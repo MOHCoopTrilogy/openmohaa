@@ -4423,7 +4423,7 @@ void Vehicle::MoveVehicle(void)
                         //  and thus blocking them temporarily while dying.
                         //  For example in e1l1, the first tank would get stuck, because sometimes
                         //  there are too many actors moving in the path of the vehicle
-                        if (!bHitPerson || !tr.ent->entity->IsDead()) {
+                        if (!bHitPerson || (!tr.ent->entity->IsDead() && !tr.ent->entity->m_pGlueMaster)) { // HZM coop: skip GLUED riders - don't block/crush on our own seated passengers
                             break;
                         }
                     }
@@ -4509,7 +4509,7 @@ void Vehicle::MoveVehicle(void)
 
                     // Added in OPM
                     //  (see the comment above)
-                    if (!bHitPerson || !tr.ent->entity->IsDead()) {
+                    if (!bHitPerson || (!tr.ent->entity->IsDead() && !tr.ent->entity->m_pGlueMaster)) { // HZM coop: skip GLUED riders - don't block/crush on our own seated passengers
                         break;
                     }
                 }
@@ -4598,7 +4598,7 @@ void Vehicle::MoveVehicle(void)
 
                     // Added in OPM
                     //  (see the comment above)
-                    if (!bHitPerson || !tr.ent->entity->IsDead()) {
+                    if (!bHitPerson || (!tr.ent->entity->IsDead() && !tr.ent->entity->m_pGlueMaster)) { // HZM coop: skip GLUED riders - don't block/crush on our own seated passengers
                         break;
                     }
                 }
