@@ -1626,6 +1626,13 @@ qboolean Player::CondSolidForward(Conditional& condition)
 
 qboolean Player::CondCheckHeight(Conditional& condition)
 {
+    // HZM coop: a player glued into a vehicle seat (duckableglue) is pinned in place, so the normal
+    // stand-up headroom trace can startsolid (adjacent seated players / vehicle context) and leave them
+    // stuck crouched. They are safe to change height freely, so always allow it for duckable-glued players.
+    if ( m_pGlueMaster && m_bGlueDuckable ) {
+        return true;
+    }
+
     str     sHeight = condition.getParm(1);
     float   fHeight;
     Vector  newmaxs;
