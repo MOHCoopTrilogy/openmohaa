@@ -20,6 +20,7 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 ===========================================================================
 */
 #include "tr_local.h"
+#include "tr_postprocess_gl1.h"
 
 backEndData_t	*backEndData;
 backEndState_t	backEnd;
@@ -801,8 +802,21 @@ void RB_RenderDrawSurfList( drawSurf_t *drawSurfs, int numDrawSurfs ) {
 			if ( oldDepthRange != depthRange ) {
 				if ( depthRange ) {
 					qglDepthRange (0, 0.3);
+					// HZM: depthRange means a view-weapon (RF_DEPTHHACK) surface. Render it with the
+					// un-zoomed weapon projection so ADS world-zoom doesn't magnify the gun off-screen.
+					if ( backEnd.viewParms.weaponFovActive ) {
+						qglMatrixMode( GL_PROJECTION );
+						qglLoadMatrixf( backEnd.viewParms.weaponProjectionMatrix );
+						qglMatrixMode( GL_MODELVIEW );
+					}
 				} else {
 					qglDepthRange (0, 1.0);
+					// HZM: restore the world projection for non-weapon surfaces
+					if ( backEnd.viewParms.weaponFovActive ) {
+						qglMatrixMode( GL_PROJECTION );
+						qglLoadMatrixf( backEnd.viewParms.projectionMatrix );
+						qglMatrixMode( GL_MODELVIEW );
+					}
 				}
 				oldDepthRange = depthRange;
 			}
@@ -951,8 +965,23 @@ void RB_RenderSpriteSurfList(drawSurf_t* drawSurfs, int numDrawSurfs) {
         {
 			if (depthRange) {
 				qglDepthRange(0.0, 0.3);
+				// HZM: depth-hacked sprites (e.g. the first-person muzzle flash) must use the SAME un-zoomed,
+				// screen-shifted weapon projection as the view-weapon surfaces. Without this they render with
+				// the world projection and stay at the un-shifted position, so during ADS they appear offset
+				// from the shifted gun (most visible when crouched with a horizontal shift dialled in).
+				if (backEnd.viewParms.weaponFovActive) {
+					qglMatrixMode(GL_PROJECTION);
+					qglLoadMatrixf(backEnd.viewParms.weaponProjectionMatrix);
+					qglMatrixMode(GL_MODELVIEW);
+				}
 			} else {
                 qglDepthRange(0.0, 1.0);
+				// HZM: restore the world projection for non-weapon sprites
+				if (backEnd.viewParms.weaponFovActive) {
+					qglMatrixMode(GL_PROJECTION);
+					qglLoadMatrixf(backEnd.viewParms.projectionMatrix);
+					qglMatrixMode(GL_MODELVIEW);
+				}
 			}
 
             oldDepthRange = depthRange;
@@ -973,6 +1002,12 @@ void RB_RenderSpriteSurfList(drawSurf_t* drawSurfs, int numDrawSurfs) {
 	// go back to the previous depth range
 	if (depthRange) {
 		qglDepthRange(0.0, 1.0);
+		// HZM: if we switched to the weapon projection for depth-hacked sprites, restore the world one
+		if (backEnd.viewParms.weaponFovActive) {
+			qglMatrixMode(GL_PROJECTION);
+			qglLoadMatrixf(backEnd.viewParms.projectionMatrix);
+			qglMatrixMode(GL_MODELVIEW);
+		}
 	}
 }
 
@@ -985,6 +1020,23 @@ RENDER BACK END THREAD FUNCTIONS
 ============================================================================
 */
 
+// HZM coop - gl1 post-FX runs at the 3D->2D transition so it processes ONLY the 3D scene; the HUD/2D is
+// drawn on top afterwards and never touched (otherwise SSAO/bloom contaminate the HUD - e.g. a black box
+// behind the score widget). s_postfx_scene3D = a world view was drawn this frame; s_postfx_applied = the
+// post-pass already ran this frame. Both reset at end of frame (RB_SwapBuffers). The actual transition
+// hook lives in Set2DWindow (tr_draw.c) - the universal 3D->2D chokepoint that BOTH the engine UI and
+// the cgame HUD (via re.Set2DWindow) pass through; RB_SetGL2D would miss the cgame HUD path.
+qboolean s_postfx_scene3D = qfalse;
+qboolean s_postfx_applied = qfalse;
+
+void RB_PostFxMaybeApply( void ) {
+	if ( s_postfx_applied || !s_postfx_scene3D ) {
+		return;
+	}
+	s_postfx_applied = qtrue;	// mark even if inactive; RB_PostFxApply self-gates on R_PostFxActive
+	RB_PostFxApply();
+}
+
 /*
 ================
 RB_SetGL2D
@@ -992,6 +1044,7 @@ RB_SetGL2D
 ================
 */
 void	RB_SetGL2D (void) {
+	// post-FX fires inside Set2DWindow (the real transition point), so just enter 2D here.
 	Set2DWindow(0, 0, glConfig.vidWidth, glConfig.vidHeight, 0.0, glConfig.vidWidth, glConfig.vidHeight, 0.0, 0.0, 1.0);
 }
 
@@ -1230,8 +1283,26 @@ const void	*RB_DrawSurfs( const void *data ) {
 	backEnd.refdef = cmd->refdef;
 	backEnd.viewParms = cmd->viewParms;
 
+	s_postfx_scene3D = qtrue;	// a 3D world view was rendered this frame
+
 	RB_SetupFog();
 	RB_RenderDrawSurfList( cmd->drawSurfs, cmd->numDrawSurfs );
+
+	// HZM coop - apply the gl1 post-FX composite RIGHT HERE, immediately after the world surfaces are drawn
+	// and BEFORE the 3D grass + the HUD. Doing it inline at scene-draw time is reliable everywhere (no
+	// dependence on the Set2DWindow hook's command-flush timing, which only lined up in portal/mirror rooms
+	// = the "effects only work in one area" bug). It MUST run BEFORE R_DrawGrass: grass draws with raw
+	// immediate-mode GL that leaves state the cache-based post-FX passes don't expect, which silently broke
+	// the composite whenever grass was on (turning r_grass off appeared to "fix" the effects). Gated to the
+	// main view so portal/mirror/sky sub-views (rendered first) don't trigger it early; self-gates again on
+	// R_PostFxActive (sv_running).
+	if ( !backEnd.viewParms.isPortal && !backEnd.viewParms.isPortalSky &&
+	     !( backEnd.refdef.rdflags & RDF_NOWORLDMODEL ) ) {
+		s_postfx_applied = qtrue;	// done for this frame -> the Set2DWindow hook + swap fallback skip
+		RB_PostFxApply();
+	}
+
+	R_DrawGrass();	// HZM coop: 3D grass on top of the post-processed world (self-gates on r_grass + world view)
 
 	return (const void *)(cmd + 1);
 }
@@ -1391,6 +1462,101 @@ RB_SwapBuffers
 
 =============
 */
+/*
+=============
+RB_DepthOfField  (HZM coop)
+
+gl1 screen-space depth-of-field (no FBO / no GLSL). When r_dofBlur > 0 (cgame drives it 0..1 while aiming) the
+scene edges are softened around a clear focus centre. Captures the framebuffer into a power-of-two scratch
+texture, then composites several offset copies through a radial alpha (0 in the centre -> r_dofBlur at the
+edges). r_dofBlur 0 = disabled, zero cost. Hooked at frame end (RB_SwapBuffers).
+=============
+*/
+static void RB_DepthOfField( void ) {
+	static GLuint		dofTex = 0;
+	static int			potW = 0, potH = 0;
+	int					vw, vh, nw, nh, tap, i, k;
+	float				s, t, ox, oy, aEdge, rad, str, cx, cy;
+	static const float	taps[5][2] = { {0,0}, {1,1}, {-1,1}, {1,-1}, {-1,-1} };
+	float				rim[8][2];
+
+	if ( !r_dofBlur || r_dofBlur->value <= 0.0f ) {
+		return;
+	}
+	vw = glConfig.vidWidth;
+	vh = glConfig.vidHeight;
+	if ( vw <= 0 || vh <= 0 ) {
+		return;
+	}
+
+	for ( nw = 1; nw < vw; nw <<= 1 ) {}
+	for ( nh = 1; nh < vh; nh <<= 1 ) {}
+
+	if ( !dofTex ) {
+		qglGenTextures( 1, &dofTex );
+		potW = potH = 0;
+	}
+	qglBindTexture( GL_TEXTURE_2D, dofTex );
+	glState.currenttextures[glState.currenttmu] = dofTex;
+	if ( nw != potW || nh != potH ) {
+		potW = nw;
+		potH = nh;
+		qglTexImage2D( GL_TEXTURE_2D, 0, GL_RGB, potW, potH, 0, GL_RGB, GL_UNSIGNED_BYTE, NULL );
+		qglTexParameterf( GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR );
+		qglTexParameterf( GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR );
+		qglTexParameterf( GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP );
+		qglTexParameterf( GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP );
+	}
+
+	// grab the rendered frame into the texture (framebuffer origin = bottom-left)
+	qglCopyTexSubImage2D( GL_TEXTURE_2D, 0, 0, 0, 0, 0, vw, vh );
+
+	s   = (float)vw / (float)potW;
+	t   = (float)vh / (float)potH;
+	rad = ( r_dofRadius ? r_dofRadius->value : 3.0f );
+	str = r_dofBlur->value;
+	if ( str > 1.0f ) {
+		str = 1.0f;
+	}
+	aEdge = str / 5.0f; // 5 accumulating taps reach ~str at the edges
+	cx    = vw * 0.5f;
+	cy    = vh * 0.5f;
+
+	rim[0][0] = 0;          rim[0][1] = 0;
+	rim[1][0] = cx;         rim[1][1] = 0;
+	rim[2][0] = (float)vw;  rim[2][1] = 0;
+	rim[3][0] = (float)vw;  rim[3][1] = cy;
+	rim[4][0] = (float)vw;  rim[4][1] = (float)vh;
+	rim[5][0] = cx;         rim[5][1] = (float)vh;
+	rim[6][0] = 0;          rim[6][1] = (float)vh;
+	rim[7][0] = 0;          rim[7][1] = cy;
+
+	RB_SetGL2D();
+	GL_State( GLS_DEPTHTEST_DISABLE | GLS_SRCBLEND_SRC_ALPHA | GLS_DSTBLEND_ONE_MINUS_SRC_ALPHA );
+	qglEnable( GL_TEXTURE_2D );
+	qglBindTexture( GL_TEXTURE_2D, dofTex );
+	glState.currenttextures[glState.currenttmu] = dofTex;
+
+	for ( tap = 0; tap < 5; tap++ ) {
+		ox = taps[tap][0] * rad / (float)potW;
+		oy = taps[tap][1] * rad / (float)potH;
+		qglBegin( GL_TRIANGLE_FAN );
+		qglColor4f( 1.0f, 1.0f, 1.0f, 0.0f ); // centre = in focus (sharp)
+		qglTexCoord2f( s * ( cx / vw ) + ox, t * ( ( vh - cy ) / vh ) + oy );
+		qglVertex2f( cx, cy );
+		for ( i = 0; i <= 8; i++ ) {
+			k = i % 8;
+			qglColor4f( 1.0f, 1.0f, 1.0f, aEdge ); // edges = blurred
+			qglTexCoord2f( s * ( rim[k][0] / vw ) + ox, t * ( ( vh - rim[k][1] ) / vh ) + oy );
+			qglVertex2f( rim[k][0], rim[k][1] );
+		}
+		qglEnd();
+	}
+
+	qglColor4f( 1.0f, 1.0f, 1.0f, 1.0f );
+	GL_Bind( tr.whiteImage ); // restore a known texture in the GL_Bind cache
+}
+
 const void	*RB_SwapBuffers( const void *data ) {
 	const swapBuffersCommand_t	*cmd;
 
@@ -1398,6 +1564,13 @@ const void	*RB_SwapBuffers( const void *data ) {
 	if ( tess.numIndexes ) {
 		RB_EndSurface();
 	}
+
+	// HZM coop - gl1 post-FX (Approach B). Normally already ran at the 3D->2D transition (so the HUD is
+	// untouched); this is only a fallback for the rare frame that draws 3D with no following 2D pass.
+	RB_PostFxMaybeApply();
+
+	// HZM coop - screen-space depth of field (cgame gates it via r_dofBlur on ADS)
+	RB_DepthOfField();
 
 	// texture swapping test
 	if ( r_showImages->integer ) {
@@ -1434,6 +1607,10 @@ const void	*RB_SwapBuffers( const void *data ) {
 	GLimp_EndFrame();
 
 	backEnd.in2D = qfalse;
+
+	// reset the post-FX per-frame gates for the next frame
+	s_postfx_scene3D = qfalse;
+	s_postfx_applied = qfalse;
 
 	return (const void *)(cmd + 1);
 }

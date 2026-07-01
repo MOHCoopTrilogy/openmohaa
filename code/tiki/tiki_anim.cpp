@@ -138,6 +138,13 @@ int TIKI_Anim_NumForName(dtiki_t *pmdl, const char *name)
                     continue;
                 }
 
+                // HZM: fAnimWeights is a fixed stack array of MAX_FRAMEINFOS (16) floats.
+                // A random-anim group with more than MAX_FRAMEINFOS identically-aliased members
+                // overran it (no guard here, unlike the sibling TIKI_Anim_Random). Clamp.
+                if (iAnimCount >= MAX_FRAMEINFOS) {
+                    break;
+                }
+
                 if (panimdef->flags & TAF_AUTOSTEPS) {
                     fAnimWeights[iAnimCount] = 0.0f;
                     panimdef->flags &= ~TAF_AUTOSTEPS;

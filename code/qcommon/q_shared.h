@@ -1672,7 +1672,14 @@ typedef enum
 #define MAX_SERVER_SOUNDS_BITS		(MAX_SERVER_SOUNDS-1)
 
 #define	MAX_MODELS			1024		// these are sent over the net as 8 bits
-#define	MAX_SOUNDS			512		// so they cannot be blindly increased
+// HZM COOP: raised 512 -> 1024. The coop mod registers >512 unique sounds per map
+// (combat VO + ambience + vehicle + coop content), overflowing SV_SoundIndex and
+// silently dropping sounds (e.g. m1l1 truck engine). Requires matching changes:
+//   - MSG_WriteSounds/MSG_ReadSounds sound_index bits 9 -> 10 (qcommon/msg.cpp)
+//   - CS_SOUNDTRACK/CS_TEAMS..CS_AXIS made computed (fgame/bg_public.h) so the
+//     shifted CS_IMAGES/CS_WEAPONS arrays don't collide with them.
+// CS_MAX stays < MAX_CONFIGSTRINGS (2736), so no gamestate/protocol buffer change.
+#define	MAX_SOUNDS			1024	// raised from 512 (HZM coop) - see note above; cap is ~10 bits in MSG_*Sounds
 #define MAX_OBJECTIVES		20
 #define MAX_LIGHTSTYLES		32
 #define MAX_WEAPONS			64
@@ -1689,7 +1696,13 @@ typedef enum
 
 #define	RESERVED_CONFIGSTRINGS	2	// game can't modify below this, only the system can
 
-#define	MAX_GAMESTATE_CHARS	41952
+// HZM COOP: raised 41952 -> 98304. Coop officer fights spawn many reinforcement waves
+// (sniper/squad/battalion/dogs); each new model/sound registers a configstring whose
+// string bytes accumulate here and are NEVER freed during a map. Combined with MAX_SOUNDS
+// 512->1024 (more sound strings), a long m1l1 officer fight overflowed 41952 ->
+// "MAX_GAMESTATE_CHARS exceeded" server crash. 98304 (96KB) stays well under the already-
+// raised MAX_MSGLEN (131072) that carries the gamestate, with room for offsets/overhead.
+#define	MAX_GAMESTATE_CHARS	98304
 typedef struct {
 	int			stringOffsets[MAX_CONFIGSTRINGS];
 	char		stringData[MAX_GAMESTATE_CHARS];
@@ -1825,6 +1838,11 @@ typedef struct playerState_s {
 #define BUTTON_LEAN_LEFT_BITINDEX		4
 #define BUTTON_LEAN_RIGHT_BITINDEX		5
 #define BUTTON_TALK_BITINDEX			6			// displays talk balloon and disables actions
+// HZM coop - dedicated WALK (slow) key. Bound to Alt via "+button12" in autoexec. Bit 12 is free of the
+// weapon-command field (which uses bits 7-11, GetWeaponCommandMask(31)=31<<7) and is sent in the full
+// 16-bit usercmd buttons delta, so the server reads it directly from last_ucmd.buttons.
+#define BUTTON_COOPWALK_BITINDEX		12
+#define BUTTON_COOPADS_BITINDEX			13			// HZM coop - AIM DOWN SIGHTS (dedicated, decoupled from secondary-fire/bash)
 #define BUTTON_ANY_BITINDEX				14			// any key whatsoever
 #define BUTTON_MOUSE_BITINDEX			15			// mouse move
 
@@ -1835,6 +1853,8 @@ typedef struct playerState_s {
 #define BUTTON_LEAN_LEFT       (1 << BUTTON_LEAN_LEFT_BITINDEX)
 #define BUTTON_LEAN_RIGHT      (1 << BUTTON_LEAN_RIGHT_BITINDEX)
 #define	BUTTON_TALK			   (1 << BUTTON_TALK_BITINDEX)			// displays talk balloon and disables actions
+#define BUTTON_COOPWALK        (1 << BUTTON_COOPWALK_BITINDEX)
+#define BUTTON_COOPADS         (1 << BUTTON_COOPADS_BITINDEX)         // HZM coop - aim down sights
 #define	BUTTON_ANY			   (1 << BUTTON_ANY_BITINDEX)		   // any key whatsoever
 #define BUTTON_MOUSE           (1 << BUTTON_MOUSE_BITINDEX)
 
@@ -1932,6 +1952,7 @@ typedef struct usercmd_s {
 #define RF_SHADOW_PRECISE		(1<<24)		// this entity can have a precise shadow applied to it
 #define RF_INVISIBLE			(1<<25)		// This entity is invisible, and only negative lights will light it up
 #define RF_ALWAYSDRAW			(1<<26)		// This entity is invisible, and only negative lights will light it up
+#define RF_COOP_BOSS			(1<<27)		// HZM coop: mark officer/bodyguard/wave actors for boss icon
 #define RF_PRECISESHADOW		(1<<28)		// This entity is invisible, and only negative lights will light it up
 //
 // use this mask when propagating renderfx from one entity to another

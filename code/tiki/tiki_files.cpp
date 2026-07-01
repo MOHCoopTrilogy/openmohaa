@@ -307,7 +307,7 @@ dtiki_t *TIKI_LoadTikiModel(dtikianim_t *tikianim, const char *name, con_map<str
     dtiki_t* temp_tiki;
 
     //int skel;
-    dloadsurface_t     loadsurfaces[24];
+    dloadsurface_t     loadsurfaces[MAX_TIKI_LOAD_SURFACES];
     int                numSurfacesSetUp;
     dtikisurface_t    *tikiSurf;
     dloadsurface_t    *loadsurf;
@@ -893,8 +893,16 @@ dtikianim_t *TIKI_InitTiki(dloaddef_t *ld, size_t defsize)
     bool                      bPrecache;
     int                       index;
     char                      tempName[257];
-    int                       order[MAX_TIKI_ALIASES];
-    short                     temp_aliases[MAX_TIKI_ALIASES];
+    // HZM: heap-allocated so they never overrun the call stack regardless of MAX_TIKI_LOAD_ANIMS.
+    // Was MAX_TIKI_ALIASES (4095) stack arrays -> /GS canary crash when m1l1 loads >4095 anims.
+    // Even at 8192 entries the combined 48 KB stack allocation corrupts longjmp unwind on Win11 CET.
+    int   *order        = (int *)  malloc(sizeof(int)   * MAX_TIKI_LOAD_ANIMS);
+    short *temp_aliases = (short *)malloc(sizeof(short) * MAX_TIKI_LOAD_ANIMS);
+    if (!order || !temp_aliases) {
+        free(order);
+        free(temp_aliases);
+        return NULL;
+    }
 
     panim = (dtikianim_t *)TIKI_Alloc(defsize);
 
@@ -984,6 +992,8 @@ dtikianim_t *TIKI_InitTiki(dloaddef_t *ld, size_t defsize)
                     // Fixed in OPM
                     //  The original game doesn't free the animation on error
                     TIKI_Free(panim);
+                    free(order);
+                    free(temp_aliases);
                     return NULL;
                 }
 
@@ -1123,6 +1133,8 @@ dtikianim_t *TIKI_InitTiki(dloaddef_t *ld, size_t defsize)
     }
 
     assert(ptr <= max_ptr);
+    free(order);
+    free(temp_aliases);
     return panim;
 }
 

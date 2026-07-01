@@ -42,7 +42,15 @@ static const char *whiteListedVariables[] = {
 
     // for 3rd person server
     "cg_3rd_person",
-    "cg_cameraverticaldisplacement"
+    "cg_cameraverticaldisplacement",
+
+    // HZM coop - allow the server to mix client audio for scripted cinematics (e.g. m3l1a Omaha
+    // ramp-drop): duck effects/ambient so the music takes over, then restore. Without these the
+    // server-stuffed volume changes are silently filtered on the client.
+    "s_volume",
+    "s_musicvolume",
+    "s_ambientvolume",
+    "s_sfxduck"
 };
 
 //

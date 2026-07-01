@@ -165,7 +165,14 @@ void CG_SetInitialSnapshot(snapshot_t *snap)
 
     cgi.MUSIC_UpdateMood(snap->ps.current_music_mood, snap->ps.fallback_music_mood);
     cgi.MUSIC_UpdateVolume(snap->ps.music_volume, snap->ps.music_volume_fade_time);
-    cgi.S_SetReverb(snap->ps.reverb_type, snap->ps.reverb_level);
+    // HZM coop - when auto-reverb is on and the MAP provides no reverb (eax_generic), let the cgame
+    // environment detector (CG_UpdateEnvReverb) own it; otherwise honor the map-authored reverb.
+    {
+        cvar_t *pAR = cgi.Cvar_Get("coop_autoReverb", "1", CVAR_ARCHIVE);
+        if (!(pAR && pAR->integer) || snap->ps.reverb_type != eax_generic) {
+            cgi.S_SetReverb(snap->ps.reverb_type, snap->ps.reverb_level);
+        }
+    }
 
     CG_InitRadar();
     cgi.CL_RestoreSavedCgameState();
@@ -241,7 +248,12 @@ static void CG_TransitionSnapshot(qboolean differentServer)
         }
 
         if ((ops->reverb_type != ps->reverb_type) || (ops->reverb_level != ps->reverb_level)) {
-            cgi.S_SetReverb(ps->reverb_type, ps->reverb_level);
+            // HZM coop - honor map-authored reverb; when auto-reverb is on and the map provides none
+            // (eax_generic), let CG_UpdateEnvReverb own it (don't reset to dry on leaving a reverb zone).
+            cvar_t *pAR = cgi.Cvar_Get("coop_autoReverb", "1", CVAR_ARCHIVE);
+            if (!(pAR && pAR->integer) || ps->reverb_type != eax_generic) {
+                cgi.S_SetReverb(ps->reverb_type, ps->reverb_level);
+            }
         }
 
         // if we are not doing client side movement prediction for any

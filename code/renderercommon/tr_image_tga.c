@@ -99,21 +99,30 @@ void R_LoadTGA ( const char *name, byte **pic, int *width, int *height)
 
 	buf_p += 18;
 
-	if (targa_header.image_type!=2 
+	// HZM coop - retail MOHAA tolerated more TGA variants than this loader. Do NOT crash the whole
+	// server (ERR_DROP) on an unsupported one - log the offending file and fail soft (leave *pic = NULL
+	// so the caller falls back to a default texture). Prevents binoc/other base-asset LoadTGA crashes.
+	if (targa_header.image_type!=2
 		&& targa_header.image_type!=10
-		&& targa_header.image_type != 3 ) 
+		&& targa_header.image_type != 3 )
 	{
-		ri.Error (ERR_DROP, "LoadTGA: Only type 2 (RGB), 3 (gray), and 10 (RGB) TGA images supported");
+		ri.Printf( PRINT_WARNING, "LoadTGA: unsupported image_type %d in '%s' - skipping (using default texture)\n", targa_header.image_type, name );
+		ri.FS_FreeFile( buffer.v );
+		return;
 	}
 
 	if ( targa_header.colormap_type != 0 )
 	{
-		ri.Error( ERR_DROP, "LoadTGA: colormaps not supported" );
+		ri.Printf( PRINT_WARNING, "LoadTGA: colormaps not supported in '%s' - skipping (using default texture)\n", name );
+		ri.FS_FreeFile( buffer.v );
+		return;
 	}
 
 	if ( ( targa_header.pixel_size != 32 && targa_header.pixel_size != 24 ) && targa_header.image_type != 3 )
 	{
-		ri.Error (ERR_DROP, "LoadTGA: Only 32 or 24 bit images supported (no colormaps)");
+		ri.Printf( PRINT_WARNING, "LoadTGA: unsupported pixel_size %d in '%s' - skipping (using default texture)\n", targa_header.pixel_size, name );
+		ri.FS_FreeFile( buffer.v );
+		return;
 	}
 
 	columns = targa_header.width;

@@ -37,6 +37,14 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 #include "actor.h"
 #include "player.h"
 
+Event EV_Door_MoveSound
+(
+    "sound_move",
+    EV_DEFAULT,
+    "s",
+    "sound",
+    "Sets the sound to use when the door opens or closes (sets both open and close start sounds)."
+);
 Event EV_Door_OpenStartSound
 (
     "sound_open_start",
@@ -285,6 +293,7 @@ Door.enemy chains from the master door through all doors linked in the chain.
 */
 
 CLASS_DECLARATION(ScriptSlave, Door, "NormalDoor") {
+    {&EV_Door_MoveSound,           &Door::SetMoveSound      },
     {&EV_Door_OpenStartSound,      &Door::SetOpenStartSound },
     {&EV_Door_OpenEndSound,        &Door::SetOpenEndSound   },
     {&EV_Door_CloseStartSound,     &Door::SetCloseStartSound},
@@ -470,6 +479,13 @@ void Door::SetLockedSound(str sound)
     if (sound_locked.length() > 1) {
         CacheResource(sound_locked.c_str());
     }
+}
+
+void Door::SetMoveSound(Event *ev)
+{
+    str sound = ev->GetString(1);
+    SetOpenStartSound(sound);
+    SetCloseStartSound(sound);
 }
 
 void Door::SetOpenStartSound(Event *ev)

@@ -178,6 +178,24 @@ Event EV_GetAngle
     "direction if newAngle is[ 0 - 359 ] or - 1 or - 2",
     EV_GETTER
 );
+Event EV_SetAngleX
+(
+    "anglex",
+    EV_DEFAULT,
+    "f",
+    "pitchAngle",
+    "set the pitch (x) component of the entity's angles.",
+    EV_NORMAL
+);
+Event EV_SetAngleY
+(
+    "angley",
+    EV_DEFAULT,
+    "f",
+    "yawAngle",
+    "set the yaw (y) component of the entity's angles.",
+    EV_NORMAL
+);
 Event EV_ForwardVector
 (
     "forwardvector",
@@ -232,6 +250,8 @@ CLASS_DECLARATION(Listener, SimpleEntity, NULL) {
     {&EV_SetAngle,       &SimpleEntity::SetAngleEvent   },
     {&EV_SetAngle2,      &SimpleEntity::SetAngleEvent   },
     {&EV_GetAngle,       &SimpleEntity::GetAngleEvent   },
+    {&EV_SetAngleX,      &SimpleEntity::SetAngleXEvent  },
+    {&EV_SetAngleY,      &SimpleEntity::SetAngleYEvent  },
     {&EV_ForwardVector,  &SimpleEntity::GetForwardVector},
     {&EV_LeftVector,     &SimpleEntity::GetLeftVector   },
     {&EV_RightVector,    &SimpleEntity::GetRightVector  },
@@ -488,6 +508,20 @@ void SimpleEntity::GetAngleEvent(Event *ev)
 
     angles.AngleVectorsLeft(&forward);
     ev->AddFloat(G_GetAngle(forward));
+}
+
+void SimpleEntity::SetAngleXEvent(Event *ev)
+{
+    Vector a = angles;
+    a[0] = ev->GetFloat(1);
+    setAngles(a);
+}
+
+void SimpleEntity::SetAngleYEvent(Event *ev)
+{
+    Vector a = angles;
+    a[1] = ev->GetFloat(1);
+    setAngles(a);
 }
 
 void SimpleEntity::setAngles(Vector angles)

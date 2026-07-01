@@ -598,6 +598,48 @@ void R_SetupProjection( void ) {
 	tr.viewParms.projectionMatrix[7] = 0;
 	tr.viewParms.projectionMatrix[11] = -1;
 	tr.viewParms.projectionMatrix[15] = 0;
+
+	//
+	// HZM: separate (un-zoomed) projection for the first-person view weapon.
+	// cgame sets r_weaponfovx to the un-zoomed fov_x; when ADS zooms the WORLD fov down, the gun
+	// would otherwise magnify off the bottom of the screen because this engine renders the weapon
+	// with the same projection as the world. Build a second projection at the weapon fov and apply
+	// it to RF_DEPTHHACK surfaces in the backend. weaponFovActive=false => weapon uses world fov.
+	//
+	tr.viewParms.weaponFovActive = qfalse;
+	if ( r_weaponfovx && r_weaponfovx->value > 1.0f && fabs( r_weaponfovx->value - tr.refdef.fov_x ) > 0.05f ) {
+		float wxmax, wymax, wwidth, wheight;
+
+		wxmax = zNear * tan( r_weaponfovx->value * M_PI / 360.0f );
+		// preserve the world aspect ratio (ymax/xmax) so the gun is not stretched
+		wymax = ( xmax != 0 ) ? ( wxmax * ( ymax / xmax ) ) : ymax;
+		wwidth = 2 * wxmax;
+		wheight = 2 * wymax;
+
+		Com_Memcpy( tr.viewParms.weaponProjectionMatrix, tr.viewParms.projectionMatrix, sizeof( tr.viewParms.weaponProjectionMatrix ) );
+		tr.viewParms.weaponProjectionMatrix[0] = 2 * zNear / wwidth;
+		tr.viewParms.weaponProjectionMatrix[5] = 2 * zNear / wheight;
+
+		// HZM: pull the weapon's NEAR clip plane closer than the world's so the rear of the raised ADS
+		// viewmodel (which sits very near the camera) is not sliced off. [0]/[5] are fov-only (zNear
+		// cancels out), so only the depth terms [10]/[14] need rebuilding with the smaller near plane.
+		// r_weaponznear tunes it (default 1; lower = shows more of the gun's back end).
+		{
+			float wzNear = ( r_weaponznear && r_weaponznear->value > 0.05f ) ? r_weaponznear->value : zNear;
+			if ( wzNear > zNear ) { wzNear = zNear; }
+			tr.viewParms.weaponProjectionMatrix[10] = -( zFar + wzNear ) / ( zFar - wzNear );
+			tr.viewParms.weaponProjectionMatrix[14] = -2.0f * zFar * wzNear / ( zFar - wzNear );
+		}
+
+		// HZM: nudge the weapon image in SCREEN space during ADS to line the iron sights up with the
+		// screen centre (no 3D distortion - this offsets the projection principal point, so the whole
+		// gun shifts on screen while the world stays put). r_weaponshifty: negative = up / positive =
+		// down ; r_weaponshiftx: positive = right / negative = left.
+		if ( r_weaponshifty ) { tr.viewParms.weaponProjectionMatrix[9] = r_weaponshifty->value; }
+		if ( r_weaponshiftx ) { tr.viewParms.weaponProjectionMatrix[8] = r_weaponshiftx->value; }
+
+		tr.viewParms.weaponFovActive = qtrue;
+	}
 }
 
 /*

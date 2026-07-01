@@ -144,6 +144,8 @@ protected:
     virtual void     ArmorDamage(Event *ev);
     virtual qboolean CanBlock(int meansofdeath, qboolean full_block);
     void             AddBloodSpurt(Vector direction);
+    void             TryDropBloodTrail(void); // HZM coop - wounded+moving AI drip ground blood splats
+    void             DropBloodPool(void);     // HZM coop - persistent blood pool under a killed sentient
     qboolean         ShouldBleed(int meansofdeath, qboolean dead);
     qboolean         ShouldGib(int meansofdeath, float damage);
     str              GetBloodSpurtName(void);
@@ -214,6 +216,8 @@ public:
     float             max_mouth_angle;
     int               max_gibs;
     float             next_bleed_time;
+    float             m_fNextBloodTrailTime;   // HZM coop - blood-trail throttle (time gate)
+    Vector            m_vLastBloodTrailOrigin; // HZM coop - blood-trail throttle (distance gate)
     bool              m_bForceDropHealth;
     bool              m_bForceDropWeapon;
 

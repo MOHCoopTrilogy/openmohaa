@@ -103,6 +103,8 @@ public:
     void GetAngles(Event *ev);
     void SetAngleEvent(Event *ev);
     void GetAngleEvent(Event *ev);
+    void SetAngleXEvent(Event *ev);
+    void SetAngleYEvent(Event *ev);
 
     void GetForwardVector(Event *ev);
     void GetLeftVector(Event *ev);

@@ -40,6 +40,7 @@ class Decal : public Entity
       void           setShader( str shader );
       void           setOrientation( str deg );
       void           setRadius( float rad );
+      void           setColor( float r, float g, float b ); // HZM coop - tint the mark (packs constantLight, no light cast)
       void Archive( Archiver &arc ) override;
 	};
 

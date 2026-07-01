@@ -61,6 +61,7 @@ cvar_t *cg_lagometer;
 cvar_t *r_lerpmodels;
 cvar_t *cg_cameraheight;
 cvar_t *cg_cameradist;
+cvar_t *cg_camerasideoffset; // HZM coop - third-person lateral camera offset (+ = right shoulder)
 cvar_t *cg_cameraverticaldisplacement;
 cvar_t *cg_camerascale;
 cvar_t *cg_shadows;
@@ -117,6 +118,23 @@ cvar_t *ui_timemessage;
 //
 cvar_t *cg_fov;
 cvar_t *cg_cheats;
+cvar_t *cg_adsZoom; // HZM coop - ADS: view-fov multiplier while RMB (secondary attack) is held
+cvar_t *cg_adsGunZoom; // HZM coop - ADS: how much the view weapon zooms WITH the world (0=gun stays normal size, 1=gun zooms fully with the world but its rear can clip)
+cvar_t *cg_adsPitch;   // HZM coop - ADS: pitch the view weapon (deg) so the rear aperture lines up with the front sight
+cvar_t *cg_adsYaw;     // HZM coop - ADS: yaw the view weapon (deg) to angle the gun left/right for horizontal sight alignment
+cvar_t *cg_adsRoll;    // HZM coop - ADS: roll the view weapon (deg) about the barrel axis to un-tilt the gun (standing)
+cvar_t *cg_adsCrouchPitch; // HZM coop - ADS: EXTRA pitch (deg) applied only while crouched (crouch pose shifts the sights)
+cvar_t *cg_adsCrouchYaw;   // HZM coop - ADS: EXTRA yaw (deg) applied only while crouched
+cvar_t *cg_adsCrouchRoll;  // HZM coop - ADS: EXTRA roll (deg) applied only while crouched (un-tilt the crouch gun)
+cvar_t *cg_adsShiftX;      // HZM coop - ADS: STANDING horizontal screen shift of the whole weapon view (+ right / - left); fed to renderer r_weaponshiftx
+cvar_t *cg_adsShiftY;      // HZM coop - ADS: STANDING vertical screen shift (- up / + down); fed to renderer r_weaponshifty
+cvar_t *cg_adsCrouchShiftX; // HZM coop - ADS: EXTRA horizontal screen shift added only while crouched (slide hands+gun toward centre)
+cvar_t *cg_adsCrouchShiftY; // HZM coop - ADS: EXTRA vertical screen shift added only while crouched
+cvar_t *cg_adsTune;        // HZM coop - ADS tuning workbench: 1 = dial the held gun via the global cg_ads* cvars + show a centre reticle and a live value readout
+cvar_t *cg_adsMode;        // HZM coop - ADS workbench active param: 0=pitch (up/down) 1=yaw (left/right) 2=shift (slide hands+gun) 3=roll (crouch un-tilt)
+cvar_t *cg_adsUp;      // HZM coop - ADS: raise the view weapon up toward the sights (units) while RMB held
+cvar_t *cg_adsForward; // HZM coop - ADS: move the view weapon forward(+)/back(-) while RMB held
+cvar_t *cg_adsRight;   // HZM coop - ADS: move the view weapon right(+)/left(-) while RMB held
 
 /*
 =================
@@ -144,10 +162,13 @@ void CG_RegisterCvars(void)
     cg_lagometer                  = cgi.Cvar_Get("cg_lagometer", "0", 0);
     paused                        = cgi.Cvar_Get("paused", "0", 0);
     r_lerpmodels                  = cgi.Cvar_Get("r_lerpmodels", "1", 0);
-    cg_3rd_person                 = cgi.Cvar_Get("cg_3rd_person", "0", CVAR_CHEAT);
+    cg_3rd_person                 = cgi.Cvar_Get("cg_3rd_person", "0", 0);
     cg_drawviewmodel              = cgi.Cvar_Get("cg_drawviewmodel", "2", CVAR_ARCHIVE);
     cg_cameraheight               = cgi.Cvar_Get("cg_cameraheight", "18", CVAR_ARCHIVE);
     cg_cameradist                 = cgi.Cvar_Get("cg_cameradist", "120", CVAR_ARCHIVE);
+    // HZM coop - third-person camera lateral offset: positive = over the RIGHT shoulder. Pair with a
+    // smaller cg_cameradist for a tight over-the-shoulder feel. Default 18 = right shoulder.
+    cg_camerasideoffset           = cgi.Cvar_Get("cg_camerasideoffset", "18", CVAR_ARCHIVE);
     cg_cameraverticaldisplacement = cgi.Cvar_Get("cg_cameraverticaldisplacement", "-2", CVAR_ARCHIVE);
     cg_camerascale                = cgi.Cvar_Get("cg_camerascale", "0.3", CVAR_ARCHIVE);
     cg_traceinfo                  = cgi.Cvar_Get("cg_traceinfo", "0", CVAR_ARCHIVE);
@@ -216,6 +237,47 @@ void CG_RegisterCvars(void)
 
     cg_fov = cgi.Cvar_Get("cg_fov", "80", CVAR_ARCHIVE);
     cg_cheats = cgi.Cvar_Get("cheats", "0", CVAR_USERINFO | CVAR_SERVERINFO | CVAR_LATCH);
+    // HZM coop - ADS zoom factor (1.0 = off; 0.70 = ~30% zoom-in while RMB held). Applied in CG_CalcFov.
+    cg_adsZoom = cgi.Cvar_Get("cg_adsZoom", "0.70", CVAR_ARCHIVE);
+    // HZM coop - how much the view weapon zooms with the world during ADS (0..1). 0 keeps the gun a
+    // constant size (rear never clips); 1 zooms the gun fully with the world (sights align but the rear
+    // can fall off-screen). ~0.5 = a closer/bigger gun with the sights mostly aligned. Used by CG_CalcFov.
+    cg_adsGunZoom = cgi.Cvar_Get("cg_adsGunZoom", "0.5", CVAR_ARCHIVE);
+    // HZM coop - ADS iron-sight pitch (degrees). A screen shift (r_weaponshifty) moves the whole gun
+    // uniformly so it cannot align the rear aperture with the front post; a small pitch about the grip
+    // does. 0 = off; dial +/- a few degrees while aiming to line the sights up. Live-tunable.
+    cg_adsPitch = cgi.Cvar_Get("cg_adsPitch", "0", CVAR_ARCHIVE);
+    // HZM coop - ADS iron-sight YAW (degrees). Same idea as cg_adsPitch but horizontal: angles the gun
+    // left/right so the front post centres in the rear ring sideways. 0 = off. Live-tunable.
+    cg_adsYaw = cgi.Cvar_Get("cg_adsYaw", "0", CVAR_ARCHIVE);
+    // HZM coop - ADS iron-sight ROLL (degrees). Rotates the gun about its barrel axis to un-tilt it
+    // (standing). 0 = off. Crouch has its own EXTRA roll below (cg_adsCrouchRoll). Live-tunable.
+    cg_adsRoll = cgi.Cvar_Get("cg_adsRoll", "0", CVAR_ARCHIVE);
+    // HZM coop - crouch-only ADS correction. The crouch pose hunches the upper body and carries the gun
+    // down/left/tilted off the standing sight line; these add EXTRA rotation about the grip (so the hands
+    // stay attached) ONLY while ducked, to bring the crouched sight picture back onto the standing one.
+    cg_adsCrouchPitch = cgi.Cvar_Get("cg_adsCrouchPitch", "0", CVAR_ARCHIVE);
+    cg_adsCrouchYaw   = cgi.Cvar_Get("cg_adsCrouchYaw", "0", CVAR_ARCHIVE);
+    cg_adsCrouchRoll  = cgi.Cvar_Get("cg_adsCrouchRoll", "0", CVAR_ARCHIVE);
+    // HZM coop - ADS screen shift (slides the whole weapon view: hands + gun). Standing = cg_adsShiftX/Y;
+    // crouch ADDS cg_adsCrouchShiftX/Y. cg_view feeds the combined result into the renderer's r_weaponshiftx/y
+    // each frame (only consumed during ADS), so the renderer needs no change. + right/- left ; - up/+ down.
+    cg_adsShiftX       = cgi.Cvar_Get("cg_adsShiftX", "0", CVAR_ARCHIVE);
+    cg_adsShiftY       = cgi.Cvar_Get("cg_adsShiftY", "0", CVAR_ARCHIVE);
+    cg_adsCrouchShiftX = cgi.Cvar_Get("cg_adsCrouchShiftX", "0", CVAR_ARCHIVE);
+    cg_adsCrouchShiftY = cgi.Cvar_Get("cg_adsCrouchShiftY", "0", CVAR_ARCHIVE);
+    // HZM coop - ADS tuning workbench. cg_adsTune 1: the gun you're holding is tuned LIVE by the global
+    // cg_adsPitch/cg_adsYaw (+ r_weaponshiftx/y, + cg_adsCrouch* while crouched) instead of its baked
+    // per-gun values, and a centre reticle + value readout are drawn. Dial it in, then bind a key to
+    // "adssave" to dump the gun's stand+crouch values to the console.
+    cg_adsTune = cgi.Cvar_Get("cg_adsTune", "0", CVAR_ARCHIVE);
+    cg_adsMode = cgi.Cvar_Get("cg_adsMode", "0", CVAR_ARCHIVE);
+    // HZM coop - ADS weapon position offset (raise the gun to the sights). Applied to the first-person
+    // model every frame while RMB is held, so it works for ALL animations incl. full-auto (recoil plays
+    // on top). Units are view-space (~1 unit = 1 inch). Live-tunable to dial in the sight picture.
+    cg_adsUp      = cgi.Cvar_Get("cg_adsUp", "6", CVAR_ARCHIVE);
+    cg_adsForward = cgi.Cvar_Get("cg_adsForward", "0", CVAR_ARCHIVE);
+    cg_adsRight   = cgi.Cvar_Get("cg_adsRight", "-2", CVAR_ARCHIVE);
 }
 /*
 ===============

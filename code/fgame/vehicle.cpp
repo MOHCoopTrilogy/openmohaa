@@ -830,7 +830,82 @@ cvar_t *g_showvehicleslotpoints;
 cvar_t *g_showvehicletags;
 cvar_t *g_showvehiclepath;
 
+// HZM: actor-type event externs — these events are defined in actor.cpp and registered
+// only on the Actor class.  Vehicle entities in Breakthrough (e.g. vehicle_german_panzer-tank
+// on e3l3) were authored with Actor-style BSP keys (type_idle, type_attack, maxdist, etc.)
+// that have no meaning on a vehicle.  Registering explicit no-ops here on VehicleBase
+// prevents any code path from misrouting the event to an Actor-specific handler.
+extern Event EV_Actor_SetTypeIdle;
+extern Event EV_Actor_SetTypeIdle2;
+extern Event EV_Actor_SetTypeAttack;
+extern Event EV_Actor_SetTypeAttack2;
+extern Event EV_Actor_SetTypeDisguise;
+extern Event EV_Actor_SetTypeDisguise2;
+extern Event EV_Actor_SetDisguiseLevel;
+extern Event EV_Actor_SetDisguiseLevel2;
+extern Event EV_Actor_SetTypeGrenade;
+extern Event EV_Actor_SetTypeGrenade2;
+extern Event EV_Actor_SetMaxDistance;
+extern Event EV_Actor_SetMaxDistance2;
+extern Event EV_Actor_SetSoundAwareness;
+extern Event EV_Actor_SetSoundAwareness2;
+extern Event EV_Actor_SetMaxNoticeTimeScale;
+extern Event EV_Actor_SetMaxNoticeTimeScale2;
+extern Event EV_Actor_SetFixedLeash;
+extern Event EV_Actor_SetFixedLeash2;
+extern Event EV_Actor_SetEnemyShareRange;
+extern Event EV_Actor_SetEnemyShareRange2;
+extern Event EV_Actor_SetPatrolWaitTrigger;
+extern Event EV_Actor_SetPatrolWaitTrigger2;
+extern Event EV_Actor_SetBalconyHeight;
+extern Event EV_Actor_SetBalconyHeight2;
+extern Event EV_Actor_SetAccuracy;
+extern Event EV_Actor_SetAccuracy2;
+extern Event EV_Actor_SetAmmoGrenade;
+extern Event EV_Actor_SetAmmoGrenade2;
+extern Event EV_Actor_SetDisguiseRange;
+extern Event EV_Actor_SetDisguiseRange2;
+extern Event EV_Actor_SetDisguisePeriod;
+extern Event EV_Actor_SetDisguisePeriod2;
+extern Event EV_Actor_SetGrenadeAwareness;
+extern Event EV_Actor_SetGrenadeAwareness2;
+
 CLASS_DECLARATION(Animate, VehicleBase, NULL) {
+    // HZM: no-op handlers for actor-type BSP keys on vehicle entities (e3l3 fix)
+    {&EV_Actor_SetTypeIdle,           &VehicleBase::EventIgnoreActorKey},
+    {&EV_Actor_SetTypeIdle2,          &VehicleBase::EventIgnoreActorKey},
+    {&EV_Actor_SetTypeAttack,         &VehicleBase::EventIgnoreActorKey},
+    {&EV_Actor_SetTypeAttack2,        &VehicleBase::EventIgnoreActorKey},
+    {&EV_Actor_SetTypeDisguise,       &VehicleBase::EventIgnoreActorKey},
+    {&EV_Actor_SetTypeDisguise2,      &VehicleBase::EventIgnoreActorKey},
+    {&EV_Actor_SetDisguiseLevel,      &VehicleBase::EventIgnoreActorKey},
+    {&EV_Actor_SetDisguiseLevel2,     &VehicleBase::EventIgnoreActorKey},
+    {&EV_Actor_SetTypeGrenade,        &VehicleBase::EventIgnoreActorKey},
+    {&EV_Actor_SetTypeGrenade2,       &VehicleBase::EventIgnoreActorKey},
+    {&EV_Actor_SetMaxDistance,        &VehicleBase::EventIgnoreActorKey},
+    {&EV_Actor_SetMaxDistance2,       &VehicleBase::EventIgnoreActorKey},
+    {&EV_Actor_SetSoundAwareness,     &VehicleBase::EventIgnoreActorKey},
+    {&EV_Actor_SetSoundAwareness2,    &VehicleBase::EventIgnoreActorKey},
+    {&EV_Actor_SetMaxNoticeTimeScale, &VehicleBase::EventIgnoreActorKey},
+    {&EV_Actor_SetMaxNoticeTimeScale2,&VehicleBase::EventIgnoreActorKey},
+    {&EV_Actor_SetFixedLeash,         &VehicleBase::EventIgnoreActorKey},
+    {&EV_Actor_SetFixedLeash2,        &VehicleBase::EventIgnoreActorKey},
+    {&EV_Actor_SetEnemyShareRange,    &VehicleBase::EventIgnoreActorKey},
+    {&EV_Actor_SetEnemyShareRange2,   &VehicleBase::EventIgnoreActorKey},
+    {&EV_Actor_SetPatrolWaitTrigger,  &VehicleBase::EventIgnoreActorKey},
+    {&EV_Actor_SetPatrolWaitTrigger2, &VehicleBase::EventIgnoreActorKey},
+    {&EV_Actor_SetBalconyHeight,      &VehicleBase::EventIgnoreActorKey},
+    {&EV_Actor_SetBalconyHeight2,     &VehicleBase::EventIgnoreActorKey},
+    {&EV_Actor_SetAccuracy,           &VehicleBase::EventIgnoreActorKey},
+    {&EV_Actor_SetAccuracy2,          &VehicleBase::EventIgnoreActorKey},
+    {&EV_Actor_SetAmmoGrenade,        &VehicleBase::EventIgnoreActorKey},
+    {&EV_Actor_SetAmmoGrenade2,       &VehicleBase::EventIgnoreActorKey},
+    {&EV_Actor_SetDisguiseRange,      &VehicleBase::EventIgnoreActorKey},
+    {&EV_Actor_SetDisguiseRange2,     &VehicleBase::EventIgnoreActorKey},
+    {&EV_Actor_SetDisguisePeriod,     &VehicleBase::EventIgnoreActorKey},
+    {&EV_Actor_SetDisguisePeriod2,    &VehicleBase::EventIgnoreActorKey},
+    {&EV_Actor_SetGrenadeAwareness,   &VehicleBase::EventIgnoreActorKey},
+    {&EV_Actor_SetGrenadeAwareness2,  &VehicleBase::EventIgnoreActorKey},
     {NULL, NULL}
 };
 
@@ -853,6 +928,14 @@ VehicleBase::VehicleBase()
     offset = vec_zero;
 
     PostEvent(EV_BecomeNonSolid, EV_POSTSPAWN);
+}
+
+void VehicleBase::EventIgnoreActorKey(Event *ev)
+{
+    // HZM: intentional no-op — absorbs actor-type BSP keys that appear on vehicle
+    // entities authored with AI editor defaults (e.g. vehicle_german_panzer-tank on
+    // e3l3 carries type_idle, type_attack, maxdist, sound_awareness, etc.).
+    // These keys have no meaning on a vehicle and must be silently discarded.
 }
 
 CLASS_DECLARATION(VehicleBase, Vehicle, "script_vehicle") {
@@ -1246,6 +1329,12 @@ void Vehicle::OpenSlotsByModel(void)
     str bonename;
     int bonenum;
     int boneindex;
+
+    // HZM: guard against NULL tiki (e.g. e3l3 panzer-tank entity whose model key arrives
+    // before the TIK has been precached; gi.Tag_NumForName on a NULL tiki crashes).
+    if (!edict->tiki) {
+        return;
+    }
 
     driver.boneindex       = gi.Tag_NumForName(edict->tiki, "driver");
     driver.enter_boneindex = gi.Tag_NumForName(edict->tiki, "driver_enter");
@@ -4538,7 +4627,7 @@ void Vehicle::MoveVehicle(void)
                 G_DebugBBox(tr.endpos, gp->vm.mins, gp->vm.maxs, 0, 0, 1, 1);
             }
 
-            if ((!tr.ent || !tr.ent->entity->IsSubclassOfProjectile()) && driver.ent
+            if ((!tr.ent || !tr.ent->entity || !tr.ent->entity->IsSubclassOfProjectile()) && driver.ent
                 && driver.ent->IsSubclassOfPlayer()) {
                 if (fSpeed > 0) {
                     if (i) {
@@ -5170,6 +5259,14 @@ void Vehicle::SpawnTurret(Event *ev)
     UpdateTurretSlot(slot);
 
     pTurret->ProcessPendingEvents();
+
+    // HZM coop - a turret spawned via script AFTER level spawn never gets EV_Item_DropToFloor
+    // (EV_POSTSPAWN is a one-time level-spawn gate), so VehicleTurretGun::PlaceTurret never runs to
+    // init the eye/pitch/barrel tags + base orientation. Force it here for post-level turrets;
+    // BSP-init turrets are untouched, so single-player is unchanged.
+    if (level.Spawned()) {
+        pTurret->ProcessEvent(EV_Item_DropToFloor);
+    }
 }
 
 /*

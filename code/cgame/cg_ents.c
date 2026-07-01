@@ -383,26 +383,33 @@ void CG_Decal(centity_t *cent)
 
     s1 = &cent->currentState;
 
-    shader = cgi.R_RegisterShader(CG_ConfigString(CS_IMAGES + s1->tag_num));
-    ByteToDir(s1->surfaces[0], dir);
-    CG_ImpactMark(
-        shader,
-        s1->origin,
-        dir,
-        s1->angles[2],
-        s1->scale,
-        s1->scale,
-        cent->color[0],
-        cent->color[1],
-        cent->color[2],
-        cent->color[3],
-        qtrue,
-        qfalse,
-        qtrue,
-        qfalse,
-        0.5f,
-        0.5f
-    );
+    {
+        const char *decalName = CG_ConfigString(CS_IMAGES + s1->tag_num);
+        // HZM coop - a "coop_bloodpool" decal (the death blood pool) is PERSISTENT: pass alphaFade=qfalse so
+        // the mark system doesn't fade it out after ~10s (it lasts until recycled). All other decals fade.
+        qboolean bPersist = (qboolean)(decalName && strstr(decalName, "bloodpool") != NULL);
+
+        shader = cgi.R_RegisterShader(decalName);
+        ByteToDir(s1->surfaces[0], dir);
+        CG_ImpactMark(
+            shader,
+            s1->origin,
+            dir,
+            s1->angles[2],
+            s1->scale,
+            s1->scale,
+            cent->color[0],
+            cent->color[1],
+            cent->color[2],
+            cent->color[3],
+            bPersist ? qfalse : qtrue,
+            qfalse,
+            qtrue,
+            qfalse,
+            0.5f,
+            0.5f
+        );
+    }
 }
 
 /*
@@ -656,6 +663,10 @@ void CG_AddPacketEntities(void)
             CG_MultiBeam(cent);
         }
     }
+
+    // HZM coop - global dynamic precipitation (brush-less, sky-gated). No-op unless coop_dynRainGlobal is set
+    // by the weather script + rain density is > 0. Renders once per frame around the player.
+    CG_RainGlobal();
 }
 
 void CG_GetOrigin(centity_t *cent, vec3_t origin)

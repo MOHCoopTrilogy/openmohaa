@@ -467,6 +467,7 @@ trace_t G_PushEntity(Entity *ent, Vector push)
     Vector     end;
     int        mask;
     gentity_t *edict;
+    int        retries = 0; // HZM: bound the goto-retry loop below
 
     start = ent->origin;
     end   = start + push;
@@ -489,9 +490,16 @@ retry:
 
         // if the pushed entity went away and the pusher is still there
         if ((!trace.ent || !trace.ent->inuse) && edict->inuse) {
-            // move the pusher back and try again
-            ent->setOrigin(start);
-            goto retry;
+            // HZM: cap the retries. A projectile that repeatedly impacts non-entity
+            // geometry (trace.ent == NULL) without being removed by its Touch handler
+            // would spin here forever and hang the server (root-caused on e3l4's
+            // airstrike bomb via a live cdb attach: single-entity tight loop in
+            // G_PushEntity goto retry). After a few retries, stop and let the move stand.
+            if (++retries <= 8) {
+                // move the pusher back and try again
+                ent->setOrigin(start);
+                goto retry;
+            }
         }
     }
 

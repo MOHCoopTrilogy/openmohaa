@@ -128,6 +128,7 @@ public:
     void         EventPlayerSpawn(Event *ev);
     void         EventPlayerSpawnUtility(Event *ev);
     void         EventPauseAnim(Event *ev);
+    void         EventStopAnimating(Event *ev);
     virtual void DumpAnimInfo();
     void         SlotChanged(int slot);
 

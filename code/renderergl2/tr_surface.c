@@ -1353,8 +1353,30 @@ void RB_DrawTerrainTris(srfTerrain_t* p) {
 	int i;
 	terraInt numv;
 	int dlightBits;
+	int16_t iNormal[4];
+	int16_t iTangent[4];
+	vec3_t  vUp;
+	vec4_t  vTangent;
+	int     firstVert, v;
+	static vec3_t s_terraNormAcc[SHADER_MAX_VERTEXES];
 
 	RB_CHECKOVERFLOW(p->nVerts, p->nTris * 3);
+
+	// HZM coop - gl2 tess.normal/tangent are PACKED int16[4] (not float like gl1). The port set neither
+	// correctly for terrain: the float "1.0" normal stored as int16 1 = a near-zero normal, and the tangent
+	// was never written (stale garbage) - so gl2's per-pixel / specular lighting shaded terrain wrong (the
+	// moving white sheen). Pack a proper up-normal + a matching tangent once, copy them per vertex (same as
+	// the mesh/sprite paths do via R_VaoPackNormal / R_VaoPackTangent). Tangent (1,0,0), handedness +1 ->
+	// bitangent (0,1,0): a valid TBN for a flat-up terrain vertex.
+	VectorSet(vUp, 0.0f, 0.0f, 1.0f);
+	R_VaoPackNormal(iNormal, vUp);
+	vTangent[0] = 1.0f;
+	vTangent[1] = 0.0f;
+	vTangent[2] = 0.0f;
+	vTangent[3] = 1.0f;
+	R_VaoPackTangent(iTangent, vTangent);
+
+	firstVert = tess.numVertexes; // remember where this patch's verts start (for the normal pass below)
 
 	dlightBits = p->dlightBits[0];
 	tess.dlightBits |= dlightBits;
@@ -1370,9 +1392,8 @@ void RB_DrawTerrainTris(srfTerrain_t* p) {
             tess.texCoords[tess.numVertexes][1] = g_pVert[i].texCoords[0][1];
             tess.lightCoords[tess.numVertexes][0] = g_pVert[i].xyz[0] * lmScale + p->lmapX;
             tess.lightCoords[tess.numVertexes][1] = g_pVert[i].xyz[1] * lmScale + p->lmapY;
-			tess.normal[tess.numVertexes][0] = 0;
-			tess.normal[tess.numVertexes][1] = 0;
-			tess.normal[tess.numVertexes][2] = 1.0;
+			VectorCopy4(iNormal, tess.normal[tess.numVertexes]);
+			VectorCopy4(iTangent, tess.tangent[tess.numVertexes]);
 			tess.color[tess.numVertexes][0] = 0xffff;
 			tess.color[tess.numVertexes][1] = 0xffff;
 			tess.color[tess.numVertexes][2] = 0xffff;
@@ -1393,9 +1414,8 @@ void RB_DrawTerrainTris(srfTerrain_t* p) {
             tess.lightCoords[tess.numVertexes][0] = g_pVert[i].texCoords[1][0];
             tess.lightCoords[tess.numVertexes][1] = g_pVert[i].texCoords[1][1];
 			//tess.vertexDlightBits[tess.numVertexes] = dlightBits;
-			tess.normal[tess.numVertexes][0] = 0;
-			tess.normal[tess.numVertexes][1] = 0;
-			tess.normal[tess.numVertexes][2] = 1.0;
+			VectorCopy4(iNormal, tess.normal[tess.numVertexes]);
+			VectorCopy4(iTangent, tess.tangent[tess.numVertexes]);
             tess.color[tess.numVertexes][0] = 0xffff;
             tess.color[tess.numVertexes][1] = 0xffff;
             tess.color[tess.numVertexes][2] = 0xffff;
@@ -1404,6 +1424,11 @@ void RB_DrawTerrainTris(srfTerrain_t* p) {
 			g_pVert[i].iVertArray = tess.numVertexes;
 			tess.numVertexes++;
 		}
+	}
+
+	// HZM coop - zero the per-vertex normal accumulator for this patch's verts.
+	for (v = firstVert; v < tess.numVertexes; v++) {
+		VectorClear(s_terraNormAcc[v]);
 	}
 
 	for (i = p->iTriHead; i; i = g_pTris[i].iNext)
@@ -1415,11 +1440,39 @@ void RB_DrawTerrainTris(srfTerrain_t* p) {
 		//
 		if (g_pTris[i].byConstChecks & 4)
 		{
-			tess.indexes[tess.numIndexes] = g_pVert[g_pTris[i].iPt[0]].iVertArray;
-			tess.indexes[tess.numIndexes + 1] = g_pVert[g_pTris[i].iPt[1]].iVertArray;
-			tess.indexes[tess.numIndexes + 2] = g_pVert[g_pTris[i].iPt[2]].iVertArray;
+			int    ia = g_pVert[g_pTris[i].iPt[0]].iVertArray;
+			int    ib = g_pVert[g_pTris[i].iPt[1]].iVertArray;
+			int    ic = g_pVert[g_pTris[i].iPt[2]].iVertArray;
+			vec3_t e1, e2, fn;
+
+			// HZM coop - area-weighted face normal, accumulated into each vertex -> smooth terrain normals,
+			// so gl2's per-pixel sun lighting follows the real slopes instead of a flat sweeping glint.
+			VectorSubtract(tess.xyz[ib], tess.xyz[ia], e1);
+			VectorSubtract(tess.xyz[ic], tess.xyz[ia], e2);
+			CrossProduct(e1, e2, fn);
+			VectorAdd(s_terraNormAcc[ia], fn, s_terraNormAcc[ia]);
+			VectorAdd(s_terraNormAcc[ib], fn, s_terraNormAcc[ib]);
+			VectorAdd(s_terraNormAcc[ic], fn, s_terraNormAcc[ic]);
+
+			tess.indexes[tess.numIndexes] = ia;
+			tess.indexes[tess.numIndexes + 1] = ib;
+			tess.indexes[tess.numIndexes + 2] = ic;
 			tess.numIndexes += 3;
 		}
+	}
+
+	// HZM coop - normalize + pack the accumulated normals (terrain faces up, so force +Z).
+	for (v = firstVert; v < tess.numVertexes; v++) {
+		vec3_t  n;
+		int16_t pn[4];
+		VectorCopy(s_terraNormAcc[v], n);
+		if (VectorNormalize(n) < 0.001f) {
+			VectorSet(n, 0.0f, 0.0f, 1.0f);
+		} else if (n[2] < 0.0f) {
+			VectorInverse(n);
+		}
+		R_VaoPackNormal(pn, n);
+		VectorCopy4(pn, tess.normal[v]);
 	}
 }
 

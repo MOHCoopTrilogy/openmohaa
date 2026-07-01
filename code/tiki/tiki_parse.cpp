@@ -888,6 +888,23 @@ qboolean TIKI_LoadSetupCase(
             }
 
             if (currentSurface == *numSurfacesSetUp) {
+                // HZM: guard the fixed-size stack array loadsurfaces[MAX_TIKI_LOAD_SURFACES].
+                // Without this check, a model whose matched setup defines more distinct
+                // surfaces than the array can hold writes past the end of the caller's
+                // stack array (TIKI_LoadTikiModel) -> /GS stack-canary trip (0xc0000409).
+                if (*numSurfacesSetUp >= MAX_TIKI_LOAD_SURFACES) {
+                    TIKI_Error(
+                        "^~^~^ TIKI_LoadSetup: too many surfaces (max %i) in %s; ignoring surface '%s'.\n",
+                        MAX_TIKI_LOAD_SURFACES,
+                        filename,
+                        name
+                    );
+                    // Skip any per-surface modifiers (flags/damage/shaders) that follow,
+                    // by leaving currentSurface clamped at the last valid slot. Subsequent
+                    // SETUP_FLAGS/SETUP_SHADER/SETUP_DAMAGE will touch a valid index.
+                    currentSurface = MAX_TIKI_LOAD_SURFACES - 1;
+                    break;
+                }
                 loadsurfaces[currentSurface].flags = 0;
                 (*numSurfacesSetUp)++;
             }
@@ -963,7 +980,7 @@ qboolean TIKI_LoadSetup(
     MSG_BeginReading(&msg);
 
     memset(tiki, 0, sizeof(dtiki_t));
-    memset(loadsurfaces, 0, sizeof(dloadsurface_t) * 24);
+    memset(loadsurfaces, 0, sizeof(dloadsurface_t) * MAX_TIKI_LOAD_SURFACES);
     *numSurfacesSetUp = 0;
 
     VectorCopy(vec3_origin, tiki->load_origin);
@@ -1237,14 +1254,43 @@ __newcase:
 
         WriteCaseValue(ld, token);
 
+        // HZM: ld->headmodels / ld->headskins are fixed char buffers
+        // (MAX_TIKI_LOAD_HEADMODELS_LENGTH / MAX_TIKI_LOAD_HEADSKINS_LENGTH) living inside the
+        // stack-allocated dloaddef_t in TIKI_LoadTikiAnim. The original code strcat'd each
+        // case value (+ '\n') with NO length check, so a model with enough distinct
+        // headmodel/headskin case values overran the stack buffer -> /GS stack-canary trip
+        // (0xc0000409) on cold load, with no preceding error log (matches m3l1a symptom).
+        // Guard each append against the remaining space and degrade gracefully.
         if (isheadmodel && !TIKI_strstr(ld->headmodels, token)) {
-            strcat(ld->headmodels, token);
-            strcat(ld->headmodels, "\n");
+            size_t curlen = strlen(ld->headmodels);
+            size_t addlen = strlen(token) + 1; // token + '\n'
+            if (curlen + addlen + 1 > sizeof(ld->headmodels)) {
+                TIKI_Error(
+                    "^~^~^ TIKI_ParseCase: too many/too long headmodel values (max %u bytes) in %s; ignoring '%s'.\n",
+                    (unsigned int)sizeof(ld->headmodels),
+                    ld->tikiFile.Filename(),
+                    token
+                );
+            } else {
+                strcat(ld->headmodels, token);
+                strcat(ld->headmodels, "\n");
+            }
         }
 
         if (isheadskin && !TIKI_strstr(ld->headskins, token)) {
-            strcat(ld->headskins, token);
-            strcat(ld->headskins, "\n");
+            size_t curlen = strlen(ld->headskins);
+            size_t addlen = strlen(token) + 1; // token + '\n'
+            if (curlen + addlen + 1 > sizeof(ld->headskins)) {
+                TIKI_Error(
+                    "^~^~^ TIKI_ParseCase: too many/too long headskin values (max %u bytes) in %s; ignoring '%s'.\n",
+                    (unsigned int)sizeof(ld->headskins),
+                    ld->tikiFile.Filename(),
+                    token
+                );
+            } else {
+                strcat(ld->headskins, token);
+                strcat(ld->headskins, "\n");
+            }
         }
     }
 

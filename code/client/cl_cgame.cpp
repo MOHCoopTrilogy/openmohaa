@@ -921,9 +921,11 @@ void CL_InitCGame( void ) {
 
 	t1 = Sys_Milliseconds();
 
+
 	// find the current mapname
 	info = cl.gameState.stringData + cl.gameState.stringOffsets[ CS_SERVERINFO ];
 	mapname = Info_ValueForKey( info, "mapname" );
+
 
 	if (CL_UseLargeLightmap(mapname)) {
 		Com_sprintf(cl.mapname, sizeof(cl.mapname), "maps/%s.bsp", mapname);
@@ -945,6 +947,7 @@ void CL_InitCGame( void ) {
 		CL_InitClientSavedData();
 	}
 
+
 	if (cl.snap.valid) {
 		// init for this gamestate
 		// use the lastExecutedServerCommand instead of the serverCommandSequence
@@ -956,6 +959,7 @@ void CL_InitCGame( void ) {
 		// It would cause the client to lose the game state number
 		cge->CG_Init(&cgi, clc.serverMessageSequence, clc.serverCommandSequence, clc.clientNum);
 	}
+
 
 	ClearNewConfigFlag();
 	TIKI_FinishLoad();

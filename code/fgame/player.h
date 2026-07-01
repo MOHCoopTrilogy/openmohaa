@@ -329,6 +329,8 @@ public:
     str m_sPerferredWeaponOverride;
 
     float  m_fHealRate;
+    float  m_fRecoilTarget;   // HZM coop - accumulated view-recoil pitch (deg) from firing, decays to 0
+    float  m_fRecoilApplied;  // HZM coop - recoil pitch currently folded into delta_angles (for recovery)
     Vector m_vViewPos;
     Vector m_vViewAng;
     Vector mvTrail[MAX_TRAILS];
@@ -349,6 +351,10 @@ public:
     int    m_iNumRightArmShots;
 
     float m_fLastSprintTime;
+    // HZM coop - SPRINT stamina (seconds of sprint remaining). Drains while sprinting, regens otherwise.
+    // m_bCoopSprinting = the per-frame "is actually sprinting right now" flag (set in ClientMove).
+    float m_fCoopStamina;
+    bool  m_bCoopSprinting;
     bool  m_bHasJumped;
     float m_fLastInvulnerableTime;
     int   m_iInvulnerableTimeRemaining;
@@ -498,6 +504,7 @@ public:
     qboolean CondAttackSecondary(Conditional& condition);
     qboolean CondAttackButtonPrimary(Conditional& condition);
     qboolean CondAttackButtonSecondary(Conditional& condition);
+    qboolean CondCoopAds(Conditional& condition); // HZM coop - aim down sights (dedicated bind)
 
     //
     // Added in OPM
@@ -720,9 +727,13 @@ public:
     void JumpXY(Event *ev);
 
     void SetViewAngles(Vector angles) override;
+    void AddViewRecoil(float fPitch); // HZM coop - add an upward view-recoil kick (deg) on weapon fire
     void SetTargetViewAngles(Vector angles) override;
 
     Vector GetViewAngles(void) override { return v_angle; };
+
+    // HZM coop - expose the last command buttons so server-side weapon code can detect aim/breath input.
+    int GetLastButtons(void) const { return last_ucmd.buttons; };
 
     void  SetFov(float newFov);
     float GetFov() const;
@@ -809,6 +820,7 @@ public:
     void       EventGetFireHeld(Event *ev);
     void       EventGetPrimaryFireHeld(Event *ev);
     void       EventGetSecondaryFireHeld(Event *ev);
+    void       EventGetCoopAdsHeld(Event *ev); // HZM coop - aim-down-sights button held (for ads.scr move slowdown)
     void       Score(Event *ev);
     void       Join_DM_Team(Event *ev);
     void       Auto_Join_DM_Team(Event *ev);
@@ -897,6 +909,8 @@ public:
     // Added in 2.0
     void  TickSprint();
     float GetRunSpeed() const;
+    // HZM coop - is the player currently sprinting this frame (read by cgame-independent consumers if needed)
+    bool  IsCoopSprinting() const { return m_bCoopSprinting; }
     void  FireWeapon(int number, firemode_t mode) override;
     void  SetInvulnerable();
     void  TickInvulnerable();

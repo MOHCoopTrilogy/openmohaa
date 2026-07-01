@@ -139,6 +139,8 @@ add_subdirectory("code/gamespy")
 #
 add_subdirectory("code/sys")
 
+if(NOT BUILD_NO_SERVER)
+
 ##
 ## Server app
 ##
@@ -163,6 +165,8 @@ if (MSVC)
 	target_link_options(omohaaded PRIVATE "/MANIFEST:NO")
 	INSTALL(FILES $<TARGET_PDB_FILE:omohaaded> DESTINATION ${CMAKE_INSTALL_BINDIR}/${BIN_INSTALL_SUBDIR} OPTIONAL)
 endif()
+
+endif() # NOT BUILD_NO_SERVER
 
 if (NOT BUILD_NO_CLIENT)
 	##

@@ -116,6 +116,15 @@ Event EV_Animate_Client_Sound
     NULL,
     EV_NORMAL
 );
+Event EV_Animate_StopAnimating
+(
+    "stopanimating",
+    EV_DEFAULT,
+    NULL,
+    NULL,
+    "Stops the current animation.",
+    EV_NORMAL
+);
 
 CLASS_DECLARATION(Entity, Animate, "animate") {
     {&EV_SetControllerAngles,         &Animate::SetControllerAngles    },
@@ -127,6 +136,7 @@ CLASS_DECLARATION(Entity, Animate, "animate") {
     {&EV_Animate_PlayerSpawn_Utility, &Animate::EventPlayerSpawnUtility},
     {&EV_Animate_PauseAnim,           &Animate::EventPauseAnim         },
     {&EV_Animate_Client_Sound,        &Animate::ClientSound            },
+    {&EV_Animate_StopAnimating,       &Animate::EventStopAnimating     },
     {NULL,                            NULL                             }
 };
 
@@ -513,6 +523,11 @@ void Animate::StopAnimating(int slot)
     animtimes[slot] = 0.0f;
 
     SlotChanged(slot);
+}
+
+void Animate::EventStopAnimating(Event *ev)
+{
+    StopAnimating(0);
 }
 
 void Animate::DoExitCommands(int slot)

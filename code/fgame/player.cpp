@@ -1197,6 +1197,15 @@ Event EV_GetSecondaryFireHeld // Added in 2.30
      "returns 1 if this player is holding the secondary fire, or 0 if not",
      EV_GETTER
 );
+Event EV_GetCoopAdsHeld // HZM coop
+(
+    "coopadsheld",
+     EV_DEFAULT,
+     NULL,
+     NULL,
+     "returns 1 if this player is holding the aim-down-sights button, or 0 if not",
+     EV_GETTER
+);
 Event EV_Player_GetReady
 (
     "ready",
@@ -1900,6 +1909,7 @@ CLASS_DECLARATION(Sentient, Player, "player") {
     {&EV_GetFireHeld,                     &Player::EventGetFireHeld             },
     {&EV_GetPrimaryFireHeld,              &Player::EventGetPrimaryFireHeld      },
     {&EV_GetSecondaryFireHeld,            &Player::EventGetSecondaryFireHeld    },
+    {&EV_GetCoopAdsHeld,                  &Player::EventGetCoopAdsHeld          },
     {&EV_Player_GetReady,                 &Player::EventGetReady                },
     {&EV_Player_SetReady,                 &Player::EventSetReady                },
     {&EV_Player_SetNotReady,              &Player::EventSetNotReady             },
@@ -2172,6 +2182,9 @@ Player::Player()
     client->ps.pm_flags &= ~PMF_NO_HUD;
 
     m_fLastSprintTime = 0;
+    // start with a full stamina pool on (re)spawn; TickSprint clamps this down to the cvar max each frame
+    m_fCoopStamina    = 9999.0f;
+    m_bCoopSprinting  = false;
     m_bHasJumped      = false;
 
     m_fLastInvulnerableTime      = 0;
@@ -2438,6 +2451,8 @@ void Player::InitHealth(void)
     //  Make sure to clear the heal rate and the dead flag when respawning
     //
     m_fHealRate = 0;
+    m_fRecoilTarget  = 0; // HZM coop - clear view-recoil on (re)spawn (delta_angles is reset here too)
+    m_fRecoilApplied = 0;
     edict->s.eFlags &= ~EF_DEAD;
 
     // Fixed in OPM
@@ -4060,7 +4075,54 @@ void Player::ClientMove(usercmd_t *ucmd)
         if (last_ucmd.buttons & BUTTON_RUN) {
             client->ps.speed = GetRunSpeed();
         } else {
-            client->ps.speed = sv_runspeed->value * sv_walkspeedmult->value;
+            // BUTTON_RUN clear = the walk key (Shift). With coop_sprint enabled, Shift is the SPRINT key, so
+            // holding it must NEVER drop below normal run: while stamina lasts the sprint boost below adds on
+            // top, and once stamina is spent we fall back to RUN (not the slow walk that made sprint feel
+            // like it ended after a couple seconds / "competed with walk"). The dedicated Alt walk key
+            // (BUTTON_COOPWALK, handled just below) is the only thing that forces the slow walk now.
+            cvar_t *pSprintBase = gi.Cvar_Get("coop_sprint", "1", CVAR_ARCHIVE);
+            if (pSprintBase && pSprintBase->integer) {
+                client->ps.speed = GetRunSpeed();
+            } else {
+                client->ps.speed = sv_runspeed->value * sv_walkspeedmult->value;
+            }
+        }
+
+        // HZM coop - SPRINT: when the per-frame sprint state is set (computed in TickSprint: Shift held +
+        // not aiming + moving forward + stamina left), scale ABOVE the normal run speed by coop_sprintMult.
+        // Replaces the walk-slow value the BUTTON_RUN-clear branch above just set (Shift = walk key). When
+        // sprint is disabled or stamina is exhausted, m_bCoopSprinting is false so we keep vanilla behavior.
+        if (m_bCoopSprinting) {
+            cvar_t *pMult = gi.Cvar_Get("coop_sprintMult", "1.3", CVAR_ARCHIVE);
+            float   mult  = pMult ? pMult->value : 1.3f;
+            if (mult < 1.0f) { mult = 1.0f; } // sprint is never slower than run
+            client->ps.speed = sv_runspeed->value * mult;
+        }
+
+        // HZM coop - Alt WALK key (BUTTON_COOPWALK) forces a slow walk. Shift is now sprint/breath, so the
+        // dedicated walk-slow moved to Alt. The run/walk branch above keys off BUTTON_RUN (Shift), which is
+        // still SET when only Alt is held, so without this you'd keep running. altWalk already suppresses
+        // sprint in TickSprint, so just clamp to walk speed here (crouch mult below still stacks).
+        if ((last_ucmd.buttons & BUTTON_COOPWALK) && !m_bCoopSprinting) {
+            cvar_t *pSprintOn = gi.Cvar_Get("coop_sprint", "1", CVAR_ARCHIVE);
+            if (pSprintOn && pSprintOn->integer) {
+                client->ps.speed = sv_runspeed->value * sv_walkspeedmult->value;
+            }
+        }
+
+        // HZM coop - aiming down the IRON SIGHTS (BUTTON_COOPADS) slows you to a careful aimed walk so movement
+        // AND the footstep cadence match the pose. Scoped/zoomed weapons already slow via GetZoomMovement below,
+        // but iron-sight ADS is not IsZoomed, so without this you stroll at full run speed (fast footsteps).
+        // coop_adsSpeedMult scales it (1.0 = no slowdown). Suppressed while sprinting (you can't sprint + ADS).
+        // DEFAULT 1.0 = OFF (reverted: the 0.55 aimed-walk felt far too slow). Footstep cadence will be
+        // handled separately. Left in place + tunable: lower coop_adsSpeedMult below 1.0 to re-enable.
+        if ((last_ucmd.buttons & BUTTON_COOPADS) && !m_bCoopSprinting) {
+            cvar_t *pAdsMult = gi.Cvar_Get("coop_adsSpeedMult", "1.0", CVAR_ARCHIVE);
+            float   amult    = pAdsMult ? pAdsMult->value : 1.0f;
+            if (amult < 0.1f) { amult = 0.1f; } else if (amult > 1.0f) { amult = 1.0f; }
+            if (amult < 1.0f) {
+                client->ps.speed = (float)client->ps.speed * amult;
+            }
         }
 
         if (m_iMovePosFlags & MPF_POSITION_CROUCHING) {
@@ -4072,8 +4134,15 @@ void Player::ClientMove(usercmd_t *ucmd)
             //
             // Also use the weapon movement speed
             //
+            // HZM coop - UNIFORM weapon move speed: every gun moves at the same multiplier (default 0.89 =
+            // the BAR's, the heaviest) so movement is consistent + a touch slower, instead of varying per
+            // weapon. coop_weaponMoveSpeed <= 0 falls back to each weapon's own movementspeed (vanilla).
+            static cvar_t *pWMS = NULL;
+            float          fwms;
+            if (!pWMS) { pWMS = gi.Cvar_Get("coop_weaponMoveSpeed", "0.89", CVAR_ARCHIVE); }
             if (!IsZoomed()) {
-                client->ps.speed = (float)client->ps.speed * pWeap->GetMovementSpeed();
+                fwms = (pWMS && pWMS->value > 0.0f) ? pWMS->value : pWeap->GetMovementSpeed();
+                client->ps.speed = (float)client->ps.speed * fwms;
             } else {
                 client->ps.speed = (float)client->ps.speed * pWeap->GetZoomMovement();
             }
@@ -4498,6 +4567,17 @@ void Player::ClientThink(void)
             }
         }
 
+        // HZM coop - scoped weapons (snipers) zoom on the ADS button (RMB / BUTTON_COOPADS) too. ADS was
+        // decoupled from secondary-fire (which moved to V), but a sniper's "ADS" IS its zoom, so RMB must
+        // still scope it. Only zoom weapons respond (iron-sight guns have GetZoom()==0 and ADS via statemap).
+        if (new_buttons & BUTTON_COOPADS) {
+            Weapon *zw = GetActiveWeapon(WEAPON_MAIN);
+
+            if (zw && (zw->GetZoom())) {
+                ToggleZoom(zw->GetZoom());
+            }
+        }
+
         if (new_buttons & BUTTON_USE) {
             DoUse(NULL);
         }
@@ -4619,6 +4699,7 @@ void Player::Think(void)
     if (whereami->integer && origin != oldorigin) {
         gi.DPrintf("x %8.2f y %8.2f z %8.2f area %2d\n", origin[0], origin[1], origin[2], edict->r.areanum);
     }
+
 
     if (g_gametype->integer == GT_SINGLE_PLAYER && g_playermodel->modified) {
         setModel("models/player/" + str(g_playermodel->string) + ".tik");
@@ -7305,7 +7386,7 @@ void Player::UpdateStats(void)
 
                 trace = G_Trace(m_vViewPos, vec_zero, vec_zero, vEnd, this, MASK_BEAM, qfalse, "infoclientcheck");
 
-                if (trace.ent && trace.ent->entity->IsSubclassOfPlayer() && !(trace.ent->r.svFlags & SVF_NOCLIENT)) {
+                if (trace.ent && trace.ent->entity && trace.ent->entity->IsSubclassOfPlayer() && !(trace.ent->r.svFlags & SVF_NOCLIENT)) {
                     Player *p = static_cast<Player *>(trace.ent->entity);
 
                     if (IsSpectator() || p->GetTeam() == GetTeam()) {
@@ -7656,10 +7737,12 @@ void Player::UpdateStats(void)
 
 void Player::UpdateMusic(void)
 {
-    if (music_forced) {
-        client->ps.current_music_mood  = music_current_mood;
-        client->ps.fallback_music_mood = music_fallback_mood;
-    }
+    // Always copy mood to snapshot so trigger_music entities propagate correctly.
+    // The original guard (music_forced) meant non-forced mood changes (trigger_music,
+    // spawn success cue) never reached cgame. mood_forced is preserved for callers
+    // that need to override the SoundManager, but snapshot write is unconditional.
+    client->ps.current_music_mood  = music_current_mood;
+    client->ps.fallback_music_mood = music_fallback_mood;
 
     // Copy music volume and fade time to player state
     client->ps.music_volume           = music_current_volume;
@@ -7907,6 +7990,16 @@ void Player::JumpXY(Event *ev)
 
     // make sure the player leaves the ground
     client->ps.walking = qfalse;
+}
+
+// HZM coop - accumulate an upward view-recoil kick (degrees). Capped so sustained auto climbs to a limit
+// rather than running away. Player::Think eases it back down and folds it into delta_angles.
+void Player::AddViewRecoil(float fPitch)
+{
+    m_fRecoilTarget += fPitch;
+    if (m_fRecoilTarget > 6.0f) {
+        m_fRecoilTarget = 6.0f;
+    }
 }
 
 void Player::SetViewAngles(Vector newViewangles)
@@ -11414,6 +11507,11 @@ void Player::EventGetSecondaryFireHeld(Event *ev)
     ev->AddInteger(buttons & BUTTON_ATTACKRIGHT ? true : false);
 }
 
+void Player::EventGetCoopAdsHeld(Event *ev) // HZM coop - aim-down-sights button held
+{
+    ev->AddInteger(buttons & BUTTON_COOPADS ? true : false);
+}
+
 void Player::BeginTempSpectator(void)
 {
     m_bTempSpectator = true;
@@ -11831,6 +11929,59 @@ void Player::TickSprint()
     if (last_ucmd.upmove) {
         m_fLastSprintTime = timeHeld;
     }
+
+    //====
+    // HZM coop - SPRINT stamina + state.
+    // Decides whether the player is sprinting THIS frame and drains/regens the stamina pool. The actual
+    // speed boost is applied in ClientMove (the GetRunSpeed/walk branch). Sprint = the walk key (Shift,
+    // BUTTON_RUN clear in default "always run") held while NOT aiming + moving forward + stamina left.
+    // While AIMING (ADS / scope) the walk key keeps its existing walk + breath-hold behavior untouched.
+    // The dedicated Alt walk key (BUTTON_COOPWALK) always forces a slow walk and never sprints.
+    {
+        cvar_t *pOn      = gi.Cvar_Get("coop_sprint", "1", CVAR_ARCHIVE);
+        cvar_t *pStamina = gi.Cvar_Get("coop_sprintStamina", "5", CVAR_ARCHIVE);
+        cvar_t *pRegen   = gi.Cvar_Get("coop_sprintRegen", "0.6", CVAR_ARCHIVE);
+        float   maxStam  = pStamina ? pStamina->value : 5.0f;
+        float   regen    = pRegen ? pRegen->value : 0.6f;
+        float   dt       = level.frametime;
+        qboolean enabled = (pOn && pOn->integer) ? qtrue : qfalse;
+        qboolean aiming;
+        qboolean walkKey;
+        qboolean altWalk;
+        qboolean wantSprint;
+
+        if (maxStam < 0.1f) { maxStam = 0.1f; }
+        if (dt < 0.0f || dt > 0.5f) { dt = 0.0f; } // clamp pauses / map loads
+
+        // clamp the (possibly spawn-seeded huge) pool to the current max
+        if (m_fCoopStamina > maxStam) { m_fCoopStamina = maxStam; }
+
+        aiming  = (IsZoomed() || (last_ucmd.buttons & BUTTON_COOPADS)) ? qtrue : qfalse; // ADS now on its own button
+        walkKey = (last_ucmd.buttons & BUTTON_RUN) ? qfalse : qtrue;       // Shift held = walk-key state
+        altWalk = (last_ucmd.buttons & BUTTON_COOPWALK) ? qtrue : qfalse;  // Alt held = forced slow walk
+
+        // want to sprint: enabled, alive, not on a turret/vehicle, Shift held, NOT aiming, NOT forcing walk,
+        // actually moving forward (forwardmove > 0; rules out standing still / walking backward / strafing).
+        wantSprint = qfalse;
+        if (enabled && !deadflag && !m_pVehicle && !m_pTurret && walkKey && !aiming && !altWalk
+            && last_ucmd.forwardmove > 0) {
+            wantSprint = qtrue;
+        }
+
+        if (wantSprint && m_fCoopStamina > 0.0f) {
+            m_bCoopSprinting = true;
+            m_fCoopStamina -= dt; // drains 1 stamina-sec per real-sec while sprinting
+            if (m_fCoopStamina < 0.0f) { m_fCoopStamina = 0.0f; }
+        } else {
+            m_bCoopSprinting = false;
+            // regen only when NOT actively trying to sprint, so you can't "pump" it
+            if (!wantSprint) {
+                m_fCoopStamina += dt * regen;
+                if (m_fCoopStamina > maxStam) { m_fCoopStamina = maxStam; }
+            }
+        }
+    }
+    //====
 }
 
 float Player::GetRunSpeed() const
@@ -12291,6 +12442,21 @@ void Player::Postthink(void)
 {
     if (bindmaster) {
         SetViewAngles(GetViewAngles() + Vector(0, bindmaster->avelocity[YAW] * level.frametime, 0));
+    }
+
+    // HZM coop - PLAYER BLOOD TRAIL: when wounded + moving, drip ground-blood splats, exactly like wounded
+    // AI (Sentient::TryDropBloodTrail). Behind its OWN toggle (coop_playerBloodTrail), DEFAULT OFF: the
+    // player-spawned decal was rendering as untextured white wedges in the field (the AI hit-splat using the
+    // IDENTICAL Decal code renders fine, so the cause is runtime/player-specific, not the shader) - until
+    // that's root-caused live, players don't drip by default. AI blood trails (coop_bloodTrail) are unaffected.
+    {
+        cvar_t *pPB = gi.Cvar_Get("coop_playerBloodTrail", "1", CVAR_ARCHIVE);
+        if (pPB && pPB->integer) {
+            if (!blood_model.length()) {
+                blood_model = "fx_bspurt.tik";
+            }
+            TryDropBloodTrail();
+        }
     }
 }
 

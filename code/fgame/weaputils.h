@@ -308,6 +308,7 @@ float BulletAttack
 	int*     piTracerCount,
 	float    bulletthroughwood,
 	float    bulletthroughmetal,
+	float    bulletthroughany,
 	Weapon*  weap,
 	float    tracerspeed
 	);

@@ -101,12 +101,18 @@ static const unsigned int DEAD_VIEWHEIGHT       = 8;
 #define CS_PLAYERS         (CS_LIGHTSTYLES + MAX_LIGHTSTYLES) // 1684
 
 #define CS_WEAPONS         (CS_PLAYERS + MAX_CLIENTS) // su44 was here
-#define CS_TEAMS           1892
-#define CS_GENERAL_STRINGS 1893
-#define CS_SPECTATORS      1894
-#define CS_ALLIES          1895
-#define CS_AXIS            1896
-#define CS_SOUNDTRACK      1881
+// HZM COOP: these were hardcoded (1881/1892-1896) just above the old CS_WEAPONS end
+// (~1812). Raising MAX_SOUNDS 512->1024 shifts CS_IMAGES/CS_LIGHTSTYLES/CS_PLAYERS/
+// CS_WEAPONS upward, which would collide with those literals. Make them computed so
+// they always sit just after the weapons block. All modules rebuild from these headers
+// so the values stay consistent. New layout (MAX_SOUNDS=1024): CS_WEAPONS=2260,
+// CS_SOUNDTRACK=2324 ... CS_AXIS=2329, all < MAX_CONFIGSTRINGS (2736).
+#define CS_SOUNDTRACK      (CS_WEAPONS + MAX_WEAPONS)
+#define CS_TEAMS           (CS_SOUNDTRACK + 1)
+#define CS_GENERAL_STRINGS (CS_TEAMS + 1)
+#define CS_SPECTATORS      (CS_GENERAL_STRINGS + 1)
+#define CS_ALLIES          (CS_SPECTATORS + 1)
+#define CS_AXIS            (CS_ALLIES + 1)
 
 #define CS_TEAMINFO        1
 
@@ -549,6 +555,7 @@ movement on the server game.
         STAT_INFOCLIENT_HEALTH,
         STAT_DAMAGEDIR,
         STAT_SECONDARY_AMMO, // added in 2.0
+        STAT_MGHEAT,         // HZM coop - mounted MG42 turret heat 0-100, drives the cgame heat meter (uses the last free MAX_STATS slot)
         STAT_LAST_STAT
     } playerstat_t;
 

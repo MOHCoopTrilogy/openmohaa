@@ -4190,6 +4190,7 @@ void CacheResource(const char *stuff)
 {
     str real_stuff;
 
+
     if (!stuff || !stuff[0]) {
         return;
     }
@@ -4301,6 +4302,7 @@ void ClientGameCommandManager::AliasCache(Event *ev)
     // real path is argument 2
     // any additional parameters are in arguments 3-n
 
+
     parmbuffer[0] = 0;
     psMapsBuffer  = NULL;
 
@@ -4355,12 +4357,14 @@ void ClientGameCommandManager::Alias(Event *ev)
     // real path is argument 2
     // any additional parameters are in arguments 3-n
 
+
     parmbuffer[0] = 0;
     subtitle      = qfalse;
     psMapsBuffer  = NULL;
 
     for (i = 3; i <= ev->NumArgs(); i++) {
         str s = ev->GetString(i);
+
 
         if (!s.icmp("maps")) {
             i++;
@@ -4459,6 +4463,17 @@ void ClientGameCommandManager::Footstep(Event *ev)
     }
 
     if (current_centity && current_entity) {
+        // HZM coop: the local player walks at ~30% speed while aiming down sights, but the leg anim keeps
+        // firing footstep commands at full walk cadence - so ADS steps sound too fast. Throttle the local
+        // player's ADS footsteps to a slow, deliberate interval (pmove footsteps are disabled, so every
+        // footstep sound comes through here).
+        if (current_centity == &cg_entities[cg.predicted_player_state.clientNum] && CG_AimingDownSights()) {
+            static int s_iLastAdsFootstepTime = 0;
+            if (cg.time - s_iLastAdsFootstepTime < 700) {
+                return;
+            }
+            s_iLastAdsFootstepTime = cg.time;
+        }
         CG_Footstep(sTagName.c_str(), current_centity, current_entity, iRunning, iEquipment);
     }
 }

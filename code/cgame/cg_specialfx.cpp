@@ -402,6 +402,12 @@ void ClientSpecialEffectsManager::LoadEffects()
         case SFX_FENCE_WOOD:
             szEffectModel = "models/fx/fx_fence_wood.tik";
             break;
+        case SFX_COOP_GUNSMOKE: // HZM coop - subtle lingering gun smoke (muzzle + bullet impact)
+            szEffectModel = "models/fx/coop_gunsmoke.tik";
+            break;
+        case SFX_COOP_BARRELSMOKE: // HZM coop - short wisp trailing back off the barrel after a shot
+            szEffectModel = "models/fx/coop_barrelsmoke.tik";
+            break;
         default:
             szEffectModel = "models/fx/bh_stone_hard.tik";
             break;
@@ -799,12 +805,16 @@ void CG_LandingSound(centity_t *ent, refEntity_t *pREnt, float volume, int iEqui
 
     iEffectNum = -1;
 
+    // HZM: players use 200ms (footstep cadence); non-players (shell casings, props) use 1500ms
+    // so a bouncing casing only produces one click regardless of how many times it skips.
+    int landThrottle = (ent->currentState.eType == ET_PLAYER) ? 200 : 1500;
+
     if (ent->iNextLandTime > cg.time) {
-        ent->iNextLandTime = cg.time + 200;
+        ent->iNextLandTime = cg.time + landThrottle;
         return;
     }
 
-    ent->iNextLandTime = cg.time + 200;
+    ent->iNextLandTime = cg.time + landThrottle;
     VectorCopy(ent->lerpOrigin, vStart);
     vStart[2] += GROUND_DISTANCE;
 

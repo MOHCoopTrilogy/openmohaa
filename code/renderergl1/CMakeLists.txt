@@ -30,3 +30,5 @@ if (target_type STREQUAL "SHARED_LIBRARY")
 		INSTALL(FILES $<TARGET_PDB_FILE:omohrenderergl1> DESTINATION ${CMAKE_INSTALL_LIBDIR}/${LIB_INSTALL_SUBDIR} OPTIONAL)
 	endif()
 endif ()
+
+# HZM: touch to re-glob (added tr_grass_gl1.c)

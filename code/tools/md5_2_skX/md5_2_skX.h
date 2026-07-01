@@ -28,7 +28,11 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 // this tool is dependant on OpenMoHAA engine headers,
 // not on the ones used by q3map and rest of utilities
 #include "../../qcommon/q_shared.h"
-#include "../../qcommon/tiki_local.h"
+// HZM coop 2026-06-30: this fork's rewrite renamed/split the old qcommon/tiki_local.h structs
+// (skdHeader_t/skcHeader_t/...) into skeletor/*_file_format.h + tiki/tiki_shared.h. The on-disk
+// byte layout is unchanged and the engine still loads the old SKD v5 / SKC v13 formats, so we keep
+// su44's struct NAMES via a self-contained legacy header that mirrors those layouts byte-for-byte.
+#include "skx_format.h"
 
 #define MD5_2_SKX_VERSION "0.1"
 

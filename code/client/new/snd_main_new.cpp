@@ -245,26 +245,175 @@ void MUSIC_SongEnded(void)
     STUB();
 }
 
+// ---------------------------------------------------------------------------
+// HZM: MOHAA .mus "mood" music subsystem - DMA-backend port.
+//
+// Vanilla MOHAA delivers BOTH its score and its atmospheric ambience through the
+// .mus mood system: a map runs `soundtrack music/<map>.mus` (CS_MUSIC configstring
+// -> MUSIC_NewSoundtrack) then `forcemusic <mood>` at scripted beats (mood travels
+// in the player-state snapshot -> cg_snapshot.c calls MUSIC_UpdateMood per client).
+// OpenMOHAA only implemented this in the OpenAL backend (snd_openal_new.cpp), which
+// is EXCLUDED from this NO_MODERN_DMA build - so these were stubbed and every map
+// played silent. Port the parser + mood selection here, backed by the same proven
+// background-track streamer that tmstartloop uses (S_StartBackgroundTrack loops the
+// stream; S_UpdateBackgroundTrack already pumps it each frame). Single-stream model:
+// each mood = one looping track, switched on mood change. Networked snapshot/cfgstr
+// means every coop client drives this independently -> all players hear it.
+// ---------------------------------------------------------------------------
+#define MOOD_MAX_SONGS 16
+
+typedef struct {
+    char alias[32];
+    char path[64];
+    int  mood_num;
+} moodSong_t;
+
+static moodSong_t s_moodSongs[MOOD_MAX_SONGS];
+static int        s_moodNumSongs       = 0;
+static char       s_moodSoundtrack[64] = "";
+static int        s_moodPlaying        = -2; // mood_num currently streaming (-2 = none selected yet)
+
+static int MUSIC_FindMoodSong(int mood_num)
+{
+    int i;
+
+    if (mood_num <= mood_none) {
+        return -1;
+    }
+    for (i = 0; i < s_moodNumSongs; i++) {
+        if (s_moodSongs[i].mood_num == mood_num) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+static void MUSIC_LoadMoodFile(const char* name)
+{
+    char*       data = NULL;
+    char*       buffer;
+    char        load_path[64];
+    char        a0[64], a1[64];
+    int         len;
+    moodSong_t* psong;
+
+    s_moodNumSongs = 0;
+    load_path[0]   = 0;
+
+    len = FS_ReadFile(name, (void**)&data);
+    if (len <= 0 || !data) {
+        Com_Printf("MUSIC: could not load soundtrack %s\n", name);
+        return;
+    }
+
+    buffer = data;
+    while (1) {
+        // first token of a line (allow crossing newlines); '' = end of file
+        Q_strncpyz(a0, COM_GetToken(&buffer, qtrue), sizeof(a0));
+        if (!a0[0]) {
+            break;
+        }
+        // second token (same line only); trailing // comments are skipped by the tokenizer
+        Q_strncpyz(a1, COM_GetToken(&buffer, qfalse), sizeof(a1));
+
+        if (!Q_stricmp(a0, "path")) {
+            Q_strncpyz(load_path, a1, sizeof(load_path));
+            len = (int)strlen(load_path);
+            if (len > 0 && load_path[len - 1] != '/' && load_path[len - 1] != '\\') {
+                Q_strcat(load_path, sizeof(load_path), "/");
+            }
+        } else if (a0[0] == '!') {
+            // per-song directive (!<alias> volume/loop/fadetime/...). The single-stream
+            // port loops every track, so just consume the rest of the line and move on.
+            while (COM_GetToken(&buffer, qfalse)[0]) {
+            }
+        } else if (a1[0]) {
+            // "<mood-alias> <file>"
+            if (s_moodNumSongs >= MOOD_MAX_SONGS) {
+                continue;
+            }
+            psong = &s_moodSongs[s_moodNumSongs];
+            Q_strncpyz(psong->alias, a0, sizeof(psong->alias));
+            Q_strncpyz(psong->path, load_path, sizeof(psong->path));
+            Q_strcat(psong->path, sizeof(psong->path), a1);
+            psong->mood_num = MusicMood_NameToNum(a0);
+            s_moodNumSongs++;
+        }
+    }
+
+    FS_FreeFile(data);
+    Com_Printf("MUSIC: loaded %d songs from %s\n", s_moodNumSongs, name);
+}
+
 /*
 =================
-S_StartSound
+MUSIC_NewSoundtrack
+  Called when the CS_MUSIC configstring changes (server `soundtrack <file.mus>`).
 =================
 */
 void MUSIC_NewSoundtrack(const char* name)
 {
-    // FIXME: unimplemented
-    STUB();
+    if (!name) {
+        return;
+    }
+    if (!Q_stricmp(name, s_moodSoundtrack)) {
+        return; // unchanged
+    }
+
+    Q_strncpyz(s_moodSoundtrack, name, sizeof(s_moodSoundtrack));
+    s_moodNumSongs = 0;
+    s_moodPlaying  = -2;
+
+    if (!*name || !Q_stricmp(name, "none")) {
+        S_StopBackgroundTrack();
+        return;
+    }
+
+    MUSIC_LoadMoodFile(name);
+    // Playback is driven by MUSIC_UpdateMood (called every snapshot with the live mood).
 }
 
 /*
 =================
 MUSIC_UpdateMood
+  Called every snapshot with the networked player-state mood. Switches the looping
+  background track when the desired mood changes.
 =================
 */
 void MUSIC_UpdateMood(int current, int fallback)
 {
-    // FIXME: unimplemented
-    //STUB();
+    int idx;
+
+    if (!s_moodNumSongs) {
+        return; // no soundtrack loaded yet
+    }
+
+    if (current == mood_none) {
+        if (s_moodPlaying != mood_none) {
+            S_StopBackgroundTrack();
+            s_moodPlaying = mood_none;
+        }
+        return;
+    }
+
+    idx = MUSIC_FindMoodSong(current);
+    if (idx < 0) {
+        idx = MUSIC_FindMoodSong(fallback);
+    }
+    if (idx < 0) {
+        idx = MUSIC_FindMoodSong(mood_normal);
+    }
+    if (idx < 0) {
+        return; // no song for this mood; leave the current track playing
+    }
+
+    if (s_moodSongs[idx].mood_num == s_moodPlaying) {
+        return; // already streaming this mood
+    }
+
+    s_moodPlaying = s_moodSongs[idx].mood_num;
+    Com_Printf("MUSIC: start %s (mood %d)\n", s_moodSongs[idx].path, s_moodSongs[idx].mood_num);
+    S_StartBackgroundTrack(s_moodSongs[idx].path, s_moodSongs[idx].path); // intro==loop -> loops forever
 }
 
 /*

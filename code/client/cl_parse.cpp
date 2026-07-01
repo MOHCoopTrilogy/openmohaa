@@ -541,6 +541,7 @@ void CL_ParseGamestate( msg_t *msg ) {
 
 	UI_CloseConsole();
 
+
 	clc.connectPacketCount = 0;
 	if (cls.cgameStarted) {
 		CL_FlushMemory();
@@ -573,6 +574,7 @@ void CL_ParseGamestate( msg_t *msg ) {
             s = MSG_ReadScrambledBigString(msg);
             len = strlen(s);
 
+
             if (len + 1 + cl.gameState.dataCount > MAX_GAMESTATE_CHARS) {
                 Com_Error(ERR_DROP, "MAX_GAMESTATE_CHARS exceeded");
             }
@@ -594,6 +596,7 @@ void CL_ParseGamestate( msg_t *msg ) {
 			Com_Error( ERR_DROP, "CL_ParseGamestate: bad command byte %i", cmd );
 		}
 	}
+
 
 	clc.clientNum = MSG_ReadLong(msg);
 	// read the checksum feed

@@ -3503,6 +3503,18 @@ static void FS_Startup(const char* gameName)
 		FS_AddGameDirectory ( fs_homepath->string, gameName );
 	}
 
+	// HZM coop unify: when targeting Breakthrough (fs_basegame == "maintt"), ALSO mount the
+	// Spearhead base "mainta" so the Spearhead (t-series) maps + assets are available under the
+	// single Breakthrough profile. Added BEFORE the maintt basegame below so Breakthrough/mod
+	// content wins any filename conflicts (FS_AddGameDirectory prepends; later add = higher search
+	// priority -> maintt+mod > mainta > main). Only triggers for Breakthrough; AA/Spearhead untouched.
+	if ( !Q_stricmp( fs_basegame->string, "maintt" ) ) {
+		if (fs_gogpath->string[0])   { FS_AddGameDirectory(fs_gogpath->string,   "mainta"); }
+		if (fs_steampath->string[0]) { FS_AddGameDirectory(fs_steampath->string, "mainta"); }
+		if (fs_basepath->string[0])  { FS_AddGameDirectory(fs_basepath->string,  "mainta"); }
+		if (fs_homepath->string[0] && Q_stricmp(fs_homepath->string, fs_basepath->string)) { FS_AddGameDirectory(fs_homepath->string, "mainta"); }
+	}
+
 	// check for additional base game so mods can be based upon other mods
 	if ( fs_basegame->string[0] && Q_stricmp( fs_basegame->string, gameName ) ) {
 		if (fs_gogpath->string[0]) {

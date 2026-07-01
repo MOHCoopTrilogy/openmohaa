@@ -77,10 +77,16 @@ void ClientGameCommandManager::InitializeRainCvars()
     cg.rain.numshaders = 0;
 }
 
+// HZM coop - set when the legacy entity-based rain (a map rain brush) renders, so CG_RainGlobal below stands
+// down and we never double up rain on maps that already author it.
+int g_lastRainEntityTime = 0;
+
 void CG_Rain(centity_t *cent)
 {
     int         iLife;
     vec3_t      mins, maxs;
+
+    g_lastRainEntityTime = cg.time; // a rain brush exists on this map
     vec3_t      vOmins, vOmaxs, vOe;
     float       fcolor[4];
     vec3_t      vStart, vEnd;
@@ -227,6 +233,110 @@ void CG_Rain(centity_t *cent)
             1.0,
             0,
             "raineffect"
+        );
+    }
+}
+
+// HZM coop - GLOBAL dynamic precipitation. Vanilla CG_Rain only renders inside a map-placed rain BRUSH
+// (most maps don't have one) and never checks for ceilings. This renders rain/snow in a box around the
+// player WITHOUT a brush (so dynamic weather works on any map), and SKY-GATES every column with an up-trace
+// (SURF_SKY = open sky) so drops never fall indoors / under roofs / overhangs. Driven by the same level.rain_*
+// params the coop weather script ramps. Gated by coop_dynRainGlobal so legacy rain-brush maps are untouched.
+void CG_RainGlobal(void)
+{
+    static cvar_t *pGlobal = NULL;
+    int            iNumSpawn, i, iRandom, iLife, iSlant, iSpeedVary;
+    float          fDensity;
+    float          fcolor[4];
+    vec3_t         vOmins, vOmaxs, vOe, vStart, vEnd, vLength;
+    vec3_t         vZero = {0.0f, 0.0f, 0.0f};
+    const char    *shadername;
+
+    if (!pGlobal) {
+        pGlobal = cgi.Cvar_Get("coop_dynRainGlobal", "1", CVAR_ARCHIVE); // master toggle (off if it misbehaves)
+    }
+    if (!pGlobal->integer || !cg_rain->integer || paused->integer) {
+        return;
+    }
+    // Driven purely by the networked cg.rain.density so EVERY coop client sees the weather. 0 = clear.
+    if (cg.rain.density <= 0.0f || cg.rain.min_dist <= 1.0f) {
+        return;
+    }
+    // A map with its own rain brush drives the entity-based CG_Rain; stand down so we never double the rain.
+    if (g_lastRainEntityTime && (cg.time - g_lastRainEntityTime) < 1000) {
+        return;
+    }
+
+    fcolor[0] = fcolor[1] = fcolor[2] = fcolor[3] = 1.0f;
+
+    // player-centred volume (no map brush needed)
+    vOmins[0] = cg.refdef.vieworg[0] - cg.rain.min_dist;
+    vOmins[1] = cg.refdef.vieworg[1] - cg.rain.min_dist;
+    vOmins[2] = cg.refdef.vieworg[2] - 256.0f;
+    vOmaxs[0] = cg.refdef.vieworg[0] + cg.rain.min_dist;
+    vOmaxs[1] = cg.refdef.vieworg[1] + cg.rain.min_dist;
+    vOmaxs[2] = cg.refdef.vieworg[2] + 640.0f;
+
+    VectorSubtract(vOmaxs, vOmins, vOe);
+    if (vOe[0] < 1.0f || vOe[1] < 1.0f || vOe[2] < 1.0f) {
+        return;
+    }
+
+    fDensity  = cg.rain.density / 200.0f;
+    iNumSpawn = (int)(sqrt(vOe[0] * vOe[1]) * fDensity);
+    if (iNumSpawn > MAX_BEAMS) {
+        iNumSpawn = MAX_BEAMS;
+    }
+
+    iSlant     = (cg.rain.slant < 1) ? 1 : cg.rain.slant;            // snow uses slant 1; guard div-by-zero
+    iSpeedVary = (cg.rain.speed_vary < 1) ? 1 : cg.rain.speed_vary;  // guard div-by-zero
+
+    iRandom    = rand();
+    shadername = cg.rain.numshaders ? cg.rain.shader[iRandom % cg.rain.numshaders] : cg.rain.shader[0];
+
+    for (i = 0; i < iNumSpawn; ++i) {
+        trace_t skyTr;
+        vec3_t  vSkyStart, vSkyEnd;
+
+        vStart[0] = (float)(iRandom % (int)(vOe[0] + 1.0f)) + vOmins[0];
+        iRandom   = ((214013 * iRandom + 2531011) >> 16) & 0x7FFF;
+        vStart[1] = (float)(iRandom % (int)(vOe[1] + 1.0f)) + vOmins[1];
+        iRandom   = ((214013 * iRandom + 2531011) >> 16) & 0x7FFF;
+        vStart[2] = (float)(iRandom % (int)(vOe[2] + 1.0f)) + vOmins[2];
+
+        VectorSubtract(cg.refdef.vieworg, vStart, vLength);
+        vLength[2] = 0;
+        if (VectorLengthSquared(vLength) > Square(cg.rain.min_dist)) {
+            continue;
+        }
+
+        // SKY GATE: trace straight up this column; only rain where the sky is genuinely open above (so it
+        // stops dead under roofs/awnings and never falls into interiors). Mirrors coop_hasOpenSky.
+        vSkyStart[0] = vStart[0];
+        vSkyStart[1] = vStart[1];
+        vSkyStart[2] = cg.refdef.vieworg[2];
+        vSkyEnd[0]   = vStart[0];
+        vSkyEnd[1]   = vStart[1];
+        vSkyEnd[2]   = cg.refdef.vieworg[2] + 4096.0f;
+        cgi.CM_BoxTrace(&skyTr, vSkyStart, vSkyEnd, vZero, vZero, 0, MASK_SOLID, qfalse);
+        if (!(skyTr.surfaceFlags & SURF_SKY) && skyTr.fraction < 0.999f) {
+            continue; // solid ceiling above -> dry
+        }
+
+        iRandom = ((214013 * iRandom + 2531011) >> 16) & 0x7FFF;
+        vEnd[0] = (float)(iRandom % iSlant) + vStart[0] + vss_wind_x->value;
+        iRandom = ((214013 * iRandom + 2531011) >> 16) & 0x7FFF;
+        vEnd[1] = (float)(iRandom % iSlant) + vStart[1] + vss_wind_y->value;
+        vEnd[2] = vOmins[2];
+
+        iLife = (int)((vStart[2] - vOmins[2]) / ((float)(iRandom % iSpeedVary) + cg.rain.speed) * 1000.0f);
+        if (iLife > 10000) {
+            iLife = 10000;
+        }
+
+        CG_CreateBeam(
+            vStart, vec_zero, 0, 1, 1.0, cg.rain.width, BEAM_INVERTED_FAST, 1000.0, iLife, qtrue,
+            vEnd, 0, 0, 0, 1, 0, shadername, fcolor, 0, 0.0, cg.rain.length, 1.0, 0, "raineffect"
         );
     }
 }

@@ -209,6 +209,100 @@ void CG_PlayerTeamIcon(refEntity_t *pModel, entityState_t *pPlayerState)
 
 /*
 ===============
+CG_ActorOverheadIcon
+Draws an authentic MP-style overhead faction marker above an AI actor's head, using
+the SAME render path as CG_PlayerTeamIcon: a world-space RT_SPRITE billboard submitted
+via cgi.R_AddRefSpriteToScene. The engine sizes/positions it, so it sits centered above
+the head and stays a readable size at range (the previous hand-rolled 2D screen
+projection drifted off to the side and mis-scaled). bEnemy selects the swastika sprite
+(axis) vs the allied star sprite. Anchored to the head tag + 20 units, same as players.
+===============
+*/
+/* iconType: 0 = allied star, 1 = axis swastika, 2 = officer eagle (Reichsadler) */
+static void CG_ActorOverheadIcon(refEntity_t *pModel, int iconType)
+{
+    int         i, iTag;
+    float       fAlpha, fDist;
+    vec3_t      vTmp;
+    refEntity_t iconEnt;
+    const char *sprName;
+
+    if (iconType == 2) {
+        sprName = "textures/hud/coop_officer_icon.spr";
+    } else if (iconType == 1) {
+        sprName = "textures/hud/coop_axis_icon.spr";
+    } else {
+        sprName = "textures/hud/coop_ally_icon.spr";
+    }
+
+    memset(&iconEnt, 0, sizeof(iconEnt));
+    iconEnt.hModel = cgi.R_RegisterModel(sprName);
+    if (!iconEnt.hModel) {
+        return;
+    }
+
+    memset(vTmp, 0, sizeof(vTmp));
+    AnglesToAxis(vTmp, iconEnt.axis);
+
+    iconEnt.scale              = 0.5f;
+    iconEnt.renderfx           = 0;
+    iconEnt.reType             = RT_SPRITE;
+    iconEnt.shaderTime         = 0.0f;
+    iconEnt.frameInfo[0].index = 0;
+    iconEnt.shaderRGBA[0]      = -1;
+    iconEnt.shaderRGBA[1]      = -1;
+    iconEnt.shaderRGBA[2]      = -1;
+    VectorCopy(pModel->origin, iconEnt.origin);
+
+    iTag = cgi.Tag_NumForName(pModel->tiki, "eyes bone");
+    if (iTag == -1) {
+        iTag = cgi.Tag_NumForName(pModel->tiki, "Bip01 Head");
+    }
+    if (iTag == -1) {
+        iconEnt.origin[2] = iconEnt.origin[2] + 96.0f;
+    } else {
+        orientation_t oHead = cgi.TIKI_Orientation(pModel, iTag);
+        for (i = 0; i < 3; ++i) {
+            VectorMA(iconEnt.origin, oHead.origin[i], pModel->axis[i], iconEnt.origin);
+        }
+        iconEnt.origin[2] = iconEnt.origin[2] + 20.0f;
+    }
+
+    VectorSubtract(iconEnt.origin, cg.refdef.vieworg, vTmp);
+    fDist = VectorLength(vTmp);
+
+    if (fDist < 256.0f) {
+        iconEnt.scale = fDist / 853.0f + 0.2f;
+    } else if (fDist > 512.0f) {
+        iconEnt.scale = (fDist - 512.0f) / 2560.0f + 0.5f;
+    }
+    if (iconEnt.scale > 1.0f) {
+        iconEnt.scale = 1.0f;
+    }
+
+    if (fDist > 256.0f) {
+        fAlpha = 1.0f;
+    } else if (fDist >= 72.0f) {
+        fAlpha = (fDist - 72.0f) / 184.0f;
+    } else {
+        fAlpha = 0.0f;
+    }
+    iconEnt.shaderRGBA[3] = (int)(fAlpha * 255.0f);
+
+    if (fAlpha > 0.0f) {
+        cgi.R_AddRefSpriteToScene(&iconEnt);
+    }
+}
+
+/* Retained as an empty stub so CG_Draw2D's call (cg_drawtools.cpp) still links. The
+ * old deferred 2D-stretchpic icon buffer it used to flush is gone, replaced by the
+ * RT_SPRITE world sprite in CG_ActorOverheadIcon above. */
+void CG_DrawCoopIcons(void)
+{
+}
+
+/*
+===============
 CG_InterpolateAnimParms
 
 Interpolate between current and next entity
@@ -994,6 +1088,52 @@ void CG_ProcessPlayerModel()
     cg_forceModel->modified        = qfalse;
 }
 
+// HZM coop - BAKED per-gun ADS iron-sight tune, dialled in-game with the tuning workbench (numpad pad) and
+// captured via adssave. name = weapon configstring (CS_WEAPONS). Standing pitch/yaw/roll + screen shift x/y
+// are absolute; crouch values are EXTRA, added on top of the standing values while ducked. Guns NOT listed
+// fall back to the global cg_ads* cvars. cg_modelanim applies the rotations; cg_view applies the shift.
+static const adsGunTune_t s_adsGunTune[] = {
+    //  name                     sP     sY     sR    sSx    sSy      cP     cY    cR    cSx    cSy
+    { "Colt 45",               -2.5f, -2.0f,  1.5f, -0.02f,-0.02f,  -2.5f,-11.0f, 4.0f,-0.14f, 0.10f },
+    { "Walther P38",           -1.5f, -0.5f,  1.5f,  0.0f, -0.02f,   0.5f, -9.5f, 1.0f,-0.14f, 0.02f },
+    { "Webley Revolver",        2.5f, -1.5f,  0.0f, -0.02f, 0.12f,   0.5f,-10.0f, 1.0f,-0.14f, 0.02f },
+    { "Nagant Revolver",        2.5f, -1.5f,  0.0f, -0.02f, 0.08f,   0.5f,-10.0f, 1.0f,-0.14f, 0.02f },
+    { "Beretta",                2.5f, -1.5f, -2.0f,  0.0f,  0.08f,   0.5f,-10.0f, 1.0f,-0.14f, 0.02f },
+    { "Hi-Standard Silenced",   0.0f, -1.0f, -2.0f, -0.02f, 0.02f,   1.0f, -8.0f, 1.0f,-0.10f, 0.02f },
+    { "M1 Garand",             -7.5f, -1.0f, -1.0f, -0.02f,-0.22f,   3.5f,-38.5f, 3.5f,-0.62f, 0.08f },
+    { "Mauser KAR 98K",        -7.5f, -1.0f, -1.0f, -0.02f,-0.22f,   3.5f,-37.0f, 3.5f,-0.58f, 0.08f },
+    { "Lee-Enfield",           -7.0f, -1.0f,  1.0f, -0.02f,-0.26f,   3.5f,-33.0f, 3.0f,-0.50f, 0.02f },
+    { "Mosin Nagant Rifle",    -6.5f, -1.5f,  0.5f, -0.02f,-0.24f,   4.0f,-33.5f, 3.0f,-0.52f, 0.12f },
+    { "Carcano",               -6.0f, -1.0f,  0.5f, -0.02f,-0.22f,   4.0f,-34.0f, 3.0f,-0.54f, 0.10f },
+    { "DeLisle",                1.0f, -3.0f,  2.0f, -0.04f, 0.02f,   4.0f,-34.0f, 3.0f,-0.56f, 0.14f },
+    { "Thompson",               1.0f,  2.0f,  0.0f,  0.02f, 0.0f,    1.0f,-10.5f, 1.5f,-0.14f, 0.02f },
+    { "MP40",                   0.5f,  2.0f, -1.5f,  0.02f, 0.0f,    1.0f,-20.0f, 1.5f,-0.28f, 0.02f },
+    { "Sten Mark II",           1.0f,  1.5f, -1.5f,  0.02f,-0.04f,   1.0f,-20.0f, 1.5f,-0.28f, 0.02f },
+    { "PPSH SMG",              -2.5f, 11.0f, -2.0f,  0.14f,-0.08f,   1.5f,-19.0f, 1.5f,-0.26f, 0.04f },
+    { "Moschetto",             -8.0f,  6.0f, -2.0f,  0.10f,-0.28f,   2.0f,-18.5f, 1.5f,-0.26f, 0.04f },
+    { "BAR",                    1.0f, -0.5f,  0.0f,  0.0f,  0.04f,  -1.0f,-23.0f, 1.5f,-0.32f, 0.16f },
+    { "StG 44",                 0.0f,  2.5f,  0.0f,  0.04f, 0.02f,   1.5f,-20.5f, 2.0f,-0.28f, 0.06f },
+    { "Vickers-Berthier",       7.0f,-11.5f, -1.0f, -0.12f, 0.28f,   1.5f,-22.0f, 2.5f,-0.34f, 0.10f },
+    { "Bazooka",               11.0f,  7.5f, -1.0f,  0.20f, 0.16f,   1.5f, -7.0f, 3.5f,-0.08f, 0.04f },
+    { "Panzerschreck",         11.0f,  7.5f, -1.0f,  0.08f, 0.30f,   1.5f, -7.0f, 1.0f,-0.06f, 0.04f },
+    { "PIAT",                 -12.5f, 21.0f,  2.0f,  0.24f,-0.32f,   1.5f, -7.0f, 1.0f,-0.10f, 0.02f },
+    { "shotgun",              -12.5f, 12.0f,  2.0f,  0.12f,-0.42f,  -3.0f,-43.0f, 1.0f,-0.64f, 0.02f },
+};
+
+const adsGunTune_t *CG_FindAdsTune(const char *wpn)
+{
+    int i;
+    if (!wpn || !*wpn) {
+        return NULL;
+    }
+    for (i = 0; i < (int)(sizeof(s_adsGunTune) / sizeof(s_adsGunTune[0])); i++) {
+        if (!Q_stricmp(wpn, s_adsGunTune[i].name)) {
+            return &s_adsGunTune[i];
+        }
+    }
+    return NULL;
+}
+
 /*
 ===============
 CG_ModelAnim
@@ -1012,10 +1152,17 @@ void CG_ModelAnim(centity_t *cent, qboolean bDoShaderTime)
 
     s1 = &cent->currentState;
 
-    bThirdPerson |= cg_3rd_person->integer ? qtrue : qfalse;
+    // HZM coop - aiming down sights forces first person (so the viewmodel + iron-sight ADS render),
+    // matching the camera switch in cg_view.c. Reuses the exact ADS gate.
+    bThirdPerson |= (cg_3rd_person->integer && !CG_AimingDownSights()) ? qtrue : qfalse;
     // Fixed in OPM
     //  Draw world model body when in camera
     bThirdPerson |= (cg.snap->ps.pm_flags & PMF_CAMERA_VIEW && !(cg.snap->ps.pm_flags & PMF_TURRET));
+    // HZM coop - REMOVED the 3rd-person MG42 experiment's `bThirdPerson |= PMF_TURRET` line. It force-drew
+    // your own body in 3rd person on EVERY turret (MG42 nest, jeep .30cal, halftrack), overriding the
+    // upstream line above (which deliberately excludes turrets so the mounted view stays clean first-person).
+    // The cg_view.c half of that experiment was reverted but this half was missed = the "camera stuck in my
+    // body" regression. Restored to stock: turrets are first person, own body not drawn.
 
     if ((cg.snap->ps.pm_flags & PMF_INTERMISSION) && s1->number == cg.snap->ps.clientNum && !bThirdPerson) {
         // Don't render the first-person model during intermission
@@ -1244,6 +1391,79 @@ void CG_ModelAnim(centity_t *cent, qboolean bDoShaderTime)
             } else if (!Q_stricmp(szTagName, "tag_weapon_right") || !Q_stricmp(szTagName, "tag_weapon_left")) {
                 iTagNum = cgi.Tag_NumForName(tiki, szTagName);
                 CG_AttachEntity(&model, parent, tiki, iTagNum & TAG_MASK, s1->attach_use_angles, s1->attach_offset);
+
+                // HZM coop: ADS iron-sight aim. A screen shift (r_weaponshift) moves the whole gun
+                // uniformly, so it cannot line the REAR aperture up with the FRONT post; rotating the
+                // weapon about tag_weapon (near the grip) tilts/angles the barrel so both sights fall on
+                // the aim line. cg_adsPitch (up/down) + cg_adsYaw (left/right), live-tunable, ADS only.
+                if (CG_AimingDownSights()) {
+                    vec3_t      vAdsA, vAdsB;
+                    const char *adsWpn   = "";
+                    const adsGunTune_t *adsT;
+                    qboolean    tune   = (cg_adsTune && cg_adsTune->integer) ? qtrue : qfalse;
+                    qboolean    ducked = (cg.predicted_player_state.pm_flags & PMF_DUCKED) ? qtrue : qfalse;
+                    float       fAdsPitch, fAdsYaw, fAdsRoll;
+
+                    if (cg.snap->ps.activeItems[1] >= 0) {
+                        adsWpn = CG_ConfigString(CS_WEAPONS + cg.snap->ps.activeItems[1]);
+                    }
+                    // Per-gun ADS sight values are BAKED in s_adsGunTune (CG_FindAdsTune). TUNE MODE
+                    // (cg_adsTune 1) ignores the table and uses the global cg_ads* cvars so the held gun can
+                    // be dialled live; any gun NOT in the table also falls back to those globals.
+                    adsT      = tune ? NULL : CG_FindAdsTune(adsWpn);
+                    fAdsPitch = adsT ? adsT->sPitch : (cg_adsPitch ? cg_adsPitch->value : 0.0f);
+                    fAdsYaw   = adsT ? adsT->sYaw   : (cg_adsYaw   ? cg_adsYaw->value   : 0.0f);
+                    fAdsRoll  = adsT ? adsT->sRoll  : (cg_adsRoll  ? cg_adsRoll->value  : 0.0f);
+
+                    // pitch: rotate forward + up about the left axis (tilt muzzle up/down)
+                    if (fAdsPitch != 0.0f) {
+                        RotatePointAroundVector(vAdsA, model.axis[1], model.axis[0], fAdsPitch);
+                        RotatePointAroundVector(vAdsB, model.axis[1], model.axis[2], fAdsPitch);
+                        VectorCopy(vAdsA, model.axis[0]);
+                        VectorCopy(vAdsB, model.axis[2]);
+                    }
+                    // yaw: rotate forward + left about the up axis (angle muzzle left/right)
+                    if (fAdsYaw != 0.0f) {
+                        RotatePointAroundVector(vAdsA, model.axis[2], model.axis[0], fAdsYaw);
+                        RotatePointAroundVector(vAdsB, model.axis[2], model.axis[1], fAdsYaw);
+                        VectorCopy(vAdsA, model.axis[0]);
+                        VectorCopy(vAdsB, model.axis[1]);
+                    }
+                    // roll: rotate up + left about the forward axis (un-tilt the gun) - standing
+                    if (fAdsRoll != 0.0f) {
+                        RotatePointAroundVector(vAdsA, model.axis[0], model.axis[1], fAdsRoll);
+                        RotatePointAroundVector(vAdsB, model.axis[0], model.axis[2], fAdsRoll);
+                        VectorCopy(vAdsA, model.axis[1]);
+                        VectorCopy(vAdsB, model.axis[2]);
+                    }
+
+                    // CROUCH-only EXTRA correction (added on top of the standing rotation): the crouch pose
+                    // hunches the body and carries the gun off the standing sight line. Per-gun crouch values
+                    // come from the table; tune mode / un-tabled guns fall back to the cg_adsCrouch* cvars.
+                    if (ducked) {
+                        float cp = adsT ? adsT->cPitch : (cg_adsCrouchPitch ? cg_adsCrouchPitch->value : 0.0f);
+                        float cy = adsT ? adsT->cYaw   : (cg_adsCrouchYaw   ? cg_adsCrouchYaw->value   : 0.0f);
+                        float cr = adsT ? adsT->cRoll  : (cg_adsCrouchRoll  ? cg_adsCrouchRoll->value  : 0.0f);
+                        if (cp != 0.0f) {
+                            RotatePointAroundVector(vAdsA, model.axis[1], model.axis[0], cp);
+                            RotatePointAroundVector(vAdsB, model.axis[1], model.axis[2], cp);
+                            VectorCopy(vAdsA, model.axis[0]);
+                            VectorCopy(vAdsB, model.axis[2]);
+                        }
+                        if (cy != 0.0f) {
+                            RotatePointAroundVector(vAdsA, model.axis[2], model.axis[0], cy);
+                            RotatePointAroundVector(vAdsB, model.axis[2], model.axis[1], cy);
+                            VectorCopy(vAdsA, model.axis[0]);
+                            VectorCopy(vAdsB, model.axis[1]);
+                        }
+                        if (cr != 0.0f) {
+                            RotatePointAroundVector(vAdsA, model.axis[0], model.axis[1], cr);
+                            RotatePointAroundVector(vAdsB, model.axis[0], model.axis[2], cr);
+                            VectorCopy(vAdsA, model.axis[1]);
+                            VectorCopy(vAdsB, model.axis[2]);
+                        }
+                    }
+                }
             } else {
                 // Don't show the model at all
                 return;
@@ -1374,6 +1594,27 @@ void CG_ModelAnim(centity_t *cent, qboolean bDoShaderTime)
         CG_PlayerTeamIcon(&model, &cent->currentState);
     }
 
+
+    if ((cent->currentState.eType == ET_MODELANIM || cent->currentState.eType == ET_MODELANIM_SKEL)
+        && (cent->currentState.renderfx & RF_COOP_BOSS)
+        && !(cent->currentState.eFlags & EF_DEAD)) {
+        int iconType;
+        /* The officer is additionally tagged "+additivedynamiclight" (RF_ADDITIVE_DLIGHT)
+         * by the coop script as an officer marker. That bit is NOT set by default on
+         * sentients (RF_SHADOW_PRECISE is -> it put the eagle over every actor AND player),
+         * has no visual effect without an attached dlight, and the stock game.dll already
+         * supports the token (a brand-new renderfx token would need an fgame rebuild this
+         * build tree can't produce). It gets the eagle icon. */
+        if (cent->currentState.renderfx & RF_ADDITIVE_DLIGHT) {
+            iconType = 2; /* officer -> Reichsadler eagle */
+        } else if (cent->currentState.eFlags & EF_AXIS) {
+            iconType = 1; /* axis -> swastika */
+        } else {
+            iconType = 0; /* ally -> star */
+        }
+        CG_ActorOverheadIcon(&model, iconType);
+    }
+
     if (s1->number == cg.snap->ps.clientNum) {
         if ((!cg.bFPSModelLastFrame && !bThirdPerson) || (cg.bFPSModelLastFrame && bThirdPerson)) {
             // reset the animations when toggling 3rd person
@@ -1496,6 +1737,35 @@ void CG_ModelAnim(centity_t *cent, qboolean bDoShaderTime)
                     iSurfaceNum = cgi.Surface_NameToNum(model.tiki, "lefthand");
                     if (iSurfaceNum >= 0) {
                         model.surfaces[iSurfaceNum] &= ~MDL_SURFACE_NODRAW;
+                    }
+                }
+
+                // HZM coop - ADS off-hand HIDE. The raised aim poses bake the support (off) hand for a
+                // different gun's foregrip, so on many weapons it hovers off the gun while aiming. Instead
+                // of re-posing every weapon, just HIDE the support hand while aiming down the sights (the
+                // trigger hand + gun stay, sight alignment + tuning unchanged). Covers both the normal
+                // "lefthand" and the rifle "garandhand" support surfaces. Toggle: cg_adsHideOffHand 0.
+                // ONLY while the steady aim pose (VM_ANIM_CHARGE) is playing - during a bolt rechamber,
+                // reload, or weapon switch the vm anim changes away from charge, so the support hand
+                // re-appears to work the bolt / magazine (bolt rifles like the Kar98 need this).
+                {
+                    cvar_t *pHideOff = cgi.Cvar_Get("cg_adsHideOffHand", "1", CVAR_ARCHIVE);
+                    if (pHideOff && pHideOff->integer && CG_AimingDownSights()
+                        && cg.snap->ps.iViewModelAnim == VM_ANIM_CHARGE) {
+                        iSurfaceNum = cgi.Surface_NameToNum(model.tiki, "lefthand");
+                        if (iSurfaceNum >= 0) {
+                            model.surfaces[iSurfaceNum] |= MDL_SURFACE_NODRAW;
+                        }
+                        iSurfaceNum = cgi.Surface_NameToNum(model.tiki, "garandhand");
+                        if (iSurfaceNum >= 0) {
+                            model.surfaces[iSurfaceNum] |= MDL_SURFACE_NODRAW;
+                        }
+                        // also hide the off-arm: "viewsleeves" is the forearm/sleeve geometry that was
+                        // left dangling once the support hand was hidden. Leaves trigger hand + gun only.
+                        iSurfaceNum = cgi.Surface_NameToNum(model.tiki, "viewsleeves");
+                        if (iSurfaceNum >= 0) {
+                            model.surfaces[iSurfaceNum] |= MDL_SURFACE_NODRAW;
+                        }
                     }
                 }
             }

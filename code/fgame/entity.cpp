@@ -2091,9 +2091,19 @@ void Entity::ProcessInitCommands(void)
         return;
     }
 
+    // HZM: guard against a NULL TIKI. ExplosionAttack -> setModel can leave an entity
+    // with no loaded model (edict->tiki == NULL) when the model failed to load or was
+    // never precached (root-caused on e3l4's airstrike: the truck-strafe bomb explosion
+    // model is missing, so setModel yields a NULL tiki). The next line then dereferences
+    // edict->tiki->a and access-violates (cdb: AV 0xC0000005 at the tiki->a read, surfaced
+    // as fail-fast 0xC0000409 via the abort handler). No model => no init commands to run.
+    if (!edict->tiki) {
+        return;
+    }
+
     a = edict->tiki->a;
 
-    if (a->num_server_initcmds) {
+    if (a && a->num_server_initcmds) {
         int    i, j;
         Event *event;
         for (i = 0; i < a->num_server_initcmds; i++) {
@@ -3979,6 +3989,8 @@ void Entity::RenderEffects(Event *ev)
             mask = RF_SHADOW_PRECISE;
         } else if (!Q_stricmp(flag, "invisible")) {
             mask = RF_INVISIBLE;
+        } else if (!Q_stricmp(flag, "coopboss")) {
+            mask = RF_COOP_BOSS;
         } else {
             action = FLAG_IGNORE;
             gi.Printf("Unknown token %s.", flag);

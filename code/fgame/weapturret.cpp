@@ -451,6 +451,11 @@ TurretGun::TurretGun()
     m_iFiring         = TURRETFIRESTATE_NONE;
     m_iTargetType     = 0;
 
+    // HZM coop: MG overheat state
+    m_fHeat                = 0;
+    m_bOverheated          = false;
+    m_fOverheatRecoverTime = 0;
+
     // set the camera
     m_pUserCamera = NULL;
 
@@ -823,14 +828,49 @@ void TurretGun::P_ThinkActive(void)
     vTargAngles = vTarg.toAngles();
     P_SetTargetAngles(vTargAngles);
 
-    // Handle firing
-    if (m_iFiring != TURRETFIRESTATE_NONE) {
+    // Handle firing -- HZM coop: MG OVERHEAT. Sustained fire builds heat; at the cap the gun overheats
+    // and is locked out for a 10s cooldown (steam hiss + an "OVERHEATED" centerprint to the gunner).
+    // Heat bleeds off while not firing so short bursts are fine.
+    // HZM coop: MG42 HEAT METER - a continuous heat CYCLE (0..100), not a fixed timer. Heat builds the
+    // more you fire and bleeds off while idle; at 100 the gun overheats (cooldown sound + lockout) and
+    // the meter visibly drops while locked, becoming ready again once it cools back to 0. The value is
+    // mirrored to the gunner's STAT_MGHEAT so cgame draws the red heat bar.
+    if (m_bOverheated) {
+        // locked out: ignore fire input; the meter drops as it cools
+        m_iFiring = TURRETFIRESTATE_NONE;
+        m_fHeat -= 25.0f * level.frametime;
+        if (m_fHeat <= 0.0f) {
+            m_fHeat       = 0.0f;
+            m_bOverheated = false;
+            // (no "MG ready" centerprint - the heat bar communicates the state)
+        }
+    } else if (m_iFiring != TURRETFIRESTATE_NONE) {
         m_iFiring = TURRETFIRESTATE_FIRING;
+        m_fHeat += 50.0f * level.frametime; // ~2.0s of sustained fire to reach full (overheats readily)
 
         if (ReadyToFire(FIRE_PRIMARY)) {
             Fire(FIRE_PRIMARY);
             m_fCurrViewJitter = m_fViewJitter;
         }
+
+        if (m_fHeat >= 100.0f) {
+            m_fHeat       = 100.0f;
+            m_bOverheated = true;
+            m_iFiring     = TURRETFIRESTATE_NONE;
+            Sound("coop_mg_overheat");
+            // (no "OVERHEATED" centerprint - the red heat bar communicates the state)
+        }
+    } else {
+        // bleed off heat when not firing (slow, so bursts still accumulate toward overheat)
+        m_fHeat -= 8.0f * level.frametime;
+        if (m_fHeat < 0.0f) {
+            m_fHeat = 0.0f;
+        }
+    }
+
+    // mirror the heat (0..100) to the gunner's HUD so cgame can draw the red heat meter
+    if (owner && owner->IsSubclassOfPlayer()) {
+        static_cast<Player *>(owner.Pointer())->client->ps.stats[STAT_MGHEAT] = (int)m_fHeat;
     }
 
     //
@@ -846,9 +886,28 @@ void TurretGun::P_ThinkActive(void)
 
     P_ApplyFiringViewJitter(vAngles);
 
+    // Mounted-turret camera (STOCK): camera at the gun, offset by the weapon's OWN TIKI viewOffset
+    // (m_vViewOffset, e.g. mg42_gun_fake = "-42 0 10") - PER-GUN, so every turret uses its own correct eye
+    // position. coop_turretTune 0 (default) = exactly this stock per-gun behavior (safe for ALL turrets).
+    // coop_turretTune 1 = TEMPORARY live override (coop_turretView Fwd/Up/Side) to dial in ONE gun's framing
+    // in real time; once it looks right we BAKE those numbers into that gun's .tik viewOffset and set
+    // coop_turretTune back to 0 - so the final state is per-gun, never a permanent global override.
     m_pUserCamera->setOrigin(origin);
     m_pUserCamera->setAngles(vAngles);
-    m_pUserCamera->SetPositionOffset(m_vViewOffset);
+    {
+        static cvar_t *pTune = NULL, *pF = NULL, *pU = NULL, *pS = NULL;
+        if (!pTune) {
+            pTune = gi.Cvar_Get("coop_turretTune",     "0",   CVAR_ARCHIVE);
+            pF    = gi.Cvar_Get("coop_turretViewFwd",  "-20", CVAR_ARCHIVE); // + toward muzzle / - behind
+            pU    = gi.Cvar_Get("coop_turretViewUp",   "16",  CVAR_ARCHIVE); // raise to the gun's sight line
+            pS    = gi.Cvar_Get("coop_turretViewSide", "0",   CVAR_ARCHIVE);
+        }
+        if (pTune->integer) {
+            m_pUserCamera->SetPositionOffset(Vector(pF->value, pS->value, pU->value));
+        } else {
+            m_pUserCamera->SetPositionOffset(m_vViewOffset);
+        }
+    }
 
     owner->client->ps.camera_flags |= CF_CAMERA_ANGLES_TURRETMODE;
 
@@ -1267,6 +1326,16 @@ void TurretGun::AI_ThinkActive()
 void TurretGun::Think(void)
 {
     if (!owner && (m_bHadOwner || !aim_target)) {
+        // HZM coop: keep cooling the barrel while UNMANNED (and clear any overheat lockout) so the heat
+        // does not freeze when a player dismounts - it cools on its own (~7s from full) whether or not
+        // anyone picks it back up. m_fHeat persists across dismount; the HUD stat is what gets zeroed.
+        if (m_fHeat > 0.0f) {
+            m_fHeat -= 15.0f * level.frametime;
+            if (m_fHeat <= 0.0f) {
+                m_fHeat       = 0.0f;
+                m_bOverheated = false;
+            }
+        }
         ThinkIdle();
     } else if (owner && owner->IsSubclassOfPlayer()) {
         P_ThinkActive();
@@ -1401,6 +1470,7 @@ void TurretGun::RemoveUserCamera()
         player->SetCamera(NULL, 1.0f);
         player->ZoomOff();
         player->client->ps.camera_flags &= ~CF_CAMERA_ANGLES_TURRETMODE;
+        player->client->ps.stats[STAT_MGHEAT] = 0; // HZM coop - clear the heat meter when leaving the turret
     }
 
     m_pUserCamera->PostEvent(EV_Remove, 0);

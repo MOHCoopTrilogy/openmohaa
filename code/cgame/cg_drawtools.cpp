@@ -25,6 +25,8 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 
 #include "cg_local.h"
 
+extern "C" void CG_DrawCoopIcons(void);
+
 /*
 ================
 CG_AdjustFrom640
@@ -504,7 +506,9 @@ void CG_DrawZoomOverlay()
 
     if (!Q_stricmp(weaponstring, "Spy Camera")) {
         zoomType = 2;
-    } else if (!Q_stricmp(weaponstring, "Binoculars")) {
+    } else if (!Q_stricmp(weaponstring, "Binoculars") || !Q_stricmp(weaponstring, "Bombing Run")) {
+        // HZM coop: the "Bombing Run" weapon is a binoculars reskin - use the
+        // full-screen binocular overlay instead of the generic sniper scope.
         zoomType = 3;
     } else {
         if (cg.snap->ps.stats[STAT_INZOOM] && cg.snap->ps.stats[STAT_INZOOM] <= 30) {
@@ -1354,6 +1358,17 @@ void CG_DrawCrosshair()
         return;
     }
 
+    // HZM coop - hide the crosshair while aiming down sights (ADS button held) so the iron sights are used.
+    // Sniper scopes already hide it via STAT_INZOOM below; this covers the iron-sight ADS (not scoped).
+    {
+        usercmd_t adsCmd;
+        cgi.GetUserCmd(cgi.GetCurrentCmdNumber(), &adsCmd);
+        if ((adsCmd.buttons & BUTTON_COOPADS) && cg.snap->ps.stats[STAT_HEALTH] > 0
+            && !cg.snap->ps.stats[STAT_INZOOM]) {
+            return;
+        }
+    }
+
     if ((cg.snap->ps.pm_flags & PMF_NO_HUD) || (cg.snap->ps.pm_flags & PMF_INTERMISSION)) {
         return;
     }
@@ -1418,6 +1433,18 @@ void CG_DrawCrosshair()
         height = cgi.R_GetShaderHeight(shader);
         x      = (cgs.glconfig.vidWidth - width) * 0.5f;
         y      = (cgs.glconfig.vidHeight - height) * 0.5f;
+
+        // HZM coop - FREE-AIM: move the crosshair to the actual aim point (offset from screen centre by the
+        // deadzone offset) so it marks where bullets go, not the camera centre.
+        {
+            float faYaw, faPitch;
+            if (CG_GetFreeAim(&faYaw, &faPitch)) {
+                float fovx = (cg.refdef.fov_x > 1.0f) ? cg.refdef.fov_x : 90.0f;
+                float fovy = (cg.refdef.fov_y > 1.0f) ? cg.refdef.fov_y : 73.0f;
+                x -= (cgs.glconfig.vidWidth  * 0.5f) * (tan(DEG2RAD(faYaw))   / tan(DEG2RAD(fovx * 0.5f)));
+                y += (cgs.glconfig.vidHeight * 0.5f) * (tan(DEG2RAD(faPitch)) / tan(DEG2RAD(fovy * 0.5f)));
+            }
+        }
 
         cgi.R_SetColor(NULL);
         cgi.R_DrawStretchPic(x, y, width * cgs.uiHiResScale[0], height * cgs.uiHiResScale[1], 0, 0, 1, 1, shader);
@@ -1506,10 +1533,219 @@ void CG_DrawVote()
 CG_Draw2D
 ==============
 */
+/*
+=================
+CG_DrawMGHeat  (HZM coop)
+
+Small RED heat meter for the mounted MG42 turret. Driven by STAT_MGHEAT (0..100), which the turret
+fills as you fire and drains as it cools (see fgame/weapturret.cpp). Only shown while on a turret
+(PMF_TURRET). Deliberately small - smaller than the usual coop meters.
+=================
+*/
+static void CG_DrawMGHeat(void)
+{
+    int    heat;
+    float  bw, bh, bx, by, fillw;
+    vec4_t cBg   = {0.0f, 0.0f, 0.0f, 0.55f};
+    vec4_t cFill = {0.85f, 0.10f, 0.08f, 0.90f};
+
+    if (!cg.snap) {
+        return;
+    }
+    if (!(cg.snap->ps.pm_flags & PMF_TURRET)) {
+        return; // only while mounted on a turret
+    }
+
+    heat = cg.snap->ps.stats[STAT_MGHEAT];
+    if (heat < 0) {
+        heat = 0;
+    } else if (heat > 100) {
+        heat = 100;
+    }
+
+    // small bar, BOTTOM-RIGHT corner (out of the way of the firing lane)
+    bw = 70.0f * cgs.uiHiResScale[0];
+    bh = 5.0f * cgs.uiHiResScale[1];
+    bx = cg.refdef.width - bw - 18.0f * cgs.uiHiResScale[0];
+    by = cg.refdef.height - bh - 18.0f * cgs.uiHiResScale[1];
+
+    // dark frame
+    cgi.R_SetColor(cBg);
+    cgi.R_DrawBox(bx - 1.0f, by - 1.0f, bw + 2.0f, bh + 2.0f);
+
+    // red fill scaled by heat
+    fillw = bw * ((float)heat / 100.0f);
+    if (fillw > 0.0f) {
+        cgi.R_SetColor(cFill);
+        cgi.R_DrawBox(bx, by, fillw, bh);
+    }
+
+    cgi.R_SetColor(NULL);
+}
+
+// HZM coop - ADS tuning overlay: a bright centre crosshair (the bullet aim-point you align the sights to)
+// plus a live readout of the held weapon and its tune values. Shown only while cg_adsTune is on.
+static void CG_DrawAdsTune(void)
+{
+    float       cx, cy;
+    vec4_t      col;
+    char        txt[256];
+    const char *wpn = "";
+
+    if (!cg_adsTune || !cg_adsTune->integer) {
+        return;
+    }
+
+    cx = cgs.glconfig.vidWidth * 0.5f;
+    cy = cgs.glconfig.vidHeight * 0.5f;
+
+    col[0] = 0.1f; col[1] = 1.0f; col[2] = 0.1f; col[3] = 1.0f;
+    cgi.R_SetColor(col);
+    cgi.R_DrawBox(cx - 6.0f, cy, 13.0f, 1.0f);
+    cgi.R_DrawBox(cx, cy - 6.0f, 1.0f, 13.0f);
+
+    if (cg.snap && cg.snap->ps.activeItems[1] >= 0) {
+        wpn = CG_ConfigString(CS_WEAPONS + cg.snap->ps.activeItems[1]);
+    }
+    {
+        const char *modeName = (cg_adsMode && cg_adsMode->integer == 1) ? "YAW"
+                             : (cg_adsMode && cg_adsMode->integer == 2) ? "SHIFT"
+                             : (cg_adsMode && cg_adsMode->integer == 3) ? "ROLL"
+                                                                        : "PITCH";
+        qboolean    ducked   = (cg.predicted_player_state.pm_flags & PMF_DUCKED) ? qtrue : qfalse;
+        Com_sprintf(
+            txt,
+            sizeof(txt),
+            "ADS TUNE [%s] %s   MODE: %s   stand P%.1f Y%.1f R%.1f Sx%.2f Sy%.2f   crouch P%.1f Y%.1f R%.1f Sx%.2f Sy%.2f",
+            wpn,
+            ducked ? "CROUCH" : "STAND",
+            modeName,
+            cg_adsPitch->value,
+            cg_adsYaw->value,
+            cg_adsRoll ? cg_adsRoll->value : 0.f,
+            cg_adsShiftX ? cg_adsShiftX->value : 0.f,
+            cg_adsShiftY ? cg_adsShiftY->value : 0.f,
+            cg_adsCrouchPitch->value,
+            cg_adsCrouchYaw->value,
+            cg_adsCrouchRoll->value,
+            cg_adsCrouchShiftX ? cg_adsCrouchShiftX->value : 0.f,
+            cg_adsCrouchShiftY ? cg_adsCrouchShiftY->value : 0.f
+        );
+    }
+    col[0] = 1.0f; col[1] = 1.0f; col[2] = 0.3f; col[3] = 1.0f;
+    cgi.R_SetColor(col);
+    cgi.R_DrawString(cgs.media.objectiveFont, txt, 30.0f, 40.0f / cgs.uiHiResScale[1], -1, cgs.uiHiResScale);
+
+    cgi.R_SetColor(NULL);
+}
+
+// HZM coop - ADS focus VIGNETTE: softly darken the screen edges while aiming, for a "focus on the sights"
+// depth-of-field feel (renderergl1 has no true DoF). Fades in/out over ~0.15s. Texture is black with a
+// radial alpha (clear centre -> soft-dark edges); drawn full-screen, alpha-blended.
+static void CG_DrawAdsVignette(void)
+{
+    static qhandle_t hVig   = 0;
+    static float     fAlpha = 0.0f;
+    float            step;
+
+    if (!hVig) {
+        hVig = cgi.R_RegisterShaderNoMip("textures/hud/coop_ads_vignette");
+    }
+    if (!hVig) {
+        return;
+    }
+
+    step = (cg.frametime > 0) ? ((float)cg.frametime / 150.0f) : 1.0f; // ~0.15s in/out
+    if (CG_AimingDownSights()) {
+        fAlpha += step;
+        if (fAlpha > 1.0f) { fAlpha = 1.0f; }
+    } else {
+        fAlpha -= step;
+        if (fAlpha < 0.0f) { fAlpha = 0.0f; }
+    }
+
+    // HZM coop - drive the renderer's DEPTH OF FIELD from this same eased ADS fade. Set every frame (0 when
+    // not aiming) so the gl1 DoF pass (renderergl1 RB_DepthOfField) blurs the edges while you aim and is fully
+    // disabled otherwise. cg_dofStrength scales it (0 = off). This is separate from the dark vignette below.
+    {
+        cvar_t *pDof = cgi.Cvar_Get("cg_dofStrength", "0.6", CVAR_ARCHIVE);
+        cgi.Cvar_Set("r_dofBlur", va("%g", fAlpha * (pDof ? pDof->value : 0.6f)));
+    }
+
+    if (fAlpha <= 0.0f) {
+        return;
+    }
+
+    // draw ONCE full-screen (CG_DrawOverlayFullScreen mirrors the texture into 4 quadrants - meant for a
+    // quarter-scope image - which tiled our full vignette into a dark frame). One quad = one big vignette.
+    {
+        vec4_t col;
+        col[0] = 1.0f;
+        col[1] = 1.0f;
+        col[2] = 1.0f;
+        col[3] = fAlpha;
+        cgi.R_SetColor(col);
+        cgi.R_DrawStretchPic(
+            0.0f, 0.0f, (float)cgs.glconfig.vidWidth, (float)cgs.glconfig.vidHeight, 0.0f, 0.0f, 1.0f, 1.0f, hVig
+        );
+        cgi.R_SetColor(NULL);
+    }
+}
+
+// HZM coop - clean MAGAZINE counter (replaces the stock stacked-bullet-icons + round counters, which are
+// stripped out via empty ui/hud_ammo_*.urc overrides). Shows how many full magazines are left in reserve for
+// the held weapon = reserve ammo / clip size. Bottom-right, where the old ammo HUD lived.
+static void CG_DrawMagazines(void)
+{
+    int    reserve, clipsize, mags;
+    char   txt[16];
+    float  sx, sy;
+    vec4_t col;
+
+    if (!cg.snap || !cg_hud->integer) {
+        return;
+    }
+    if (cg.snap->ps.stats[STAT_HEALTH] <= 0) {
+        return;
+    }
+    if (cg.snap->ps.pm_flags & (PMF_NO_HUD | PMF_INTERMISSION)) {
+        return;
+    }
+    if (cg.snap->ps.activeItems[1] < 0) {
+        return; // no weapon equipped
+    }
+
+    reserve  = cg.snap->ps.stats[STAT_AMMO];
+    clipsize = cg.snap->ps.stats[STAT_MAXCLIPAMMO];
+    if (reserve < 0) {
+        reserve = 0;
+    }
+    mags = (clipsize > 0) ? (reserve / clipsize) : reserve;
+
+    Com_sprintf(txt, sizeof(txt), "%i", mags);
+
+    // R_DrawString multiplies the passed position by cgs.uiHiResScale, so to land at an actual pixel we pass
+    // (actualPixel / scale). Computing from the real vidWidth/vidHeight keeps it pinned to the bottom-right
+    // corner on ANY aspect - a fixed virtual-640 x would land at screen centre on ultrawide (3440x1440).
+    sx = ((float)cgs.glconfig.vidWidth  - 170.0f) / cgs.uiHiResScale[0];
+    sy = ((float)cgs.glconfig.vidHeight -  80.0f) / cgs.uiHiResScale[1];
+
+    col[0] = 0.80f;
+    col[1] = 0.72f;
+    col[2] = 0.35f;
+    col[3] = 1.0f; // muted gold, matching the old ammo text
+    cgi.R_SetColor(col);
+    // small "MAGS" caption above the number (offsets are in virtual units, like sx/sy)
+    cgi.R_DrawString(cgs.media.objectiveFont, "MAGS", sx, sy - 14.0f, -1, cgs.uiHiResScale);
+    cgi.R_DrawString(cgs.media.objectiveFont, txt, sx + 2.0f, sy, -1, cgs.uiHiResScale);
+    cgi.R_SetColor(NULL);
+}
+
 void CG_Draw2D(void)
 {
     CG_UpdateCountdown();
     CG_DrawZoomOverlay();
+    CG_DrawAdsVignette();
     CG_DrawLagometer();
     CG_HudDrawElements();
     CG_DrawObjectives();
@@ -1522,4 +1758,8 @@ void CG_Draw2D(void)
     CG_DrawVote();
     CG_DrawInstantMessageMenu();
     CG_DrawCrosshair();
+    CG_DrawCoopIcons();
+    CG_DrawMGHeat();
+    CG_DrawMagazines();
+    CG_DrawAdsTune();
 }

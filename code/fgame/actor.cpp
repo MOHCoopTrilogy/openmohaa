@@ -840,6 +840,96 @@ Event EV_Actor_GetTypeGrenade
     "Gets the grenade type of the actor.",
     EV_GETTER
 );
+Event EV_Actor_SetTypePain
+(
+    "type_pain",
+    EV_DEFAULT,
+    "s",
+    "value",
+    "Sets the pain type of the actor.",
+    EV_NORMAL
+);
+Event EV_Actor_SetTypePain2
+(
+    "type_pain",
+    EV_DEFAULT,
+    "s",
+    "value",
+    "Sets the pain type of the actor.",
+    EV_SETTER
+);
+Event EV_Actor_SetTypeKilled
+(
+    "type_killed",
+    EV_DEFAULT,
+    "s",
+    "value",
+    "Sets the killed type of the actor.",
+    EV_NORMAL
+);
+Event EV_Actor_SetTypeKilled2
+(
+    "type_killed",
+    EV_DEFAULT,
+    "s",
+    "value",
+    "Sets the killed type of the actor.",
+    EV_SETTER
+);
+Event EV_Actor_SetTypeCurious
+(
+    "type_curious",
+    EV_DEFAULT,
+    "s",
+    "value",
+    "Sets the curious type of the actor.",
+    EV_NORMAL
+);
+Event EV_Actor_SetTypeCurious2
+(
+    "type_curious",
+    EV_DEFAULT,
+    "s",
+    "value",
+    "Sets the curious type of the actor.",
+    EV_SETTER
+);
+Event EV_Actor_SetAIProneProbability
+(
+    "aipronechance",
+    EV_DEFAULT,
+    "f",
+    "value",
+    "Sets the probability of the actor going prone (not implemented).",
+    EV_NORMAL
+);
+Event EV_Actor_SetAIProneProbability2
+(
+    "aipronechance",
+    EV_DEFAULT,
+    "f",
+    "value",
+    "Sets the probability of the actor going prone (not implemented).",
+    EV_SETTER
+);
+Event EV_Actor_SetAICrouchProbability
+(
+    "aicrouchchance",
+    EV_DEFAULT,
+    "f",
+    "value",
+    "Sets the probability of the actor crouching (not implemented).",
+    EV_NORMAL
+);
+Event EV_Actor_SetAICrouchProbability2
+(
+    "aicrouchchance",
+    EV_DEFAULT,
+    "f",
+    "value",
+    "Sets the probability of the actor crouching (not implemented).",
+    EV_SETTER
+);
 Event EV_Actor_SetPatrolPath
 (
     "patrolpath",
@@ -2498,6 +2588,16 @@ CLASS_DECLARATION(SimpleActor, Actor, "Actor") {
     {&EV_Actor_SetTypeGrenade,                &Actor::EventSetTypeGrenade               },
     {&EV_Actor_SetTypeGrenade2,               &Actor::EventSetTypeGrenade               },
     {&EV_Actor_GetTypeGrenade,                &Actor::EventGetTypeGrenade               },
+    {&EV_Actor_SetTypePain,                   &Actor::EventSetTypePain                  },
+    {&EV_Actor_SetTypePain2,                  &Actor::EventSetTypePain                  },
+    {&EV_Actor_SetTypeKilled,                 &Actor::EventSetTypeKilled                },
+    {&EV_Actor_SetTypeKilled2,                &Actor::EventSetTypeKilled                },
+    {&EV_Actor_SetTypeCurious,                &Actor::EventSetTypeCurious               },
+    {&EV_Actor_SetTypeCurious2,               &Actor::EventSetTypeCurious               },
+    {&EV_Actor_SetAIProneProbability,         &Actor::EventSetAIProneProbability        },
+    {&EV_Actor_SetAIProneProbability2,        &Actor::EventSetAIProneProbability        },
+    {&EV_Actor_SetAICrouchProbability,        &Actor::EventSetAICrouchProbability       },
+    {&EV_Actor_SetAICrouchProbability2,       &Actor::EventSetAICrouchProbability       },
     {&EV_Actor_SetMinDistance,                &Actor::EventSetMinDistance               },
     {&EV_Actor_SetMinDistance2,               &Actor::EventSetMinDistance               },
     {&EV_Actor_GetMinDistance,                &Actor::EventGetMinDistance               },
@@ -2825,6 +2925,8 @@ Actor::Actor()
     m_bLockThinkState  = false;
     m_bAutoAvoidPlayer = true;
     m_bIsCurious       = true;
+
+    m_fSuppressTime    = 0; // HZM coop - reactive suppression timer (set by nearby incoming fire)
 
     InitThinkStates();
     SetThinkState(THINKSTATE_IDLE, THINKLEVEL_IDLE);
@@ -7525,6 +7627,8 @@ void Actor::Think(void)
 
     m_bAnimating = false;
 
+    TryDropBloodTrail(); // HZM coop - wounded AI leave ground blood trails as they move
+
     Director.Pause();
 
     iNewCurrentHistory = level.inttime / 125 % 4;
@@ -8101,6 +8205,89 @@ Actor::EventGetTypeGrenade
 void Actor::EventGetTypeGrenade(Event *ev)
 {
     ev->AddConstString(m_csThinkNames[m_ThinkMap[THINKSTATE_GRENADE]]);
+}
+
+/*
+===============
+Actor::EventSetTypePain
+===============
+*/
+void Actor::EventSetTypePain(Event *ev)
+{
+    bool (*AllowedState)(int state);
+    eThinkNum think;
+
+    think        = (eThinkNum)GetThinkType(ev->GetConstString(1));
+    AllowedState = Actor::GlobalFuncs[think].IsState;
+
+    if (!AllowedState(THINKSTATE_PAIN)) {
+        SetThink(THINKSTATE_PAIN, THINK_PAIN);
+        ScriptError("Invalid pain think '%s'", Director.GetString(m_csThinkNames[think]).c_str());
+    }
+
+    SetThink(THINKSTATE_PAIN, think);
+}
+
+/*
+===============
+Actor::EventSetTypeKilled
+===============
+*/
+void Actor::EventSetTypeKilled(Event *ev)
+{
+    bool (*AllowedState)(int state);
+    eThinkNum think;
+
+    think        = (eThinkNum)GetThinkType(ev->GetConstString(1));
+    AllowedState = Actor::GlobalFuncs[think].IsState;
+
+    if (!AllowedState(THINKSTATE_KILLED)) {
+        SetThink(THINKSTATE_KILLED, THINK_KILLED);
+        ScriptError("Invalid killed think '%s'", Director.GetString(m_csThinkNames[think]).c_str());
+    }
+
+    SetThink(THINKSTATE_KILLED, think);
+}
+
+/*
+===============
+Actor::EventSetTypeCurious
+===============
+*/
+void Actor::EventSetTypeCurious(Event *ev)
+{
+    bool (*AllowedState)(int state);
+    eThinkNum think;
+
+    think        = (eThinkNum)GetThinkType(ev->GetConstString(1));
+    AllowedState = Actor::GlobalFuncs[think].IsState;
+
+    if (!AllowedState(THINKSTATE_CURIOUS)) {
+        SetThink(THINKSTATE_CURIOUS, THINK_CURIOUS);
+        ScriptError("Invalid curious think '%s'", Director.GetString(m_csThinkNames[think]).c_str());
+    }
+
+    SetThink(THINKSTATE_CURIOUS, think);
+}
+
+/*
+===============
+Actor::EventSetAIProneProbability
+===============
+*/
+void Actor::EventSetAIProneProbability(Event *ev)
+{
+    // aipronechance: prone system not implemented; silently accepted.
+}
+
+/*
+===============
+Actor::EventSetAICrouchProbability
+===============
+*/
+void Actor::EventSetAICrouchProbability(Event *ev)
+{
+    // aicrouchchance: AI crouch system not implemented; silently accepted.
 }
 
 /*
@@ -10614,6 +10801,36 @@ Vector Actor::GunTarget(bool bNoCollision, const vec3_t position, const vec3_t f
 
     fCoverFactor = mAccuracy * ((1.0 - m_fVisibilityAlpha) * aiMinAccuracy->value + m_fVisibilityAlpha);
 
+    // HZM coop - REACTIVE SUPPRESSION: while bullets are cracking near this AI (m_fSuppressTime set in
+    // BulletAttack when a player's rounds land close), degrade its aim so it sprays / keeps its head down,
+    // letting you push or flank. coop_aiSuppress 0 = off; coop_aiSuppressAccuracy = aim multiplier (lower =
+    // more suppressed).
+    {
+        static cvar_t *pSupOn  = gi.Cvar_Get("coop_aiSuppress", "1", CVAR_ARCHIVE);
+        static cvar_t *pSupAcc = gi.Cvar_Get("coop_aiSuppressAccuracy", "0.2", CVAR_ARCHIVE);
+        if (pSupOn->integer && level.time < m_fSuppressTime) {
+            float k = pSupAcc->value;
+            if (k < 0.0f) { k = 0.0f; } else if (k > 1.0f) { k = 1.0f; }
+            fCoverFactor *= k;
+
+            // ...and BREAK the stand-and-shoot: switch this AI's ATTACK behavior to seek COVER. The cover
+            // think runs to the nearest valid cover node and fights from it; if the map has no cover node
+            // near it (or within its leash), Cover_FindCover -> State_Cover_NewEnemy fall back to aiming in
+            // place, so this is safe even on cover-less maps (no crash, no regression). Sticky: once you've
+            // suppressed him he keeps fighting from cover for the rest of the engagement. Only the ATTACK
+            // think changes - IDLE/patrol is untouched, so he returns to normal once the enemy is gone.
+            // Mounted MGs (can't move) and scripted special-attack types are left alone. coop_aiSuppressCover 0 = off.
+            static cvar_t *pSupCover = gi.Cvar_Get("coop_aiSuppressCover", "1", CVAR_ARCHIVE);
+            if (pSupCover->integer) {
+                eThinkNum cur = m_ThinkMap[THINKSTATE_ATTACK];
+                if (cur != THINK_COVER && cur != THINK_MACHINEGUNNER && cur != THINK_WEAPONLESS
+                    && cur != THINK_DOG_ATTACK && cur != THINK_ALARM) {
+                    SetThink(THINKSTATE_ATTACK, THINK_COVER);
+                }
+            }
+        }
+    }
+
     if (doInit) {
         aiRanges[0] = gi.Cvar_Get("g_aishortrange", "500", 0);
         aiRanges[1] = gi.Cvar_Get("g_aimediumrange", "700", 0);
@@ -11873,7 +12090,13 @@ void Actor::BecomeCorpse(void)
     // don't cast shadow
     edict->s.renderfx &= ~RF_SHADOW;
 
-    PostEvent(EV_DeathSinkStart, 10);
+    // HZM coop - do NOT auto-sink/remove AI corpses in coop. The vanilla engine sinks every body 10s
+    // after death, which made bodies vanish on the battlefield even with the body queue raised to 128.
+    // In coop the corpse lifetime is owned entirely by coop_mod/corpse.scr (cvar coop_corpseLife:
+    // 0 = keep forever, >0 = fade out after N seconds). Single-player keeps the vanilla 10s sink.
+    if (g_gametype->integer == GT_SINGLE_PLAYER) {
+        PostEvent(EV_DeathSinkStart, 10);
+    }
 }
 
 /*

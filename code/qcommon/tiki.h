@@ -33,7 +33,7 @@ class Archiver;
 #    include "../qcommon/str.h"
 #endif
 
-#define MAX_TIKI_LOAD_ANIMS                 4095
+#define MAX_TIKI_LOAD_ANIMS                 8192 // HZM: raised from 4095; new_generic_human.tik exceeds 4095 after force-load pack additions (Issue #12)
 #define MAX_TIKI_LOAD_SKEL_INDEX            12
 #define MAX_TIKI_LOAD_SERVER_INIT_COMMANDS  160
 #define MAX_TIKI_LOAD_CLIENT_INIT_COMMANDS  180 // 2.30: Increased from 160 to 180
@@ -45,6 +45,17 @@ class Archiver;
 #define MAX_TIKI_LOAD_FRAME_CLIENT_COMMANDS 128
 
 #define MAX_TIKI_LOAD_SHADERS               4
+
+// HZM: Max distinct surfaces parsed from a model's setup/$case blocks into the
+// stack array loadsurfaces[] in TIKI_LoadTikiModel. Was a bare hardcoded 24 with
+// NO bounds check in the SETUP_SURFACE parse case (tiki_parse.cpp::TIKI_LoadSetupCase),
+// so a model whose matched setup defines >24 surfaces overran the stack array ->
+// /GS stack-canary trip (0xc0000409). Which $case branches match (and thus how many
+// surfaces accumulate) depends on the entity's spawn key/values, which is why the
+// overrun only manifested on certain registrations (e.g. heavy m1l3c models on an
+// in-game transition, where the registering key|value| string differs from a fresh
+// load). Raised headroom + added an explicit guard. See tiki_parse.cpp.
+#define MAX_TIKI_LOAD_SURFACES              48
 
 typedef struct AliasList_s     AliasList_t;
 typedef struct AliasListNode_s AliasListNode_t;

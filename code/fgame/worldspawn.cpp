@@ -467,6 +467,15 @@ Event EV_World_SetSunDiffuseColor
     "Sets an alternate sun color to use for clcing diffuse sun",
     EV_NORMAL
 );
+Event EV_World_SetSunAngle
+(
+    "sunangle",
+    EV_DEFAULT,
+    "f",
+    "angle",
+    "Sets the sun angle for lighting.",
+    EV_NORMAL
+);
 Event EV_World_Overbright
 (
     "overbright",
@@ -531,6 +540,7 @@ CLASS_DECLARATION(Entity, World, "worldspawn") {
     {&EV_World_SetNumArenas,             NULL                            },
     {&EV_World_SetSunDiffuse,            NULL                            },
     {&EV_World_SetSunDiffuseColor,       NULL                            },
+    {&EV_World_SetSunAngle,              NULL                            },
     {&EV_World_Overbright,               NULL                            },
     {&EV_World_VisDerived,               NULL                            },
     {&EV_World_SetAIVisionDistance,      &World::SetAIVisionDistance     },

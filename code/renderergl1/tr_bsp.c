@@ -751,6 +751,21 @@ static void ParseMesh ( dsurface_t *ds, drawVert_t *verts, msurface_t *surf ) {
     width = LittleLong( ds->patchWidth );
     height = LittleLong( ds->patchHeight );
 
+    // HZM: bounds guard. points[] is a fixed-size stack buffer of
+    // MAX_PATCH_SIZE*MAX_PATCH_SIZE drawVert_t. A patch surface in the BSP whose
+    // patchWidth/patchHeight (or their product) exceeds that overruns the stack
+    // and trips the /GS security cookie (exception 0xc0000409). Upstream ioq3
+    // guards this in ParseMesh; the sibling ParseFace already guards with
+    // MAX_FACE_POINTS. Skip the malformed surface instead of corrupting the
+    // stack. (Matches the NODRAW skip pattern above; preserves the rest of the map.)
+    if ( width <= 0 || height <= 0 || width > MAX_PATCH_SIZE || height > MAX_PATCH_SIZE
+         || width * height > MAX_PATCH_SIZE * MAX_PATCH_SIZE ) {
+        ri.Printf( PRINT_WARNING, "WARNING: ParseMesh: bad patch size (%i x %i), max %i; skipping surface\n",
+                   width, height, MAX_PATCH_SIZE );
+        surf->data = &skipData;
+        return;
+    }
+
     verts += LittleLong( ds->firstVert );
     numPoints = width * height;
     for ( i = 0 ; i < numPoints ; i++ ) {
@@ -2447,6 +2462,8 @@ void RE_LoadWorldMap( const char *name ) {
     ri.UI_LoadResource("*115");
     R_VisDebugLoad(name);
     ri.UI_LoadResource("*116");
+
+    R_InitGrassWorld();	// HZM coop: scatter 3D grass on SURF_GRASS surfaces (cvar r_grass gates rendering)
 }
 
 /*

@@ -974,6 +974,33 @@ qboolean Player::CondAttackButtonSecondary(Conditional& condition)
     return (last_ucmd.buttons & BUTTON_ATTACKRIGHT);
 }
 
+// HZM coop - AIM DOWN SIGHTS condition. Mirrors CondAttackSecondary (requires an active main weapon)
+// but reads the dedicated BUTTON_COOPADS bit instead of BUTTON_ATTACKRIGHT, so iron-sight aiming is
+// driven by its own bind (RMB) while secondary-fire/bash stays on the native right-attack button (V).
+qboolean Player::CondCoopAds(Conditional& condition)
+{
+    Weapon *weapon;
+
+    if (level.playerfrozen || m_bFrozen || (flags & FL_IMMOBILE)) {
+        return false;
+    }
+
+    if (g_gametype->integer != GT_SINGLE_PLAYER && !m_bAllowFighting) {
+        return false;
+    }
+
+    if (!(last_ucmd.buttons & BUTTON_COOPADS)) {
+        return false;
+    }
+
+    weapon = GetActiveWeapon(WEAPON_MAIN);
+    if (weapon) {
+        return true;
+    }
+
+    return false;
+}
+
 qboolean Player::CondPositionType(Conditional& condition)
 {
     int flags = 0;
@@ -2029,6 +2056,7 @@ Condition<Player> Player::m_conditions[] = {
     }, // Checks to see if there is an active weapon as well as the button being pressed
     {"ATTACK_PRIMARY_BUTTON",           &Player::CondAttackButtonPrimary     }, // Checks to see if the left attack button is pressed
     {"ATTACK_SECONDARY_BUTTON",         &Player::CondAttackButtonSecondary   },
+    {"COOP_ADS",                        &Player::CondCoopAds                 }, // HZM coop - aim down sights (dedicated bind), see CondCoopAds
     {"CHECK_MOVEMENT_SPEED",            &Player::CondCheckMovementSpeed      },
 
     //

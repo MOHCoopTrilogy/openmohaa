@@ -49,6 +49,7 @@ cvar_t *s_testsound;
 cvar_t *s_separation;
 cvar_t *s_musicVolume;
 cvar_t *s_ambientVolume;
+cvar_t *s_sfxduck; // HZM coop - cinematic duck multiplier for EFFECT channels only (music exempt); 1 = normal
 
 sfx_info_t sfx_infos[MAX_SFX_INFOS];
 
@@ -102,7 +103,8 @@ void S_Init(qboolean full_startup)
 
     s_volume         = Cvar_Get("s_volume", "0.9", CVAR_ARCHIVE);
     s_musicVolume    = Cvar_Get("s_musicvolume", "0.9", CVAR_ARCHIVE);
-    s_ambientVolume  = Cvar_Get("s_ambientvolume", "1.00", CVAR_ARCHIVE);
+    s_ambientVolume  = Cvar_Get("s_ambientvolume", "0.6", CVAR_ARCHIVE);
+    s_sfxduck        = Cvar_Get("s_sfxduck", "1", CVAR_ARCHIVE); // HZM coop - effect-channel duck (music exempt)
     s_separation     = Cvar_Get("s_separation", "0.5", CVAR_ARCHIVE);
     s_khz            = Cvar_Get("s_khz", "44", CVAR_ARCHIVE | CVAR_SOUND_LATCH);
     s_loadas8bit     = Cvar_Get("s_loadas8bit", "0", CVAR_ARCHIVE | CVAR_LATCH);
@@ -362,12 +364,18 @@ sfxHandle_t S_RegisterSound(const char *name, int streamed, qboolean force_load)
     for (i = 0; name[i] && i < MAX_QPATH; i++) {
         szCacheName[i] = tolower(name[i]);
     }
-    szCacheName[i] = 0;
 
+    // HZM fix: bounds-check BEFORE writing the terminator. The original wrote
+    // szCacheName[i]=0 first, which for a name >= MAX_QPATH chars writes at
+    // szCacheName[MAX_QPATH] - one past this stack array - tripping the /GS stack
+    // canary (0xc0000409). e3l4 caches a sound alias with a >=64-char path, which is
+    // why it crashed here. Reject the over-long name before terminating in-bounds.
     if (i >= MAX_QPATH) {
         Com_Printf("Sound name exceeds MAX_QPATH\n");
         return 0;
     }
+
+    szCacheName[i] = 0;
 
     sfx = S_FindName(szCacheName, s_registrationSequence);
     if (!sfx) {

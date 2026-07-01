@@ -189,7 +189,10 @@ int SV_FindIndex( const char *name, int start, int max, qboolean create ) {
 	}
 
 	if( result == max ) {
-		Com_Error( 1, "SV_FindIndex: overflow  max%d create%d  name %s", max, create, name );
+		// HZM: warn and return 0 instead of fatal error — coop mod precaches >512 sounds in MP mode.
+		// Slot 0 = "no sound" which is safe. Sounds past the limit just don't play.
+		Com_Printf( S_COLOR_YELLOW "WARNING: SV_FindIndex overflow (max=%d, start=%d): %s\n", max, start, name );
+		return 0;
 	}
 
 	SV_SetConfigstring( start + result, name );

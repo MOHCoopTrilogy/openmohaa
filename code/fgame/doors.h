@@ -83,6 +83,7 @@ protected:
     void     SetTime(Event *ev);
     void     LockDoor(Event *ev);
     void     UnlockDoor(Event *ev);
+    void     SetMoveSound(Event *ev);
     void     SetOpenStartSound(str sound);
     void     SetOpenStartSound(Event *ev);
     void     SetOpenEndSound(str sound);

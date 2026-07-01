@@ -365,6 +365,94 @@ void CG_EditCHShader(void)
     }
 }
 
+// HZM coop - ADS tuning workbench: dump the gun you're holding + its current tune values to the console
+// (and the log). Bind a key to "adssave" - dial the gun in cg_adsTune mode, then press it to capture the
+// stand (cg_adsPitch/yaw + r_weaponshift) and crouch (cg_adsCrouch*) values for that weapon.
+void CG_AdsSave_f(void)
+{
+    const char *wpn = "";
+    qboolean    ducked;
+
+    ducked = (cg.predicted_player_state.pm_flags & PMF_DUCKED) ? qtrue : qfalse;
+    if (cg.snap && cg.snap->ps.activeItems[1] >= 0) {
+        wpn = CG_ConfigString(CS_WEAPONS + cg.snap->ps.activeItems[1]);
+    }
+
+    cgi.Printf("=== ADS TUNE  [%s]  (currently %s) ===\n", wpn, ducked ? "CROUCHED" : "STANDING");
+    cgi.Printf("  STAND : pitch %g  yaw %g  roll %g   shift x %g  y %g\n",
+        cg_adsPitch->value, cg_adsYaw->value, cg_adsRoll ? cg_adsRoll->value : 0.f,
+        cg_adsShiftX ? cg_adsShiftX->value : 0.f, cg_adsShiftY ? cg_adsShiftY->value : 0.f);
+    cgi.Printf("  CROUCH: pitch %g  yaw %g  roll %g   shift x %g  y %g\n",
+        cg_adsCrouchPitch->value, cg_adsCrouchYaw->value, cg_adsCrouchRoll->value,
+        cg_adsCrouchShiftX ? cg_adsCrouchShiftX->value : 0.f,
+        cg_adsCrouchShiftY ? cg_adsCrouchShiftY->value : 0.f);
+}
+
+// HZM coop - ADS workbench NUDGE: move the active param (cg_adsMode) in a direction, live. The active
+// STANCE (stand vs crouch) is auto-detected, so each tunes its own set: standing -> cg_adsPitch/cg_adsYaw
+// + cg_adsShiftX/Y ; crouched -> cg_adsCrouchPitch/Yaw + cg_adsCrouchShiftX/Y (+ cg_adsCrouchRoll in ROLL
+// mode). SHIFT slides the WHOLE weapon view (hands + gun) on screen. dx: -1 left / +1 right ; dy: -1 down /
+// +1 up. Only acts while cg_adsTune is on (so the keys are inert in normal play). modes: 0 pitch 1 yaw 2
+// shift 3 roll.
+static void CG_AdsNudge(float dx, float dy)
+{
+    const float rot = 0.5f;   // degrees per press (pitch/yaw/roll)
+    const float sh  = 0.02f;  // screen-shift units per press
+    int         mode;
+    qboolean    ducked;
+    char        val[32];
+    cvar_t     *c;
+
+    if (!cg_adsTune || !cg_adsTune->integer) {
+        return;
+    }
+    mode   = cg_adsMode ? cg_adsMode->integer : 0;
+    ducked = (cg.predicted_player_state.pm_flags & PMF_DUCKED) ? qtrue : qfalse;
+
+    if (mode == 0) {
+        // PITCH (up/down) - up raises the muzzle / front sight
+        c = ducked ? cg_adsCrouchPitch : cg_adsPitch;
+        Com_sprintf(val, sizeof(val), "%g", c->value + dy * rot);
+        cgi.Cvar_Set(ducked ? "cg_adsCrouchPitch" : "cg_adsPitch", val);
+    } else if (mode == 1) {
+        // YAW (left/right)
+        c = ducked ? cg_adsCrouchYaw : cg_adsYaw;
+        Com_sprintf(val, sizeof(val), "%g", c->value + dx * rot);
+        cgi.Cvar_Set(ducked ? "cg_adsCrouchYaw" : "cg_adsYaw", val);
+    } else if (mode == 2) {
+        // SHIFT - slide the whole weapon view (hands + gun) on screen toward centre. standing tunes
+        // cg_adsShiftX/Y ; crouched tunes cg_adsCrouchShiftX/Y (added on top of standing by cg_view).
+        const char *cvX = ducked ? "cg_adsCrouchShiftX" : "cg_adsShiftX";
+        const char *cvY = ducked ? "cg_adsCrouchShiftY" : "cg_adsShiftY";
+        if (dy != 0.0f) {
+            c = cgi.Cvar_Get(cvY, "0", 0);
+            Com_sprintf(val, sizeof(val), "%g", c->value - dy * sh); // up = move gun up = shifty more negative
+            cgi.Cvar_Set(cvY, val);
+        }
+        if (dx != 0.0f) {
+            c = cgi.Cvar_Get(cvX, "0", 0);
+            Com_sprintf(val, sizeof(val), "%g", c->value + dx * sh);
+            cgi.Cvar_Set(cvX, val);
+        }
+    } else {
+        // ROLL (left/right) - un-tilt about the barrel axis. standing = cg_adsRoll, crouch = cg_adsCrouchRoll.
+        if (dx != 0.0f) {
+            c = ducked ? cg_adsCrouchRoll : cg_adsRoll;
+            Com_sprintf(val, sizeof(val), "%g", c->value + dx * rot);
+            cgi.Cvar_Set(ducked ? "cg_adsCrouchRoll" : "cg_adsRoll", val);
+        }
+    }
+}
+
+void CG_AdsModePitch_f(void) { cgi.Cvar_Set("cg_adsMode", "0"); cgi.Cvar_Set("cg_adsTune", "1"); cgi.Printf("ADS tune: PITCH (up/down)\n"); }
+void CG_AdsModeYaw_f(void)   { cgi.Cvar_Set("cg_adsMode", "1"); cgi.Cvar_Set("cg_adsTune", "1"); cgi.Printf("ADS tune: YAW (left/right)\n"); }
+void CG_AdsModeShift_f(void) { cgi.Cvar_Set("cg_adsMode", "2"); cgi.Cvar_Set("cg_adsTune", "1"); cgi.Printf("ADS tune: SHIFT - slide hands+gun (up/down/left/right)\n"); }
+void CG_AdsModeRoll_f(void)  { cgi.Cvar_Set("cg_adsMode", "3"); cgi.Cvar_Set("cg_adsTune", "1"); cgi.Printf("ADS tune: ROLL (left/right un-tilt, stand + crouch)\n"); }
+void CG_AdsUp_f(void)    { CG_AdsNudge(0.0f,  1.0f); }
+void CG_AdsDown_f(void)  { CG_AdsNudge(0.0f, -1.0f); }
+void CG_AdsLeft_f(void)  { CG_AdsNudge(-1.0f, 0.0f); }
+void CG_AdsRight_f(void) { CG_AdsNudge( 1.0f, 0.0f); }
+
 #if 0
 
 
@@ -539,6 +627,15 @@ static consoleCommand_t commands[] = {
     {"pushcallvotesubclient",  &CG_PushCallVoteSubClient_f },
     {"pushvote",               &CG_PushVote_f              },
     {"callentryvote",          &CG_CallEntryVote_f         },
+    {"adssave",                &CG_AdsSave_f               },
+    {"adsm_pitch",             &CG_AdsModePitch_f          },
+    {"adsm_yaw",               &CG_AdsModeYaw_f            },
+    {"adsm_shift",             &CG_AdsModeShift_f          },
+    {"adsm_roll",              &CG_AdsModeRoll_f           },
+    {"adsn_up",                &CG_AdsUp_f                 },
+    {"adsn_down",              &CG_AdsDown_f               },
+    {"adsn_left",              &CG_AdsLeft_f               },
+    {"adsn_right",             &CG_AdsRight_f              },
 };
 
 /*

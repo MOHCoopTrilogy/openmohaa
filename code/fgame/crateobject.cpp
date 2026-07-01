@@ -25,6 +25,7 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 #include "crateobject.h"
 #include "player.h"
 #include "g_phys.h"
+#include "g_spawn.h"
 
 /*****************************************************************************
 /*QUAKED func_crate (0 0.25 0.5) ? INDESTRUCTABLE NOTSTACKEDON
@@ -88,15 +89,25 @@ Event EV_Crate_SetDebris
     "Sets the debris type of the crate"
 );
 
+Event EV_Crate_SpawnItems
+(
+    "spawnitems",
+    EV_DEFAULT,
+    "s",
+    "itemList",
+    "Space-separated list of item TIK paths to spawn when the crate is destroyed."
+);
+
 CLASS_DECLARATION(Entity, CrateObject, "func_crate") {
-    {&EV_Crate_Setup,         &CrateObject::CrateSetup     },
-    {&EV_Crate_Falling,       &CrateObject::CrateFalling   },
-    {&EV_Damage,              &CrateObject::CrateDamaged   },
-    {&EV_Killed,              &CrateObject::CrateKilled    },
-    {&EV_Crate_Start_Falling, &CrateObject::StartFalling   },
-    {&EV_Crate_Think,         &CrateObject::CrateThink     },
-    {&EV_Crate_SetDebris,     &CrateObject::CrateDebrisType},
-    {NULL,                    NULL                         }
+    {&EV_Crate_Setup,         &CrateObject::CrateSetup          },
+    {&EV_Crate_Falling,       &CrateObject::CrateFalling        },
+    {&EV_Damage,              &CrateObject::CrateDamaged        },
+    {&EV_Killed,              &CrateObject::CrateKilled         },
+    {&EV_Crate_Start_Falling, &CrateObject::StartFalling        },
+    {&EV_Crate_Think,         &CrateObject::CrateThink          },
+    {&EV_Crate_SetDebris,     &CrateObject::CrateDebrisType     },
+    {&EV_Crate_SpawnItems,    &CrateObject::CrateSpawnItemsEvent},
+    {NULL,                    NULL                              }
 };
 
 CrateObject::CrateObject()
@@ -260,6 +271,11 @@ void CrateObject::CrateDebrisType(Event *ev)
     }
 }
 
+void CrateObject::CrateSpawnItemsEvent(Event *ev)
+{
+    m_sSpawnItems = ev->GetString(1);
+}
+
 void CrateObject::StartFalling(Event *ev)
 {
     m_fMoveTime = 0;
@@ -394,6 +410,25 @@ void CrateObject::CrateKilled(Event *ev)
 
     health   = 0;
     deadflag = DEAD_DEAD;
+
+    if (m_sSpawnItems.length() > 0) {
+        char buf[1024];
+        Q_strncpyz(buf, m_sSpawnItems.c_str(), sizeof(buf));
+        char *tok = strtok(buf, " ");
+        while (tok && *tok) {
+            SpawnArgs args;
+            args.setArg("model", tok);
+            ClassDef *cls = args.getClassDef();
+            if (cls) {
+                Entity *ent = (Entity *)cls->newInstance();
+                if (ent) {
+                    ent->setOrigin(vCenter);
+                    ent->ProcessPendingEvents();
+                }
+            }
+            tok = strtok(NULL, " ");
+        }
+    }
 
     PostEvent(EV_Remove, 0);
 

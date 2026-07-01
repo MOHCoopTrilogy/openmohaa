@@ -57,6 +57,10 @@ cvar_t *r_preferOpenGLES;
 int qglMajorVersion, qglMinorVersion;
 int qglesMajorVersion, qglesMinorVersion;
 
+// HZM post-FX: set true in GLimp_GetProcAddresses (fixed-function/gl1 path) when the GL 2.0 + FBO
+// procs were loaded, so the gl1 GLSL post-process layer can enable. False => post-FX disabled.
+qboolean glPostFxProcsLoaded = qfalse;
+
 void (APIENTRYP qglActiveTextureARB) (GLenum texture);
 void (APIENTRYP qglClientActiveTextureARB) (GLenum texture);
 void (APIENTRYP qglMultiTexCoord2fARB) (GLenum target, GLfloat s, GLfloat t);
@@ -319,6 +323,19 @@ static qboolean GLimp_GetProcAddresses( qboolean fixedFunction ) {
 		//  Add compression-related GL functions for the renderer
 		if ( QGL_VERSION_ATLEAST( 1, 3 ) ) {
 			QGL_1_3_PROCS;
+		}
+		// HZM post-FX: load GL 1.5/2.0 + FBO procs on the fixed-function (gl1) path so a GLSL
+		// post-process layer can run on top of gl1. Only when the desktop context is >= 2.0;
+		// otherwise post-FX auto-disables and gl1 renders exactly as before.
+		{
+			extern qboolean glPostFxProcsLoaded;
+			glPostFxProcsLoaded = qfalse;
+			if ( QGL_VERSION_ATLEAST( 2, 0 ) ) {
+				QGL_1_5_PROCS;
+				QGL_2_0_PROCS;
+				QGL_ARB_framebuffer_object_PROCS;
+				glPostFxProcsLoaded = ( qglCreateProgram != NULL && qglGenFramebuffers != NULL );
+			}
 		}
 	} else {
 		if ( QGL_VERSION_ATLEAST( 2, 0 ) ) {

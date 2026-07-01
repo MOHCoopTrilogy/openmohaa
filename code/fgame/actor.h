@@ -64,6 +64,16 @@ extern Event EV_Actor_GetDisguiseLevel;
 extern Event EV_Actor_SetTypeGrenade;
 extern Event EV_Actor_SetTypeGrenade2;
 extern Event EV_Actor_GetTypeGrenade;
+extern Event EV_Actor_SetTypePain;
+extern Event EV_Actor_SetTypePain2;
+extern Event EV_Actor_SetTypeKilled;
+extern Event EV_Actor_SetTypeKilled2;
+extern Event EV_Actor_SetTypeCurious;
+extern Event EV_Actor_SetTypeCurious2;
+extern Event EV_Actor_SetAIProneProbability;
+extern Event EV_Actor_SetAIProneProbability2;
+extern Event EV_Actor_SetAICrouchProbability;
+extern Event EV_Actor_SetAICrouchProbability2;
 extern Event EV_Actor_SetPatrolPath;
 extern Event EV_Actor_SetPatrolPath2;
 extern Event EV_Actor_GetPatrolPath;
@@ -293,7 +303,7 @@ typedef struct {
 
 #define MAX_ORIGIN_HISTORY 4
 #define MAX_COVER_NODES    16
-#define MAX_BODYQUEUE      5
+#define MAX_BODYQUEUE      128		// HZM coop: was 5 - keep many more corpses on the field so bodies persist through firefights (coop_corpseLife handles optional TIMED despawn); capped well under the entity budget (MAX_GENTITIES 1024)
 
 typedef enum {
     AI_GREN_TOSS_NONE,
@@ -733,6 +743,8 @@ public:
     Vector m_vDfwPos;
     /* Don't Face Wall time. */
     float m_fDfwTime;
+    /* HZM coop - reactive suppression: level.time until incoming near-miss fire degrades this AI's aim. */
+    float m_fSuppressTime;
     /* last time GunPostiton() was called */
     int m_iGunPositionCheckTime;
     /* gun position */
@@ -1435,6 +1447,11 @@ public:
     void           EventGetDisguiseLevel(Event *ev);
     void           EventSetTypeGrenade(Event *ev);
     void           EventGetTypeGrenade(Event *ev);
+    void           EventSetTypePain(Event *ev);
+    void           EventSetTypeKilled(Event *ev);
+    void           EventSetTypeCurious(Event *ev);
+    void           EventSetAIProneProbability(Event *ev);
+    void           EventSetAICrouchProbability(Event *ev);
     void           EventSetMinDistance(Event *ev);
     void           EventGetMinDistance(Event *ev);
     void           EventSetMaxDistance(Event *ev);

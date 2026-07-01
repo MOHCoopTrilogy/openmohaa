@@ -116,7 +116,8 @@ qboolean CM_LoadTGA(const char *name, byte **pic, int *width, int *height)
     targa_header.attributes = *buf_p++;
 
     if (targa_header.image_type != 2 && targa_header.image_type != 10 && targa_header.image_type != 3) {
-        Com_Error(ERR_DROP, "LoadTGA: Only type 2 (RGB), 3 (gray), and 10 (RGB) TGA images supported\n");
+        FS_FreeFile(buffer);
+        return qfalse;
     }
 
     if (targa_header.colormap_type != 0) {

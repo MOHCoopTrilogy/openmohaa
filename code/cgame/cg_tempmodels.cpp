@@ -1408,6 +1408,22 @@ void ClientGameCommandManager::SpawnTempModel(int mcount)
             }
         }
 
+        // HZM coop - BRASS STAYS: ejected shell casings normally fade out in ~2s. Detect the shell model
+        // (any weapon's eject, players AND AI - they all spawn client tempmodels) and give it a long life +
+        // push the fade to the very end, so brass collects on the ground. Capped by cg_max_tempmodels (old
+        // brass recycles). coop_brassLife = seconds the casing lingers (0 = vanilla). Kept moderate so brass
+        // doesn't starve the tempmodel pool of other effects in a long firefight.
+        {
+            static cvar_t *pBL = NULL;
+            if (!pBL) { pBL = cgi.Cvar_Get("coop_brassLife", "45", CVAR_ARCHIVE); }
+            if (pBL && pBL->value > 0.0f && p->modelname.length() && strstr(p->modelname.c_str(), "shell")) {
+                p->cgd.life = pBL->value * 1000.0f;
+                if (p->cgd.flags & T_FADE) {
+                    p->cgd.fadedelay = p->cgd.life * 0.85f; // stay solid ~85% of life, then fade out gracefully
+                }
+            }
+        }
+
         p->lastAnimTime          = p->cgd.createTime;
         p->lastPhysicsTime       = p->cgd.createTime;
         p->killTime              = cg.time + p->cgd.life; // The time the tempmodel will die

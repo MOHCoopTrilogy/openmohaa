@@ -49,3 +49,5 @@ profile
 code_unfinished/*
 thirdparties/
 code/parser/generated/*
+.cmake/
+code/tools/md5_2_skX/.build/

@@ -1387,20 +1387,26 @@ S_OpenBackgroundStream
 ======================
 */
 static void S_OpenBackgroundStream( const char *filename ) {
-	// close the background track, but DON'T reset s_rawend
-	// if restarting the same back ground track
+	snd_stream_t *newStream;
+
+	// HZM: open the NEW stream before closing the current one. The original closed the
+	// playing track first, so a missing/failed track silenced the level (root-caused on
+	// e3l4: combat 'forcemusic' switched to a mood whose track isn't in the mounted paks
+	// -> close-then-fail left it silent on the first gunshot). Now a failed open keeps the
+	// current track playing instead of dropping to silence.
+	newStream = S_CodecOpenStream(filename);
+	if(!newStream) {
+		Com_Printf( S_COLOR_YELLOW "WARNING: couldn't open music file %s (keeping current track)\n", filename );
+		return;
+	}
+
+	// new stream opened OK - now replace the current one
 	if(s_backgroundStream)
 	{
 		S_CodecCloseStream(s_backgroundStream);
 		s_backgroundStream = NULL;
 	}
-
-	// Open stream
-	s_backgroundStream = S_CodecOpenStream(filename);
-	if(!s_backgroundStream) {
-		Com_Printf( S_COLOR_YELLOW "WARNING: couldn't open music file %s\n", filename );
-		return;
-	}
+	s_backgroundStream = newStream;
 
 	if(s_backgroundStream->info.channels != 2 || s_backgroundStream->info.rate != 22050) {
 		Com_Printf(S_COLOR_YELLOW "WARNING: music file %s is not 22k stereo\n", filename );

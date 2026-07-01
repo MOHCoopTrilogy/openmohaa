@@ -409,7 +409,7 @@ void Alias_ListUpdateDialog(AliasList_t *list, const char *alias)
 
 AliasListNode_t *Alias_ListFindNode(AliasList_t *list, const char *alias)
 {
-    char   convalias[40];
+    char   convalias[MAX_ALIASLIST_NAME_LENGTH];
     int    index;
     int    l;
     int    r;
@@ -422,6 +422,15 @@ AliasListNode_t *Alias_ListFindNode(AliasList_t *list, const char *alias)
     }
 
     length = strlen(alias);
+
+    // Bounds guard: convalias is MAX_ALIASLIST_NAME_LENGTH bytes. An alias longer than
+    // that cannot match any stored alias_name (also capped at that size), and copying it
+    // here would overrun this stack buffer -> 0xc0000409 /GS canary failure (hit by a
+    // long alias lookup during the dog-model TIKI cold-load on m3l1a). Mirrors the guard
+    // already present in Alias_ListFindRandomRange.
+    if (length + 1 > MAX_ALIASLIST_NAME_LENGTH) {
+        return NULL;
+    }
 
     for (index = 0; index < length; index++) {
         convalias[index] = tolower(alias[index]);

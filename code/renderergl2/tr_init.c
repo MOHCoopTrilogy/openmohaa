@@ -1414,12 +1414,18 @@ void R_Register( void )
 	r_baseNormalX = ri.Cvar_Get( "r_baseNormalX", "1.0", CVAR_ARCHIVE | CVAR_LATCH );
 	r_baseNormalY = ri.Cvar_Get( "r_baseNormalY", "1.0", CVAR_ARCHIVE | CVAR_LATCH );
 	r_baseParallax = ri.Cvar_Get( "r_baseParallax", "0.05", CVAR_ARCHIVE | CVAR_LATCH );
-	r_baseSpecular = ri.Cvar_Get( "r_baseSpecular", "0.04", CVAR_ARCHIVE | CVAR_LATCH );
+	// HZM coop - default specular OFF. gl1 (the other shipping renderer) is fixed-function with NO specular;
+	// gl2's lightall shader otherwise applies a 4% white sun specular to every lit world surface (no spec map
+	// -> specular defaults to vec4(1.0)), producing a view-dependent "white sheen" that sweeps across terrain
+	// and floors as the camera pans. 0 matches the gl1 look and removes the only view-dependent term.
+	r_baseSpecular = ri.Cvar_Get( "r_baseSpecular", "0", CVAR_ARCHIVE | CVAR_LATCH );
 	r_baseGloss = ri.Cvar_Get( "r_baseGloss", "0.3", CVAR_ARCHIVE | CVAR_LATCH );
 	r_glossType = ri.Cvar_Get("r_glossType", "1", CVAR_ARCHIVE | CVAR_LATCH);
 	r_dlightMode = ri.Cvar_Get( "r_dlightMode", "0", CVAR_ARCHIVE | CVAR_LATCH );
 	r_pshadowDist = ri.Cvar_Get( "r_pshadowDist", "128", CVAR_ARCHIVE );
-	r_mergeLightmaps = ri.Cvar_Get( "r_mergeLightmaps", "1", CVAR_ARCHIVE | CVAR_LATCH );
+	// HZM coop - default lightmap atlas merging OFF. The merged-atlas lightmap coords come out wrong for
+	// MOHAA terrain/world surfaces in this fork, rendering them black (streaky). 0 keeps per-surface lightmaps.
+	r_mergeLightmaps = ri.Cvar_Get( "r_mergeLightmaps", "0", CVAR_ARCHIVE | CVAR_LATCH );
 	r_imageUpsample = ri.Cvar_Get( "r_imageUpsample", "0", CVAR_ARCHIVE | CVAR_LATCH );
 	r_imageUpsampleMaxSize = ri.Cvar_Get( "r_imageUpsampleMaxSize", "1024", CVAR_ARCHIVE | CVAR_LATCH );
 	r_imageUpsampleType = ri.Cvar_Get( "r_imageUpsampleType", "1", CVAR_ARCHIVE | CVAR_LATCH );

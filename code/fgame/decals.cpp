@@ -80,12 +80,38 @@ void Decal::setOrientation
    setAngles( ang );
    }
 
-void Decal::setRadius 
+void Decal::setRadius
    (
    float rad
    )
 
    {
    edict->s.scale = rad;
+   }
+
+// HZM coop - tint the decal. The client (CG_EntityEffects) unpacks s.constantLight as r=byte0, g=byte1,
+// b=byte2, intensity=byte3, and modulates the mark by that color (MIN with the white default). Without this
+// the mark renders with the default WHITE modulate, so a grayscale splat (bloodsplat.spr) shows up white -
+// which is exactly the "white squares" the player blood trail left. Intensity byte = 0 so it casts NO light.
+void Decal::setColor
+   (
+   float r,
+   float g,
+   float b
+   )
+
+   {
+   int ir, ig, ib;
+
+   if ( r < 0.0f ) r = 0.0f; else if ( r > 1.0f ) r = 1.0f;
+   if ( g < 0.0f ) g = 0.0f; else if ( g > 1.0f ) g = 1.0f;
+   if ( b < 0.0f ) b = 0.0f; else if ( b > 1.0f ) b = 1.0f;
+
+   ir = (int)( r * 255.0f );
+   ig = (int)( g * 255.0f );
+   ib = (int)( b * 255.0f );
+   if ( ir < 1 ) ir = 1; // keep constantLight non-zero (0 would read as black) and != 0xffffff
+
+   edict->s.constantLight = ir | ( ig << 8 ) | ( ib << 16 ); // high byte (intensity) = 0 -> no dynamic light
    }
 

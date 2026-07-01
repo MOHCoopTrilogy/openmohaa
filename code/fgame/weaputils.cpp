@@ -38,6 +38,7 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 #include "trigger.h"
 #include "debuglines.h"
 #include "smokegrenade.h"
+#include "scriptmaster.h"
 
 constexpr unsigned long MAX_TRAVEL_DIST = 16216;
 
@@ -1143,6 +1144,15 @@ void Projectile::Touch(Event *ev)
     other = ev->GetEntity(1);
     assert(other);
 
+    // HZM: the assert above is compiled out in release. A projectile impact can deliver
+    // a NULL 'other' (root-caused on e3l4's airstrike: bombs impacting world/removed
+    // entities), and the isSubclassOf() below then dereferences NULL -> access violation
+    // (cdb: AV 0xC0000005 at weaputils.cpp:1148, surfaced as 0xC0000409 via abort). Nothing
+    // valid to touch -> bail.
+    if (!other) {
+        return;
+    }
+
     // Don't touch teleporters
     if (other->isSubclassOf(Teleporter)) {
         return;
@@ -2138,6 +2148,7 @@ float BulletAttack(
     int    *piTracerCount,
     float   bulletthroughwood,
     float   bulletthroughmetal,
+    float   bulletthroughany,
     Weapon *weap,
     float   tracerspeed
 )
@@ -2171,6 +2182,32 @@ float BulletAttack(
     lastSurfaceFlags = 0;
     iNumHit          = 0;
 
+    // HZM coop - REACTIVE SUPPRESSION: when a PLAYER's shot lands near ENEMY AI, briefly degrade their aim
+    // (sets m_fSuppressTime; the penalty is applied in actor.cpp's aim code) so they keep their head down /
+    // spray and you can push or flank. One trace + one radius scan per fire event (cheap). Friendly AI are
+    // skipped via the team check. coop_aiSuppress 0 = off.
+    if (owner && owner->IsSubclassOfPlayer()) {
+        static cvar_t *pSupOn = gi.Cvar_Get("coop_aiSuppress", "1", CVAR_ARCHIVE);
+        if (pSupOn->integer) {
+            static cvar_t *pSupR = gi.Cvar_Get("coop_aiSuppressRadius", "150", CVAR_ARCHIVE);
+            static cvar_t *pSupT = gi.Cvar_Get("coop_aiSuppressTime", "1.5", CVAR_ARCHIVE);
+            int     ownTeam = static_cast<Sentient *>(owner)->m_Team;
+            float   rad     = (pSupR->value > 1.0f) ? pSupR->value : 150.0f;
+            Vector  vAim    = dir;
+            trace_t sTr;
+            Entity *e;
+
+            vAim.normalize();
+            sTr = G_Trace(start, vec_zero, vec_zero, start + vAim * range, owner, MASK_SHOT_TRIG, false, "AISuppress", true);
+            for (e = findradius(NULL, Vector(sTr.endpos), rad); e; e = findradius(e, Vector(sTr.endpos), rad)) {
+                if (e != owner && e->IsSubclassOfActor() && e->health > 0
+                    && static_cast<Sentient *>(e)->m_Team != ownTeam) {
+                    static_cast<Actor *>(e)->m_fSuppressTime = level.time + pSupT->value;
+                }
+            }
+        }
+    }
+
     if (g_protocol >= protocol_e::PROTOCOL_MOHTA_MIN) {
         bulletbits = 2;
     } else {
@@ -2184,6 +2221,27 @@ float BulletAttack(
 
     if (!owner || owner->IsDead() || owner == world) {
         weap = NULL;
+    }
+
+    // HZM coop - SMG WALL-PUNCH: a small % of player-fired SMG rounds punch THROUGH any surface (not just the
+    // soft/wood/metal the weapon is normally rated for). We raise bulletthroughany for this fire event when the
+    // roll hits, and the existing penetration loop (the `bulletthroughany > 0` branch, capped at 5 layers)
+    // carries the round through walls with the normal distance-based damage falloff. Player-only so enemies
+    // can't wallbang you. coop_smgPenetrate 0 = off; Chance = per-shot probability; Power = punch strength
+    // (higher = less damage lost through the wall).
+    if (weap && owner && owner->IsSubclassOfPlayer() && (weap->GetWeaponClass() & WEAPON_CLASS_SMG)) {
+        static cvar_t *pSmgOn = gi.Cvar_Get("coop_smgPenetrate", "1", CVAR_ARCHIVE);
+        if (pSmgOn->integer) {
+            static cvar_t *pSmgCh  = gi.Cvar_Get("coop_smgPenetrateChance", "0.1", CVAR_ARCHIVE);
+            static cvar_t *pSmgPow = gi.Cvar_Get("coop_smgPenetratePower", "8", CVAR_ARCHIVE);
+            if (G_Random() < pSmgCh->value) {
+                float pw = pSmgPow->value;
+                if (pw < 1.0f) { pw = 1.0f; }
+                if (bulletthroughany < pw) {
+                    bulletthroughany = pw;
+                }
+            }
+        }
     }
 
     for (i = 0; i < count; i++) {
@@ -2238,7 +2296,8 @@ float BulletAttack(
 
                     if (!(tracethrough.surfaceFlags & (SURF_FOLIAGE | SURF_GLASS | SURF_PUDDLE | SURF_PAPER))
                         && (!(tracethrough.surfaceFlags & SURF_WOOD) || !bulletthroughwood)
-                        && (!(tracethrough.surfaceFlags & (SURF_GRILL | SURF_METAL)) || !bulletthroughmetal)) {
+                        && (!(tracethrough.surfaceFlags & (SURF_GRILL | SURF_METAL)) || !bulletthroughmetal)
+                        && bulletthroughany <= 0.0f) {
                         vTmpEnd        = vTraceStart + vDir * -4;
                         trace.fraction = 1.f;
                         bBulletDone    = qtrue;
@@ -2249,17 +2308,26 @@ float BulletAttack(
                         break;
                     }
 
-                    if (lastSurfaceFlags & SURF_WOOD) {
-                        if (tracethrough.surfaceFlags & SURF_WOOD) {
-                            throughThingFrac = 1.f / bulletthroughwood;
-                        } else {
-                            throughThingFrac = 2.f / (bulletthroughwood + bulletthroughmetal);
+                    // HZM coop: unified per-surface penetration power. Wood uses bulletthroughwood,
+                    // metal/grill uses bulletthroughmetal, and ANY other (untyped/rock/concrete) surface
+                    // uses bulletthroughany (the "punch through any hard material" power). Averaging the
+                    // entry/exit surface powers reproduces the stock wood/metal math exactly while
+                    // extending it to arbitrary materials. Guards keep it divide-by-zero safe.
+                    {
+                        float powLast = (lastSurfaceFlags & SURF_WOOD)            ? bulletthroughwood
+                                      : ((lastSurfaceFlags & (SURF_GRILL | SURF_METAL)) ? bulletthroughmetal : 0.f);
+                        float powCur  = (tracethrough.surfaceFlags & SURF_WOOD)   ? bulletthroughwood
+                                      : ((tracethrough.surfaceFlags & (SURF_GRILL | SURF_METAL)) ? bulletthroughmetal : 0.f);
+                        if (powLast <= 0.f) {
+                            powLast = bulletthroughany;
                         }
-                    } else {
-                        if (tracethrough.surfaceFlags & SURF_WOOD) {
-                            throughThingFrac = 2.f / (bulletthroughwood + bulletthroughmetal);
+                        if (powCur <= 0.f) {
+                            powCur = bulletthroughany;
+                        }
+                        if (powLast + powCur <= 0.f) {
+                            throughThingFrac = 1.f;
                         } else {
-                            throughThingFrac = 1.f / bulletthroughmetal;
+                            throughThingFrac = 2.f / (powLast + powCur);
                         }
                     }
 
@@ -2348,11 +2416,20 @@ float BulletAttack(
                         // Get the new value of the victims health or water
 
                         damage_total += original_value - ent->health;
+
+                        // HZM coop: headshot KILL reward. If a player just killed an enemy AI with a
+                        // head-region hit (head/helmet/neck), play a local "headshot" cue to that player.
+                        if (owner && owner->IsSubclassOfPlayer() && ent->IsSubclassOfSentient()
+                            && !ent->IsSubclassOfPlayer() && original_value > 0 && ent->health <= 0
+                            && (trace.location == HITLOC_HEAD || trace.location == HITLOC_HELMET
+                                || trace.location == HITLOC_NECK)) {
+                            owner->Sound("coop_headshot", CHAN_LOCAL);
+                        }
                     }
 
                     if (ent->edict->solid == SOLID_BBOX && !(trace.contents & CONTENTS_CLAYPIDGEON)) {
                         if (trace.surfaceFlags & MASK_SURF_TYPE) {
-                            gi.SetBroadcastVisible(vTmpEnd, NULL);
+                            gi.SetBroadcastVisible(vTmpEnd, vBarrel); // HZM coop: also broadcast to the SHOOTER's PVS (muzzle), not just the impact's, so bullet impact effects (wall holes + flesh BLOOD) reach a distant shooter - was (vTmpEnd, NULL) = impact PVS only = no blood on far targets
                             gi.MSG_StartCGM(BG_MapCGMToProtocol(g_protocol, CGM_BULLET_6));
                             gi.MSG_WriteCoord(vTmpEnd[0]);
                             gi.MSG_WriteCoord(vTmpEnd[1]);
@@ -2361,7 +2438,20 @@ float BulletAttack(
                             gi.MSG_WriteBits(bulletlarge, bulletbits);
                             gi.MSG_EndCGM();
                         } else if (trace.location >= 0 && ent->IsSubclassOfSentient()) {
-                            gi.SetBroadcastVisible(vTmpEnd, NULL);
+                            // HZM coop - diagnostic (coop_bloodDebug 1): confirm a distant flesh hit actually
+                            // registers + sends the blood message. If this prints with a big dist when you
+                            // shoot a far enemy, blood IS spawning (so it's a visibility/size problem); if it
+                            // never prints at range, the hit itself isn't registering.
+                            {
+                                static cvar_t *pBD = NULL;
+                                if (!pBD) { pBD = gi.Cvar_Get("coop_bloodDebug", "0", CVAR_ARCHIVE); }
+                                if (pBD && pBD->integer && owner && owner->IsSubclassOfPlayer()) {
+                                    Vector vd = Vector(vTmpEnd) - owner->origin;
+                                    gi.Printf("^~^~^ FLESHHIT dist=%.0f loc=%d pos=(%.0f %.0f %.0f)\n",
+                                              vd.length(), trace.location, vTmpEnd[0], vTmpEnd[1], vTmpEnd[2]);
+                                }
+                            }
+                            gi.SetBroadcastVisible(vTmpEnd, vBarrel); // HZM coop: also broadcast to the SHOOTER's PVS (muzzle), not just the impact's, so bullet impact effects (wall holes + flesh BLOOD) reach a distant shooter - was (vTmpEnd, NULL) = impact PVS only = no blood on far targets
                             gi.MSG_StartCGM(BG_MapCGMToProtocol(g_protocol, CGM_BULLET_8));
                             gi.MSG_WriteCoord(vTmpEnd[0]);
                             gi.MSG_WriteCoord(vTmpEnd[1]);
@@ -2370,7 +2460,7 @@ float BulletAttack(
                             gi.MSG_WriteBits(bulletlarge, bulletbits);
                             gi.MSG_EndCGM();
                         } else if (ent->edict->r.contents & CONTENTS_SOLID) {
-                            gi.SetBroadcastVisible(vTmpEnd, NULL);
+                            gi.SetBroadcastVisible(vTmpEnd, vBarrel); // HZM coop: also broadcast to the SHOOTER's PVS (muzzle), not just the impact's, so bullet impact effects (wall holes + flesh BLOOD) reach a distant shooter - was (vTmpEnd, NULL) = impact PVS only = no blood on far targets
                             gi.MSG_StartCGM(BG_MapCGMToProtocol(g_protocol, CGM_BULLET_7));
                             gi.MSG_WriteCoord(vTmpEnd[0]);
                             gi.MSG_WriteCoord(vTmpEnd[1]);
@@ -2380,7 +2470,7 @@ float BulletAttack(
                             gi.MSG_EndCGM();
                         }
                     } else if (ent->edict->solid == SOLID_BSP && !(trace.contents & CONTENTS_CLAYPIDGEON)) {
-                        gi.SetBroadcastVisible(vTmpEnd, NULL);
+                        gi.SetBroadcastVisible(vTmpEnd, vBarrel); // HZM coop: also broadcast to the SHOOTER's PVS (muzzle), not just the impact's, so bullet impact effects (wall holes + flesh BLOOD) reach a distant shooter - was (vTmpEnd, NULL) = impact PVS only = no blood on far targets
                         gi.MSG_StartCGM(BG_MapCGMToProtocol(g_protocol, CGM_BULLET_6));
                         gi.MSG_WriteCoord(vTmpEnd[0]);
                         gi.MSG_WriteCoord(vTmpEnd[1]);
@@ -2400,16 +2490,22 @@ float BulletAttack(
                             && !trace.ent->r.bmodel && trace.ent->entity->takedamage)
                         || ((trace.surfaceFlags & SURF_WOOD) && bulletthroughwood)
                         || ((trace.surfaceFlags & (SURF_GRILL | SURF_METAL)) && bulletthroughmetal
-                            && iContinueCount < 5)) {
+                            && iContinueCount < 5)
+                        || (bulletthroughany > 0.0f && iContinueCount < 5)) {
                         if (((trace.surfaceFlags & SURF_WOOD) && bulletthroughwood)
-                            || ((trace.surfaceFlags & (SURF_GRILL | SURF_METAL)) && bulletthroughmetal)) {
+                            || ((trace.surfaceFlags & (SURF_GRILL | SURF_METAL)) && bulletthroughmetal)
+                            || bulletthroughany > 0.0f) {
                             if (trace.contents & CONTENTS_FENCE) {
                                 float damageMultiplier;
 
-                                if (lastSurfaceFlags & SURF_WOOD) {
+                                if ((lastSurfaceFlags & SURF_WOOD) && bulletthroughwood) {
                                     damageMultiplier = 1.f / bulletthroughwood;
-                                } else {
+                                } else if ((lastSurfaceFlags & (SURF_GRILL | SURF_METAL)) && bulletthroughmetal) {
                                     damageMultiplier = 1.f / bulletthroughmetal;
+                                } else if (bulletthroughany > 0.0f) {
+                                    damageMultiplier = 1.f / bulletthroughany;
+                                } else {
+                                    damageMultiplier = 1.f;
                                 }
 
                                 newdamage -= damageMultiplier * 2 * damage;
@@ -2883,6 +2979,17 @@ void ExplosionAttack(
                 if (owner && owner->IsSubclassOfSentient()) {
                     smoke->setOwner(static_cast<Sentient *>(owner));
                 }
+
+                gi.Printf("COOP_SMOKE_CHECK: SmokeGrenade at (%.0f %.0f %.0f) owner_is_player=%d\n",
+                    pos.x, pos.y, pos.z,
+                    (owner && owner->IsSubclassOfPlayer()) ? 1 : 0);
+
+                if (owner && owner->IsSubclassOfPlayer()) {
+                    gi.Printf("COOP_SMOKE_FIRE: calling smokeDropZone\n");
+                    Event parms(EV_Listener_ExecuteScript, 1);
+                    parms.AddVector(pos);
+                    Director.ExecuteThread("coop_mod/paradrop.scr", "smokeDropZone", parms);
+                }
             }
         } else {
             explosion = new Explosion;
@@ -3064,6 +3171,31 @@ void RadiusDamage(
 
     for (i = 1; i <= ents.NumObjects(); i++) {
         ent = ents.ObjectAt(i);
+
+        // HZM coop - blast IMPULSE on dead bodies. Corpses are inert (MOVETYPE_NONE + takedamage off), so the
+        // damage/knockback path below skips them - give them a physics shove so explosions actually THROW
+        // bodies. g_corpseImpulse scales it (0 = off). Only already-dead sentients; live targets get normal
+        // knockback. Flip to TOSS + set a world clipmask so the body arcs and lands instead of sliding/sinking.
+        if (ent != ignore && ent != attacker && ent->IsSubclassOfSentient() && ent->health <= 0) {
+            cvar_t *pCI = gi.Cvar_Get("g_corpseImpulse", "1.0", CVAR_ARCHIVE);
+            float   fCI = pCI ? pCI->value : 0.0f;
+            if (fCI > 0.0f) {
+                Vector vImp  = ent->centroid - origin;
+                float  fDist = vImp.length();
+                if (fDist < radius) {
+                    float fScale = 1.0f - (fDist / radius);
+                    if (fDist < 1.0f) {
+                        vImp = Vector(0, 0, 1);
+                    }
+                    vImp.normalize();
+                    vImp[2] += 0.5f; // bias upward so bodies pop, not just slide
+                    vImp.normalize();
+                    ent->setMoveType(MOVETYPE_TOSS);
+                    ent->edict->clipmask = MASK_SOLID;
+                    ent->velocity += vImp * (350.0f * fScale * fCI);
+                }
+            }
+        }
 
         if (ent == ignore || !(ent->takedamage) || (hurtOwnerOnly && ent != attacker)) {
             continue;

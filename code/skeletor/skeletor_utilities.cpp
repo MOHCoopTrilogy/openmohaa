@@ -169,6 +169,22 @@ int skelChannelList_s::AddChannel(int newGlobalChannelNum)
 {
     short int iLocalChannel;
 
+    // HZM: m_chanGlobalFromLocal is a fixed array of MAX_GLOBAL_FROM_LOCAL (200) shorts
+    // embedded inside skelChannelList_c. It is a member of dtiki_t::m_boneList (heap), and of
+    // every skelAnimDataGameHeader_t::channelList. TIKI_LoadTikiModel calls AddChannel once per
+    // bone of every mesh (up to MAX_SKELMODELS * TIKI_MAX_BONES additions), and the anim loaders
+    // call it once per file-declared channel. With no bounds check, a model/anim whose distinct
+    // channel count exceeded 200 wrote past the end of the array -> /GS stack-canary trip /
+    // heap corruption (0xc0000409) on cold load with no error log. Guard both write sites.
+    if (m_numChannels >= MAX_GLOBAL_FROM_LOCAL) {
+        SKEL_Warning(
+            "skelChannelList::AddChannel: too many channels (max %i), ignoring channel %i\n",
+            MAX_GLOBAL_FROM_LOCAL,
+            newGlobalChannelNum
+        );
+        return -1;
+    }
+
     if (newGlobalChannelNum == -1) {
         // Fixed in 2.0
         // Set the global from local to -1

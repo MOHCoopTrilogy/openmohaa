@@ -1667,21 +1667,30 @@ static void LoadTGA ( const char *name, byte **pic, int *width, int *height)
 	targa_header.pixel_size = *buf_p++;
 	targa_header.attributes = *buf_p++;
 
-	if (targa_header.image_type!=2 
+	// HZM coop: this is the ACTIVE (renderergl1) TGA loader. Don't ERR_DROP (which crashes the whole
+	// server) on an unsupported base-game TGA - warn with the offending filename and fail soft, leaving
+	// *pic = NULL so the caller falls back to a default texture. (Mirrors the renderercommon fix.)
+	if (targa_header.image_type!=2
 		&& targa_header.image_type!=10
-		&& targa_header.image_type != 3 ) 
+		&& targa_header.image_type != 3 )
 	{
-		ri.Error (ERR_DROP, "LoadTGA: Only type 2 (RGB), 3 (gray), and 10 (RGB) TGA images supported\n");
+		ri.Printf( PRINT_WARNING, "LoadTGA: unsupported image_type %d in '%s' - skipping (using default texture)\n", targa_header.image_type, name );
+		ri.FS_FreeFile( buffer );
+		return;
 	}
 
 	if ( targa_header.colormap_type != 0 )
 	{
-		ri.Error( ERR_DROP, "LoadTGA: colormaps not supported\n" );
+		ri.Printf( PRINT_WARNING, "LoadTGA: colormaps not supported in '%s' - skipping (using default texture)\n", name );
+		ri.FS_FreeFile( buffer );
+		return;
 	}
 
 	if ( ( targa_header.pixel_size != 32 && targa_header.pixel_size != 24 ) && targa_header.image_type != 3 )
 	{
-		ri.Error (ERR_DROP, "LoadTGA: Only 32 or 24 bit images supported (no colormaps)\n");
+		ri.Printf( PRINT_WARNING, "LoadTGA: unsupported pixel_size %d in '%s' - skipping (using default texture)\n", targa_header.pixel_size, name );
+		ri.FS_FreeFile( buffer );
+		return;
 	}
 
 	columns = targa_header.width;

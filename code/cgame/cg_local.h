@@ -457,6 +457,7 @@ extern "C" {
     extern cvar_t *r_lerpmodels;
     extern cvar_t *cg_cameraheight;
     extern cvar_t *cg_cameradist;
+    extern cvar_t *cg_camerasideoffset; // HZM coop - third-person right-shoulder offset
     extern cvar_t *cg_cameraverticaldisplacement;
     extern cvar_t *cg_camerascale;
     extern cvar_t *cg_shadows;
@@ -513,6 +514,31 @@ extern "C" {
     //
     extern cvar_t *cg_fov;
     extern cvar_t *cg_cheats;
+    extern cvar_t *cg_adsZoom; // HZM coop - ADS view-fov multiplier (RMB held)
+    extern cvar_t *cg_adsGunZoom; // HZM coop - how much the view weapon zooms with the world in ADS (0..1)
+    extern cvar_t *cg_adsPitch; // HZM coop - ADS iron-sight pitch (deg) to align rear aperture with front sight
+    extern cvar_t *cg_adsYaw; // HZM coop - ADS iron-sight yaw (deg) to angle the gun left/right
+    extern cvar_t *cg_adsRoll; // HZM coop - ADS iron-sight roll (deg) to un-tilt the gun (standing)
+    extern cvar_t *cg_adsCrouchPitch; // HZM coop - ADS extra pitch while crouched
+    extern cvar_t *cg_adsCrouchYaw; // HZM coop - ADS extra yaw while crouched
+    extern cvar_t *cg_adsCrouchRoll; // HZM coop - ADS extra roll while crouched
+    extern cvar_t *cg_adsShiftX; // HZM coop - ADS standing horizontal screen shift (hands+gun)
+    extern cvar_t *cg_adsShiftY; // HZM coop - ADS standing vertical screen shift (hands+gun)
+    extern cvar_t *cg_adsCrouchShiftX; // HZM coop - ADS extra horizontal screen shift while crouched
+    extern cvar_t *cg_adsCrouchShiftY; // HZM coop - ADS extra vertical screen shift while crouched
+    extern cvar_t *cg_adsTune; // HZM coop - ADS tuning workbench (reticle + readout + live-dial held gun)
+    extern cvar_t *cg_adsMode; // HZM coop - ADS workbench active param (0 pitch / 1 yaw / 2 shift / 3 roll)
+    // HZM coop - baked per-gun ADS sight tune (standing values + crouch EXTRA added on top). The table
+    // (s_adsGunTune) lives in cg_modelanim.c; cg_modelanim applies pitch/yaw/roll, cg_view the screen shift.
+    typedef struct {
+        const char *name;
+        float sPitch, sYaw, sRoll, sShiftX, sShiftY;   // standing (absolute)
+        float cPitch, cYaw, cRoll, cShiftX, cShiftY;   // crouch EXTRA (added on top of standing)
+    } adsGunTune_t;
+    const adsGunTune_t *CG_FindAdsTune(const char *wpn);
+    extern cvar_t *cg_adsUp;      // HZM coop - ADS weapon raise (units)
+    extern cvar_t *cg_adsForward; // HZM coop - ADS weapon forward/back (units)
+    extern cvar_t *cg_adsRight;   // HZM coop - ADS weapon right/left (units)
 
     //
     // cg_main.c
@@ -607,6 +633,15 @@ extern "C" {
     void  CG_AddLightShow();
     qboolean CG_FrustumCullSphere(const vec3_t vPos, float fRadius);
     void  CG_OffsetFirstPersonView(refEntity_t *pREnt, qboolean bUseWorldPosition);
+    qboolean CG_AimingDownSights(void); // HZM coop - RMB-held iron-sight ADS gate (zoom + 3rd->1st person)
+    void  CG_AddSuppression(float amount); // HZM coop - bump the under-fire suppression FX (near-miss zings / hits)
+    void  CG_AddHeat(float amount); // HZM coop - bump the heat-haze shimmer FX (nearby explosions)
+    void  CG_AddMuzzleHeat(float amount); // HZM coop - bump the LOCALIZED gun-muzzle heat shimmer (gunfire)
+    void  CG_AddCoopDynamicLight(const vec3_t org, float r, float g, float b, float radius, int life_ms); // HZM coop - push a transient dlight (muzzle/explosion)
+    void  CG_AddCoopDynamicLights(void); // HZM coop - per-frame: re-add the live transient dlights
+    void  CG_UpdateEnvReverb(void); // HZM coop - per-frame: auto reverb from indoor/outdoor up-trace
+    qboolean CG_GetBreathState(float *outFrac, qboolean *outCooldown); // HZM coop - hold-breath HUD info
+    qboolean CG_GetFreeAim(float *outYaw, float *outPitch); // HZM coop - free-aim deadzone offset (degrees)
     void  CG_DrawActiveFrame(int serverTime, int frameTime, stereoFrame_t stereoView, qboolean demoPlayback);
 
     //
@@ -865,6 +900,7 @@ extern "C" {
     //
     void CG_Emitter(centity_t *cent);
     void CG_Rain(centity_t *cent);
+    void CG_RainGlobal(void); // HZM coop - brush-less, sky-gated dynamic rain/snow (any map, dry interiors)
 
     //
     // cg_testemitter.cpp

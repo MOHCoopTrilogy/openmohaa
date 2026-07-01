@@ -1283,6 +1283,7 @@ bool ProjectileGenerator_Gun::Attack(int count)
             &iTracerCount,
             m_fBulletThroughWood,
             m_fBulletThroughMetal,
+            0,
             NULL,
             m_fTracerSpeed
         );

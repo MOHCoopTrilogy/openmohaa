@@ -436,6 +436,8 @@ qboolean S_LoadSound(const char *fileName, sfx_t *sfx, int streamed, qboolean fo
     char         tempName[MAX_RES_NAME + 1];
     int          realKhz;
 
+    Com_Printf("^E3DBG S_LoadSound ENTER file='%s' streamed=%i force=%i\n", fileName ? fileName : "(null)", streamed, force_load);
+
     sfx->buffer = 0;
 
     if (fileName[0] == '*') {
@@ -460,6 +462,7 @@ qboolean S_LoadSound(const char *fileName, sfx_t *sfx, int streamed, qboolean fo
     }
 
     size = FS_FOpenFileRead(fileName, &file_handle, qfalse, qtrue);
+    Com_Printf("^E3DBG S_LoadSound '%s' fileSize=%i\n", fileName, size);
     if (size <= 0) {
         if (file_handle) {
             FS_FCloseFile(file_handle);
@@ -471,7 +474,9 @@ qboolean S_LoadSound(const char *fileName, sfx_t *sfx, int streamed, qboolean fo
 
     FS_Read(sfx->data, size, file_handle);
     FS_FCloseFile(file_handle);
+    Com_Printf("^E3DBG S_LoadSound BEFORE GetWavinfo '%s' size=%i\n", fileName, size);
     sfx->info = GetWavinfo(fileName, sfx->data, size);
+    Com_Printf("^E3DBG S_LoadSound AFTER GetWavinfo '%s' rate=%i width=%i ch=%i samples=%i dataofs=%i datasize=%i\n", fileName, sfx->info.rate, sfx->info.width, sfx->info.channels, sfx->info.samples, sfx->info.dataofs, sfx->info.datasize);
 
     if (sfx->info.channels != 1 && !streamed) {
         Com_Printf("%s is a stereo wav file\n", fileName);

@@ -736,6 +736,8 @@ Sentient::Sentient()
     on_fire_tagnums[2]      = -1;
     attack_blocked_time     = 0;
     m_fHelmetSpeed          = 0;
+    m_fNextBloodTrailTime   = 0;            // HZM coop - blood trail
+    m_vLastBloodTrailOrigin = vec_zero;     // HZM coop - blood trail
 
     inventory.ClearObjectList();
 
@@ -1515,8 +1517,10 @@ void Sentient::ArmorDamage(Event *ev)
         G_DebugDamage(damage, this, attacker, inflictor);
     }
 
+    // COOP: same-team damage is filtered in ALL gametypes (was SP-only) so the officer's
+    // reinforcements/bodyguards can't kill each other or the officer, and coop teammates don't friendly-fire.
     if (!(flags & FL_GODMODE)
-        && ((g_gametype->integer != GT_SINGLE_PLAYER) || !(attacker) || (attacker) == this
+        && (!(attacker) || (attacker) == this
             || !(attacker->IsSubclassOfSentient()) || (attacker->m_Team != m_Team))) {
         health -= damage;
     }
@@ -1579,6 +1583,8 @@ void Sentient::ArmorDamage(Event *ev)
         // Make sure health is now 0
 
         health = 0;
+
+        DropBloodPool(); // HZM coop - leave a persistent blood pool under the body where it dies
 
         if (attacker) {
             const EntityPtr attackerPtr = attacker;
@@ -1736,12 +1742,174 @@ void Sentient::AddBloodSpurt(Vector direction)
 
         if (trace.fraction < 1) {
             Decal *decal = new Decal;
-            decal->setShader(blood_splat_name);
+            decal->setShader("coop_bloodsplat"); // our depth-biased (polygonOffset) red mark - no z-fight flicker
+            // tint the ground splat (else it renders white - same fix as the blood trail).
+            if (blood_splat_name == "greensplat.spr") {
+                decal->setColor(0.15f, 0.45f, 0.12f);
+            } else if (blood_splat_name == "bluesplat.spr") {
+                decal->setColor(0.12f, 0.20f, 0.55f);
+            } else {
+                decal->setColor(0.50f, 0.03f, 0.03f);
+            }
             decal->setOrigin(Vector(trace.endpos) + (Vector(trace.plane.normal) * 0.2f));
             decal->setDirection(trace.plane.normal);
             decal->setOrientation("random");
             decal->setRadius(blood_splat_size + G_Random(blood_splat_size));
         }
+    }
+}
+
+// HZM coop - PERSISTENT BLOOD POOL under a body where it dies. Unlike the impact splats (which the client
+// fades out in ~10s), this uses the "coop_bloodpool" decal shader, which CG_Decal renders WITHOUT the fade
+// (it lasts until the mark pool recycles it), so blood is actually there when you walk up to a corpse. Big +
+// dark crimson. coop_bloodPool = radius (0 = off). Traces to the floor under the body's centroid.
+void Sentient::DropBloodPool(void)
+{
+    static cvar_t *pBP = NULL;
+    float          rad;
+    trace_t        trace;
+    Vector         end;
+
+    if (!pBP) { pBP = gi.Cvar_Get("coop_bloodPool", "44", CVAR_ARCHIVE); }
+    rad = pBP ? pBP->value : 44.0f;
+    if (rad <= 1.0f) { return; }
+
+    // green/blue bleeders (rare) keep their tint; everyone else is a dark red pool
+    str splat = GetBloodSplatName();
+    if (!splat.length()) { return; } // this thing doesn't bleed
+
+    end = centroid - Vector(0, 0, 256);
+    trace = G_Trace(centroid, vec_zero, vec_zero, end, this, MASK_DEADSOLID, false, "DropBloodPool");
+    if (trace.fraction >= 1.0f) { return; } // no floor under the body
+
+    Decal *decal = new Decal;
+    decal->setShader("coop_bloodpool"); // distinct shader -> cgame renders it non-fading (CG_Decal)
+    if (splat == "greensplat.spr") {
+        decal->setColor(0.12f, 0.40f, 0.10f);
+    } else if (splat == "bluesplat.spr") {
+        decal->setColor(0.10f, 0.16f, 0.45f);
+    } else {
+        decal->setColor(0.34f, 0.02f, 0.02f); // dark crimson pool
+    }
+    decal->setOrigin(Vector(trace.endpos) + (Vector(trace.plane.normal) * 0.25f));
+    decal->setDirection(trace.plane.normal);
+    decal->setOrientation("random");
+    decal->setRadius(rad + G_Random(rad * 0.3f));
+}
+
+// HZM coop - BLOOD TRAIL. A wounded (health below a fraction of max) AI that is MOVING drips ground
+// blood splats behind it, reusing the engine's own feet-splat from AddBloodSpurt (floor trace + a 1-frame
+// Decal carrying the AI's GetBloodSplatName() shader; persistence is the client's auto-recycled mark pool,
+// so this is cheap and needs no cgame change). Called per-frame from Actor::Think (AI only - players are
+// not Actors). Self-throttled by time + distance so droplets are spaced along the path, not a smear.
+void Sentient::TryDropBloodTrail(void)
+{
+    cvar_t *pVar;
+    str     splat;
+    float   frac, interval, mindist, chance, sz, length;
+    trace_t trace;
+    Vector  dir, start;
+
+    if (!com_blood->integer) {
+        return;
+    }
+
+    pVar = gi.Cvar_Get("coop_bloodTrail", "1", CVAR_ARCHIVE);
+    if (!pVar->integer) {
+        return;
+    }
+
+    // alive only
+    if (health <= 0 || max_health <= 0) {
+        return;
+    }
+
+    // wounded only
+    pVar = gi.Cvar_Get("coop_bloodTrailHealthFrac", "0.5", CVAR_ARCHIVE);
+    frac = pVar->value;
+    if (frac <= 0.0f || frac > 1.0f) { frac = 0.5f; }
+    if (health > max_health * frac) {
+        return;
+    }
+
+    // time gate
+    pVar     = gi.Cvar_Get("coop_bloodTrailInterval", "0.45", CVAR_ARCHIVE);
+    interval = pVar->value;
+    if (interval < 0.1f) { interval = 0.1f; }
+    if (level.time < m_fNextBloodTrailTime) {
+        return;
+    }
+
+    // distance gate (must have travelled far enough since the last drop)
+    pVar    = gi.Cvar_Get("coop_bloodTrailDist", "56", CVAR_ARCHIVE);
+    mindist = pVar->value;
+    if ((origin - m_vLastBloodTrailOrigin).lengthSquared() < mindist * mindist) {
+        return;
+    }
+
+    // advance the gates now so a failed chance roll / missing splat doesn't retry every frame
+    m_fNextBloodTrailTime   = level.time + interval;
+    m_vLastBloodTrailOrigin = origin;
+
+    splat = GetBloodSplatName();
+    if (!splat.length()) {
+        return; // AI with no blood splat shader simply leaves no trail
+    }
+
+    pVar   = gi.Cvar_Get("coop_bloodTrailChance", "0.8", CVAR_ARCHIVE);
+    chance = pVar->value;
+    if (G_Random() > chance) {
+        return;
+    }
+
+    // trace to the floor beneath the AI (same feet-splat geometry as AddBloodSpurt)
+    start  = centroid;
+    dir    = origin - centroid;
+    dir.z -= 50;
+    dir.x += G_CRandom(12);
+    dir.y += G_CRandom(12);
+    length = dir.length();
+    dir.normalize();
+    dir = dir * (length + 16);
+
+    trace = G_Trace(start, vec_zero, vec_zero, start + dir, NULL, MASK_DEADSOLID, false, "BloodTrail");
+
+    // HZM coop - blood-trail DIAGNOSTIC (coop_bloodDebug 1). The PLAYER's splat rendered as untextured white
+    // wedges while the AI's IDENTICAL decal renders red, so log the inputs for BOTH to diff player vs AI:
+    // who dropped it, the floor-trace result, the splat shader + its image index (0/invalid would mean an
+    // unregistered shader -> white), and the geometry. Lines are ^~^~^-prefixed for qconsole.log parsing.
+    {
+        cvar_t *pDbg = gi.Cvar_Get("coop_bloodDebug", "0", CVAR_ARCHIVE);
+        if (pDbg && pDbg->integer) {
+            int imgidx = gi.imageindex(splat.c_str());
+            gi.Printf(
+                "^~^~^ BLOODTRAIL %s ent=%d splat='%s' imgidx=%d frac=%.2f norm=(%.2f %.2f %.2f) "
+                "end=(%.0f %.0f %.0f) cen=(%.0f %.0f %.0f) org=(%.0f %.0f %.0f)\n",
+                IsSubclassOfPlayer() ? "PLAYER" : "AI", entnum, splat.c_str(), imgidx, trace.fraction,
+                trace.plane.normal[0], trace.plane.normal[1], trace.plane.normal[2],
+                trace.endpos[0], trace.endpos[1], trace.endpos[2],
+                centroid[0], centroid[1], centroid[2],
+                origin[0], origin[1], origin[2]);
+        }
+    }
+
+    if (trace.fraction < 1) {
+        sz = GetBloodSplatSize();
+        Decal *decal = new Decal;
+        decal->setShader("coop_bloodsplat"); // our depth-biased (polygonOffset) red blood mark - no z-fight flicker
+        // tint the mark - without a color the grayscale splat renders WHITE (the "white squares" bug). Match
+        // the blood type: red for normal, green/blue for the special-fluid variants.
+        if (splat == "greensplat.spr") {
+            decal->setColor(0.15f, 0.45f, 0.12f);
+        } else if (splat == "bluesplat.spr") {
+            decal->setColor(0.12f, 0.20f, 0.55f);
+        } else {
+            decal->setColor(0.50f, 0.03f, 0.03f); // bloodsplat.spr -> dark blood red
+        }
+        decal->setOrigin(Vector(trace.endpos) + (Vector(trace.plane.normal) * 0.2f));
+        decal->setDirection(trace.plane.normal);
+        decal->setOrientation("random");
+        decal->setRadius((sz * 0.6f) + G_Random(sz * 0.5f)); // a touch smaller than a hit-splat
     }
 }
 
@@ -1890,7 +2058,15 @@ float Sentient::GetBloodSplatSize(void)
         m = 250;
     }
 
-    return (10 + (m - 50) / 200 * 6);
+    // HZM coop - bigger splats so blood reads at a DISTANCE (vanilla 10-16 units was a coin-sized dot,
+    // invisible past short range). Now ~20-32 units. Tunable via coop_bloodSplatScale (default 1.0).
+    {
+        static cvar_t *pBS = NULL;
+        float          s;
+        if (!pBS) { pBS = gi.Cvar_Get("coop_bloodSplatScale", "1.0", CVAR_ARCHIVE); }
+        s = (pBS && pBS->value > 0.05f) ? pBS->value : 1.0f;
+        return (20.0f + (m - 50) / 200.0f * 12.0f) * s;
+    }
 }
 
 str Sentient::GetGibName(void)

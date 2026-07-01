@@ -1826,6 +1826,24 @@ void Weapon::Shoot(Event *ev)
     }
 
     GetMuzzlePosition(pos, vBarrel, forward, right, up);
+
+    if (owner && owner->IsSubclassOfPlayer()) {
+        const char *wg = Director.GetString(GetWeaponGroup());
+        gi.Printf("COOP_BINOC_CHECK: player fired weapon, weapongroup='%s'\n", wg ? wg : "(null)");
+        if (!Q_stricmp("binoculars", wg)) {
+            trace_t trace;
+            Vector  vEnd = pos + forward * 16384.0f;
+            trace = G_Trace(pos, vec_zero, vec_zero, vEnd, owner, MASK_SHOT, qfalse, "coop_binoculars");
+            gi.Printf("COOP_BINOC_FIRE: hit (%.0f %.0f %.0f), calling binoculars_fired\n",
+                trace.endpos[0], trace.endpos[1], trace.endpos[2]);
+            Event parms(EV_Listener_ExecuteScript, 2);
+            parms.AddEntity((Entity *)owner.Pointer());
+            parms.AddVector(trace.endpos);
+            Director.ExecuteThread("coop_mod/officer.scr", "binoculars_fired", parms);
+            return;
+        }
+    }
+
     ApplyFireKickback(forward, 1000.0);
 
     if (firetype[mode] != FT_LANDMINE || CanPlaceLandmine(pos, owner)) {
@@ -1913,28 +1931,54 @@ void Weapon::Shoot(Event *ev)
                     ownerPtr                    = turretGun->GetRemoteOwner();
                 }
 
-                BulletAttack(
-                    pos,
-                    vBarrel,
-                    forward,
-                    right,
-                    up,
-                    bulletrange[mode],
-                    bulletdamage[mode],
-                    bulletlarge[mode],
-                    bulletknockback[mode],
-                    0,
-                    GetMeansOfDeath(mode),
-                    vSpread,
-                    bulletcount[mode],
-                    ownerPtr,
-                    tracerFrequency,
-                    &tracercount[mode],
-                    bulletthroughwood[mode],
-                    bulletthroughmetal[mode],
-                    this,
-                    tracerspeed[mode]
-                );
+                // HZM coop - PLAYER bullet penetration. WOOD: always punch through (g_bulletThroughWood power,
+                // since guns default to 0). ANY HARD MATERIAL (metal, grill, rock, concrete, stone, brick -
+                // anything, not just metal): rifles & MGs get a SMALL random chance per shot (g_penChance) to
+                // also penetrate it, with g_bulletThroughAny power. AI keep their own values, so cover still
+                // protects you FROM enemies.
+                {
+                    float fThroughWood  = bulletthroughwood[mode];
+                    float fThroughMetal = bulletthroughmetal[mode];
+                    float fThroughAny   = 0.0f;
+                    if (ownerPtr && ownerPtr->IsSubclassOfPlayer()) {
+                        if (fThroughWood <= 0.0f) {
+                            cvar_t *pTW = gi.Cvar_Get("g_bulletThroughWood", "100", CVAR_ARCHIVE);
+                            fThroughWood = pTW ? pTW->value : 0.0f;
+                        }
+                        if (GetWeaponClass() & (WEAPON_CLASS_RIFLE | WEAPON_CLASS_MG)) {
+                            cvar_t *pPC     = gi.Cvar_Get("g_penChance", "0.1", CVAR_ARCHIVE);
+                            float   fChance = pPC ? pPC->value : 0.0f;
+                            if (fChance > 0.0f && random() < fChance) {
+                                cvar_t *pTA = gi.Cvar_Get("g_bulletThroughAny", "70", CVAR_ARCHIVE);
+                                fThroughAny = pTA ? pTA->value : 0.0f;
+                            }
+                        }
+                    }
+
+                    BulletAttack(
+                        pos,
+                        vBarrel,
+                        forward,
+                        right,
+                        up,
+                        bulletrange[mode],
+                        bulletdamage[mode],
+                        bulletlarge[mode],
+                        bulletknockback[mode],
+                        0,
+                        GetMeansOfDeath(mode),
+                        vSpread,
+                        bulletcount[mode],
+                        ownerPtr,
+                        tracerFrequency,
+                        &tracercount[mode],
+                        fThroughWood,
+                        fThroughMetal,
+                        fThroughAny,
+                        this,
+                        tracerspeed[mode]
+                    );
+                }
             }
             break;
         case FT_FAKEBULLET:
@@ -2104,7 +2148,46 @@ void Weapon::Shoot(Event *ev)
 //======================
 //Weapon::ApplyFireKickback
 //======================
-void Weapon::ApplyFireKickback(const Vector& org, float kickback) {}
+void Weapon::ApplyFireKickback(const Vector& org, float kickback)
+{
+    // HZM coop - REAL recoil: push the firing player's VIEW up a little on each shot so the aim physically
+    // climbs and ACCUMULATES (sustained fire walks upward; you compensate by pulling down). Uses
+    // SetViewAngles - the engine's proven view-force (death cam / scripted views) - so it moves the actual
+    // aim for the local listen-server host too (a raw delta_angles nudge blipped-and-recovered invisibly).
+    // g_adsRecoilKick = degrees of climb per shot (0 = off). No auto-recover by design - it inches up.
+    Player *player;
+    cvar_t *pKick;
+    float   amt;
+    Vector  vAng;
+
+    if (!owner || !owner->IsSubclassOfPlayer()) {
+        return;
+    }
+    player = (Player *)owner.Pointer();
+
+    pKick = gi.Cvar_Get("g_adsRecoilKick", "0.5", CVAR_ARCHIVE);
+    amt   = pKick ? pKick->value : 0.0f;
+    if (amt <= 0.0f) {
+        return;
+    }
+
+    // HZM coop - HOLD BREATH reduces recoil. When the player is aiming (ADS = its own button held, or
+    // scoped sniper) AND holding the walk key (BUTTON_RUN clear = the breath-hold input, matching the cgame
+    // breath logic), scale the kick down by g_breathRecoilMult so steadying your aim also tames muzzle climb.
+    {
+        int      btn    = player->GetLastButtons();
+        qboolean aiming = (player->IsZoomed() || (btn & BUTTON_COOPADS)) ? qtrue : qfalse;
+        qboolean walk   = (btn & BUTTON_RUN) ? qfalse : qtrue;
+        if (aiming && walk) {
+            cvar_t *pBR = gi.Cvar_Get("g_breathRecoilMult", "0.4", CVAR_ARCHIVE);
+            amt *= (pBR ? pBR->value : 0.4f);
+        }
+    }
+
+    vAng    = player->GetViewAngles();
+    vAng[0] -= amt; // pitch up (negative pitch) -> the aim climbs
+    player->SetViewAngles(vAng);
+}
 
 //======================
 //Weapon::SetAimAnim

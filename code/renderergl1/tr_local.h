@@ -737,6 +737,8 @@ typedef struct {
 	int			viewportX, viewportY, viewportWidth, viewportHeight;
 	float		fovX, fovY;
 	float		projectionMatrix[16];
+	float		weaponProjectionMatrix[16];	// HZM: un-zoomed projection for the view weapon (so ADS world-zoom doesn't magnify the gun off-screen)
+	qboolean	weaponFovActive;			// HZM: when true, RF_DEPTHHACK surfaces use weaponProjectionMatrix
 	cplane_t	frustum[5];
 	vec3_t		visBounds[2];
 	float		zFar;
@@ -1405,6 +1407,41 @@ typedef struct {
 extern backEndState_t	backEnd;
 extern trGlobals_t	tr;
 extern glconfig_t	glConfig;		// outside of TR since it shouldn't be cleared during ref re-init
+extern qboolean		glPostFxProcsLoaded;	// HZM post-FX: gl1 GLSL post-process procs loaded (sdl_glimp.c)
+extern cvar_t		*r_postProcess;			// HZM post-FX: master toggle
+extern cvar_t		*r_ppPassthrough;		// HZM post-FX: Phase-0 passthrough
+extern cvar_t		*r_ppBloom;				// HZM post-FX: bloom on/off
+extern cvar_t		*r_ppBloomThreshold;	// HZM post-FX: bloom threshold
+extern cvar_t		*r_ppBloomIntensity;	// HZM post-FX: bloom intensity
+extern cvar_t		*r_ppSSAO;				// HZM post-FX: SSAO on/off
+extern cvar_t		*r_ppSSAORadius;		// HZM post-FX: SSAO radius
+extern cvar_t		*r_ppSSAOIntensity;		// HZM post-FX: SSAO intensity
+extern cvar_t		*r_ppSSAOBias;			// HZM post-FX: SSAO bias
+extern cvar_t		*r_ppSSAODepthAware;	// HZM post-FX: SSAO depth-aware (bilateral) blur
+extern cvar_t		*r_ppDoF;			// HZM post-FX: depth-of-field on/off
+extern cvar_t		*r_ppDoFFocus;		// HZM post-FX: DoF focus distance (0 = auto)
+extern cvar_t		*r_ppDoFRange;		// HZM post-FX: DoF sharp-band falloff scale
+extern cvar_t		*r_ppDoFIntensity;	// HZM post-FX: DoF max blur mix
+extern cvar_t		*r_ppTonemap;		// HZM post-FX: tonemap + color grade on/off
+extern cvar_t		*r_ppExposure;		// HZM post-FX: exposure
+extern cvar_t		*r_ppContrast;		// HZM post-FX: contrast
+extern cvar_t		*r_ppSaturation;	// HZM post-FX: saturation
+extern cvar_t		*r_ppFXAA;			// HZM post-FX: FXAA on/off
+extern cvar_t		*r_ppGrade;			// HZM post-FX: color-grade preset
+extern cvar_t		*r_ppLowHealth;		// HZM post-FX: low-health screen effect on/off
+extern cvar_t		*r_ppHealthFrac;	// HZM post-FX: health fraction (cgame-written)
+extern cvar_t		*r_ppLowHealthStart;// HZM post-FX: ramp-in threshold
+extern cvar_t		*r_ppLowHealthAmount;// HZM post-FX: max strength
+extern cvar_t		*r_ppSuppression;	// HZM post-FX: suppression (under-fire) effect on/off
+extern cvar_t		*r_ppSuppress;		// HZM post-FX: current suppression intensity 0..1 (cgame-written)
+extern cvar_t		*r_ppSuppressAmount;// HZM post-FX: max strength of the suppression effect
+extern cvar_t		*r_ppHeatHaze;		// HZM post-FX: heat-haze shimmer on/off
+extern cvar_t		*r_ppHeat;			// HZM post-FX: current heat intensity 0..1 (cgame-written)
+extern cvar_t		*r_ppHeatAmount;	// HZM post-FX: max strength of the heat-haze shimmer
+extern cvar_t		*r_ppSunShafts;		// HZM post-FX: god rays on/off
+extern cvar_t		*r_ppSunShaftIntensity;// HZM post-FX: god-rays strength
+extern cvar_t		*r_ppSunShaftDecay;	// HZM post-FX: god-rays per-step falloff
+extern cvar_t		*r_ppSunShaftThreshold;// HZM post-FX: ray source brightness threshold
 
 // These variables should live inside glConfig but can't because of
 // compatibility issues to the original ID vms.  If you release a stand-alone
@@ -1430,6 +1467,12 @@ extern cvar_t	*r_verbose;				// used for verbose debug spew
 extern cvar_t	*r_ignoreFastPath;		// allows us to ignore our Tess fast paths
 
 extern cvar_t	*r_znear;				// near Z clip plane
+extern cvar_t	*r_weaponfovx;			// HZM: un-zoomed view-weapon fov_x (set by cgame for ADS); 0 = disabled
+extern cvar_t	*r_weaponznear;			// HZM: near-clip plane for the ADS view weapon
+extern cvar_t	*r_weaponshifty;		// HZM: ADS weapon vertical screen-shift (sight align)
+extern cvar_t	*r_weaponshiftx;		// HZM: ADS weapon horizontal screen-shift (sight align)
+extern cvar_t	*r_dofBlur;			// HZM: depth-of-field strength 0..1 (cgame drives on ADS); 0 = off
+extern cvar_t	*r_dofRadius;		// HZM: depth-of-field blur kernel spread in source texels
 
 extern cvar_t	*r_stencilbits;			// number of desired stencil bits
 extern cvar_t	*r_depthbits;			// number of desired depth bits
@@ -1757,6 +1800,10 @@ void Draw_TrianglePic(const vec2_t vPoints[3], const vec2_t vTexCoords[3], qhand
 void DrawBox(float x, float y, float w, float h);
 void AddBox(float x, float y, float w, float h);
 void Set2DWindow(int x, int y, int w, int h, float left, float right, float bottom, float top, float n, float f);
+void RB_PostFxMaybeApply( void );	// HZM coop: run gl1 post-FX once per frame at the 3D->2D transition
+void R_InitGrassWorld( void );		// HZM coop: scatter 3D grass on SURF_GRASS surfaces at map load
+void R_DrawGrass( void );			// HZM coop: draw the grass blades within radius (world 3D pass)
+void R_ShutdownGrass( void );		// HZM coop: free the grass scatter set
 void RE_Scissor(int x, int y, int width, int height);
 void DrawLineLoop(const vec2_t* points, int count, int stipple_factor, int stipple_mask);
 void RE_StretchRaw(int x, int y, int w, int h, int cols, int rows, int components, const byte* data);
@@ -2447,8 +2494,12 @@ typedef enum {
 // these are sort of arbitrary limits.
 // the limits apply to the sum of all scenes in a frame --
 // the main view, all the 3D icons, etc
-#define	MAX_POLYS		4096
-#define	MAX_POLYVERTS	16384
+// HZM: raised 4x (was 4096 / 16384) to stop effects-heavy scenes (e.g. m6l1b)
+// dropping dynamic polys with the "Exceeded MAX POLYS" warning in RE_AddPolyToScene.
+// These also serve as the default for the r_maxpolys / r_maxpolyverts cvars and the
+// floor clamp in R_Init, so raising them here covers every map globally.
+#define	MAX_POLYS		16384
+#define	MAX_POLYVERTS	65536
 #define	MAX_TERMARKS	1024
 
 // all of the information needed by the back end must be

@@ -36,6 +36,7 @@ class CrateObject : public Entity
     Vector m_vJitterAngles;
     Vector m_vStartAngles;
     float  m_fJitterScale;
+    str    m_sSpawnItems;
 
 private:
     void TellNeighborsToFall(void);
@@ -48,6 +49,7 @@ public:
 
     void CrateSetup(Event *ev);
     void CrateDebrisType(Event *ev);
+    void CrateSpawnItemsEvent(Event *ev);
     void StartFalling(Event *ev);
     void CrateFalling(Event *ev);
     void CrateDamaged(Event *ev);
@@ -66,4 +68,5 @@ inline void CrateObject::Archive(Archiver& arc)
     arc.ArchiveVector(&m_vJitterAngles);
     arc.ArchiveVector(&m_vStartAngles);
     arc.ArchiveFloat(&m_fJitterScale);
+    arc.ArchiveString(&m_sSpawnItems);
 }

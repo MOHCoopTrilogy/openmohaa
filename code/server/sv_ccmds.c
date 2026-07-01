@@ -294,7 +294,11 @@ static void SV_GameMap_f( void ) {
 	Q_strncpyz( svs.gameName, "current", sizeof( svs.gameName ) );
 	Cvar_SaveGameRestart_f();
 
-	bTransition = sv.state == SS_GAME;
+	// In coop/MP mode, bsptransition/leveltransition go through gamemap with the server in
+	// SS_GAME state. The archive write+read path (SV_ArchivePersistantFile) then crashes
+	// because coop's main.scr has already populated game.Vars() before the archive reads
+	// them back. Persistant player data is only meaningful in SP campaigns; skip it for MP.
+	bTransition = sv.state == SS_GAME && g_gametype->integer == GT_SINGLE_PLAYER;
 
 	// save persistant data
 	if( bTransition ) {
@@ -1863,7 +1867,7 @@ void SV_ReloadMap_f(void)
     Q_strncpyz(svs.gameName, "current", sizeof(svs.gameName));
 	Cvar_SaveGameRestart_f();
 
-	bTransition = sv.state == SS_GAME;
+	bTransition = sv.state == SS_GAME && g_gametype->integer == GT_SINGLE_PLAYER;
 	if (bTransition) {
 		SV_ArchivePersistantFile(qfalse);
 	}

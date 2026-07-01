@@ -436,6 +436,16 @@ Set2DWindow
 */
 void Set2DWindow(int x, int y, int w, int h, float left, float right, float bottom, float top, float n, float f) {
 	R_IssuePendingRenderCommands();
+
+	// HZM coop - gl1 post-FX. The 3D scene has just been flushed to the backbuffer. If this is the
+	// frame's first 3D->2D transition, run the post-pass NOW (before any 2D/HUD draws) so SSAO/bloom
+	// process only the scene and never the HUD. This is the universal chokepoint: the cgame HUD enters
+	// 2D via re.Set2DWindow (bypassing RB_SetGL2D), so hooking here catches it too. The 2D viewport/
+	// state below is re-established afterwards, so the post-pass's GL state changes don't leak into 2D.
+	if (!backEnd.in2D) {
+		RB_PostFxMaybeApply();
+	}
+
 	qglViewport(x, y, w, h);
 	qglScissor(x, y, w, h);
 	qglMatrixMode(GL_PROJECTION);

@@ -26,6 +26,14 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 #include "../server/server.h"
 #include "snd_codec.h"
 
+#ifdef USE_INTERNAL_OPENAL_HEADERS
+#include "AL/efx-presets.h"
+#elif defined(_MSC_VER) || defined(__APPLE__)
+#include <efx-presets.h>
+#else
+#include <AL/efx-presets.h>
+#endif
+
 typedef struct {
     const char *funcname;
     void      **funcptr;
@@ -68,7 +76,53 @@ int                 s_iNumMilesAudioProviders  = 0;
 bool                s_bProvidersEmunerated     = false;
 static bool         al_initialized             = false;
 static bool         al_use_reverb              = false;
+static bool         al_use_eaxreverb           = false;
 static float        al_current_volume          = 0;
+
+// EFX function pointers — loaded at runtime via alGetProcAddress when ALC_EXT_EFX is present
+static LPALGENAUXILIARYEFFECTSLOTS   qalGenAuxiliaryEffectSlots   = NULL;
+static LPALDELETEAUXILIARYEFFECTSLOTS qalDeleteAuxiliaryEffectSlots = NULL;
+static LPALAUXILIARYEFFECTSLOTI      qalAuxiliaryEffectSloti      = NULL;
+static LPALAUXILIARYEFFECTSLOTF      qalAuxiliaryEffectSlotf      = NULL;
+static LPALGENEFFECTS                qalGenEffects                = NULL;
+static LPALDELETEEFFECTS             qalDeleteEffects             = NULL;
+static LPALEFFECTI                   qalEffecti                   = NULL;
+static LPALEFFECTF                   qalEffectf                   = NULL;
+static LPALEFFECTFV                  qalEffectfv                  = NULL;
+static LPALSOURCE3I                  qalSource3i                  = NULL;
+
+static ALuint al_efx_effect = 0;
+static ALuint al_efx_slot   = 0;
+
+// MSS reverb preset indices 0-25 mapped to EFX EAXREVERB parameters (from efx-presets.h)
+static const EFXEAXREVERBPROPERTIES al_reverb_presets[26] = {
+    /* 0  GENERIC         */ { 1.0000f,1.0000f,0.3162f,0.8913f,1.0000f, 1.49f,0.83f,1.00f,0.0500f,0.0070f,{0,0,0},1.2589f,0.0110f,{0,0,0},0.2500f,0.00f,0.25f,0.00f,0.9943f,5000.00f,250.00f,0.00f,1},
+    /* 1  PADDEDCELL      */ { 0.1715f,1.0000f,0.3162f,0.0010f,1.0000f, 0.17f,0.10f,1.00f,0.2500f,0.0010f,{0,0,0},1.2691f,0.0020f,{0,0,0},0.2500f,0.00f,0.25f,0.00f,0.9943f,5000.00f,250.00f,0.00f,1},
+    /* 2  ROOM            */ { 0.4287f,1.0000f,0.3162f,0.5929f,1.0000f, 0.40f,0.83f,1.00f,0.1503f,0.0020f,{0,0,0},1.0629f,0.0030f,{0,0,0},0.2500f,0.00f,0.25f,0.00f,0.9943f,5000.00f,250.00f,0.00f,1},
+    /* 3  BATHROOM        */ { 0.1715f,1.0000f,0.3162f,0.2512f,1.0000f, 1.49f,0.54f,1.00f,0.6531f,0.0070f,{0,0,0},3.2734f,0.0110f,{0,0,0},0.2500f,0.00f,0.25f,0.00f,0.9943f,5000.00f,250.00f,0.00f,1},
+    /* 4  LIVINGROOM      */ { 0.9766f,1.0000f,0.3162f,0.0010f,1.0000f, 0.50f,0.10f,1.00f,0.2051f,0.0030f,{0,0,0},0.2805f,0.0040f,{0,0,0},0.2500f,0.00f,0.25f,0.00f,0.9943f,5000.00f,250.00f,0.00f,1},
+    /* 5  STONEROOM       */ { 1.0000f,1.0000f,0.3162f,0.7079f,1.0000f, 2.31f,0.64f,1.00f,0.4411f,0.0120f,{0,0,0},1.1003f,0.0170f,{0,0,0},0.2500f,0.00f,0.25f,0.00f,0.9943f,5000.00f,250.00f,0.00f,1},
+    /* 6  AUDITORIUM      */ { 1.0000f,1.0000f,0.3162f,0.5781f,1.0000f, 4.32f,0.59f,1.00f,0.4032f,0.0200f,{0,0,0},0.7170f,0.0300f,{0,0,0},0.2500f,0.00f,0.25f,0.00f,0.9943f,5000.00f,250.00f,0.00f,1},
+    /* 7  CONCERTHALL     */ { 1.0000f,1.0000f,0.3162f,0.5623f,1.0000f, 3.92f,0.70f,1.00f,0.2427f,0.0200f,{0,0,0},0.9977f,0.0290f,{0,0,0},0.2500f,0.00f,0.25f,0.00f,0.9943f,5000.00f,250.00f,0.00f,1},
+    /* 8  CAVE            */ { 1.0000f,1.0000f,0.3162f,1.0000f,1.0000f, 2.91f,1.30f,1.00f,0.5000f,0.0150f,{0,0,0},0.7063f,0.0220f,{0,0,0},0.2500f,0.00f,0.25f,0.00f,0.9943f,5000.00f,250.00f,0.00f,0},
+    /* 9  ARENA           */ { 1.0000f,1.0000f,0.3162f,0.4477f,1.0000f, 7.24f,0.33f,1.00f,0.2612f,0.0200f,{0,0,0},1.0186f,0.0300f,{0,0,0},0.2500f,0.00f,0.25f,0.00f,0.9943f,5000.00f,250.00f,0.00f,1},
+    /* 10 HANGAR          */ { 1.0000f,1.0000f,0.3162f,0.3162f,1.0000f,10.05f,0.23f,1.00f,0.5000f,0.0200f,{0,0,0},1.2560f,0.0300f,{0,0,0},0.2500f,0.00f,0.25f,0.00f,0.9943f,5000.00f,250.00f,0.00f,1},
+    /* 11 CARPETEDHALLWAY */ { 0.4287f,1.0000f,0.3162f,0.0100f,1.0000f, 0.30f,0.10f,1.00f,0.1215f,0.0020f,{0,0,0},0.1531f,0.0300f,{0,0,0},0.2500f,0.00f,0.25f,0.00f,0.9943f,5000.00f,250.00f,0.00f,1},
+    /* 12 HALLWAY         */ { 0.3645f,1.0000f,0.3162f,0.7079f,1.0000f, 1.49f,0.59f,1.00f,0.2458f,0.0070f,{0,0,0},1.6615f,0.0110f,{0,0,0},0.2500f,0.00f,0.25f,0.00f,0.9943f,5000.00f,250.00f,0.00f,1},
+    /* 13 STONECORRIDOR   */ { 1.0000f,1.0000f,0.3162f,0.7612f,1.0000f, 2.70f,0.79f,1.00f,0.2472f,0.0130f,{0,0,0},1.5758f,0.0200f,{0,0,0},0.2500f,0.00f,0.25f,0.00f,0.9943f,5000.00f,250.00f,0.00f,1},
+    /* 14 ALLEY           */ { 1.0000f,0.3000f,0.3162f,0.7328f,1.0000f, 1.49f,0.86f,1.00f,0.2500f,0.0070f,{0,0,0},0.9954f,0.0110f,{0,0,0},0.1250f,0.95f,0.25f,0.00f,0.9943f,5000.00f,250.00f,0.00f,1},
+    /* 15 FOREST          */ { 1.0000f,0.3000f,0.3162f,0.0224f,1.0000f, 1.49f,0.54f,1.00f,0.0525f,0.1620f,{0,0,0},0.7682f,0.0880f,{0,0,0},0.1250f,1.00f,0.25f,0.00f,0.9943f,5000.00f,250.00f,0.00f,1},
+    /* 16 CITY            */ { 1.0000f,0.5000f,0.3162f,0.3981f,1.0000f, 1.49f,0.67f,1.00f,0.0730f,0.0070f,{0,0,0},0.1427f,0.0110f,{0,0,0},0.2500f,0.00f,0.25f,0.00f,0.9943f,5000.00f,250.00f,0.00f,1},
+    /* 17 MOUNTAINS       */ { 1.0000f,0.2700f,0.3162f,0.0562f,1.0000f, 1.49f,0.21f,1.00f,0.0407f,0.3000f,{0,0,0},0.1919f,0.1000f,{0,0,0},0.2500f,1.00f,0.25f,0.00f,0.9943f,5000.00f,250.00f,0.00f,0},
+    /* 18 QUARRY          */ { 1.0000f,1.0000f,0.3162f,0.3162f,1.0000f, 1.49f,0.83f,1.00f,0.0000f,0.0610f,{0,0,0},1.7783f,0.0250f,{0,0,0},0.1250f,0.70f,0.25f,0.00f,0.9943f,5000.00f,250.00f,0.00f,1},
+    /* 19 PLAIN           */ { 1.0000f,0.2100f,0.3162f,0.1000f,1.0000f, 1.49f,0.50f,1.00f,0.0585f,0.1790f,{0,0,0},0.1089f,0.1000f,{0,0,0},0.2500f,1.00f,0.25f,0.00f,0.9943f,5000.00f,250.00f,0.00f,1},
+    /* 20 PARKINGLOT      */ { 1.0000f,1.0000f,0.3162f,1.0000f,1.0000f, 1.65f,1.50f,1.00f,0.2082f,0.0080f,{0,0,0},0.2652f,0.0120f,{0,0,0},0.2500f,0.00f,0.25f,0.00f,0.9943f,5000.00f,250.00f,0.00f,0},
+    /* 21 SEWERPIPE       */ { 0.3071f,0.8000f,0.3162f,0.3162f,1.0000f, 2.81f,0.14f,1.00f,1.6387f,0.0140f,{0,0,0},3.2471f,0.0210f,{0,0,0},0.2500f,0.00f,0.25f,0.00f,0.9943f,5000.00f,250.00f,0.00f,1},
+    /* 22 UNDERWATER      */ { 0.3645f,1.0000f,0.3162f,0.0100f,1.0000f, 1.49f,0.10f,1.00f,0.5963f,0.0070f,{0,0,0},7.0795f,0.0110f,{0,0,0},0.2500f,0.00f,1.18f,0.35f,0.9943f,5000.00f,250.00f,0.00f,1},
+    /* 23 DRUGGED         */ { 0.4287f,0.5000f,0.3162f,1.0000f,1.0000f, 8.39f,1.39f,1.00f,0.8760f,0.0020f,{0,0,0},3.1081f,0.0300f,{0,0,0},0.2500f,0.00f,0.25f,1.00f,0.9943f,5000.00f,250.00f,0.00f,0},
+    /* 24 DIZZY           */ { 0.3645f,0.6000f,0.3162f,0.6310f,1.0000f,17.23f,0.56f,1.00f,0.1392f,0.0200f,{0,0,0},0.4937f,0.0300f,{0,0,0},0.2500f,1.00f,0.81f,0.31f,0.9943f,5000.00f,250.00f,0.00f,0},
+    /* 25 PSYCHOTIC       */ { 0.0625f,0.5000f,0.3162f,0.8404f,1.0000f, 7.56f,0.91f,1.00f,0.4864f,0.0200f,{0,0,0},2.4378f,0.0300f,{0,0,0},0.2500f,0.00f,4.00f,1.00f,0.9943f,5000.00f,250.00f,0.00f,0},
+};
 static unsigned int al_frequency               = 22050;
 static ALCcontext  *al_context_id              = NULL;
 static ALCdevice   *al_device                  = NULL;
@@ -133,6 +187,10 @@ static ALuint S_OPENAL_Format(float width, int channels);
 //
 #ifdef AL_SOFT_source_resampler
 LPALGETSTRINGISOFT qalGetStringiSOFT;
+#endif
+
+#ifdef AL_SOFT_loop_points
+static LPALBUFFERIV qalBufferiv_soft = NULL;
 #endif
 
 /*
@@ -224,6 +282,144 @@ static void S_OPENAL_NukeChannel(openal_channel *channel)
 
 /*
 ==============
+S_OPENAL_ApplyEFXPreset
+==============
+*/
+static void S_OPENAL_ApplyEFXPreset(const EFXEAXREVERBPROPERTIES *p, float level)
+{
+    if (!al_efx_effect || !qalEffecti || !qalEffectf || !qalEffectfv || !qalAuxiliaryEffectSloti) {
+        return;
+    }
+
+    if (al_use_eaxreverb) {
+        qalEffectf(al_efx_effect,  AL_EAXREVERB_DENSITY,              p->flDensity);
+        qalEffectf(al_efx_effect,  AL_EAXREVERB_DIFFUSION,            p->flDiffusion);
+        qalEffectf(al_efx_effect,  AL_EAXREVERB_GAIN,                 p->flGain * level);
+        qalEffectf(al_efx_effect,  AL_EAXREVERB_GAINHF,               p->flGainHF);
+        qalEffectf(al_efx_effect,  AL_EAXREVERB_GAINLF,               p->flGainLF);
+        qalEffectf(al_efx_effect,  AL_EAXREVERB_DECAY_TIME,           p->flDecayTime);
+        qalEffectf(al_efx_effect,  AL_EAXREVERB_DECAY_HFRATIO,        p->flDecayHFRatio);
+        qalEffectf(al_efx_effect,  AL_EAXREVERB_DECAY_LFRATIO,        p->flDecayLFRatio);
+        qalEffectf(al_efx_effect,  AL_EAXREVERB_REFLECTIONS_GAIN,     p->flReflectionsGain);
+        qalEffectf(al_efx_effect,  AL_EAXREVERB_REFLECTIONS_DELAY,    p->flReflectionsDelay);
+        qalEffectfv(al_efx_effect, AL_EAXREVERB_REFLECTIONS_PAN,      p->flReflectionsPan);
+        qalEffectf(al_efx_effect,  AL_EAXREVERB_LATE_REVERB_GAIN,     p->flLateReverbGain);
+        qalEffectf(al_efx_effect,  AL_EAXREVERB_LATE_REVERB_DELAY,    p->flLateReverbDelay);
+        qalEffectfv(al_efx_effect, AL_EAXREVERB_LATE_REVERB_PAN,      p->flLateReverbPan);
+        qalEffectf(al_efx_effect,  AL_EAXREVERB_ECHO_TIME,            p->flEchoTime);
+        qalEffectf(al_efx_effect,  AL_EAXREVERB_ECHO_DEPTH,           p->flEchoDepth);
+        qalEffectf(al_efx_effect,  AL_EAXREVERB_MODULATION_TIME,      p->flModulationTime);
+        qalEffectf(al_efx_effect,  AL_EAXREVERB_MODULATION_DEPTH,     p->flModulationDepth);
+        qalEffectf(al_efx_effect,  AL_EAXREVERB_AIR_ABSORPTION_GAINHF,p->flAirAbsorptionGainHF);
+        qalEffectf(al_efx_effect,  AL_EAXREVERB_HFREFERENCE,          p->flHFReference);
+        qalEffectf(al_efx_effect,  AL_EAXREVERB_LFREFERENCE,          p->flLFReference);
+        qalEffectf(al_efx_effect,  AL_EAXREVERB_ROOM_ROLLOFF_FACTOR,  p->flRoomRolloffFactor);
+        qalEffecti(al_efx_effect,  AL_EAXREVERB_DECAY_HFLIMIT,        p->iDecayHFLimit);
+    } else {
+        qalEffectf(al_efx_effect,  AL_REVERB_GAIN,                    p->flGain * level);
+        qalEffectf(al_efx_effect,  AL_REVERB_GAINHF,                  p->flGainHF);
+        qalEffectf(al_efx_effect,  AL_REVERB_DECAY_TIME,              p->flDecayTime);
+        qalEffectf(al_efx_effect,  AL_REVERB_DECAY_HFRATIO,           p->flDecayHFRatio);
+        qalEffectf(al_efx_effect,  AL_REVERB_REFLECTIONS_GAIN,        p->flReflectionsGain);
+        qalEffectf(al_efx_effect,  AL_REVERB_REFLECTIONS_DELAY,       p->flReflectionsDelay);
+        qalEffectf(al_efx_effect,  AL_REVERB_LATE_REVERB_GAIN,        p->flLateReverbGain);
+        qalEffectf(al_efx_effect,  AL_REVERB_LATE_REVERB_DELAY,       p->flLateReverbDelay);
+        qalEffectf(al_efx_effect,  AL_REVERB_AIR_ABSORPTION_GAINHF,   p->flAirAbsorptionGainHF);
+        qalEffectf(al_efx_effect,  AL_REVERB_ROOM_ROLLOFF_FACTOR,     p->flRoomRolloffFactor);
+        qalEffecti(al_efx_effect,  AL_REVERB_DECAY_HFLIMIT,           p->iDecayHFLimit);
+    }
+
+    qalAuxiliaryEffectSloti(al_efx_slot, AL_EFFECTSLOT_EFFECT, (ALint)al_efx_effect);
+    qalGetError();
+}
+
+/*
+==============
+S_OPENAL_InitEFX
+==============
+*/
+static bool S_OPENAL_InitEFX()
+{
+    if (!qalcIsExtensionPresent(al_device, "ALC_EXT_EFX")) {
+        return false;
+    }
+
+    qalGenAuxiliaryEffectSlots   = (LPALGENAUXILIARYEFFECTSLOTS)   qalGetProcAddress("alGenAuxiliaryEffectSlots");
+    qalDeleteAuxiliaryEffectSlots = (LPALDELETEAUXILIARYEFFECTSLOTS)qalGetProcAddress("alDeleteAuxiliaryEffectSlots");
+    qalAuxiliaryEffectSloti      = (LPALAUXILIARYEFFECTSLOTI)       qalGetProcAddress("alAuxiliaryEffectSloti");
+    qalAuxiliaryEffectSlotf      = (LPALAUXILIARYEFFECTSLOTF)       qalGetProcAddress("alAuxiliaryEffectSlotf");
+    qalGenEffects                = (LPALGENEFFECTS)                 qalGetProcAddress("alGenEffects");
+    qalDeleteEffects             = (LPALDELETEEFFECTS)              qalGetProcAddress("alDeleteEffects");
+    qalEffecti                   = (LPALEFFECTI)                    qalGetProcAddress("alEffecti");
+    qalEffectf                   = (LPALEFFECTF)                    qalGetProcAddress("alEffectf");
+    qalEffectfv                  = (LPALEFFECTFV)                   qalGetProcAddress("alEffectfv");
+    qalSource3i                  = (LPALSOURCE3I)                   qalGetProcAddress("alSource3i");
+
+    if (!qalGenAuxiliaryEffectSlots || !qalDeleteAuxiliaryEffectSlots ||
+        !qalAuxiliaryEffectSloti    || !qalAuxiliaryEffectSlotf       ||
+        !qalGenEffects              || !qalDeleteEffects              ||
+        !qalEffecti                 || !qalEffectf                    ||
+        !qalEffectfv                || !qalSource3i) {
+        Com_Printf("OpenAL: Failed to load all EFX function pointers.\n");
+        return false;
+    }
+
+    qalGetError();
+    qalGenAuxiliaryEffectSlots(1, &al_efx_slot);
+    if (qalGetError() != AL_NO_ERROR || !al_efx_slot) {
+        Com_Printf("OpenAL: Failed to create EFX auxiliary effect slot.\n");
+        return false;
+    }
+
+    qalGenEffects(1, &al_efx_effect);
+    if (qalGetError() != AL_NO_ERROR || !al_efx_effect) {
+        qalDeleteAuxiliaryEffectSlots(1, &al_efx_slot);
+        al_efx_slot = 0;
+        Com_Printf("OpenAL: Failed to create EFX effect object.\n");
+        return false;
+    }
+
+    qalEffecti(al_efx_effect, AL_EFFECT_TYPE, AL_EFFECT_EAXREVERB);
+    if (qalGetError() == AL_NO_ERROR) {
+        al_use_eaxreverb = true;
+        Com_Printf("OpenAL: EFX EAXREVERB initialized.\n");
+    } else {
+        qalEffecti(al_efx_effect, AL_EFFECT_TYPE, AL_EFFECT_REVERB);
+        if (qalGetError() != AL_NO_ERROR) {
+            qalDeleteEffects(1, &al_efx_effect);
+            qalDeleteAuxiliaryEffectSlots(1, &al_efx_slot);
+            al_efx_effect = 0;
+            al_efx_slot   = 0;
+            Com_Printf("OpenAL: Neither EAXREVERB nor REVERB effect available.\n");
+            return false;
+        }
+        Com_Printf("OpenAL: EFX standard REVERB initialized (EAXREVERB unavailable).\n");
+    }
+
+    return true;
+}
+
+/*
+==============
+S_OPENAL_DestroyEFX
+==============
+*/
+static void S_OPENAL_DestroyEFX()
+{
+    if (al_efx_effect && qalDeleteEffects) {
+        qalDeleteEffects(1, &al_efx_effect);
+        al_efx_effect = 0;
+    }
+    if (al_efx_slot && qalDeleteAuxiliaryEffectSlots) {
+        qalDeleteAuxiliaryEffectSlots(1, &al_efx_slot);
+        al_efx_slot = 0;
+    }
+    al_use_reverb   = false;
+    al_use_eaxreverb = false;
+}
+
+/*
+==============
 S_OPENAL_NukeContext
 ==============
 */
@@ -244,6 +440,8 @@ static void S_OPENAL_NukeContext()
     }
 
     S_OPENAL_NukeBuffer(&openal.movieSFX.buffer);
+
+    S_OPENAL_DestroyEFX();
 
     if (al_context_id) {
         Com_Printf("OpenAL: Destroying context...\n");
@@ -553,6 +751,10 @@ static bool S_OPENAL_InitChannel(int idx, openal_channel *chan)
     alDieIfError();
     qalSourcei(chan->source, AL_SOURCE_RELATIVE, true);
     alDieIfError();
+    // HZM coop - gain headroom so a sound aliased with soundparms volume >1 actually amplifies past full
+    // scale (default AL_MAX_GAIN is 1.0, which clamps it). Sounds aliased at vol <=1 are unaffected.
+    qalSourcef(chan->source, AL_MAX_GAIN, 8.0f);
+    alDieIfError();
 
 #ifdef AL_SOFT_source_resampler
     qalSourcei(chan->source, AL_SOURCE_RESAMPLER_SOFT, al_resampler_index);
@@ -619,10 +821,10 @@ qboolean S_OPENAL_Init()
         return false;
     }
 
-    al_use_reverb = false;
+    al_use_reverb    = false;
+    al_use_eaxreverb = false;
     if (s_reverb->integer) {
-        STUB_DESC("reenable reverb support later.");
-
+        al_use_reverb = S_OPENAL_InitEFX();
         if (al_use_reverb) {
             S_OPENAL_SetReverb(s_iReverbType, s_fReverbLevel);
         } else {
@@ -1939,6 +2141,8 @@ static int S_OPENAL_Start3DLoopSound(
     pChan3D->fMinDist    = fMinDistance;
     pChan3D->fMaxDist    = fMaxDistance;
     pChan3D->set_3d();
+    // Volume already distance-attenuated manually above; disable AL's rolloff to avoid double-falloff.
+    qalSourcef(pChan3D->source, AL_ROLLOFF_FACTOR, 0.0f);
 
     if (!pChan3D->set_sfx(pLoopSound->pSfx)) {
         Com_DPrintf("OpenAL: Set sample error - %s\n", pLoopSound->pSfx->name);
@@ -2466,10 +2670,25 @@ S_OPENAL_reverb
 */
 static void S_OPENAL_reverb(int iChannel, int iReverbType, float fReverbLevel)
 {
-    // FIXME: Connect source to effect slot
-    //  see https://github.com/kcat/openal-soft/blob/master/examples/alreverb.c
+    openal_channel *pChan;
+    ALuint          source;
 
-    // No reverb currently.
+    if (!al_use_reverb || !al_efx_slot || !qalSource3i) {
+        return;
+    }
+
+    pChan = openal.channel[iChannel];
+    if (!pChan) {
+        return;
+    }
+    source = pChan->source;
+    if (!source) {
+        return;
+    }
+
+    // Route send 0 of this source through the global reverb slot
+    qalSource3i(source, AL_AUXILIARY_SEND_FILTER, (ALint)al_efx_slot, 0, AL_FILTER_NULL);
+    qalGetError();
 }
 
 /*
@@ -2481,13 +2700,14 @@ void S_OPENAL_SetReverb(int iType, float fLevel)
 {
     s_fReverbLevel = fLevel;
     s_iReverbType  = iType;
-    if (al_use_reverb) {
-        s_bReverbChanged = true;
+    if (!al_use_reverb || !al_efx_effect) {
+        return;
     }
-
-    // FIXME: generate effect and auxiliary effect slot
-    //  or destroy them
-    //  see https://github.com/kcat/openal-soft/blob/master/examples/alreverb.c
+    if (iType < 0 || iType >= 26) {
+        iType = 0;
+    }
+    S_OPENAL_ApplyEFXPreset(&al_reverb_presets[iType], reverb_table[iType] * fLevel);
+    s_bReverbChanged = true;
 }
 
 /*
@@ -2503,7 +2723,7 @@ void S_OPENAL_Update()
     if (cl.snap.ps.stats[STAT_CINEMATIC]) {
         S_SetGlobalAmbientVolumeLevel(0.5f);
     } else {
-        S_SetGlobalAmbientVolumeLevel(1.f);
+        S_SetGlobalAmbientVolumeLevel(s_ambientVolume->value);
     }
 
     if (paused->integer && !s_bSoundPaused) {
@@ -2910,6 +3130,28 @@ openal_channel::set_gain
 */
 void openal_channel::set_gain(float gain)
 {
+    // HZM coop - cinematic effects duck: when s_sfxduck < 1, lower EFFECT channels only. The music
+    // / stream channels (chan_song / chan_mp3 / chan_trig_music) are exempt so the soundtrack stays
+    // full while gunfire/voices/ambience recede. Effect gains are re-applied every frame by
+    // S_OPENAL_Respatialize, so this ducks already-playing sounds in real time too.
+    if (s_sfxduck && s_sfxduck->value < 1.f) {
+        qboolean bMusic = qfalse;
+        if ((void *)this == (void *)&openal.chan_mp3 || (void *)this == (void *)&openal.chan_trig_music) {
+            bMusic = qtrue;
+        } else {
+            int i;
+            for (i = 0; i < MAX_SOUNDSYSTEM_SONGS; i++) {
+                if ((void *)this == (void *)&openal.chan_song[i]) {
+                    bMusic = qtrue;
+                    break;
+                }
+            }
+        }
+        if (!bMusic) {
+            gain *= s_sfxduck->value;
+        }
+    }
+
     qalSourcef(source, AL_GAIN, gain);
     alDieIfError();
 }
@@ -2931,8 +3173,7 @@ void openal_channel::set_no_3d()
     alDieIfError();
     qalSourcei(source, AL_ROLLOFF_FACTOR, 0);
     alDieIfError();
-    qalSourcef(source, AL_GAIN, S_GetBaseVolume());
-    alDieIfError();
+    set_gain(S_GetBaseVolume()); // HZM coop - route through set_gain so s_sfxduck applies (2D/local sounds bypassed it)
 }
 
 /*
@@ -2948,10 +3189,8 @@ void openal_channel::set_3d()
     alDieIfError();
     qalSourcef(source, AL_ROLLOFF_FACTOR, 1.0f);
     alDieIfError();
-    qalSourcef(source, AL_GAIN, S_GetBaseVolume());
-    alDieIfError();
-    qalSourcei(source, AL_DISTANCE_MODEL, AL_LINEAR_DISTANCE_CLAMPED);
-    alDieIfError();
+    set_gain(S_GetBaseVolume()); // HZM coop - route through set_gain so s_sfxduck applies
+    // Context uses AL_INVERSE_DISTANCE_CLAMPED (set at init); per-source override removed.
     //
     // Added in OPM
     //
@@ -3399,8 +3638,35 @@ openal_channel::set_sample_loop_block
 */
 void openal_channel::set_sample_loop_block(S32 start_offset, S32 end_offset)
 {
-    // FIXME: unimplemented
-    STUB_DESC("sample_loop_block");
+#ifdef AL_SOFT_loop_points
+    ALuint bufid = 0;
+    qalGetSourcei(source, AL_BUFFER, (ALint *)&bufid);
+    if (!bufid) {
+        return;
+    }
+
+    ALint end = end_offset;
+    if (end < 0) {
+        // -1 means end-of-buffer; derive sample count from buffer attributes
+        ALint size = 0, bits = 0, chans = 0;
+        qalGetBufferi(bufid, AL_SIZE, &size);
+        qalGetBufferi(bufid, AL_BITS, &bits);
+        qalGetBufferi(bufid, AL_CHANNELS, &chans);
+        if (bits <= 0 || chans <= 0) {
+            return;
+        }
+        end = size / ((bits / 8) * chans);
+    }
+
+    if (!qalBufferiv_soft) {
+        qalBufferiv_soft = (LPALBUFFERIV)qalGetProcAddress("alBufferiv");
+    }
+    if (qalBufferiv_soft) {
+        ALint points[2] = {(ALint)start_offset, end};
+        qalBufferiv_soft(bufid, AL_LOOP_POINTS_SOFT, points);
+        alDieIfError();
+    }
+#endif
 }
 
 /*
@@ -4011,7 +4277,7 @@ qboolean MUSIC_PlaySong(const char *alias)
         song_channel->fade_start_time = cls.realtime;
     } else {
         song_channel->fading = FADE_NONE;
-        song_channel->set_gain(S_GetBaseVolume() * (song->volume * s_ambientVolume->value) * s_fVolumeGain);
+        song_channel->set_gain(S_GetBaseVolume() * (song->volume * s_musicVolume->value) * s_fVolumeGain);
     }
 
     song_channel->play();
@@ -4030,8 +4296,8 @@ void MUSIC_UpdateMusicVolumes()
     unsigned int current_time;
     float        new_volume, max_volume;
 
-    if (s_ambientVolume->modified || music_volume_changed) {
-        s_ambientVolume->modified = false;
+    if (s_musicVolume->modified || music_volume_changed) {
+        s_musicVolume->modified = false;
 
         for (i = 0; i < MAX_SOUNDSYSTEM_SONGS; i++) {
             if (!openal.chan_song[i].is_playing() && !openal.chan_song[i].is_paused()) {
@@ -4043,7 +4309,7 @@ void MUSIC_UpdateMusicVolumes()
             }
 
             openal.chan_song[i].set_gain(
-                S_GetBaseVolume() * (music_songs[openal.chan_song[i].song_number].volume * s_ambientVolume->value)
+                S_GetBaseVolume() * (music_songs[openal.chan_song[i].song_number].volume * s_musicVolume->value)
                 * s_fVolumeGain * music_volume
             );
         }
@@ -4056,7 +4322,7 @@ void MUSIC_UpdateMusicVolumes()
 
         switch (openal.chan_song[i].fading) {
         case fade_t::FADE_IN:
-            max_volume = music_songs[openal.chan_song[i].song_number].volume * s_ambientVolume->value;
+            max_volume = music_songs[openal.chan_song[i].song_number].volume * s_musicVolume->value;
             new_volume = (unsigned int)(cls.realtime - openal.chan_song[i].fade_start_time)
                        / (openal.chan_song[i].fade_time * 1000.f) * max_volume;
 
@@ -4068,9 +4334,10 @@ void MUSIC_UpdateMusicVolumes()
             }
             break;
         case fade_t::FADE_OUT:
-            max_volume = music_songs[openal.chan_song[i].song_number].volume * s_ambientVolume->value;
-            new_volume = (unsigned int)(cls.realtime - openal.chan_song[i].fade_start_time)
-                       / (openal.chan_song[i].fade_time * 1000.f) * max_volume;
+            max_volume = music_songs[openal.chan_song[i].song_number].volume * s_musicVolume->value;
+            new_volume = max_volume
+                       - (unsigned int)(cls.realtime - openal.chan_song[i].fade_start_time)
+                         / (openal.chan_song[i].fade_time * 1000.f) * max_volume;
 
             if (new_volume > 0) {
                 openal.chan_song[i].set_gain(S_GetBaseVolume() * (new_volume * s_fVolumeGain * music_volume));
@@ -4167,6 +4434,9 @@ void S_TriggeredMusic_SetupHandle(const char *pszName, int iLoopCount, int iOffs
     }
 
     openal.chan_trig_music.fVolume = fVolume;
+    // HZM coop - give the triggered-music source gain headroom (default AL_MAX_GAIN is 1.0) so the
+    // soundtrack can be pushed loud over the listener attenuation (s_volume^2) and a quiet master.
+    qalSourcef(openal.chan_trig_music.source, AL_MAX_GAIN, 8.0f);
     openal.chan_trig_music.set_gain(S_GetBaseVolume() * (fVolume * s_musicVolume->value) * s_fVolumeGain);
     openal.chan_trig_music.set_sample_loop_count(iLoopCount);
     openal.chan_trig_music.set_sample_offset(iOffset);
@@ -4331,7 +4601,7 @@ void S_SetupMovieAudio(const char *pszMovieName)
         }
     }
 
-    openal.chan_movie.set_gain(S_GetBaseVolume() * 1.5f);
+    openal.chan_movie.set_gain(S_GetBaseVolume() * 1.0f);
     openal.chan_movie.play();
 
     Com_DPrintf("Movie Audio setup: %s\n", filename);

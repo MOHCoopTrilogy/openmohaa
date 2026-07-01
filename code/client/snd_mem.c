@@ -123,11 +123,13 @@ static int ResampleSfx( sfx_t *sfx, int channels, int inrate, int inwidth, int s
 	int		i, j;
 	int		sample, samplefrac, fracstep;
 	int			part;
+	int		idx, maxsrc;	// HZM: source-index clamp (overrun guard)
 	sndBuffer	*chunk;
-	
+
 	stepscale = (float)inrate / dma.speed;	// this is usually 0.5, 1, or 2
 
 	outcount = samples / stepscale;
+	maxsrc = samples * channels;	// HZM: number of valid source samples; reads must stay below this
 
 	srcsample = 0;
 	samplefrac = 0;
@@ -141,10 +143,19 @@ static int ResampleSfx( sfx_t *sfx, int channels, int inrate, int inwidth, int s
 		samplefrac += fracstep;
 		for (j=0 ; j<channels ; j++)
 		{
+			// HZM: clamp the source index so the resampler never reads past the end of the
+			// input sample buffer. srcsample is advanced by fracstep and on the final
+			// iterations can reach the buffer end and overrun by up to 'channels' samples ->
+			// AV (root-caused on mono WAVs that need resampling: the m1l3c/m3l1a dog-model
+			// transitions AND e3l4's SubPen_Generator_Run.wav, both surfaced here as
+			// 0xC0000005). Repeating the last valid sample is inaudible vs. crashing.
+			idx = srcsample + j;
+			if (idx >= maxsrc) { idx = maxsrc - 1; }
+			if (idx < 0) { idx = 0; }
 			if( inwidth == 2 ) {
-				sample = ( ((short *)data)[srcsample+j] );
+				sample = ( ((short *)data)[idx] );
 			} else {
-				sample = (unsigned int)( (unsigned char)(data[srcsample+j]) - 128) << 8;
+				sample = (unsigned int)( (unsigned char)(data[idx]) - 128) << 8;
 			}
 			part = (i*channels+j)&(SND_CHUNK_SIZE-1);
 			if (part == 0) {
@@ -178,10 +189,12 @@ static int ResampleSfxRaw( short *sfx, int channels, int inrate, int inwidth, in
 	float		stepscale;
 	int			i, j;
 	int			sample, samplefrac, fracstep;
-	
+	int			idx, maxsrc;	// HZM: source-index clamp (overrun guard)
+
 	stepscale = (float)inrate / dma.speed;	// this is usually 0.5, 1, or 2
 
 	outcount = samples / stepscale;
+	maxsrc = samples * channels;	// HZM: number of valid source samples
 
 	srcsample = 0;
 	samplefrac = 0;
@@ -194,10 +207,13 @@ static int ResampleSfxRaw( short *sfx, int channels, int inrate, int inwidth, in
 		samplefrac += fracstep;
 		for (j=0 ; j<channels ; j++)
 		{
+			idx = srcsample + j;	// HZM: clamp source index (same overrun guard as ResampleSfx)
+			if (idx >= maxsrc) { idx = maxsrc - 1; }
+			if (idx < 0) { idx = 0; }
 			if( inwidth == 2 ) {
-				sample = LittleShort ( ((short *)data)[srcsample+j] );
+				sample = LittleShort ( ((short *)data)[idx] );
 			} else {
-				sample = (int)( (unsigned char)(data[srcsample+j]) - 128) << 8;
+				sample = (int)( (unsigned char)(data[idx]) - 128) << 8;
 			}
 			sfx[i*channels+j] = sample;
 		}

@@ -74,6 +74,7 @@ CG_OffsetThirdPersonView
 static void CG_OffsetThirdPersonView(void)
 {
     vec3_t        forward;
+    vec3_t        right;
     vec3_t        original_camera_position;
     vec3_t        new_vieworg;
     trace_t       trace;
@@ -134,11 +135,14 @@ static void CG_OffsetThirdPersonView(void)
 
     // Move camera back from reference point
 
-    AngleVectors(target_angles, forward, NULL, NULL);
+    AngleVectors(target_angles, forward, right, NULL);
 
     VectorMA(target_position, -cg_cameradist->value, forward, new_vieworg);
 
     new_vieworg[2] += cg_cameraverticaldisplacement->value;
+
+    // HZM coop - shift the camera to the right shoulder (over-the-shoulder third person)
+    VectorMA(new_vieworg, cg_camerasideoffset->value, right, new_vieworg);
 
     // Create a bounding box for our camera
 
@@ -182,11 +186,14 @@ static void CG_OffsetThirdPersonView(void)
             while (target_angles[PITCH] < 90) {
                 target_angles[PITCH] += 2;
 
-                AngleVectors(target_angles, forward, NULL, NULL);
+                AngleVectors(target_angles, forward, right, NULL);
 
                 VectorMA(original_camera_position, -cg_cameradist->value, forward, new_vieworg);
 
                 new_vieworg[2] += cg_cameraverticaldisplacement->value;
+
+                // HZM coop - keep the right-shoulder offset in the wall-pitch fallback too
+                VectorMA(new_vieworg, cg_camerasideoffset->value, right, new_vieworg);
 
                 CG_Trace(
                     &trace,
@@ -222,6 +229,216 @@ static void CG_OffsetThirdPersonView(void)
             }
         }
     }
+}
+
+// HZM coop - HOLD BREATH (steady aim) state. Updated each frame in CG_OffsetFirstPersonView; read by the
+// HUD via CG_GetBreathState. While ADS, holding the run/walk key (Shift / BUTTON_RUN) suppresses the ADS
+// sway for up to cg_breathHoldTime seconds, then a cg_breathCooldown-second recharge before it's usable.
+static int      s_breathRemainMs    = -1; // ms of breath left (-1 = uninitialised)
+static int      s_breathCooldownEnd = 0;  // cg.time when the recharge ends (0 = not recharging)
+static int      s_breathLastTime    = 0;  // cg.time at last update (for dt)
+static qboolean s_breathSteady      = qfalse; // is breath actively steadying THIS frame
+static qboolean s_breathWasSteady   = qfalse; // previous frame's steady state (edge-detect for sounds)
+
+// HZM coop - FREE-AIM DEADZONE state. The mouse drives the AIM (ps.viewangles) as normal, but the CAMERA is
+// held inside a small box behind the aim: s_fa* is the aim-vs-camera offset (degrees), accumulated from the
+// per-frame aim delta and clamped to the box. Set in CG_CalcViewValues; read by the crosshair + view weapon.
+static float    s_faYaw      = 0.0f, s_faPitch     = 0.0f;
+static float    s_faPrevYaw  = 0.0f, s_faPrevPitch = 0.0f;
+static qboolean s_faInit     = qfalse;
+static float    s_faCamYaw   = 0.0f, s_faCamPitch  = 0.0f; // smoothed (weighted) camera angles
+static qboolean s_faCamInit  = qfalse;
+
+// HZM coop - SUPPRESSION (under-fire) FX intensity 0..1. Bumped by CG_AddSuppression (near-miss bullet
+// zings, from cg_parsemsg.cpp) + by taking damage (in CG_CalcFov), decays each frame, published to the
+// renderer as r_ppSuppress. File-static so both CG_AddSuppression and CG_CalcFov share it.
+static float    s_coopSuppress = 0.0f;
+
+// Bump the suppression intensity (clamped to 1). Called when an enemy round cracks past the listener.
+void CG_AddSuppression(float amount)
+{
+    if (amount <= 0.0f) {
+        return;
+    }
+    s_coopSuppress += amount;
+    if (s_coopSuppress > 1.0f) {
+        s_coopSuppress = 1.0f;
+    }
+}
+
+// HZM coop - HEAT HAZE intensity 0..1. Bumped by CG_AddHeat (nearby explosions, from cg_parsemsg.cpp),
+// decays each frame, published to the renderer as r_ppHeat. Same pattern as suppression.
+static float    s_coopHeat = 0.0f;
+
+void CG_AddHeat(float amount)
+{
+    if (amount <= 0.0f) {
+        return;
+    }
+    s_coopHeat += amount;
+    if (s_coopHeat > 1.0f) {
+        s_coopHeat = 1.0f;
+    }
+}
+
+// HZM coop - LOCALIZED MUZZLE HEAT 0..1. A SEPARATE channel from s_coopHeat: gunfire bumps THIS (via
+// CG_AddMuzzleHeat from cg_parsemsg.cpp), and it's published as r_ppMuzzleHeat to drive the tight,
+// gun-anchored heat shimmer in the renderer (NOT the fullscreen explosion warp). Decays on the same fade.
+static float s_coopMuzzleHeat = 0.0f;
+
+void CG_AddMuzzleHeat(float amount)
+{
+    if (amount <= 0.0f) {
+        return;
+    }
+    // HZM coop - FLOOR, not accumulate: each shot brings the muzzle heat UP TO 'amount' (then it decays),
+    // so EVERY gun shows the same per-shot heat regardless of fire rate. The old additive version stacked
+    // fast guns (Thompson) up to max while slow guns (handgun/BAR) barely registered. coop_heatGun = the
+    // shared per-shot level for all guns.
+    if (amount > s_coopMuzzleHeat) {
+        s_coopMuzzleHeat = amount;
+    }
+    if (s_coopMuzzleHeat > 1.0f) {
+        s_coopMuzzleHeat = 1.0f;
+    }
+}
+
+// HZM coop - TRANSIENT DYNAMIC LIGHTS (muzzle flashes + explosions). A small ring buffer of short-lived
+// omni dlights; CG_AddCoopDynamicLight pushes one (origin/color/radius/life-ms), CG_AddCoopDynamicLights is
+// called once per frame during the scene build and re-adds each still-alive light via cgi.R_AddLightToScene
+// with a linear fade. Lets gunfire + blasts actually light the world. Gated by coop_dynLights.
+#define COOP_MAX_DLIGHTS 48
+typedef struct { vec3_t org; float r, g, b; float radius; int start; int life; } coopDLight_t;
+static coopDLight_t s_coopDLights[COOP_MAX_DLIGHTS];
+static int          s_coopDLightHead = 0;
+
+void CG_AddCoopDynamicLight(const vec3_t org, float r, float g, float b, float radius, int life_ms)
+{
+    coopDLight_t *dl;
+    if (life_ms <= 0 || radius <= 0.0f) {
+        return;
+    }
+    dl = &s_coopDLights[s_coopDLightHead % COOP_MAX_DLIGHTS];
+    s_coopDLightHead++;
+    VectorCopy(org, dl->org);
+    dl->r      = r;
+    dl->g      = g;
+    dl->b      = b;
+    dl->radius = radius;
+    dl->start  = cg.time;
+    dl->life   = life_ms;
+}
+
+void CG_AddCoopDynamicLights(void)
+{
+    cvar_t *pOn = cgi.Cvar_Get("coop_dynLights", "1", CVAR_ARCHIVE);
+    int     i;
+
+    if (!pOn || !pOn->integer) {
+        return;
+    }
+    for (i = 0; i < COOP_MAX_DLIGHTS; i++) {
+        coopDLight_t *dl = &s_coopDLights[i];
+        int           age;
+        float         f;
+
+        if (dl->life <= 0) {
+            continue;
+        }
+        age = cg.time - dl->start;
+        if (age < 0 || age >= dl->life) {
+            dl->life = 0; // expired
+            continue;
+        }
+        f = 1.0f - ((float)age / (float)dl->life); // linear fade out
+        cgi.R_AddLightToScene(dl->org, dl->radius * f, dl->r * f, dl->g * f, dl->b * f, 0);
+    }
+}
+
+// HZM coop - ENVIRONMENT REVERB: where the MAP authors no reverb, auto-pick one from the surroundings -
+// an up-trace tells outdoor (open sky -> dry/open) vs indoor (ceiling -> room/hall by height). Only runs
+// when coop_autoReverb is on AND the map isn't driving reverb (cg_snapshot yields to us then). Applies via
+// cgi.S_SetReverb only on a state CHANGE so the EFX isn't re-triggered every frame. Needs s_reverb 1.
+void CG_UpdateEnvReverb(void)
+{
+    static int s_lastEnvPreset = -1;
+    static int s_lastEnvTime   = 0;
+    cvar_t    *pAR = cgi.Cvar_Get("coop_autoReverb", "1", CVAR_ARCHIVE);
+    vec3_t     zero = {0.0f, 0.0f, 0.0f};
+    vec3_t     start, end;
+    trace_t    tr;
+    int        preset;
+    float      level;
+
+    if (!pAR || !pAR->integer || !cg.snap) {
+        return;
+    }
+    if (cg.snap->ps.reverb_type != eax_generic) { // a trigger_reverb / soundman zone owns it - yield
+        s_lastEnvPreset = -1;
+        return;
+    }
+    if (cg.time - s_lastEnvTime < 250) { // throttle the trace to ~4/sec
+        return;
+    }
+    s_lastEnvTime = cg.time;
+
+    VectorCopy(cg.refdef.vieworg, start);
+    end[0] = start[0];
+    end[1] = start[1];
+    end[2] = start[2] + 2048.0f;
+    cgi.CM_BoxTrace(&tr, start, end, zero, zero, 0, MASK_SOLID, qfalse);
+
+    if ((tr.surfaceFlags & SURF_SKY) || tr.fraction >= 0.999f) {
+        preset = eax_generic; level = 0.0f;                                   // open sky / no ceiling -> dry
+    } else {
+        float ceilDist = tr.fraction * 2048.0f;
+        if (ceilDist < 256.0f)      { preset = eax_room;      level = 0.30f; } // low/small room
+        else if (ceilDist < 640.0f) { preset = eax_stoneroom; level = 0.42f; } // medium room
+        else                        { preset = eax_hallway;   level = 0.52f; } // tall / large space
+    }
+
+    if (preset != s_lastEnvPreset) {
+        cgi.S_SetReverb(preset, level);
+        s_lastEnvPreset = preset;
+    }
+}
+
+// Returns the current free-aim offset (degrees) the crosshair/weapon should follow; qtrue if non-zero.
+qboolean CG_GetFreeAim(float *outYaw, float *outPitch)
+{
+    if (outYaw)   { *outYaw   = s_faYaw; }
+    if (outPitch) { *outPitch = s_faPitch; }
+    return (s_faYaw != 0.0f || s_faPitch != 0.0f) ? qtrue : qfalse;
+}
+
+// Returns breath info for the HUD. outFrac: 0..1 (breath remaining, or recharge progress while cooling
+// down). outCooldown: true while recharging.
+qboolean CG_GetBreathState(float *outFrac, qboolean *outCooldown)
+{
+    cvar_t *pHold   = cgi.Cvar_Get("cg_breathHoldTime", "7", CVAR_ARCHIVE);
+    int     iHoldMs = (int)((pHold ? pHold->value : 7.0f) * 1000.0f);
+
+    if (iHoldMs < 100) {
+        iHoldMs = 100;
+    }
+    if (outCooldown) {
+        *outCooldown = (s_breathCooldownEnd != 0) ? qtrue : qfalse;
+    }
+    if (outFrac) {
+        if (s_breathCooldownEnd != 0) {
+            cvar_t *pCool   = cgi.Cvar_Get("cg_breathCooldown", "5", CVAR_ARCHIVE);
+            int     iCoolMs = (int)((pCool ? pCool->value : 5.0f) * 1000.0f);
+            if (iCoolMs < 100) {
+                iCoolMs = 100;
+            }
+            *outFrac = 1.0f - ((float)(s_breathCooldownEnd - cg.time) / (float)iCoolMs);
+        } else {
+            *outFrac = (s_breathRemainMs < 0) ? 1.0f : ((float)s_breathRemainMs / (float)iHoldMs);
+        }
+        if (*outFrac < 0.0f) { *outFrac = 0.0f; }
+        if (*outFrac > 1.0f) { *outFrac = 1.0f; }
+    }
+    return qtrue;
 }
 
 /*
@@ -290,12 +507,17 @@ void CG_OffsetFirstPersonView(refEntity_t *pREnt, qboolean bUseWorldPosition)
                 VectorMA(origin, oHead.origin[i], mat[i], origin);
             }
 
-            if (cg_target_game >= TG_MOHTA) {
-                // Changed in 2.0
-                //  Slight less angle
-                cg.refdefViewAngles[2] += cg.predicted_player_state.fLeanAngle * 0.2;
-            } else {
-                cg.refdefViewAngles[2] += cg.predicted_player_state.fLeanAngle * 0.3;
+            {
+                // Changed in 2.0 - slightly less angle
+                float leanRoll = (cg_target_game >= TG_MOHTA) ? 0.2f : 0.3f;
+                // HZM coop - while ADS, damp the lean view-roll so the iron sights stay aligned instead of
+                // tilting off-screen (lean+ADS stays usable). cg_adsLeanRoll: 1 = full lean tilt, 0 = none
+                // while aiming (sights dead level). Live-tunable.
+                if (CG_AimingDownSights()) {
+                    cvar_t *pALR = cgi.Cvar_Get("cg_adsLeanRoll", "1.0", CVAR_ARCHIVE);
+                    leanRoll *= (pALR ? pALR->value : 0.25f);
+                }
+                cg.refdefViewAngles[2] += cg.predicted_player_state.fLeanAngle * leanRoll;
             }
         }
     } else {
@@ -374,11 +596,19 @@ void CG_OffsetFirstPersonView(refEntity_t *pREnt, qboolean bUseWorldPosition)
         VectorAdd(vStart, vEnd, origin);
 
         if (cg.predicted_player_state.fLeanAngle) {
+            // HZM coop - this is the LATERAL lean eye-shift (pivots the eye sideways). While ADS it slides
+            // the iron-sight picture off-screen, so damp it by cg_adsLeanShift (0 = sight stays centred, you
+            // still peek the world via the small roll; 1 = full lean shift). Live-tunable. Aim stays usable.
+            float fLeanAmt = cg.predicted_player_state.fLeanAngle;
+            if (CG_AimingDownSights()) {
+                cvar_t *pALS = cgi.Cvar_Get("cg_adsLeanShift", "1.0", CVAR_ARCHIVE);
+                fLeanAmt *= (pALS ? pALS->value : 0.2f);
+            }
             VectorCopy(origin, vStart);
             vStart[2] -= 28.7f;
 
             VectorSubtract(origin, vStart, vDelta);
-            RotatePointAroundVector(vEnd, vForward, vDelta, cg.predicted_player_state.fLeanAngle);
+            RotatePointAroundVector(vEnd, vForward, vDelta, fLeanAmt);
             VectorAdd(vStart, vEnd, origin);
         }
 
@@ -468,6 +698,365 @@ void CG_OffsetFirstPersonView(refEntity_t *pREnt, qboolean bUseWorldPosition)
         VectorMA(pREnt->origin, vDelta[0], mat[0], pREnt->origin);
         VectorMA(pREnt->origin, vDelta[1], mat[1], pREnt->origin);
         VectorMA(pREnt->origin, vDelta[2], mat[2], pREnt->origin);
+
+        // HZM coop - ADS SWAY + RECOIL. Both are applied to the view weapon (hands + gun) ONLY - they move
+        // the weapon model in view space, NOT the actual aim/bullet direction, so they're immersion-only and
+        // never fight the player's input. mat[0]=forward, mat[1]=left, mat[2]=up.
+        {
+            static float s_recoil   = 0.0f;  // current recoil displacement (units), decays to 0
+            static int   s_lastClip = -1;    // STAT_CLIPAMMO last frame (to detect a shot)
+            static int   s_lastWpn  = -2;    // active weapon last frame (ignore reload/switch ammo jumps)
+            cvar_t      *pSway      = cgi.Cvar_Get("cg_adsSway", "0.4", CVAR_ARCHIVE);
+            cvar_t      *pSwaySpd   = cgi.Cvar_Get("cg_adsSwaySpeed", "1.0", CVAR_ARCHIVE);
+            cvar_t      *pRecoil    = cgi.Cvar_Get("cg_adsRecoil", "0.5", CVAR_ARCHIVE);
+            qboolean     bAds       = CG_AimingDownSights();
+            int          iClip      = cg.snap ? cg.snap->ps.stats[STAT_CLIPAMMO] : 0;
+            int          iWpn       = (cg.snap && cg.snap->ps.activeItems[1] >= 0) ? cg.snap->ps.activeItems[1] : -1;
+            int          iClass     = cg.snap ? cg.snap->ps.stats[STAT_EQUIPPED_WEAPON] : 0;
+            // scoped sniper (native zoom): the gun model is hidden by the scope, so breath + sway act on the
+            // VIEW instead of the gun model. Restricted to rifles so binoculars don't trigger it.
+            qboolean     bScoped    = (cg.snap && cg.snap->ps.stats[STAT_HEALTH] > 0
+                                       && cg.snap->ps.stats[STAT_INZOOM]
+                                       && !(cg.snap->ps.pm_flags & PMF_CAMERA_VIEW)
+                                       && (iClass & WEAPON_CLASS_RIFLE)) ? qtrue : qfalse;
+            float        fClassKick = 1.0f;
+
+            // per-class recoil feel: bigger guns climb harder
+            if (iClass & WEAPON_CLASS_PISTOL)      { fClassKick = 0.6f; }
+            else if (iClass & WEAPON_CLASS_SMG)    { fClassKick = 0.85f; }
+            else if (iClass & WEAPON_CLASS_RIFLE)  { fClassKick = 1.35f; }
+            else if (iClass & WEAPON_CLASS_MG)     { fClassKick = 1.5f; }
+            else if (iClass & WEAPON_CLASS_HEAVY)  { fClassKick = 1.3f; }
+
+            // HOLD BREATH (steady aim): while ADS, holding the run/walk key (Shift / BUTTON_RUN) suppresses
+            // the sway for up to cg_breathHoldTime sec, then a cg_breathCooldown-sec recharge. Shift still
+            // walks normally when NOT aiming (we only READ the button). Timestamps use cg.time so the
+            // recharge elapses by wall-clock even if this isn't called every frame.
+            {
+                cvar_t   *pHold   = cgi.Cvar_Get("cg_breathHoldTime", "7", CVAR_ARCHIVE);
+                cvar_t   *pCool   = cgi.Cvar_Get("cg_breathCooldown", "5", CVAR_ARCHIVE);
+                int       iHoldMs = (int)((pHold ? pHold->value : 7.0f) * 1000.0f);
+                int       iCoolMs = (int)((pCool ? pCool->value : 5.0f) * 1000.0f);
+                usercmd_t bcmd;
+                qboolean  bShift;
+                int       dt;
+
+                if (iHoldMs < 100) { iHoldMs = 100; }
+                if (iCoolMs < 100) { iCoolMs = 100; }
+                if (s_breathRemainMs < 0) { s_breathRemainMs = iHoldMs; }
+
+                dt = cg.time - s_breathLastTime;
+                if (dt < 0 || dt > 500) { dt = 0; } // clamp pauses / map loads
+                s_breathLastTime = cg.time;
+
+                // BUTTON_RUN is the run/walk SPEED state, not the raw key: with default "always run" it is
+                // SET while running and CLEARED while the walk key (Shift) is held - so "Shift held" = the
+                // bit is CLEAR. Hold Shift -> walk -> hold breath (steady).
+                cgi.GetUserCmd(cgi.GetCurrentCmdNumber(), &bcmd);
+                bShift         = (bcmd.buttons & BUTTON_RUN) ? qfalse : qtrue;
+                s_breathSteady = qfalse;
+
+                if (s_breathCooldownEnd != 0) {
+                    if (cg.time >= s_breathCooldownEnd) {
+                        s_breathCooldownEnd = 0;
+                        s_breathRemainMs    = iHoldMs; // recharge complete
+                    }
+                } else if ((bAds || bScoped) && bShift && s_breathRemainMs > 0) {
+                    s_breathSteady = qtrue;
+                    s_breathRemainMs -= dt;
+                    if (s_breathRemainMs <= 0) {
+                        s_breathRemainMs    = 0;
+                        s_breathCooldownEnd = cg.time + iCoolMs; // ran out -> start recharge
+                    }
+                }
+
+                // breath SFX on the edges: inhale when you start holding, exhale when it ends (released,
+                // ran out, or left ADS). Local 2D sounds = each player only hears their own breath.
+                if (s_breathSteady && !s_breathWasSteady) {
+                    cgi.S_StartLocalSound("sound/coop_breath/breath_in.wav", qfalse);
+                } else if (!s_breathSteady && s_breathWasSteady) {
+                    cgi.S_StartLocalSound("sound/coop_breath/breath_out.wav", qfalse);
+                }
+                s_breathWasSteady = s_breathSteady;
+
+                // AUDIO DUCK: while holding breath, gently fade MUSIC + AMBIENT bed DOWN ("focus"), then
+                // restore when the breath ends. We deliberately do NOT touch s_volume (the master SFX bus) so
+                // GUNSHOTS and other effects stay at full volume - only the music/ambience recede. cg_breathDuck
+                // = ducked level (fraction of base, 1 = no duck, lower = deeper). Base captured at duck start.
+                {
+                    static float s_breathDuck = 0.0f;       // 0 = normal, 1 = fully ducked
+                    static float s_baseMus = -1.0f, s_baseAmb = -1.0f;
+                    float        duckTarget = s_breathSteady ? 1.0f : 0.0f;
+                    float        dstep      = (cg.frametime > 0) ? ((float)cg.frametime / 1000.0f) * 4.0f : 1.0f;
+
+                    if (dstep > 1.0f) { dstep = 1.0f; }
+                    s_breathDuck += (duckTarget - s_breathDuck) * dstep;
+                    if (s_breathDuck < 0.0f) { s_breathDuck = 0.0f; }
+
+                    if (s_breathDuck > 0.001f) {
+                        cvar_t *pDuck   = cgi.Cvar_Get("cg_breathDuck", "0.7", CVAR_ARCHIVE);
+                        float   duckMin = pDuck ? pDuck->value : 0.7f;
+                        float   mul;
+                        if (s_baseMus < 0.0f) { // capture base once, at duck start
+                            s_baseMus = cgi.Cvar_Get("s_musicvolume", "0.9", 0)->value;
+                            s_baseAmb = cgi.Cvar_Get("s_ambientvolume", "0.6", 0)->value;
+                        }
+                        mul = 1.0f - s_breathDuck * (1.0f - duckMin); // 1.0 -> duckMin
+                        cgi.Cvar_Set("s_musicvolume", va("%g", s_baseMus * mul));
+                        cgi.Cvar_Set("s_ambientvolume", va("%g", s_baseAmb * mul));
+                    } else if (s_baseMus >= 0.0f) { // fully recovered -> restore exact base, clear
+                        cgi.Cvar_Set("s_musicvolume", va("%g", s_baseMus));
+                        cgi.Cvar_Set("s_ambientvolume", va("%g", s_baseAmb));
+                        s_baseMus = -1.0f;
+                        s_baseAmb = -1.0f;
+                    }
+                }
+            }
+
+            // SWAY - gentle breathing drift while aiming (figure-8), UNLESS holding breath (steady)
+            if (bAds && !s_breathSteady && pSway && pSway->value > 0.0f) {
+                float fSpd = pSwaySpd ? pSwaySpd->value : 1.0f;
+                float t    = cg.time * 0.001f * fSpd;
+                VectorMA(pREnt->origin, sin(t * 1.1f) * pSway->value,        mat[1], pREnt->origin); // L/R
+                VectorMA(pREnt->origin, sin(t * 1.7f + 0.6f) * pSway->value * 0.7f, mat[2], pREnt->origin); // U/D
+            }
+
+            // SCOPE SWAY (snipers) - the gun is hidden behind the scope, so wobble the VIEW so the scope
+            // picture gently wanders; holding breath (steady) stops it (a steady shot is then dead-on).
+            // Visual only, in DEGREES (cg_scopeSway). cg_modelanim.c rebuilds the view axis from
+            // cg.refdefViewAngles right after this returns, so the change reaches the rendered scope.
+            if (bScoped && !s_breathSteady) {
+                cvar_t *pScopeSway = cgi.Cvar_Get("cg_scopeSway", "0.25", CVAR_ARCHIVE);
+                float   fMag       = pScopeSway ? pScopeSway->value : 0.25f;
+                if (fMag > 0.0f) {
+                    float fSpd = pSwaySpd ? pSwaySpd->value : 1.0f;
+                    float t    = cg.time * 0.001f * fSpd;
+                    cg.refdefViewAngles[0] += sin(t * 1.7f + 0.6f) * fMag * 0.7f; // pitch (U/D)
+                    cg.refdefViewAngles[1] += sin(t * 1.1f) * fMag;              // yaw (L/R)
+                }
+            }
+
+            // RECOIL - detect a shot as a small drop in clip ammo on the SAME weapon (ignores reloads /
+            // weapon switches), accumulate a kick (capped for sustained auto), then decay back to rest.
+            // Holding breath (steady) softens the visual kick too.
+            if (iWpn == s_lastWpn && s_lastClip >= 0 && iClip < s_lastClip && (s_lastClip - iClip) <= 4) {
+                if (bAds && pRecoil && pRecoil->value > 0.0f) {
+                    float fMax    = pRecoil->value * fClassKick * 6.0f;
+                    float fBreath = s_breathSteady ? 0.5f : 1.0f;
+                    s_recoil += pRecoil->value * fClassKick * fBreath * (float)(s_lastClip - iClip);
+                    if (s_recoil > fMax) { s_recoil = fMax; }
+                }
+            }
+            s_lastClip = iClip;
+            s_lastWpn  = iWpn;
+
+            if (s_recoil > 0.0f) {
+                // gun kicks UP (muzzle climb) and BACK toward the camera, then recovers
+                VectorMA(pREnt->origin,  s_recoil * 0.8f, mat[2], pREnt->origin); // up
+                VectorMA(pREnt->origin, -s_recoil * 0.5f, mat[0], pREnt->origin); // back toward camera
+                // framerate-independent decay back to zero
+                s_recoil -= s_recoil * (cg.frametime / 1000.0f) * 9.0f;
+                if (s_recoil < 0.002f) { s_recoil = 0.0f; }
+            }
+
+            // HZM coop - WEAPON WEIGHT / LAG. The gun TRAILS the camera when you turn, then springs back to
+            // rest, for a sense of mass. Driven by the frame-to-frame look delta (cg.refdefViewAngles); per
+            // class weight (pistols snappy, MGs heavy); reduced in ADS; skipped while scoped. VISUAL ONLY -
+            // only nudges the view-weapon origin, never aim/bullets, and eases to 0 so the resting pose (incl.
+            // the baked per-gun ADS alignment) is untouched.
+            {
+                static qboolean s_lagInit   = qfalse;
+                static float    s_prevPitch = 0.0f, s_prevYaw = 0.0f;
+                static float    s_lagX = 0.0f, s_lagY = 0.0f; // current trail offset (units): X=L/R, Y=U/D
+                cvar_t *pLag    = cgi.Cvar_Get("cg_weaponLag", "0.7", CVAR_ARCHIVE);        // units of trail / deg
+                cvar_t *pLagMax = cgi.Cvar_Get("cg_weaponLagMax", "3.5", CVAR_ARCHIVE);     // clamp (units)
+                cvar_t *pLagStf = cgi.Cvar_Get("cg_weaponLagStiffness", "7", CVAR_ARCHIVE); // spring rate (1/s)
+                cvar_t *pLagAds = cgi.Cvar_Get("cg_weaponLagADS", "0.35", CVAR_ARCHIVE);    // lag scale while ADS
+                float   fGain   = pLag ? pLag->value : 0.7f;
+                float   fMaxLag = pLagMax ? pLagMax->value : 3.5f;
+                float   fStiff  = pLagStf ? pLagStf->value : 7.0f;
+                float   fWeight = 1.0f;
+                float   dt      = (cg.frametime > 0) ? (cg.frametime / 1000.0f) : 0.0f;
+                float   dPitch, dYaw, k, tX, tY;
+
+                if (iClass & WEAPON_CLASS_PISTOL)      { fWeight = 0.55f; }
+                else if (iClass & WEAPON_CLASS_SMG)    { fWeight = 0.8f; }
+                else if (iClass & WEAPON_CLASS_RIFLE)  { fWeight = 1.1f; }
+                else if (iClass & WEAPON_CLASS_MG)     { fWeight = 1.5f; }
+                else if (iClass & WEAPON_CLASS_HEAVY)  { fWeight = 1.35f; }
+
+                if (bAds) { fGain *= (pLagAds ? pLagAds->value : 0.35f); }
+
+                dPitch = cg.refdefViewAngles[0] - s_prevPitch;
+                dYaw   = cg.refdefViewAngles[1] - s_prevYaw;
+                while (dPitch >  180.0f) { dPitch -= 360.0f; }
+                while (dPitch < -180.0f) { dPitch += 360.0f; }
+                while (dYaw   >  180.0f) { dYaw   -= 360.0f; }
+                while (dYaw   < -180.0f) { dYaw   += 360.0f; }
+                s_prevPitch = cg.refdefViewAngles[0];
+                s_prevYaw   = cg.refdefViewAngles[1];
+
+                k = fStiff * dt;
+                if (k > 1.0f) { k = 1.0f; }
+
+                if (!s_lagInit || dt <= 0.0f || fabs(dPitch) > 45.0f || fabs(dYaw) > 45.0f) {
+                    // first frame / teleport / map change: snap to rest, don't lurch
+                    s_lagInit = qtrue;
+                    s_lagX = s_lagY = 0.0f;
+                } else if (fGain > 0.0f && !bScoped) {
+                    tX = -dYaw   * fGain * fWeight; // gun trails opposite the turn
+                    tY =  dPitch * fGain * fWeight;
+                    if (tX >  fMaxLag) { tX =  fMaxLag; } else if (tX < -fMaxLag) { tX = -fMaxLag; }
+                    if (tY >  fMaxLag) { tY =  fMaxLag; } else if (tY < -fMaxLag) { tY = -fMaxLag; }
+                    s_lagX += (tX - s_lagX) * k;
+                    s_lagY += (tY - s_lagY) * k;
+                } else {
+                    s_lagX += (0.0f - s_lagX) * k; // scoped/disabled: ease out
+                    s_lagY += (0.0f - s_lagY) * k;
+                }
+
+                VectorMA(pREnt->origin, s_lagX, mat[1], pREnt->origin); // left/right trail
+                VectorMA(pREnt->origin, s_lagY, mat[2], pREnt->origin); // up/down trail
+            }
+
+            // HZM coop - FREE-AIM: shift the gun toward the off-centre reticle so the weapon visibly leads to
+            // that side as the aim drifts within the deadzone box (cg_freeAimGun = units of shift per degree).
+            {
+                cvar_t *pFAG = cgi.Cvar_Get("cg_freeAimGun", "0.18", CVAR_ARCHIVE);
+                float   fg   = pFAG ? pFAG->value : 0.18f;
+                if (fg != 0.0f) {
+                    VectorMA(pREnt->origin,  s_faYaw   * fg, mat[1], pREnt->origin); // toward reticle L/R
+                    VectorMA(pREnt->origin, -s_faPitch * fg, mat[2], pREnt->origin); // toward reticle U/D
+                }
+            }
+
+            // HZM coop - SPRINT gun-lower. While sprinting (Shift held + NOT aiming + moving forward +
+            // stamina left), lower the view weapon: a downward dip + pull BACK + slight down-tilt, plus a
+            // slow run bob, eased in/out. The "sprinting" signal is recomputed here from
+            // the same inputs the SERVER uses (TickSprint): the walk-key (BUTTON_RUN clear = Shift), NOT
+            // aiming (ADS/scope keeps breath-hold + a normal weapon), NOT the Alt walk key (BUTTON_COOPWALK),
+            // forwardmove > 0, and a client-side mirror of the stamina pool (same cvars as the server, so it
+            // tracks the listen-server host closely). VISUAL ONLY - nudges the view-weapon origin along the
+            // view basis, never aim/bullets, and eases to zero so the resting pose is preserved.
+            {
+                static qboolean s_spInit = qfalse;
+                static float    s_spEnv  = 0.0f;   // 0 = rest, 1 = fully lowered; eased in/out
+                static float    s_spStam = 9999.0f; // client mirror of the stamina pool (seconds)
+                cvar_t  *pSpOn   = cgi.Cvar_Get("coop_sprint", "1", CVAR_ARCHIVE);
+                cvar_t  *pSpStam = cgi.Cvar_Get("coop_sprintStamina", "5", CVAR_ARCHIVE);
+                cvar_t  *pSpRegen= cgi.Cvar_Get("coop_sprintRegen", "0.6", CVAR_ARCHIVE);
+                cvar_t  *pLower  = cgi.Cvar_Get("cg_sprintLower", "1", CVAR_ARCHIVE);        // 0 = off
+                cvar_t  *pLowAmt = cgi.Cvar_Get("cg_sprintLowerAmount", "3.0", CVAR_ARCHIVE);// dip (units)
+                cvar_t  *pLowBack= cgi.Cvar_Get("cg_sprintLowerBack", "1.4", CVAR_ARCHIVE);  // pull back (units)
+                cvar_t  *pLowTilt= cgi.Cvar_Get("cg_sprintLowerTilt", "1.2", CVAR_ARCHIVE);  // down-tilt (units)
+                float    fMaxStam = pSpStam ? pSpStam->value : 5.0f;
+                float    fRegen   = pSpRegen ? pSpRegen->value : 0.6f;
+                float    dt       = (cg.frametime > 0) ? (cg.frametime / 1000.0f) : 0.0f;
+                qboolean bAiming  = (bAds || bScoped) ? qtrue : qfalse;
+                qboolean bAlive   = (cg.snap && cg.snap->ps.stats[STAT_HEALTH] > 0) ? qtrue : qfalse;
+                qboolean bWantSprint = qfalse;
+                usercmd_t scmd;
+                float    fEnvTarget, k;
+
+                if (fMaxStam < 0.1f) { fMaxStam = 0.1f; }
+                if (s_spStam > fMaxStam) { s_spStam = fMaxStam; } // clamp mirror to current max
+
+                cgi.GetUserCmd(cgi.GetCurrentCmdNumber(), &scmd);
+
+                // walk-key state (Shift): BUTTON_RUN clear; Alt walk = BUTTON_COOPWALK set forces walk
+                if (pSpOn && pSpOn->value != 0.0f && bAlive && !cg.renderingThirdPerson
+                    && !(scmd.buttons & BUTTON_RUN) && !(scmd.buttons & BUTTON_COOPWALK)
+                    && !bAiming && scmd.forwardmove > 0) {
+                    bWantSprint = qtrue;
+                }
+
+                // mirror the server stamina drain/regen so the lower stops when the pool is exhausted
+                if (dt > 0.0f && dt < 0.5f) {
+                    if (bWantSprint && s_spStam > 0.0f) {
+                        s_spStam -= dt;
+                        if (s_spStam < 0.0f) { s_spStam = 0.0f; }
+                    } else if (!bWantSprint) {
+                        s_spStam += dt * fRegen;
+                        if (s_spStam > fMaxStam) { s_spStam = fMaxStam; }
+                    }
+                }
+
+                fEnvTarget = (bWantSprint && s_spStam > 0.0f) ? 1.0f : 0.0f;
+                if (!s_spInit || dt <= 0.0f || dt >= 0.5f) {
+                    s_spInit = qtrue;
+                    s_spEnv  = fEnvTarget;
+                } else {
+                    k = (fEnvTarget > s_spEnv ? 8.0f : 6.0f) * dt; // ease in a touch faster than out
+                    if (k > 1.0f) { k = 1.0f; }
+                    s_spEnv += (fEnvTarget - s_spEnv) * k;
+                }
+                if (s_spEnv < 0.0f) { s_spEnv = 0.0f; }
+                if (s_spEnv > 1.0f) { s_spEnv = 1.0f; }
+
+                if (pLower && pLower->value != 0.0f && s_spEnv > 0.001f) {
+                    float fDip  = pLowAmt ? pLowAmt->value : 3.0f;
+                    float fBack = pLowBack ? pLowBack->value : 1.4f;
+                    float fTilt = pLowTilt ? pLowTilt->value : 1.2f;
+                    // a slow run bob so the lowered gun sways with the stride
+                    float fBob  = (float)sin(cg.time * 0.001f * 8.0f) * 0.25f + 1.0f; // 0.75 .. 1.25
+
+                    VectorMA(pREnt->origin, -s_spEnv * fDip * fBob, mat[2], pREnt->origin); // dip DOWN
+                    VectorMA(pREnt->origin, -s_spEnv * fBack,       mat[0], pREnt->origin); // pull BACK
+                    VectorMA(pREnt->origin, -s_spEnv * fTilt,       mat[1], pREnt->origin); // slight side dip
+                }
+            }
+
+            // HZM coop - WEAPON COLLISION: when the muzzle is about to poke through a wall / doorframe, pull
+            // the view weapon BACK toward you and dip it DOWN so it doesn't clip into geometry (and reads as
+            // bracing the gun in tight quarters). A short forward trace from the eye along the true view dir
+            // measures the gap; the closer the wall, the more the weapon retracts, eased in (snappy) / out
+            // (softer). World-only trace (cliptoentities = false) so teammates don't trigger it. VISUAL ONLY -
+            // moves the view-weapon origin, never aim/bullets. coop_weaponCollision 0 = off; Reach = trace
+            // length (units); Back/Dip = max retract/drop at a flush wall.
+            {
+                static qboolean s_wcInit = qfalse;
+                static float    s_wcEnv  = 0.0f;   // 0 = clear, 1 = wall flush against the muzzle; eased
+                cvar_t  *pWcOn   = cgi.Cvar_Get("coop_weaponCollision", "1", CVAR_ARCHIVE);
+                cvar_t  *pWcReach= cgi.Cvar_Get("coop_weaponCollisionReach", "30", CVAR_ARCHIVE); // trace len
+                cvar_t  *pWcBack = cgi.Cvar_Get("coop_weaponCollisionBack", "9", CVAR_ARCHIVE);    // max pull-back
+                cvar_t  *pWcDip  = cgi.Cvar_Get("coop_weaponCollisionDip", "4", CVAR_ARCHIVE);     // max down-dip
+                qboolean bAlive2 = (cg.snap && cg.snap->ps.stats[STAT_HEALTH] > 0) ? qtrue : qfalse;
+                float    dt2     = (cg.frametime > 0) ? (cg.frametime / 1000.0f) : 0.0f;
+                float    fReach  = pWcReach ? pWcReach->value : 30.0f;
+                float    fTarget = 0.0f;
+
+                if (pWcOn && pWcOn->value != 0.0f && bAlive2 && !cg.renderingThirdPerson && fReach > 1.0f) {
+                    vec3_t  wcZero = {0.0f, 0.0f, 0.0f};
+                    vec3_t  wcFwd, wcEnd;
+                    trace_t wcTr;
+                    AngleVectors(cg.refdefViewAngles, wcFwd, NULL, NULL);
+                    VectorMA(origin, fReach, wcFwd, wcEnd);
+                    CG_Trace(&wcTr, origin, wcZero, wcZero, wcEnd, cg.snap->ps.clientNum,
+                             MASK_SOLID, qfalse, qfalse, "WeaponCollision");
+                    if (wcTr.fraction < 1.0f) {
+                        fTarget = 1.0f - wcTr.fraction; // closer wall -> stronger retract
+                    }
+                }
+
+                if (!s_wcInit || dt2 <= 0.0f || dt2 >= 0.5f) {
+                    s_wcInit = qtrue;
+                    s_wcEnv  = fTarget;
+                } else {
+                    float kk = (fTarget > s_wcEnv ? 16.0f : 9.0f) * dt2; // snap in fast, ease out softer
+                    if (kk > 1.0f) { kk = 1.0f; }
+                    s_wcEnv += (fTarget - s_wcEnv) * kk;
+                }
+                if (s_wcEnv < 0.0f) { s_wcEnv = 0.0f; }
+                if (s_wcEnv > 1.0f) { s_wcEnv = 1.0f; }
+
+                if (s_wcEnv > 0.001f) {
+                    float fBack = pWcBack ? pWcBack->value : 9.0f;
+                    float fDip  = pWcDip ? pWcDip->value : 4.0f;
+                    VectorMA(pREnt->origin, -s_wcEnv * fBack, mat[0], pREnt->origin); // pull BACK toward camera
+                    VectorMA(pREnt->origin, -s_wcEnv * fDip,  mat[2], pREnt->origin); // dip DOWN (muzzle drops)
+                }
+            }
+        }
     }
 
     VectorCopy(origin, cg.playerHeadPos);
@@ -482,6 +1071,33 @@ Fixed fov at intermissions, otherwise account for fov variable and zooms.
 */
 #define WAVE_AMPLITUDE 1
 #define WAVE_FREQUENCY 0.4
+
+/*
+====================
+CG_AimingDownSights
+
+HZM coop - single source of truth for "the player is aiming down the iron sights": holding the
+secondary-attack button (RMB), alive, NOT in a native scope/zoom (snipers/binoculars use STAT_INZOOM),
+and not in a camera view. Used by the ADS zoom (CG_CalcFov) and the third->first person ADS switch.
+====================
+*/
+qboolean CG_AimingDownSights(void)
+{
+    usercmd_t cmd;
+
+    if (!cg.snap || cg.snap->ps.stats[STAT_HEALTH] <= 0) {
+        return qfalse;
+    }
+    if (cg.snap->ps.stats[STAT_INZOOM]) {
+        return qfalse;
+    }
+    if (cg.snap->ps.pm_flags & PMF_CAMERA_VIEW) {
+        return qfalse;
+    }
+
+    cgi.GetUserCmd(cgi.GetCurrentCmdNumber(), &cmd);
+    return (cmd.buttons & BUTTON_COOPADS) ? qtrue : qfalse; // ADS on its own button, decoupled from secondary-fire/bash
+}
 
 static int CG_CalcFov(void)
 {
@@ -498,6 +1114,200 @@ static int CG_CalcFov(void)
         fov_x = cg.camera_fov;
     } else {
         fov_x = RAD2DEG(atan(tan(DEG2RAD(cg.camera_fov / 2.0)) * fov_ratio)) * 2.0;
+    }
+
+    // HZM coop - AIM DOWN SIGHTS. While the secondary-attack button (RMB) is held: zoom the WORLD
+    // fov (cg_adsZoom) and give the view weapon its OWN fov via r_weaponfovx (renderergl1 renders the
+    // gun with that projection). cg_adsGunZoom blends the gun between "constant size" (0, never clips)
+    // and "zooms fully with the world" (1, sights align but the rear can clip) - default ~0.5 = a
+    // closer/bigger gun. Done in cgame because the server "fov" command does not affect the live view.
+    {
+        float        fWeaponFov  = fov_x;  // un-zoomed (aspect-adjusted) fov; weapon default = world default
+        static float s_adsZoomCur = 1.0f;  // eased ADS world-zoom factor (1 = none) - smooth, not instant
+        float        fTarget      = 1.0f;
+        float        step;
+
+        // ADS is gated off while a native scope/zoom is active (snipers) - see CG_AimingDownSights.
+        if (cg_adsZoom && cg_adsZoom->value < 1.0f && cg_adsZoom->value >= 0.2f && CG_AimingDownSights()) {
+            fTarget = cg_adsZoom->value;
+            // HZM coop - holding breath (steady) zooms in slightly MORE for focus; eases back when it ends.
+            if (s_breathSteady) {
+                cvar_t *pBZ = cgi.Cvar_Get("cg_breathZoom", "0.85", CVAR_ARCHIVE);
+                fTarget *= (pBZ ? pBZ->value : 0.85f);
+            }
+        }
+        // ease toward the target so ADS zooms in QUICKLY but smoothly (no jarring instant snap)
+        step = (cg.frametime > 0) ? ((float)cg.frametime / 1000.0f) * 12.0f : 1.0f;
+        if (step > 1.0f) { step = 1.0f; }
+        s_adsZoomCur += (fTarget - s_adsZoomCur) * step;
+        if (s_adsZoomCur > fTarget - 0.003f && s_adsZoomCur < fTarget + 0.003f) {
+            s_adsZoomCur = fTarget; // settle
+        }
+
+        if (s_adsZoomCur < 0.999f) { // any zoom (including mid-transition)
+            float fGunZoom = cg_adsGunZoom ? cg_adsGunZoom->value : 0.0f;
+            if (fGunZoom < 0.0f) { fGunZoom = 0.0f; } else if (fGunZoom > 1.0f) { fGunZoom = 1.0f; }
+            // blend the weapon fov toward the (eased) zoomed world fov by fGunZoom
+            fWeaponFov = fov_x + (fov_x * s_adsZoomCur - fov_x) * fGunZoom;
+            // zoom the world by the eased factor
+            fov_x *= s_adsZoomCur;
+        }
+
+        // tell the renderer the weapon fov (== world fov when not aiming, so it uses one projection)
+        cgi.Cvar_Set("r_weaponfovx", va("%g", fWeaponFov));
+
+        // HZM coop - drive the renderer's ADS screen-shift from the cgame tune cvars. Standing uses
+        // cg_adsShiftX/Y; while crouched ADD cg_adsCrouchShiftX/Y so the whole weapon view (hands + gun)
+        // can be slid toward centre to match the standing sight picture. r_weaponshiftx/y are only
+        // consumed by the renderer during ADS, so writing them every frame is harmless.
+        {
+            const char         *adsWpn = "";
+            const adsGunTune_t *adsT;
+            float               fShiftX, fShiftY;
+
+            if (cg.snap && cg.snap->ps.activeItems[1] >= 0) {
+                adsWpn = CG_ConfigString(CS_WEAPONS + cg.snap->ps.activeItems[1]);
+            }
+            // baked per-gun shift; tune mode / un-tabled guns fall back to the global cg_adsShift* cvars
+            adsT    = (cg_adsTune && cg_adsTune->integer) ? NULL : CG_FindAdsTune(adsWpn);
+            fShiftX = adsT ? adsT->sShiftX : (cg_adsShiftX ? cg_adsShiftX->value : 0.0f);
+            fShiftY = adsT ? adsT->sShiftY : (cg_adsShiftY ? cg_adsShiftY->value : 0.0f);
+            if (cg.predicted_player_state.pm_flags & PMF_DUCKED) {
+                fShiftX += adsT ? adsT->cShiftX : (cg_adsCrouchShiftX ? cg_adsCrouchShiftX->value : 0.0f);
+                fShiftY += adsT ? adsT->cShiftY : (cg_adsCrouchShiftY ? cg_adsCrouchShiftY->value : 0.0f);
+            }
+            cgi.Cvar_Set("r_weaponshiftx", va("%g", fShiftX));
+            cgi.Cvar_Set("r_weaponshifty", va("%g", fShiftY));
+        }
+    }
+
+    // HZM coop - publish the player health fraction (0..1) to the renderer's low-health screen effect.
+    // The renderer ramps it + applies the desaturate/red-vignette; cgame just reports it each frame.
+    // Dead (health <= 0) reports 1.0 so the respawn/spectator view is never tinted.
+    {
+        int        h    = cg.snap ? cg.snap->ps.stats[STAT_HEALTH] : 0;
+        static int s_peakHealth = 0;   // highest health seen THIS life = the self-calibrating "full" mark
+        float      frac = 1.0f;
+        // Neither STAT_MAXHEALTH (hardwired 100, player.cpp:7461) nor coop_health (750) reliably equals the
+        // player's ACTUAL current max - coop spawns can be 100 / 250 / 750, and DBNO sets 9999. Dividing by
+        // a fixed 750 made "full health" read as e.g. 100/750 = 0.13 -> a permanent red filter even at full
+        // HP. Instead track the PEAK health observed this life: at full, current==peak -> frac 1 -> no red,
+        // whatever the real max is. Red only ramps once health is actually LOST. Reset on death/spectate so
+        // it recalibrates to the next spawn's full value.
+        if (h <= 0) {
+            s_peakHealth = 0;
+        } else if (h > s_peakHealth) {
+            s_peakHealth = h;
+        }
+        if (h > 0 && s_peakHealth > 0) {
+            int cur = (h > s_peakHealth) ? s_peakHealth : h;
+            frac = (float)cur / (float)s_peakHealth;
+            if (frac < 0.0f) { frac = 0.0f; } else if (frac > 1.0f) { frac = 1.0f; }
+        }
+        // DBNO carry-over: a downed player's health is reset to 100 (reads as 'full'), so force the injury to
+        // near-max while downed - the screen should be a bleeding-out haze. dbno.scr flags it per-client via
+        // coop_dbnoView (1 = down, 0 = up/revived/dead), stuffed exactly like the DBNO audio fade.
+        {
+            static cvar_t *pDbnoV = NULL;
+            if (!pDbnoV) { pDbnoV = cgi.Cvar_Get("coop_dbnoView", "0", CVAR_ARCHIVE); }
+            if (pDbnoV && pDbnoV->integer) { frac = 0.02f; }
+        }
+        cgi.Cvar_Set("r_ppHealthFrac", va("%g", frac));
+    }
+
+    // HZM coop - SUPPRESSION FX: decay s_coopSuppress each frame, spike it when the local player takes
+    // damage (health drop), and publish it to the renderer's suppression pass as r_ppSuppress. Near-miss
+    // bullet "zings" also spike it via CG_AddSuppression (cg_parsemsg.cpp). Dead players never suppress.
+    {
+        static int s_lastSuppTime   = 0;
+        static int s_lastSuppHealth  = 0;
+        int        h        = cg.snap ? cg.snap->ps.stats[STAT_HEALTH] : 0;
+        cvar_t    *pSuppMax = cgi.Cvar_Get("coop_health", "750", CVAR_ARCHIVE);
+        int        maxH     = pSuppMax ? (int)pSuppMax->value : 750; // real coop max, so the spike is proportional to the hit
+        float      dt;
+        cvar_t    *pFade = cgi.Cvar_Get("coop_suppressFade", "1.4", CVAR_ARCHIVE);
+        float      fade  = (pFade && pFade->value > 0.1f) ? pFade->value : 0.9f;
+
+        if (s_lastSuppTime == 0) { s_lastSuppTime = cg.time; }
+        dt = (cg.time - s_lastSuppTime) / 1000.0f;
+        s_lastSuppTime = cg.time;
+        if (dt < 0.0f) { dt = 0.0f; } else if (dt > 0.5f) { dt = 0.5f; }
+
+        // taking fire = a health drop since last frame; scale the spike by how big the hit was
+        if (h > 0 && maxH > 0 && s_lastSuppHealth > 0 && h < s_lastSuppHealth) {
+            float lost = (float)(s_lastSuppHealth - h) / (float)maxH;
+            CG_AddSuppression(0.25f + lost * 2.5f); // small flinch on any hit, scaled by severity (real max)
+        }
+        s_lastSuppHealth = h;
+
+        // dead / spectating: clear it so the respawn view is never tinted
+        if (h <= 0) { s_coopSuppress = 0.0f; }
+
+        s_coopSuppress -= dt / fade;
+        if (s_coopSuppress < 0.0f) { s_coopSuppress = 0.0f; }
+
+        cgi.Cvar_Set("r_ppSuppress", va("%g", s_coopSuppress));
+    }
+
+    // HZM coop - HEAT HAZE: decay s_coopHeat each frame + publish r_ppHeat (spiked near explosions via
+    // CG_AddHeat in cg_parsemsg.cpp). Eases back over coop_heatFade seconds.
+    {
+        static int s_lastHeatTime = 0;
+        float      dt2;
+        cvar_t    *pHF   = cgi.Cvar_Get("coop_heatFade", "1.3", CVAR_ARCHIVE);
+        float      hfade = (pHF && pHF->value > 0.1f) ? pHF->value : 1.3f;
+
+        if (s_lastHeatTime == 0) { s_lastHeatTime = cg.time; }
+        dt2 = (cg.time - s_lastHeatTime) / 1000.0f;
+        s_lastHeatTime = cg.time;
+        if (dt2 < 0.0f) { dt2 = 0.0f; } else if (dt2 > 0.5f) { dt2 = 0.5f; }
+
+        s_coopHeat -= dt2 / hfade;
+        if (s_coopHeat < 0.0f) { s_coopHeat = 0.0f; }
+        cgi.Cvar_Set("r_ppHeat", va("%g", s_coopHeat));
+
+        // LOCALIZED muzzle heat decays on the same fade and publishes only its INTENSITY (r_ppMuzzleHeat).
+        // The hot-spot position/size (r_ppMuzzleX/Y/Radius) are renderer-side tunable cvars - we don't write
+        // them here so the user can dial the gun hot-spot without the cgame stomping it every frame.
+        s_coopMuzzleHeat -= dt2 / hfade;
+        if (s_coopMuzzleHeat < 0.0f) { s_coopMuzzleHeat = 0.0f; }
+        cgi.Cvar_Set("r_ppMuzzleHeat", va("%g", s_coopMuzzleHeat));
+    }
+
+    // HZM coop - RAIN ON LENS: publish r_ppRainWet (0..1) to the renderer's rain-droplet pass. Wetness =
+    // how hard it's raining (networked cg.rain.density) AND whether the player is under OPEN SKY (a single
+    // up-trace; beads don't collect indoors). Eased so beads ACCUMULATE stepping into rain and DRY when you
+    // take cover. Same publish pattern as the heat/suppression bridges above.
+    {
+        static int   s_lastWetTime = 0;
+        static float s_rainWet     = 0.0f;
+        float        dtw, target = 0.0f, k;
+
+        if (s_lastWetTime == 0) { s_lastWetTime = cg.time; }
+        dtw = (cg.time - s_lastWetTime) / 1000.0f;
+        s_lastWetTime = cg.time;
+        if (dtw < 0.0f) { dtw = 0.0f; } else if (dtw > 0.5f) { dtw = 0.5f; }
+
+        // HZM coop - RAIN ONLY: the precip system drives snow AND rain (snow = slow ~150, rain = fast ~2048).
+        // Water-on-lens only makes sense for rain, so gate on speed (>800) - snow leaves the screen dry. This
+        // covers both the dynamic-weather snow and native snow maps (central_europe_winter etc.).
+        if (cg.rain.density > 0.0f && cg.rain.speed > 800.0f) {
+            trace_t trw;
+            vec3_t  vUpEnd, vZ = {0.0f, 0.0f, 0.0f};
+            VectorCopy(cg.refdef.vieworg, vUpEnd);
+            vUpEnd[2] += 4096.0f;
+            cgi.CM_BoxTrace(&trw, cg.refdef.vieworg, vUpEnd, vZ, vZ, 0, MASK_SOLID, qfalse);
+            if ((trw.surfaceFlags & SURF_SKY) || trw.fraction >= 0.999f) {
+                target = cg.rain.density * 2.5f;   // ~0.4 peak -> 1.0 (r_ppRainAmount is the final dial)
+                if (target > 1.0f) { target = 1.0f; }
+            }
+        }
+
+        // ease: wet up over ~0.6s, dry out over ~2.5s (beads linger after you reach cover)
+        k = (target > s_rainWet) ? 1.6f : 0.4f;
+        s_rainWet += (target - s_rainWet) * (1.0f - exp(-k * dtw));
+        if (s_rainWet < 0.0f) { s_rainWet = 0.0f; }
+        cgi.Cvar_Set("r_ppRainWet", va("%g", s_rainWet));
     }
 
     x = cg.refdef.width / tan(fov_x / 360 * M_PI);
@@ -588,7 +1398,155 @@ static int CG_CalcViewValues(void)
     VectorCopy(ps->origin, cg.refdef.vieworg);
     VectorCopy(ps->viewangles, cg.refdefViewAngles);
 
-    cg.refdefViewAngles[2] += ps->fLeanAngle * 0.1;
+    // HZM coop - FREE-AIM + CAMERA WEIGHT (Hell Let Loose feel). The mouse still drives the AIM
+    // (ps->viewangles) directly - bullets and the server are unchanged, aim stays responsive. What gets
+    // "weight" is the CAMERA: (1) a small deadzone box holds the view while the aim drifts a few degrees, then
+    // (2) the camera is SMOOTHED (low-passed) toward that target so the view glides with mass instead of
+    // snapping. Works in BOTH first and third person (the 3rd-person chase cam inherits cg.refdefViewAngles).
+    // Disabled in ADS / sniper scope / on a turret / camera views so precise aiming stays direct.
+    {
+        cvar_t *pFA = cgi.Cvar_Get("cg_freeAim", "1", CVAR_ARCHIVE);
+        if (pFA && pFA->value > 0.0f) {
+            cvar_t   *pBY  = cgi.Cvar_Get("cg_freeAimBoxYaw", "3", CVAR_ARCHIVE);
+            cvar_t   *pBP  = cgi.Cvar_Get("cg_freeAimBoxPitch", "2", CVAR_ARCHIVE);
+            cvar_t   *pRet = cgi.Cvar_Get("cg_freeAimReturn", "3", CVAR_ARCHIVE);
+            cvar_t   *pSm  = cgi.Cvar_Get("cg_freeAimSmooth", "10", CVAR_ARCHIVE); // camera low-pass: lower = heavier/smoother
+            float     boxY = pBY ? pBY->value : 3.0f;
+            float     boxP = pBP ? pBP->value : 2.0f;
+            float     ret  = pRet ? pRet->value : 3.0f;
+            float     sm   = pSm ? pSm->value : 10.0f;
+            float     dt   = (cg.frametime > 0) ? (cg.frametime / 1000.0f) : 0.0f;
+            usercmd_t faCmd;
+            qboolean  bActive;
+            float     dY, dP, k, tgtY, tgtP, dcy, dcp;
+
+            cgi.GetUserCmd(cgi.GetCurrentCmdNumber(), &faCmd);
+            bActive = (cg.snap->ps.stats[STAT_HEALTH] > 0 && !(ps->pm_flags & PMF_CAMERA_VIEW)
+                       && !(ps->pm_flags & PMF_TURRET) && !cg.snap->ps.stats[STAT_INZOOM]
+                       && !(faCmd.buttons & BUTTON_COOPADS))
+                          ? qtrue
+                          : qfalse;
+
+            if (!s_faInit) {
+                s_faPrevYaw   = ps->viewangles[1];
+                s_faPrevPitch = ps->viewangles[0];
+                s_faInit      = qtrue;
+            }
+            dY = ps->viewangles[1] - s_faPrevYaw;
+            dP = ps->viewangles[0] - s_faPrevPitch;
+            while (dY >  180.0f) { dY -= 360.0f; }
+            while (dY < -180.0f) { dY += 360.0f; }
+            while (dP >  180.0f) { dP -= 360.0f; }
+            while (dP < -180.0f) { dP += 360.0f; }
+            s_faPrevYaw   = ps->viewangles[1];
+            s_faPrevPitch = ps->viewangles[0];
+
+            if (bActive && fabs(dY) < 45.0f && fabs(dP) < 45.0f) {
+                s_faYaw   += dY;
+                s_faPitch += dP;
+                if (s_faYaw   >  boxY) { s_faYaw   =  boxY; } else if (s_faYaw   < -boxY) { s_faYaw   = -boxY; }
+                if (s_faPitch >  boxP) { s_faPitch =  boxP; } else if (s_faPitch < -boxP) { s_faPitch = -boxP; }
+                if (ret > 0.0f) { // gentle recenter so the aim drifts back toward centre when idle
+                    k = ret * dt;
+                    if (k > 1.0f) { k = 1.0f; }
+                    s_faYaw   -= s_faYaw * k;
+                    s_faPitch -= s_faPitch * k;
+                }
+            } else {
+                s_faYaw   = 0.0f; // inactive: no deadzone offset (direct aim for ADS/scope/turret)
+                s_faPitch = 0.0f;
+            }
+
+            // target camera = aim minus the (boxed) offset; SMOOTH the camera toward it for weight.
+            tgtY = ps->viewangles[1] - s_faYaw;
+            tgtP = ps->viewangles[0] - s_faPitch;
+            if (!s_faCamInit) {
+                s_faCamYaw   = tgtY;
+                s_faCamPitch = tgtP;
+                s_faCamInit  = qtrue;
+            }
+            dcy = tgtY - s_faCamYaw;
+            dcp = tgtP - s_faCamPitch;
+            while (dcy >  180.0f) { dcy -= 360.0f; }
+            while (dcy < -180.0f) { dcy += 360.0f; }
+            while (dcp >  180.0f) { dcp -= 360.0f; }
+            while (dcp < -180.0f) { dcp += 360.0f; }
+            // snap (no weight) when inactive or on a big jump; otherwise low-pass at the smoothing rate
+            if (!bActive || fabs(dcy) > 45.0f || fabs(dcp) > 45.0f || sm <= 0.0f) {
+                k = 1.0f;
+            } else {
+                k = sm * dt;
+                if (k > 1.0f) { k = 1.0f; }
+            }
+            s_faCamYaw   += dcy * k;
+            s_faCamPitch += dcp * k;
+
+            cg.refdefViewAngles[1] = s_faCamYaw;
+            cg.refdefViewAngles[0] = s_faCamPitch;
+        } else {
+            s_faYaw = s_faPitch = 0.0f;
+            s_faCamInit = qfalse;
+        }
+    }
+
+    // HZM coop - lean view-ROLL (the tilt). This is the FP path that actually runs (the earlier damp in
+    // CG_OffsetFirstPersonView's bUseWorldPosition branch is not the first-person path). Damp it while ADS
+    // by cg_adsLeanRoll so the sights stay level/aligned instead of tilting off. Live-tunable.
+    {
+        float fLeanRollScale = 1.0f;
+        if (CG_AimingDownSights()) {
+            cvar_t *pALR = cgi.Cvar_Get("cg_adsLeanRoll", "1.0", CVAR_ARCHIVE);
+            fLeanRollScale = pALR ? pALR->value : 0.25f;
+        }
+        cg.refdefViewAngles[2] += ps->fLeanAngle * 0.1 * fLeanRollScale;
+    }
+
+    // HZM coop - INJURED SWAY: when hurt, the view drifts in a slow, woozy figure-eight (NOT a jolt/shake).
+    // Tracks the same self-calibrating peak-health idea as the low-health vignette: below coop_injuryStart of
+    // peak HP, a gentle sine sway on roll+pitch grows as you bleed out. coop_injurySway scales the amount
+    // (degrees); 0 disables. Two detuned harmonics keep it organic rather than a clean metronome wobble.
+    {
+        static int   s_swayPeak = 0;
+        cvar_t      *pSwayAmt   = cgi.Cvar_Get("coop_injurySway", "1.0", CVAR_ARCHIVE);
+        cvar_t      *pSwayStart = cgi.Cvar_Get("coop_injuryStart", "0.5", CVAR_ARCHIVE);
+        int          h          = cg.snap ? cg.snap->ps.stats[STAT_HEALTH] : 0;
+        float        amt        = pSwayAmt ? pSwayAmt->value : 1.0f;
+
+        if (h <= 0) {
+            s_swayPeak = 0;
+        } else if (h > s_swayPeak) {
+            s_swayPeak = h;
+        }
+        if (h > 0 && s_swayPeak > 0 && amt > 0.0f) {
+            float start = pSwayStart ? pSwayStart->value : 0.5f;
+            float frac  = (float)h / (float)s_swayPeak;
+            // DBNO carry-over: a downed player's health resets to 'full', so force near-max injury AND extra
+            // wooziness (coop_dbnoSwayMult) so aiming the downed pistol is genuinely hard. dbno.scr flags it
+            // per-client via coop_dbnoView (same per-client stuff as the DBNO audio fade).
+            {
+                static cvar_t *pDbnoV = NULL, *pDbnoMul = NULL;
+                if (!pDbnoV)   { pDbnoV   = cgi.Cvar_Get("coop_dbnoView", "0", CVAR_ARCHIVE); }
+                if (!pDbnoMul) { pDbnoMul = cgi.Cvar_Get("coop_dbnoSwayMult", "1.6", CVAR_ARCHIVE); }
+                if (pDbnoV && pDbnoV->integer) {
+                    frac = 0.02f;
+                    amt *= (pDbnoMul && pDbnoMul->value > 0.0f) ? pDbnoMul->value : 1.6f;
+                }
+            }
+            if (start <= 0.0f) { start = 0.5f; }
+            if (frac < start) {
+                // the lower the HP, the WORSE it gets: accelerate the ramp (quadratic blend) so a light wound
+                // barely sways but bleeding out near death is a heavy woozy drift. ramp 0 at threshold -> 1 at death.
+                float ramp = (start - frac) / start;
+                float injury;
+                float t = cg.time * 0.001f;
+                if (ramp < 0.0f) { ramp = 0.0f; } else if (ramp > 1.0f) { ramp = 1.0f; }
+                injury = 0.30f * ramp + 0.70f * ramp * ramp;
+                // roll: up to ~2.2 deg near death; pitch: ~1.3 deg, detuned -> woozy lissajous
+                cg.refdefViewAngles[2] += (float)(sin(t * 0.95) + 0.45 * sin(t * 1.7 + 1.1)) * 2.2f * injury * amt;
+                cg.refdefViewAngles[0] += (float)(sin(t * 0.70 + 0.6)) * 1.3f * injury * amt;
+            }
+        }
+    }
 
     if (cg.snap->ps.stats[STAT_HEALTH] > 0) {
         VectorSubtract(cg.refdefViewAngles, cg.predicted_player_state.damage_angles, cg.refdefViewAngles);
@@ -632,6 +1590,7 @@ static int CG_CalcViewValues(void)
 
     // FIXME: fffx screen shake on win32 builds?
 
+
     // add error decay
     if (cg_errorDecay->value > 0) {
         int   t;
@@ -663,7 +1622,18 @@ static int CG_CalcViewValues(void)
     AnglesToAxis(SoundAngles, cg.SoundAxis);
 
     // decide on third person view
-    cg.renderingThirdPerson = cg_3rd_person->integer;
+    // HZM coop - while aiming down sights (RMB held), snap to FIRST person so the iron-sight ADS works,
+    // then back to third person on release. NO turret special-case: a mounted turret uses its bound server
+    // camera (per-gun TIKI viewOffset, weapturret.cpp), so the view comes from there - we don't override
+    // renderingThirdPerson for turrets (the 3rd-person turret experiment is fully reverted to stock).
+    {
+        static cvar_t *pDbnoV = NULL;
+        if (!pDbnoV) { pDbnoV = cgi.Cvar_Get("coop_dbnoView", "0", CVAR_ARCHIVE); }
+        cg.renderingThirdPerson = (cg_3rd_person->integer && !CG_AimingDownSights()) ? qtrue : qfalse;
+        // DBNO forces FIRST person (you're crawling / bleeding out - the downed pistol + bleed-out vignette
+        // read in 1st person). Returns to your chosen view the instant you're revived / dead / respawned.
+        if (pDbnoV && pDbnoV->integer) { cg.renderingThirdPerson = qfalse; }
+    }
 
     if (cg.renderingThirdPerson) {
         // back away from character
@@ -1016,6 +1986,8 @@ void CG_DrawActiveFrame(int serverTime, int frameTime, stereoFrame_t stereoView,
     CG_AddBulletTracers();
     CG_AddBulletImpacts();
     CG_AddBeams();
+    CG_AddCoopDynamicLights(); // HZM coop - transient muzzle/explosion dlights
+    CG_UpdateEnvReverb();       // HZM coop - auto indoor/outdoor reverb (where the map sets none)
 
     if (cg_acidtrip->integer) {
         // lol disco

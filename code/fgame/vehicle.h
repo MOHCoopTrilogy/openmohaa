@@ -96,6 +96,13 @@ public:
 
     VehicleBase(void);
     void Archive(Archiver& arc) override;
+
+    // HZM: no-op handler for actor-type BSP keys that appear on vehicle entities
+    // (e.g. vehicle_german_panzer-tank on e3l3 carries type_idle, type_attack, maxdist,
+    // etc. — keys that are Actor-only and have no meaning on a Vehicle).  Registering
+    // them here as explicit no-ops prevents any future code path from misrouting the
+    // event to an Actor-specific handler and dereferencing a NULL actor component.
+    void EventIgnoreActorKey(Event *ev);
 };
 
 inline void VehicleBase::Archive(Archiver& arc)

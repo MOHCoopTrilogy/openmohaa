@@ -431,6 +431,13 @@ static void CG_BulletTracerEffect(const vec3_t i_vStart, const vec3_t i_vEnd, in
     fTracerColor[2] = 1.f;
     fTracerColor[3] = 1.f;
 
+    // HZM coop - TRACER GLOW: thicken the (white) tracer beam so it reads as a hot glowing round and the
+    // bloom post-FX catches it harder. cg_tracerGlow scales the beam width (1 = vanilla, 0 disables boost).
+    {
+        cvar_t *pGlow = cgi.Cvar_Get("cg_tracerGlow", "1.8", CVAR_ARCHIVE);
+        if (pGlow && pGlow->value > 0.0f) { scale *= pGlow->value; }
+    }
+
     CG_CreateBeam(
         vNewStart,
         vec_zero,
@@ -500,11 +507,84 @@ static void CG_MakeBulletTracerInternal(
     float    fPitch;
     float    fZingDistA, fZingDistB, fZingDistC;
     vec3_t   vZingPosA, vZingPosB, vZingPosC;
+    float    swMuzzle = 0.0f, swImpact = 0.0f; // HZM coop - smoke-whip spawn chances (0..1)
 
     fZingDistB  = 9999.0;
     fZingDistA  = 9999.0;
     fZingDistC  = 9999.0;
     iNumImpacts = 0;
+
+    // HZM coop - SMOKE WHIPS: read the live cvars once. coop_smokeWhip is the master on/off;
+    // coop_smokeWhipMuzzle / coop_smokeWhipImpact are per-event spawn CHANCES for a subtle lingering
+    // gun-smoke wisp (SFX_COOP_GUNSMOKE) at the barrel / at bullet impacts (0 = off, 1 = every event).
+    {
+        cvar_t *pSW  = cgi.Cvar_Get("coop_smokeWhip",       "1",    CVAR_ARCHIVE);
+        cvar_t *pSWM = cgi.Cvar_Get("coop_smokeWhipMuzzle", "0.35", CVAR_ARCHIVE);
+        cvar_t *pSWI = cgi.Cvar_Get("coop_smokeWhipImpact", "0.35", CVAR_ARCHIVE);
+        if (pSW->integer) {
+            swMuzzle = pSWM->value;
+            swImpact = pSWI->value;
+        }
+    }
+
+    // muzzle smoke: once per bullet volley, at the barrel, drifting down the bullet line
+    if (swMuzzle > 0.0f && i_iNumBullets > 0 && random() < swMuzzle) {
+        vec3_t vMuzAng, vMuzDir, vMuzPos;
+        VectorSubtract(i_vEnd[0], i_vStart, vMuzDir);
+        vectoangles(vMuzDir, vMuzAng);
+        VectorCopy(i_vBarrel, vMuzPos);
+        sfxManager.MakeEffect_Angles(SFX_COOP_GUNSMOKE, vMuzPos, vMuzAng);
+    }
+
+    // HZM coop - BARREL WISP: a SHORT wisp of smoke that trails BACK off the barrel (toward the shooter)
+    // after a shot - distinct from the forward muzzle puff above. Points down the reverse of the bullet line
+    // so it reads as smoke curling off your own gun, not a plume in your face. coop_barrelSmoke = per-volley
+    // spawn chance (0 = off). The look (short/thin) is baked in models/fx/coop_barrelsmoke.tik.
+    {
+        cvar_t *pBS = cgi.Cvar_Get("coop_barrelSmoke", "0.6", CVAR_ARCHIVE);
+        if (pBS->value > 0.0f && i_iNumBullets > 0 && random() < pBS->value) {
+            vec3_t vBackDir, vBackAng, vBPos;
+            VectorSubtract(i_vStart, i_vEnd[0], vBackDir); // reverse of the bullet line = back toward the shooter
+            vectoangles(vBackDir, vBackAng);
+            VectorCopy(i_vBarrel, vBPos);
+            sfxManager.MakeEffect_Angles(SFX_COOP_BARRELSMOKE, vBPos, vBackAng);
+        }
+    }
+
+    // HZM coop - HEAT HAZE from a hot muzzle: each shot fired close to you (your own gun, or a teammate
+    // firing nearby) adds a small screen shimmer scaled by how close the barrel is. Previously only
+    // explosions did this; now gunfire does too. coop_heatGun = max per-shot strength (0 = off) - much
+    // smaller than an explosion so single shots stay subtle, but rapid/sustained fire stacks into a
+    // visible "hot barrel" haze that cg_view.c decays back. coop_heatGunRadius = how close the barrel
+    // must be to register (keeps distant gunfire from warping your screen).
+    if (i_iNumBullets > 0) {
+        cvar_t *pHG = cgi.Cvar_Get("coop_heatGun", "0.18", CVAR_ARCHIVE);
+        float   hg  = pHG ? pHG->value : 0.18f;
+        if (hg > 0.0f) {
+            cvar_t *pHGR = cgi.Cvar_Get("coop_heatGunRadius", "350", CVAR_ARCHIVE);
+            float   hgr = (pHGR && pHGR->value > 1.0f) ? pHGR->value : 350.0f;
+            vec3_t  vd;
+            float   d;
+            VectorSubtract(i_vBarrel, cg.refdef.vieworg, vd);
+            d = VectorLength(vd);
+            if (d < hgr) {
+                // LOCALIZED now: gunfire feeds the muzzle-heat channel (tight shimmer at the gun on screen),
+                // NOT the fullscreen explosion warp - so a hot barrel reads as heat rising off YOUR gun.
+                CG_AddMuzzleHeat((1.0f - (d / hgr)) * hg);
+            }
+        }
+    }
+
+    // HZM coop - DYNAMIC MUZZLE LIGHT: a brief warm flash at the barrel that lights nearby surfaces while
+    // firing (your own gun + others'). Very short life so it reads as a flicker, not a lamp. coop_muzzleLight
+    // = flash radius (0 = off). The per-frame fade + the coop_dynLights master are handled in cg_view.c.
+    if (i_iNumBullets > 0) {
+        cvar_t *pML = cgi.Cvar_Get("coop_muzzleLight", "160", CVAR_ARCHIVE);
+        float   ml  = pML ? pML->value : 160.0f;
+        if (ml > 1.0f) {
+            CG_AddCoopDynamicLight(i_vBarrel, 1.0f, 0.82f, 0.45f, ml, 55);
+        }
+    }
 
     // check to see if it starts in water
     bStartInWater = (cgi.CM_PointContents(i_vStart, 0) & CONTENTS_FLUID) != 0;
@@ -682,6 +762,13 @@ static void CG_MakeBulletTracerInternal(
                 tImpacts[iBullet].endpos, tImpacts[iBullet].plane.normal, iLarge, &tImpacts[iBullet], qfalse
             );
 
+            // HZM coop - SMOKE WHIPS: subtle smoke wisp off the impact, drifting along the surface normal
+            if (swImpact > 0.0f && random() < swImpact) {
+                vec3_t vImpAng;
+                vectoangles(tImpacts[iBullet].plane.normal, vImpAng);
+                sfxManager.MakeEffect_Angles(SFX_COOP_GUNSMOKE, tImpacts[iBullet].endpos, vImpAng);
+            }
+
             VectorSubtract(tImpacts[iBullet].endpos, cg.SoundOrg, vTmp);
             iHeadDist = VectorLength(vTmp);
 
@@ -752,10 +839,27 @@ static void CG_MakeBulletTracerInternal(
             CG_MakeBulletHole(
                 tImpacts[iBullet].endpos, tImpacts[iBullet].plane.normal, iNumImpacts, &tImpacts[iBullet], qtrue
             );
+
+            // HZM coop - SMOKE WHIPS: subtle smoke wisp off the impact (the <=2-impact path)
+            if (swImpact > 0.0f && random() < swImpact) {
+                vec3_t vImpAng;
+                vectoangles(tImpacts[iBullet].plane.normal, vImpAng);
+                sfxManager.MakeEffect_Angles(SFX_COOP_GUNSMOKE, tImpacts[iBullet].endpos, vImpAng);
+            }
         }
     }
 
     if (fZingDistA < 9999.0f) {
+        // HZM coop - SUPPRESSION: an enemy round just cracked past the listener (fZingDistA is the closest
+        // approach in units, 0..255; own outgoing shots are already excluded by the start/end-segment gate
+        // above). Spike the under-fire screen FX, strongest for the closest pass.
+        {
+            float supp = (1.0f - (fZingDistA / 255.0f)) * 0.75f;
+            if (supp > 0.0f) {
+                CG_AddSuppression(supp);
+            }
+        }
+
         if (iLarge) {
             fVolume = 1.0f;
             fPitch  = 0.8f;
@@ -1084,6 +1188,30 @@ void CG_MakeExplosionEffect(const vec3_t vPos, int iType)
     str       sMark;
     trace_t   trace;
     qhandle_t shader;
+
+    // HZM coop - HEAT HAZE: a nearby explosion spikes the screen shimmer (closer = stronger). Done at the
+    // top so it fires for every explosion type/path; cg_view.c decays it back. coop_heatRadius = max range.
+    {
+        cvar_t *pHR = cgi.Cvar_Get("coop_heatRadius", "700", CVAR_ARCHIVE);
+        float   hr  = (pHR && pHR->value > 1.0f) ? pHR->value : 700.0f;
+        vec3_t  vd;
+        float   d;
+        VectorSubtract(vPos, cg.refdef.vieworg, vd);
+        d = VectorLength(vd);
+        if (d < hr) {
+            CG_AddHeat((1.0f - (d / hr)) * 0.9f);
+        }
+    }
+
+    // HZM coop - DYNAMIC EXPLOSION LIGHT: a bright orange flash at the blast that lights the surroundings
+    // and fades over a few frames. coop_explLight = flash radius (0 = off). Fires for every explosion path.
+    {
+        cvar_t *pEL = cgi.Cvar_Get("coop_explLight", "420", CVAR_ARCHIVE);
+        float   el  = pEL ? pEL->value : 420.0f;
+        if (el > 1.0f) {
+            CG_AddCoopDynamicLight(vPos, 1.0f, 0.65f, 0.30f, el, 260);
+        }
+    }
 
     vEnd[0] = vPos[0];
     vEnd[1] = vPos[1];

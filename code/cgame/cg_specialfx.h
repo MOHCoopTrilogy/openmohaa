@@ -142,6 +142,8 @@ typedef enum {
     SFX_FOOT_SAND,
     SFX_FOOT_SNOW,
     SFX_FENCE_WOOD,
+    SFX_COOP_GUNSMOKE, // HZM coop - subtle lingering gun smoke (muzzle + bullet impact)
+    SFX_COOP_BARRELSMOKE, // HZM coop - SHORT wisp trailing back off the barrel after a shot
     SFX_TEST_EFFECT,
     SFX_COUNT
 } SpecialEffects;

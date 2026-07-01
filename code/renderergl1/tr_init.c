@@ -22,6 +22,7 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 // tr_init.c -- functions that are not called every frame
 
 #include "tr_local.h"
+#include "tr_postprocess_gl1.h"
 
 glconfig_t	glConfig;
 qboolean	textureFilterAnisotropic = qfalse;
@@ -44,6 +45,46 @@ cvar_t	*r_ignore;
 cvar_t	*r_displayRefresh;
 
 cvar_t	*r_znear;
+cvar_t	*r_weaponfovx;	// HZM: un-zoomed view-weapon fov_x (set by cgame for ADS); 0 = disabled
+cvar_t	*r_weaponznear;	// HZM: near-clip plane for the ADS view weapon (closer than world so the gun's rear isn't clipped)
+cvar_t	*r_weaponshifty;	// HZM: ADS weapon screen-space vertical shift (-up / +down) to centre the iron sights
+cvar_t	*r_weaponshiftx;	// HZM: ADS weapon screen-space horizontal shift (+right / -left)
+cvar_t	*r_postProcess;		// HZM: master toggle for the gl1 GLSL post-process layer
+cvar_t	*r_ppPassthrough;	// HZM: Phase-0 debug - run the post chain as passthrough (no effect)
+cvar_t	*r_ppBloom;			// HZM post-FX: bloom on/off
+cvar_t	*r_ppBloomThreshold;	// HZM post-FX: bloom brightness threshold (0..1)
+cvar_t	*r_ppBloomIntensity;	// HZM post-FX: bloom additive strength
+cvar_t	*r_ppSSAO;			// HZM post-FX: SSAO on/off
+cvar_t	*r_ppSSAORadius;		// HZM post-FX: SSAO sample radius (world-scaled)
+cvar_t	*r_ppSSAOIntensity;	// HZM post-FX: SSAO darkening strength
+cvar_t	*r_ppSSAOBias;		// HZM post-FX: SSAO depth bias (reduces self-occlusion)
+cvar_t	*r_ppSSAODepthAware;	// HZM post-FX: SSAO depth-aware (bilateral) blur to stop edge haloes
+cvar_t	*r_ppDoF;			// HZM post-FX: depth-of-field on/off
+cvar_t	*r_ppDoFFocus;		// HZM post-FX: DoF focus distance (linear units); 0 = auto (center-screen depth)
+cvar_t	*r_ppDoFRange;		// HZM post-FX: DoF sharp-band falloff scale (larger = more stays sharp)
+cvar_t	*r_ppDoFIntensity;	// HZM post-FX: DoF max blur mix 0..1
+cvar_t	*r_ppTonemap;		// HZM post-FX: tonemap + color grade on/off
+cvar_t	*r_ppExposure;		// HZM post-FX: pre-tonemap exposure multiplier
+cvar_t	*r_ppContrast;		// HZM post-FX: contrast around mid-grey
+cvar_t	*r_ppSaturation;	// HZM post-FX: saturation (1 = unchanged)
+cvar_t	*r_ppFXAA;			// HZM post-FX: FXAA edge anti-aliasing on/off
+cvar_t	*r_ppGrade;			// HZM post-FX: color-grade preset (0=off/use manual; 1=neutral 2=warm 3=cold 4=bleach)
+cvar_t	*r_ppLowHealth;		// HZM post-FX: low-health screen effect on/off
+cvar_t	*r_ppHealthFrac;	// HZM post-FX: current health fraction 0..1 (written each frame by cgame)
+cvar_t	*r_ppLowHealthStart;// HZM post-FX: health fraction below which the effect ramps in (e.g. 0.5)
+cvar_t	*r_ppLowHealthAmount;// HZM post-FX: max strength of the low-health effect
+cvar_t	*r_ppSuppression;	// HZM post-FX: suppression (under-fire) effect on/off
+cvar_t	*r_ppSuppress;		// HZM post-FX: current suppression intensity 0..1 (written each frame by cgame)
+cvar_t	*r_ppSuppressAmount;// HZM post-FX: max strength of the suppression effect
+cvar_t	*r_ppHeatHaze;		// HZM post-FX: heat-haze shimmer on/off
+cvar_t	*r_ppHeat;			// HZM post-FX: current heat intensity 0..1 (written each frame by cgame)
+cvar_t	*r_ppHeatAmount;	// HZM post-FX: max strength of the heat-haze shimmer
+cvar_t	*r_ppSunShafts;		// HZM post-FX: god rays / sun shafts on/off
+cvar_t	*r_ppSunShaftIntensity;// HZM post-FX: god-rays additive strength
+cvar_t	*r_ppSunShaftDecay;	// HZM post-FX: god-rays per-step falloff (0.90..0.99)
+cvar_t	*r_ppSunShaftThreshold;// HZM post-FX: brightness threshold for the ray source (sun/sky)
+cvar_t	*r_dofBlur;		// HZM: depth-of-field strength 0..1 (driven by cgame while aiming); 0 = pass disabled
+cvar_t	*r_dofRadius;	// HZM: depth-of-field blur kernel spread in source texels
 
 cvar_t	*r_skipBackEnd;
 
@@ -326,6 +367,10 @@ static void InitOpenGL( void )
 
 	// print info
 	GfxInfo_f();
+
+	// HZM post-FX: report whether the gl1 GLSL post-process layer can run on this GPU
+	ri.Printf( PRINT_ALL, "HZM post-FX procs: %s (GL %d.%d)\n",
+		glPostFxProcsLoaded ? "LOADED" : "unavailable", qglMajorVersion, qglMinorVersion );
 
 	// set default state
 	GL_SetDefaultState();
@@ -1394,6 +1439,46 @@ void R_Register( void )
 	r_lodCurveError = ri.Cvar_Get( "r_lodCurveError", "250", CVAR_ARCHIVE|CVAR_CHEAT );
 	r_flares = ri.Cvar_Get ("r_flares", "0", CVAR_ARCHIVE );
 	r_znear = ri.Cvar_Get( "r_znear", "4", CVAR_CHEAT );
+	r_weaponfovx = ri.Cvar_Get( "r_weaponfovx", "0", 0 );	// HZM: set by cgame each frame (un-zoomed weapon fov_x)
+	r_weaponznear = ri.Cvar_Get( "r_weaponznear", "1", CVAR_ARCHIVE );	// HZM: ADS view-weapon near clip (lower = more of the gun's back end shows)
+	r_weaponshifty = ri.Cvar_Get( "r_weaponshifty", "-0.05", CVAR_ARCHIVE );	// HZM: ADS sight vertical align (-up/+down)
+	r_weaponshiftx = ri.Cvar_Get( "r_weaponshiftx", "0", CVAR_ARCHIVE );	// HZM: ADS sight horizontal align (+right/-left)
+	r_postProcess   = ri.Cvar_Get( "r_postProcess",   "1", CVAR_ARCHIVE );	// HZM post-FX master (LIVE toggle; FBO/procs always created at init, this only gates the per-frame pass so menu toggles apply instantly)
+	r_ppPassthrough = ri.Cvar_Get( "r_ppPassthrough", "1", CVAR_ARCHIVE );	// HZM post-FX Phase-0 passthrough
+	r_ppBloom          = ri.Cvar_Get( "r_ppBloom",          "1",   CVAR_ARCHIVE );	// HZM post-FX bloom (live-tunable)
+	r_ppBloomThreshold = ri.Cvar_Get( "r_ppBloomThreshold", "0.6", CVAR_ARCHIVE );
+	r_ppBloomIntensity = ri.Cvar_Get( "r_ppBloomIntensity", "1.3", CVAR_ARCHIVE );	// HZM: user-tuned default
+	r_ppSSAO          = ri.Cvar_Get( "r_ppSSAO",          "1",   CVAR_ARCHIVE );	// HZM post-FX SSAO (live-tunable)
+	r_ppSSAORadius    = ri.Cvar_Get( "r_ppSSAORadius",    "16",  CVAR_ARCHIVE );
+	r_ppSSAOIntensity = ri.Cvar_Get( "r_ppSSAOIntensity", "1.0", CVAR_ARCHIVE );
+	r_ppSSAOBias      = ri.Cvar_Get( "r_ppSSAOBias",      "0.5", CVAR_ARCHIVE );
+	r_ppSSAODepthAware = ri.Cvar_Get( "r_ppSSAODepthAware", "1", CVAR_ARCHIVE );	// HZM: bilateral AO blur (edge-preserving)
+	r_ppDoF           = ri.Cvar_Get( "r_ppDoF",           "0",    CVAR_ARCHIVE );	// HZM post-FX DoF (off by default; opt-in)
+	r_ppDoFFocus      = ri.Cvar_Get( "r_ppDoFFocus",      "0",    CVAR_ARCHIVE );	// 0 = auto-focus on center-screen depth
+	r_ppDoFRange      = ri.Cvar_Get( "r_ppDoFRange",      "1200", CVAR_ARCHIVE );
+	r_ppDoFIntensity  = ri.Cvar_Get( "r_ppDoFIntensity",  "0.5",  CVAR_ARCHIVE );
+	r_ppTonemap       = ri.Cvar_Get( "r_ppTonemap",       "0",    CVAR_ARCHIVE );	// HZM post-FX tonemap/grade (opt-in)
+	r_ppExposure      = ri.Cvar_Get( "r_ppExposure",      "1.0",  CVAR_ARCHIVE );
+	r_ppContrast      = ri.Cvar_Get( "r_ppContrast",      "1.0",  CVAR_ARCHIVE );
+	r_ppSaturation    = ri.Cvar_Get( "r_ppSaturation",    "1.0",  CVAR_ARCHIVE );
+	r_ppFXAA          = ri.Cvar_Get( "r_ppFXAA",          "0",    CVAR_ARCHIVE );	// HZM post-FX FXAA (opt-in)
+	r_ppGrade         = ri.Cvar_Get( "r_ppGrade",         "0",    CVAR_ARCHIVE );	// HZM color-grade preset (0=off)
+	r_ppLowHealth      = ri.Cvar_Get( "r_ppLowHealth",      "1",   CVAR_ARCHIVE );	// HZM low-health screen FX
+	r_ppHealthFrac     = ri.Cvar_Get( "r_ppHealthFrac",     "1",   0 );	// cgame writes this each frame (not archived)
+	r_ppLowHealthStart = ri.Cvar_Get( "r_ppLowHealthStart", "0.5", CVAR_ARCHIVE );	// ramps in below 50% health
+	r_ppLowHealthAmount= ri.Cvar_Get( "r_ppLowHealthAmount","1.0", CVAR_ARCHIVE );
+	r_ppSuppression    = ri.Cvar_Get( "r_ppSuppression",    "1",   CVAR_ARCHIVE );	// HZM suppression (under-fire) FX
+	r_ppSuppress       = ri.Cvar_Get( "r_ppSuppress",       "0",   0 );	// cgame writes this each frame (not archived)
+	r_ppSuppressAmount = ri.Cvar_Get( "r_ppSuppressAmount", "1.0", CVAR_ARCHIVE );	// max strength of the suppression FX
+	r_ppHeatHaze       = ri.Cvar_Get( "r_ppHeatHaze",       "1",   CVAR_ARCHIVE );	// HZM heat-haze shimmer
+	r_ppHeat           = ri.Cvar_Get( "r_ppHeat",           "0",   0 );	// cgame writes this each frame (not archived)
+	r_ppHeatAmount     = ri.Cvar_Get( "r_ppHeatAmount",     "1.0", CVAR_ARCHIVE );	// max strength of the heat-haze shimmer
+	r_ppSunShafts         = ri.Cvar_Get( "r_ppSunShafts",         "0",    CVAR_ARCHIVE );	// HZM god rays (opt-in)
+	r_ppSunShaftIntensity = ri.Cvar_Get( "r_ppSunShaftIntensity", "0.5",  CVAR_ARCHIVE );
+	r_ppSunShaftDecay     = ri.Cvar_Get( "r_ppSunShaftDecay",     "0.95", CVAR_ARCHIVE );
+	r_ppSunShaftThreshold = ri.Cvar_Get( "r_ppSunShaftThreshold", "0.6",  CVAR_ARCHIVE );
+	r_dofBlur = ri.Cvar_Get( "r_dofBlur", "0", CVAR_ARCHIVE );	// HZM: depth-of-field strength (cgame drives on ADS)
+	r_dofRadius = ri.Cvar_Get( "r_dofRadius", "3", CVAR_ARCHIVE );	// HZM: depth-of-field blur spread (texels)
 	ri.Cvar_CheckRange( r_znear, 0.001f, 200, qtrue );
 	r_ignoreGLErrors = ri.Cvar_Get( "r_ignoreGLErrors", "1", CVAR_ARCHIVE );
 	r_fastsky = ri.Cvar_Get( "r_fastsky", "0", 0 );
@@ -1715,6 +1800,8 @@ void R_Init( void ) {
 	if ( err != GL_NO_ERROR )
 		ri.Printf (PRINT_ALL, "glGetError() = 0x%x\n", err);
 
+	R_InitPostFxGL1();		// HZM: create gl1 post-process FBO + shaders (no-op if unsupported)
+
 	ri.Printf( PRINT_ALL, "----- finished R_Init -----\n" );
 }
 
@@ -1740,6 +1827,8 @@ void RE_Shutdown( qboolean destroyWindow ) {
 
 	if ( tr.registered ) {
 		R_IssuePendingRenderCommands();
+		R_ShutdownPostFxGL1();	// HZM: free post-process GL resources while the context is valid
+		R_ShutdownGrass();		// HZM: clear the grass scatter set
 		R_DeleteTextures();
 	}
 
