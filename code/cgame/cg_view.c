@@ -612,7 +612,13 @@ void CG_OffsetFirstPersonView(refEntity_t *pREnt, qboolean bUseWorldPosition)
             VectorAdd(vStart, vEnd, origin);
         }
 
-        if (cg.predicted_player_state.walking) {
+        // HZM coop: do NOT apply walking view-bob to a GLUED rider (vehicle passenger). A glued player has
+        // PMF_NO_MOVE and inherits the vehicle's velocity, so the stock bob (amplitude = speed) would bob the
+        // camera at ~vehicle speed while "walking" (groundEntityNum = the vehicle). The bob is added to the
+        // view AFTER the origin, so the smooth-and-locked truck appears to hop against the bobbing camera -
+        // this was the "truck steps forward in little jumps" stutter (noclip cured it by clearing walking).
+        // Riders can't self-move, so no footstep bob belongs here; let it decay to zero (else branch).
+        if (cg.predicted_player_state.walking && !(cg.predicted_player_state.pm_flags & PMF_NO_MOVE)) {
             fVel   = VectorLength(vVelocity);
             fPhase = fVel * 0.0015 + 0.9;
             cg.fCurrentViewBobPhase += (cg.frametime / 1000.0 + cg.frametime / 1000.0) * M_PI * fPhase;

@@ -2693,6 +2693,17 @@ void Entity::DamageEvent(Event *ev)
         return;
     }
 
+    // HZM coop: a player glued into a vehicle seat is pinned to a fast scripted vehicle. The RIDE itself
+    // (vehicle mover, world geometry, telefrag, falling with the vehicle) must not grind them to death -
+    // but they still take real combat damage (bullets/grenades/rockets/explosions) so riding isn't a free ride.
+    if (m_pGlueMaster && IsSubclassOfPlayer()) {
+        if (meansofdeath == MOD_CRUSH || meansofdeath == MOD_CRUSH_EVERY_FRAME
+            || meansofdeath == MOD_TELEFRAG || meansofdeath == MOD_FALLING
+            || meansofdeath == MOD_VEHICLE) {
+            return;
+        }
+    }
+
     if (!attacker) {
         ScriptError("attacker is NULL");
         return;

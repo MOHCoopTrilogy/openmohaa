@@ -436,6 +436,76 @@ static void CG_InterpolatePlayerState(qboolean grabAngles)
 }
 
 /*
+========================
+CG_LockRiderOriginToVehicle
+
+HZM coop: a player GLUED into a coop vehicle seat (PMF_NO_MOVE) has its origin interpolated INDEPENDENTLY of
+the vehicle it rides. The two interpolations don't agree frame-for-frame (the per-snapshot seat offset wobbles
+from server glue/attach update ordering), so the vehicle appears to hitch relative to the rider's otherwise
+smooth camera - the "truck steps forward in little jumps" stutter. Native occupants (turret slot) don't have
+this because they're rendered locked to the vehicle's own transform (proven: the cannon seat is buttery smooth
+while the glued bed seat stutters on the same vehicle).
+
+Fix: peg the rider's rendered origin to the ridden vehicle's OWN smooth interpolated origin plus a fixed
+per-snapshot seat offset, so the vehicle has zero relative motion in view (exactly like a native occupant).
+The vehicle is found by proximity (nearest ET_VEHICLE within a seat's reach), so no server/networking change
+is needed and it's self-contained to the client. View ANGLES are left untouched (free look preserved). Only
+affects glued/pinned riders; a no-op for everyone else.
+========================
+*/
+static void CG_LockRiderOriginToVehicle(void)
+{
+    int   i, best = -1;
+    float bestDist2 = 250.0f * 250.0f; // only lock within ~250u of a vehicle (the seat is close to it)
+    float f         = cg.frameInterpolation;
+
+    if (!(cg.snap->ps.pm_flags & PMF_NO_MOVE)) {
+        return; // only glued/pinned riders are affected
+    }
+
+    // find the ridden vehicle: the nearest ET_VEHICLE to the rider in the current snapshot
+    for (i = 0; i < cg.snap->numEntities; i++) {
+        entityState_t *es = &cg.snap->entities[i];
+        vec3_t         d;
+        float          dist2;
+
+        if (es->eType != ET_VEHICLE) {
+            continue;
+        }
+        VectorSubtract(es->origin, cg.snap->ps.origin, d);
+        dist2 = d[0] * d[0] + d[1] * d[1] + d[2] * d[2];
+        if (dist2 < bestDist2) {
+            bestDist2 = dist2;
+            best      = es->number;
+        }
+    }
+
+    if (best < 0) {
+        return; // not riding a vehicle - leave the normal interpolated origin alone
+    }
+
+    {
+        centity_t *veh = &cg_entities[best];
+        vec3_t     vehLerp, offset;
+
+        // the vehicle's OWN smooth interpolated origin (this is provably smooth)
+        if (veh->interpolate) {
+            for (i = 0; i < 3; i++) {
+                vehLerp[i] =
+                    veh->currentState.origin[i] + f * (veh->nextState.origin[i] - veh->currentState.origin[i]);
+            }
+        } else {
+            VectorCopy(veh->currentState.origin, vehLerp);
+        }
+
+        // fixed seat offset captured at the current snapshot (rider snap origin - vehicle snap origin), then
+        // lock the rider to the vehicle's smooth lerp + that offset -> no per-frame relative hitch
+        VectorSubtract(cg.snap->ps.origin, veh->currentState.origin, offset);
+        VectorAdd(vehLerp, offset, cg.predicted_player_state.origin);
+    }
+}
+
+/*
 =================
 CG_PredictPlayerState
 
@@ -481,6 +551,9 @@ void CG_PredictPlayerState(void)
     // demo playback just copies the moves
     if (cg.demoPlayback || (cg.snap->ps.pm_flags & PMF_NO_PREDICTION) || (cg.snap->ps.pm_flags & PMF_FROZEN)) {
         CG_InterpolatePlayerState(qfalse);
+        // HZM coop: lock a glued vehicle rider's origin to the ridden vehicle's own smooth interpolation so
+        // the vehicle doesn't hitch in view (matches native occupant smoothness). No-op unless PMF_NO_MOVE.
+        CG_LockRiderOriginToVehicle();
         return;
     }
 

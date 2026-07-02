@@ -4025,6 +4025,21 @@ void Player::ClientMove(usercmd_t *ucmd)
         //
         client->ps.pm_flags |= PMF_NO_PREDICTION;
         client->ps.pm_flags |= PMF_NO_MOVE;
+
+        // HZM coop: a pinned rider can't drive the normal crouch state machine - PMF_NO_MOVE makes pmove
+        // return before processing movement, so the crouch/stand toggle input never reaches it (proven: the
+        // legs statemap never evaluates CHECK_HEIGHT for a seated rider). For a DUCKABLE-glued seat, drive the
+        // height straight from the crouch axis instead: hold crouch = ducked, release = stand. The PMF_DUCKED
+        // derivation just below picks up maxs.z, and PM_CheckDuck applies the matching bbox/viewheight.
+        if (m_bGlueDuckable) {
+            if (last_ucmd.upmove < 0) {
+                maxs.z     = 54.0f;
+                viewheight = CROUCH_VIEWHEIGHT;
+            } else {
+                maxs.z     = 94.0f;
+                viewheight = DEFAULT_VIEWHEIGHT;
+            }
+        }
     }
 
     if (g_protocol >= protocol_e::PROTOCOL_MOHTA_MIN) {

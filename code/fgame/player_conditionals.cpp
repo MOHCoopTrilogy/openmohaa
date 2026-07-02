@@ -1600,6 +1600,13 @@ qboolean Player::CondCanStand(Conditional& condition)
     Vector  newmaxs(maxs);
     trace_t trace;
 
+    // HZM coop: a duckable-glued vehicle rider is pinned in the seat, so this full-height stand trace can
+    // startsolid (vehicle geometry / adjacent seated riders) and trap them crouched - unable to stand back
+    // up. They are safe to change height freely, so always allow standing (mirrors the CondCheckHeight guard).
+    if (m_pGlueMaster && m_bGlueDuckable) {
+        return qtrue;
+    }
+
     newmins[2] = MINS_Z;
     newmaxs[2] = MAXS_Z;
 

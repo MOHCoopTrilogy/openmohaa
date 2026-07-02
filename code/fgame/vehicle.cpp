@@ -4215,9 +4215,10 @@ void Vehicle::SlidePush(Vector vPush)
             if (j == i && other->entity) {
                 other->entity->CheckGround();
 
-                if (other->entity->groundentity
+                if ((other->entity->groundentity
                     && (other->entity->groundentity == edict
-                        || m_pCollisionEntity && other->entity->groundentity->entity == m_pCollisionEntity)) {
+                        || m_pCollisionEntity && other->entity->groundentity->entity == m_pCollisionEntity))
+                    || (other->entity->m_pGlueMaster && other->entity->IsSubclassOfPlayer())) { // HZM coop: also skip glued riders (their groundentity is the seat dummy, not the vehicle) so the slide-move doesn't grind them
                     // save the entity
                     pSkippedEntities[iNumSkipped]  = other->entity;
                     iContentsEntities[iNumSkipped] = other->r.contents;
@@ -4762,6 +4763,28 @@ void Vehicle::Postthink(void)
     }
 
     SetSlotsNonSolid();
+
+    // HZM coop: de-solidify GLUED riders for the ENTIRE move so the vehicle glides through them with zero
+    // collision interaction (no per-frame touch/skip = no stutter, no bHitPerson speed loss); restored right
+    // after, so riders stay solid/shootable the rest of the frame. Extends SetSlotsNonSolid to our
+    // script-glued coop passengers, which are not in the native vehicle slots.
+    gentity_t *coopRider[MAX_CLIENTS];
+    solid_t    coopRiderSolid[MAX_CLIENTS];
+    int        nCoopRiders = 0;
+    {
+        gentity_t *pe;
+        int        ci;
+        for (ci = 0, pe = g_entities; ci < game.maxclients; ci++, pe++) {
+            if (pe->client && pe->entity && pe->entity->m_pGlueMaster
+                && pe->entity->IsSubclassOfPlayer() && pe->solid != SOLID_NOT && nCoopRiders < MAX_CLIENTS) {
+                coopRider[nCoopRiders]      = pe;
+                coopRiderSolid[nCoopRiders] = pe->solid;
+                pe->entity->setSolidType(SOLID_NOT);
+                nCoopRiders++;
+            }
+        }
+    }
+
     if (m_bAnimMove) { // 2.0: use vehicle's animation to move
         AnimMoveVehicle();
     } else {
@@ -4770,6 +4793,13 @@ void Vehicle::Postthink(void)
             FactorOutOriginOffset();
         }
         MoveVehicle();
+    }
+
+    {
+        int ci;
+        for (ci = 0; ci < nCoopRiders; ci++) {
+            coopRider[ci]->entity->setSolidType(coopRiderSolid[ci]);
+        }
     }
 
     SetSlotsSolid();
