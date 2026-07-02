@@ -671,6 +671,48 @@ qboolean CG_EntityShadow(centity_t *cent, refEntity_t *model)
         return qfalse;
     }
 
+    // HZM coop - PHASE A directional shadow: when coop_shadowDir is on, draw a single elongated,
+    // sun-oriented ground decal per model (overrides the straight-down foot/blob shadow). Uses fixed
+    // sun-angle cvars (coop_shadowAz/El) so it needs no renderer sun-direction bridge. Pure cgame.
+    {
+        static cvar_t *sDir, *sAz, *sEl, *sLen;
+        if (!sDir) {
+            sDir = cgi.Cvar_Get("coop_shadowDir", "1",   CVAR_ARCHIVE);
+            sAz  = cgi.Cvar_Get("coop_shadowAz",  "45",  CVAR_ARCHIVE);   // sun azimuth (deg)
+            sEl  = cgi.Cvar_Get("coop_shadowEl",  "45",  CVAR_ARCHIVE);   // sun elevation (deg); lower = longer shadow
+            sLen = cgi.Cvar_Get("coop_shadowLen", "1.5", CVAR_ARCHIVE);   // extra length multiplier
+        }
+        if (sDir->integer) {
+            float w = model->scale * cgi.R_ModelRadius(model->hModel);
+            if (w < 1) {
+                return qfalse;
+            }
+            VectorCopy(model->origin, end);
+            end[2] -= SHADOW_DISTANCE;
+            cgi.CM_BoxTrace(&trace, model->origin, end, vec3_origin, vec3_origin, 0, MASK_PLAYERSOLID, qfalse);
+            if (trace.fraction == 1.0 || trace.startsolid || trace.allsolid) {
+                return qfalse;
+            }
+            alpha = (1.0 - trace.fraction) * 0.65f;
+            {
+                float elr = sEl->value * ((float)M_PI / 180.0f);
+                float azr = sAz->value * ((float)M_PI / 180.0f);
+                float stretch = 1.0f + sLen->value / tan(elr < 0.17f ? 0.17f : elr);
+                vec3_t sunH, pos;
+                sunH[0] = (float)cos(azr);
+                sunH[1] = (float)sin(azr);
+                sunH[2] = 0.0f;
+                // trail the shadow centre away from the sun so it reads as cast behind the model
+                VectorMA(trace.endpos, -w * (stretch - 1.0f) * 0.5f, sunH, pos);
+                CG_ImpactMark(
+                    cgs.media.shadowMarkShader, pos, trace.plane.normal,
+                    sAz->value, w * stretch, w, alpha, alpha, alpha, 1,
+                    qfalse, qtrue, qfalse, qfalse, 0.5f, 0.5f);
+            }
+            return qtrue;
+        }
+    }
+
     if (cg_shadows->integer == 2 && (model->renderfx & RF_SHADOW_PRECISE)) {
         iTagL = cgi.Tag_NumForName(model->tiki, "Bip01 L Foot");
         if (iTagL != -1) {

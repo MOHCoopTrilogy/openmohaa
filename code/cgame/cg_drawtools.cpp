@@ -1583,6 +1583,47 @@ static void CG_DrawMGHeat(void)
     cgi.R_SetColor(NULL);
 }
 
+// HZM coop - ADS TUNE seeding: entering tune mode normally snaps the gun to the un-tuned cvar defaults
+// (tune mode reads the live cg_ads* cvars instead of the baked per-gun table). Seed those cvars with the
+// held gun's BAKED values the first time you hold it in tune mode - and on every gun switch - so the gun
+// stays exactly at its real (baked) position and you only nudge the small offset to centre it, instead of
+// re-tuning from zero. Only re-seeds on gun change, so your live nudges are never clobbered mid-tune.
+static void CG_SeedAdsTuneFromBaked(void)
+{
+    static int          sLastSeededWpn = -2;
+    const adsGunTune_t *t;
+    const char         *wpn;
+    int                 wi;
+
+    if (!cg_adsTune || !cg_adsTune->integer) {
+        sLastSeededWpn = -2; // tune off: re-seed next time it's enabled
+        return;
+    }
+    if (!cg.snap || cg.snap->ps.activeItems[1] < 0) {
+        return;
+    }
+    wi = cg.snap->ps.activeItems[1];
+    if (wi == sLastSeededWpn) {
+        return; // already seeded this gun this session - keep the user's nudges
+    }
+    wpn            = CG_ConfigString(CS_WEAPONS + wi);
+    t              = CG_FindAdsTune(wpn);
+    sLastSeededWpn = wi;
+    if (!t) {
+        return; // no baked entry for this gun: leave the cvars at their fallback values
+    }
+    cgi.Cvar_Set("cg_adsPitch", va("%g", t->sPitch));
+    cgi.Cvar_Set("cg_adsYaw", va("%g", t->sYaw));
+    cgi.Cvar_Set("cg_adsRoll", va("%g", t->sRoll));
+    cgi.Cvar_Set("cg_adsShiftX", va("%g", t->sShiftX));
+    cgi.Cvar_Set("cg_adsShiftY", va("%g", t->sShiftY));
+    cgi.Cvar_Set("cg_adsCrouchPitch", va("%g", t->cPitch));
+    cgi.Cvar_Set("cg_adsCrouchYaw", va("%g", t->cYaw));
+    cgi.Cvar_Set("cg_adsCrouchRoll", va("%g", t->cRoll));
+    cgi.Cvar_Set("cg_adsCrouchShiftX", va("%g", t->cShiftX));
+    cgi.Cvar_Set("cg_adsCrouchShiftY", va("%g", t->cShiftY));
+}
+
 // HZM coop - ADS tuning overlay: a bright centre crosshair (the bullet aim-point you align the sights to)
 // plus a live readout of the held weapon and its tune values. Shown only while cg_adsTune is on.
 static void CG_DrawAdsTune(void)
@@ -1761,5 +1802,6 @@ void CG_Draw2D(void)
     CG_DrawCoopIcons();
     CG_DrawMGHeat();
     CG_DrawMagazines();
+    CG_SeedAdsTuneFromBaked(); // seed live cvars from the baked table so tune mode doesn't snap the gun
     CG_DrawAdsTune();
 }

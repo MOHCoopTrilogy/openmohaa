@@ -29,6 +29,7 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 
 cvar_t *cg_showtempmodels;
 cvar_t *cg_max_tempmodels;
+cvar_t *cg_cullTempModels;   // HZM coop - PVS-cull tempmodels so brass/debris/FX don't render through walls
 cvar_t *cg_reserve_tempmodels;
 cvar_t *cg_detail;
 cvar_t *cg_effectdetail;
@@ -239,6 +240,10 @@ void ClientGameCommandManager::InitializeTempModelCvars(void)
     cgi.Cvar_CheckRange(cg_max_tempmodels, 200, MAX_TEMPMODELS, qtrue);
 
     cg_reserve_tempmodels = cgi.Cvar_Get("cg_reserve_tempmodels", "200", CVAR_ARCHIVE);
+
+    // HZM coop - 1 = skip drawing tempmodels (brass casings, debris, blood, smoke) whose leaf is not in
+    // the view PVS, so they no longer show through walls. Marks/decals already do this; tempmodels did not.
+    cg_cullTempModels = cgi.Cvar_Get("cg_cullTempModels", "1", CVAR_ARCHIVE);
 
     if (cg_max_tempmodels->integer > MAX_TEMPMODELS) {
         // 2.40 sets the integer value directly rather than calling Cvar_Set()
@@ -935,6 +940,9 @@ void ClientGameCommandManager::AddTempModels(void)
     old_tiki = current_tiki;
     old_num  = current_entity_number;
 
+    // HZM coop - view leaf for PVS-culling tempmodels (see cg_cullTempModels); computed once per frame
+    int viewLeafNum = cgi.CM_PointLeafnum(cg.refdef.vieworg);
+
     p = m_active_tempmodels.prev;
     for (; p != &m_active_tempmodels; p = next) {
         // grab next now, so if the local entity is freed we still have it
@@ -1072,12 +1080,16 @@ void ClientGameCommandManager::AddTempModels(void)
                 p->cgd.color[2],
                 p->cgd.lightType
             );
-        } else if (p->ent.reType == RT_SPRITE) {
-            vec3_t vTestAngles;
-            cgi.R_AddRefSpriteToScene(&newEnt); // Sprite
-            MatrixToEulerAngles(newEnt.axis, vTestAngles);
-        } else {
-            cgi.R_AddRefEntityToScene(&newEnt, ENTITYNUM_NONE); // Model
+        } else if (!cg_cullTempModels->integer
+                   || cgi.CM_LeafInPVS(viewLeafNum, cgi.CM_PointLeafnum(newEnt.origin))) {
+            // HZM coop - only draw when the tempmodel's leaf is in the view PVS (no through-wall casings)
+            if (p->ent.reType == RT_SPRITE) {
+                vec3_t vTestAngles;
+                cgi.R_AddRefSpriteToScene(&newEnt); // Sprite
+                MatrixToEulerAngles(newEnt.axis, vTestAngles);
+            } else {
+                cgi.R_AddRefEntityToScene(&newEnt, ENTITYNUM_NONE); // Model
+            }
         }
 
         // Set the added once flag so we can delete it later
