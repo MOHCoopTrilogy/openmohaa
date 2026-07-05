@@ -68,6 +68,8 @@ cvar_t	*r_ppExposure;		// HZM post-FX: pre-tonemap exposure multiplier
 cvar_t	*r_ppContrast;		// HZM post-FX: contrast around mid-grey
 cvar_t	*r_ppSaturation;	// HZM post-FX: saturation (1 = unchanged)
 cvar_t	*r_ppFXAA;			// HZM post-FX: FXAA edge anti-aliasing on/off
+cvar_t	*r_ppSharpen;		// HZM post-FX: unsharp-mask crispen on/off
+cvar_t	*r_ppSharpenAmount;	// HZM post-FX: sharpen strength (0.2-0.5 typical)
 cvar_t	*r_ppGrade;			// HZM post-FX: color-grade preset (0=off/use manual; 1=neutral 2=warm 3=cold 4=bleach)
 cvar_t	*r_ppLowHealth;		// HZM post-FX: low-health screen effect on/off
 cvar_t	*r_ppHealthFrac;	// HZM post-FX: current health fraction 0..1 (written each frame by cgame)
@@ -1462,6 +1464,8 @@ void R_Register( void )
 	r_ppContrast      = ri.Cvar_Get( "r_ppContrast",      "1.0",  CVAR_ARCHIVE );
 	r_ppSaturation    = ri.Cvar_Get( "r_ppSaturation",    "1.0",  CVAR_ARCHIVE );
 	r_ppFXAA          = ri.Cvar_Get( "r_ppFXAA",          "0",    CVAR_ARCHIVE );	// HZM post-FX FXAA (opt-in)
+	r_ppSharpen       = ri.Cvar_Get( "r_ppSharpen",       "1",    CVAR_ARCHIVE );	// HZM post-FX sharpen (on by default)
+	r_ppSharpenAmount = ri.Cvar_Get( "r_ppSharpenAmount", "0.35", CVAR_ARCHIVE );	// HZM post-FX sharpen strength
 	r_ppGrade         = ri.Cvar_Get( "r_ppGrade",         "0",    CVAR_ARCHIVE );	// HZM color-grade preset (0=off)
 	r_ppLowHealth      = ri.Cvar_Get( "r_ppLowHealth",      "1",   CVAR_ARCHIVE );	// HZM low-health screen FX
 	r_ppHealthFrac     = ri.Cvar_Get( "r_ppHealthFrac",     "1",   0 );	// cgame writes this each frame (not archived)

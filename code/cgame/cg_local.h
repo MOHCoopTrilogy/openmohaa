@@ -641,6 +641,7 @@ extern "C" {
     void  CG_AddCoopDynamicLights(void); // HZM coop - per-frame: re-add the live transient dlights
     void  CG_UpdateEnvReverb(void); // HZM coop - per-frame: auto reverb from indoor/outdoor up-trace
     qboolean CG_GetBreathState(float *outFrac, qboolean *outCooldown); // HZM coop - hold-breath HUD info
+    qboolean CG_IsBreathSteady(void); // HZM coop - true while breath is ACTIVELY steadying this frame
     qboolean CG_GetFreeAim(float *outYaw, float *outPitch); // HZM coop - free-aim deadzone offset (degrees)
     void  CG_DrawActiveFrame(int serverTime, int frameTime, stereoFrame_t stereoView, qboolean demoPlayback);
 

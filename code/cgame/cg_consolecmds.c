@@ -396,8 +396,8 @@ void CG_AdsSave_f(void)
 // shift 3 roll.
 static void CG_AdsNudge(float dx, float dy)
 {
-    const float rot = 0.5f;   // degrees per press (pitch/yaw/roll)
-    const float sh  = 0.02f;  // screen-shift units per press
+    static cvar_t *rotStep = NULL, *shStep = NULL;
+    float       rot, sh;
     int         mode;
     qboolean    ducked;
     char        val[32];
@@ -406,6 +406,12 @@ static void CG_AdsNudge(float dx, float dy)
     if (!cg_adsTune || !cg_adsTune->integer) {
         return;
     }
+    // Live-tunable nudge granularity. cg_adsShiftStep defaults FINE (0.005) for precise sight centring;
+    // raise it for coarse passes, lower it for micro-adjust. cg_adsRotStep = degrees/press for pitch/yaw/roll.
+    if (!rotStep) { rotStep = cgi.Cvar_Get("cg_adsRotStep",   "0.5",   CVAR_ARCHIVE); }
+    if (!shStep)  { shStep  = cgi.Cvar_Get("cg_adsShiftStep", "0.005", CVAR_ARCHIVE); }
+    rot = rotStep->value;   // degrees per press (pitch/yaw/roll)
+    sh  = shStep->value;    // screen-shift units per press
     mode   = cg_adsMode ? cg_adsMode->integer : 0;
     ducked = (cg.predicted_player_state.pm_flags & PMF_DUCKED) ? qtrue : qfalse;
 

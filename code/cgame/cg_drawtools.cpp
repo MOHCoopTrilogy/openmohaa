@@ -1640,6 +1640,23 @@ static void CG_DrawAdsTune(void)
     cx = cgs.glconfig.vidWidth * 0.5f;
     cy = cgs.glconfig.vidHeight * 0.5f;
 
+    // HZM coop - SYMMETRY GUIDE LINES: a dim full-screen cross through the exact centre while tuning, so the
+    // iron-sight picture can be judged for left/right (vertical line) and up/down (horizontal line) symmetry.
+    // Kept faint so they don't fight the sight. cg_adsGuides 0 = off.
+    {
+        static cvar_t *adsGuides = NULL;
+        if (!adsGuides) {
+            adsGuides = cgi.Cvar_Get("cg_adsGuides", "1", CVAR_ARCHIVE);
+        }
+        if (adsGuides->integer) {
+            vec4_t gcol;
+            gcol[0] = 0.1f; gcol[1] = 1.0f; gcol[2] = 0.1f; gcol[3] = 0.28f;
+            cgi.R_SetColor(gcol);
+            cgi.R_DrawBox(cx, 0.0f, 1.0f, (float)cgs.glconfig.vidHeight); // vertical centre line
+            cgi.R_DrawBox(0.0f, cy, (float)cgs.glconfig.vidWidth, 1.0f);  // horizontal centre line
+        }
+    }
+
     col[0] = 0.1f; col[1] = 1.0f; col[2] = 0.1f; col[3] = 1.0f;
     cgi.R_SetColor(col);
     cgi.R_DrawBox(cx - 6.0f, cy, 13.0f, 1.0f);
@@ -1685,9 +1702,11 @@ static void CG_DrawAdsTune(void)
 // radial alpha (clear centre -> soft-dark edges); drawn full-screen, alpha-blended.
 static void CG_DrawAdsVignette(void)
 {
-    static qhandle_t hVig   = 0;
-    static float     fAlpha = 0.0f;
-    float            step;
+    static qhandle_t hVig    = 0;
+    static float     fAlpha  = 0.0f;
+    static float     fBreath = 0.0f; // HZM coop - eased breath-hold "focus-in" boost (0..1)
+    float            step, bstep;
+    qboolean         bBreath;
 
     if (!hVig) {
         hVig = cgi.R_RegisterShaderNoMip("textures/hud/coop_ads_vignette");
@@ -1705,12 +1724,26 @@ static void CG_DrawAdsVignette(void)
         if (fAlpha < 0.0f) { fAlpha = 0.0f; }
     }
 
+    // HZM coop - breath-hold DEEPENS the ADS focus: ease a second value up while ACTIVELY steadying breath
+    // (the same state that applies cg_breathZoom), and back down when the hold ends/recharges.
+    bstep   = (cg.frametime > 0) ? ((float)cg.frametime / 250.0f) : 1.0f; // ~0.25s, a hair slower than the base
+    bBreath = (CG_AimingDownSights() && CG_IsBreathSteady()) ? qtrue : qfalse;
+    if (bBreath) {
+        fBreath += bstep;
+        if (fBreath > 1.0f) { fBreath = 1.0f; }
+    } else {
+        fBreath -= bstep;
+        if (fBreath < 0.0f) { fBreath = 0.0f; }
+    }
+
     // HZM coop - drive the renderer's DEPTH OF FIELD from this same eased ADS fade. Set every frame (0 when
     // not aiming) so the gl1 DoF pass (renderergl1 RB_DepthOfField) blurs the edges while you aim and is fully
     // disabled otherwise. cg_dofStrength scales it (0 = off). This is separate from the dark vignette below.
     {
         cvar_t *pDof = cgi.Cvar_Get("cg_dofStrength", "0.6", CVAR_ARCHIVE);
-        cgi.Cvar_Set("r_dofBlur", va("%g", fAlpha * (pDof ? pDof->value : 0.6f)));
+        float   fDof = pDof ? pDof->value : 0.6f;
+        // breath-hold softens the world edges a touch MORE (up to +40% blur) to reinforce the focus.
+        cgi.Cvar_Set("r_dofBlur", va("%g", (fAlpha + fBreath * 0.4f) * fDof));
     }
 
     if (fAlpha <= 0.0f) {
@@ -1730,6 +1763,26 @@ static void CG_DrawAdsVignette(void)
             0.0f, 0.0f, (float)cgs.glconfig.vidWidth, (float)cgs.glconfig.vidHeight, 0.0f, 0.0f, 1.0f, 1.0f, hVig
         );
         cgi.R_SetColor(NULL);
+    }
+
+    // HZM coop - EXTRA darkening pass while holding breath: stacks a second vignette on top of the base for a
+    // stronger "tunnel-in on the sights" focus. cg_adsBreathVignette scales the added darkness (0 = disable).
+    if (fBreath > 0.0f) {
+        cvar_t *pBVig = cgi.Cvar_Get("cg_adsBreathVignette", "0.55", CVAR_ARCHIVE);
+        float   a     = fBreath * (pBVig ? pBVig->value : 0.55f);
+        if (a > 0.0f) {
+            vec4_t col;
+            if (a > 1.0f) { a = 1.0f; }
+            col[0] = 1.0f;
+            col[1] = 1.0f;
+            col[2] = 1.0f;
+            col[3] = a;
+            cgi.R_SetColor(col);
+            cgi.R_DrawStretchPic(
+                0.0f, 0.0f, (float)cgs.glconfig.vidWidth, (float)cgs.glconfig.vidHeight, 0.0f, 0.0f, 1.0f, 1.0f, hVig
+            );
+            cgi.R_SetColor(NULL);
+        }
     }
 }
 

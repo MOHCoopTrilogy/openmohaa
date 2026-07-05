@@ -586,6 +586,38 @@ static void CG_MakeBulletTracerInternal(
         }
     }
 
+    // HZM coop - DISTANT WEAPON TAILS: when the SHOOTER is far away (> coop_distantFireDist units), layer a
+    // soft distant-gunfire tail (muffled crack + rolling rumble) at the muzzle position, ADDITIVE on top of
+    // whatever fire sound reaches us - the "battlefield in the distance" feel. This runs for every bullet
+    // volley the client hears about (players + AI). Cadence detection: this message carries no entity
+    // number, so shooters are keyed by a coarse hash of the muzzle position; a volley arriving < 300 ms
+    // after the previous one from the same spot = automatic fire -> burst-rumble variant, else the sharper
+    // rifle crack-rumble. Rate-limited per shooter so MG bursts do not stack 20 tails. coop_distantFire 0 = off.
+    if (i_iNumBullets > 0) {
+        cvar_t *pDF  = cgi.Cvar_Get("coop_distantFire", "1", CVAR_ARCHIVE);
+        cvar_t *pDFD = cgi.Cvar_Get("coop_distantFireDist", "2500", CVAR_ARCHIVE);
+        if (pDF->integer) {
+            vec3_t vToShooter;
+            float  fShooterDist;
+            VectorSubtract(i_vStart, cg.SoundOrg, vToShooter);
+            fShooterDist = VectorLength(vToShooter);
+            if (fShooterDist > pDFD->value && fShooterDist < 8000.0f) {
+                static int s_iTailNextTime[8];
+                static int s_iTailLastShot[8];
+                int        iKey =
+                    (((int)i_vStart[0] >> 7) ^ ((int)i_vStart[1] >> 7) ^ ((int)i_vStart[2] >> 7)) & 7;
+                qboolean bAuto        = (cg.time - s_iTailLastShot[iKey]) < 300;
+                s_iTailLastShot[iKey] = cg.time;
+                if (cg.time >= s_iTailNextTime[iKey]) {
+                    s_iTailNextTime[iKey] = cg.time + 600; // one ~1s tail per shooter per 0.6s
+                    commandManager.PlaySound(
+                        bAuto ? "coop_gun_tail_auto" : "coop_gun_tail_rifle", i_vStart, -1, -1.0f, -1.0f, -1.0f, 0
+                    );
+                }
+            }
+        }
+    }
+
     // check to see if it starts in water
     bStartInWater = (cgi.CM_PointContents(i_vStart, 0) & CONTENTS_FLUID) != 0;
 
@@ -849,6 +881,42 @@ static void CG_MakeBulletTracerInternal(
         }
     }
 
+    // HZM coop - DISTANCE GUNFIRE TAIL: shots fired from far away get an additive report
+    // layered over the normal fire alias - a crack-slap in the mid band (coop_gunTailDist to
+    // 2x that), a rolling rumble-echo beyond. Rate-limited per source area so an MG burst
+    // does not stack twenty tails. coop_gunTail 0 disables.
+    {
+        cvar_t *pGT  = cgi.Cvar_Get("coop_gunTail", "1", CVAR_ARCHIVE);
+        cvar_t *pGTD = cgi.Cvar_Get("coop_gunTailDist", "1400", CVAR_ARCHIVE);
+
+        if (pGT->integer && pGTD->value > 0) {
+            vec3_t vToShooter;
+            float  fShooterDist;
+
+            VectorSubtract(i_vStart, cg.SoundOrg, vToShooter);
+            fShooterDist = VectorLength(vToShooter);
+
+            if (fShooterDist > pGTD->value) {
+                static int s_iTailNext[16];
+                int        iSlot;
+
+                iSlot = ((((int)(i_vStart[0]) >> 9) * 7) ^ ((((int)(i_vStart[1]) >> 9)) * 13)) & 15;
+                if (cg.time >= s_iTailNext[iSlot]) {
+                    s_iTailNext[iSlot] = cg.time + 150;
+                    if (fShooterDist > 2.0f * pGTD->value) {
+                        commandManager.PlaySound(
+                            va("snd_gun_tail_far%d", (rand() % 2) + 1), i_vStart, -1, -1.0f, -1.0f, -1.0f, 1
+                        );
+                    } else {
+                        commandManager.PlaySound(
+                            va("snd_gun_tail_mid%d", (rand() % 2) + 1), i_vStart, -1, -1.0f, -1.0f, -1.0f, 1
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     if (fZingDistA < 9999.0f) {
         // HZM coop - SUPPRESSION: an enemy round just cracked past the listener (fZingDistA is the closest
         // approach in units, 0..255; own outgoing shots are already excluded by the start/end-segment gate
@@ -866,6 +934,21 @@ static void CG_MakeBulletTracerInternal(
         } else {
             fVolume = 0.8f;
             fPitch  = 1.0f;
+        }
+
+        // HZM coop - SUPERSONIC CRACK: a round passing VERY close (< coop_bulletCrackDist units of the head)
+        // snaps a sharp 2D local crack (bypasses spatialization = "inside your head", which is exactly how a
+        // real supersonic bow wave reads). The 3D zing below still plays for the wider band. Direct-path
+        // S_StartLocalSound (same pattern as the sprint breath), random 1-of-3 variant, rate-limited so one
+        // MG burst does not machine-gun the crack itself. coop_bulletCrack 0 = off.
+        {
+            cvar_t *pBC  = cgi.Cvar_Get("coop_bulletCrack", "1", CVAR_ARCHIVE);
+            cvar_t *pBCD = cgi.Cvar_Get("coop_bulletCrackDist", "60", CVAR_ARCHIVE);
+            static int s_iNextCrackTime = 0;
+            if (pBC->integer && fZingDistA < pBCD->value && cg.time >= s_iNextCrackTime) {
+                s_iNextCrackTime = cg.time + 140;
+                cgi.S_StartLocalSound(va("sound/coop_crack/crack_%02d.wav", (rand() % 3) + 1), qfalse);
+            }
         }
 
         commandManager.PlaySound("snd_b_zing", vZingPosA, -1, fVolume, -1.0f, fPitch, 1);
@@ -893,6 +976,34 @@ static void CG_MakeBulletTracer(
 {
     bullet_tracer_t *bullet_tracer;
     int              i;
+
+    // HZM coop - VISUAL fix: the server fires the LOCAL player's bullets from the EYE, so their tracers look
+    // like they shoot out of the camera/face. When a volley starts at our own eye (first person only), move
+    // the tracer origin to roughly the view-weapon MUZZLE: eye + a tunable forward/right/down offset in view
+    // space. Other players' tracers start at their own guns (far from our eye) and are left alone. The end
+    // (impact) points are unchanged, so the tracer now runs barrel -> target. Gated by coop_tracerFromMuzzle.
+    {
+        static cvar_t *pOn = NULL, *pFwd = NULL, *pRt = NULL, *pUp = NULL;
+        if (!pOn) {
+            pOn  = cgi.Cvar_Get("coop_tracerFromMuzzle", "1",  CVAR_ARCHIVE);
+            pFwd = cgi.Cvar_Get("coop_tracerMuzzleFwd",  "24", CVAR_ARCHIVE);
+            pRt  = cgi.Cvar_Get("coop_tracerMuzzleRight", "6", CVAR_ARCHIVE);
+            pUp  = cgi.Cvar_Get("coop_tracerMuzzleUp",   "-8", CVAR_ARCHIVE); // negative = down
+        }
+        if (pOn->integer && !cg.renderingThirdPerson) {
+            vec3_t vEyeDelta;
+            VectorSubtract(i_vStart, cg.refdef.vieworg, vEyeDelta);
+            if (VectorLength(vEyeDelta) < 48.0f) { // this volley originates at our own eye = our first-person shot
+                vec3_t vMuzzle;
+                VectorCopy(cg.refdef.vieworg, vMuzzle);
+                VectorMA(vMuzzle,  pFwd->value, cg.refdef.viewaxis[0], vMuzzle); // forward toward the barrel
+                VectorMA(vMuzzle, -pRt->value,  cg.refdef.viewaxis[1], vMuzzle); // right (viewaxis[1] is LEFT)
+                VectorMA(vMuzzle,  pUp->value,  cg.refdef.viewaxis[2], vMuzzle); // up (negative drops it down)
+                VectorCopy(vMuzzle, i_vBarrel);
+                VectorCopy(vMuzzle, i_vStart);
+            }
+        }
+    }
 
     if (bullet_tracer_bullets_count >= MAX_BULLET_TRACERS) {
         Com_Printf("CG_MakeBulletTracer: MAX_BULLET_TRACERS exceeded\n");

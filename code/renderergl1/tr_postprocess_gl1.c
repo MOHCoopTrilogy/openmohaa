@@ -101,6 +101,8 @@ typedef struct {
 	GLuint   tonemapProgram;
 	qboolean fxaaOk;
 	GLuint   fxaaProgram;
+	qboolean sharpenOk;
+	GLuint   sharpenProgram; // unsharp-mask crispen (counteracts FXAA/mip softening)
 	qboolean lowHealthOk;
 	GLuint   lowHealthProgram;
 	qboolean suppressOk;
@@ -306,6 +308,33 @@ static const char *FXAA_FS =
 	"  vec3 rgbB = rgbA*0.5 + 0.25 * (texture2D(u_tex, v_uv + dir*(-0.5)).rgb + texture2D(u_tex, v_uv + dir*0.5).rgb);\n"
 	"  float lB = luma(rgbB);\n"
 	"  gl_FragColor = vec4((lB < lMin || lB > lMax) ? rgbA : rgbB, 1.0);\n"
+	"}\n";
+
+// Sharpen: cross-kernel unsharp mask. Adds back (center - blurred-neighbours) * amount. Cheap crispen that
+// counteracts the softening from FXAA / mip filtering / upscaling. u_amount ~0.2-0.5 (higher = crunchier).
+// HZM - Contrast-adaptive sharpening (CAS-style): per-pixel weight scales with local
+// contrast headroom, so flat areas and already-hard edges stay untouched - no halos,
+// unlike the plain unsharp mask this replaced. u_amount 0..1 = sharpness.
+static const char *SHARPEN_FS =
+	"#version 120\n"
+	"uniform sampler2D u_tex;\n"
+	"uniform vec2 u_rcp;\n"
+	"uniform float u_amount;\n"
+	"varying vec2 v_uv;\n"
+	"void main(){\n"
+	"  vec3 e = texture2D(u_tex, v_uv).rgb;\n"
+	"  vec3 b = texture2D(u_tex, v_uv + vec2(0.0,-u_rcp.y)).rgb;\n"
+	"  vec3 h = texture2D(u_tex, v_uv + vec2(0.0, u_rcp.y)).rgb;\n"
+	"  vec3 d = texture2D(u_tex, v_uv + vec2(-u_rcp.x,0.0)).rgb;\n"
+	"  vec3 f = texture2D(u_tex, v_uv + vec2( u_rcp.x,0.0)).rgb;\n"
+	"  vec3 mn = min(min(min(d,e),min(f,b)),h);\n"
+	"  vec3 mx = max(max(max(d,e),max(f,b)),h);\n"
+	"  vec3 amp = clamp(min(mn, vec3(2.0)-mx) / (mx + vec3(1e-5)), 0.0, 1.0);\n"
+	"  amp = sqrt(amp);\n"
+	"  float peak = -1.0 / mix(8.0, 5.0, clamp(u_amount,0.0,1.0));\n"
+	"  vec3 w = amp * peak;\n"
+	"  vec3 sharp = ((b+d+f+h)*w + e) / (4.0*w + vec3(1.0));\n"
+	"  gl_FragColor = vec4(clamp(sharp,0.0,1.0), 1.0);\n"
 	"}\n";
 
 // Low-health screen effect: desaturate toward grey + a dark-red vignette that grows as u_hurt -> 1
@@ -629,6 +658,8 @@ void R_InitPostFxGL1( void ) {
 	s.tonemapOk = (qboolean)( s.inited && s.tonemapProgram && s.sceneColor );
 	s.fxaaProgram = R_PostFx_CompileProgram( PASS_VS, FXAA_FS );
 	s.fxaaOk = (qboolean)( s.inited && s.fxaaProgram && s.sceneColor );
+	s.sharpenProgram = R_PostFx_CompileProgram( PASS_VS, SHARPEN_FS );
+	s.sharpenOk = (qboolean)( s.inited && s.sharpenProgram && s.sceneColor );
 	s.lowHealthProgram = R_PostFx_CompileProgram( PASS_VS, LOWHEALTH_FS );
 	s.lowHealthOk = (qboolean)( s.inited && s.lowHealthProgram && s.sceneColor );
 	s.suppressProgram = R_PostFx_CompileProgram( PASS_VS, SUPPRESSION_FS );
@@ -656,6 +687,7 @@ void R_ShutdownPostFxGL1( void ) {
 	if ( s.dofProgram )      qglDeleteProgram( s.dofProgram );
 	if ( s.tonemapProgram )  qglDeleteProgram( s.tonemapProgram );
 	if ( s.fxaaProgram )     qglDeleteProgram( s.fxaaProgram );
+	if ( s.sharpenProgram )  qglDeleteProgram( s.sharpenProgram );
 	if ( s.lowHealthProgram ) qglDeleteProgram( s.lowHealthProgram );
 	if ( s.suppressProgram )  qglDeleteProgram( s.suppressProgram );
 	if ( s.heatHazeProgram )  qglDeleteProgram( s.heatHazeProgram );
@@ -688,7 +720,7 @@ qboolean R_PostFxActive( void ) {
 // part of glState); we always end back on framebuffer 0.
 void RB_PostFxApply( void ) {
 	GLint    loc;
-	qboolean doSSAO, doBloom, doDoF, doTonemap, doFXAA, doLowHealth, doGodRays, doSuppress, doHeatHaze, doRain;
+	qboolean doSSAO, doBloom, doDoF, doTonemap, doFXAA, doLowHealth, doGodRays, doSuppress, doHeatHaze, doRain, doSharpen;
 	float    hurt = 0.0f;
 	float    suppress = 0.0f;
 	float    heat = 0.0f;
@@ -703,6 +735,7 @@ void RB_PostFxApply( void ) {
 	doTonemap = (qboolean)( s.tonemapOk && ( ( r_ppTonemap && r_ppTonemap->integer ) ||
 	                                         ( r_ppGrade && r_ppGrade->integer ) ) );
 	doFXAA    = (qboolean)( s.fxaaOk    && r_ppFXAA    && r_ppFXAA->integer );
+	doSharpen = (qboolean)( s.sharpenOk && r_ppSharpen && r_ppSharpen->integer );
 
 	// low-health: ramp the cgame-published health fraction into a hurt intensity, with a slow heartbeat pulse
 	doLowHealth = qfalse;
@@ -1070,6 +1103,26 @@ void RB_PostFxApply( void ) {
 		R_PostFx_SetTex( s.fxaaProgram );
 		loc = qglGetUniformLocation( s.fxaaProgram, "u_rcpFrame" );
 		if ( loc >= 0 ) qglUniform2f( loc, 1.0f / (float)s.width, 1.0f / (float)s.height );
+		qglBindTexture( GL_TEXTURE_2D, s.sceneColor );
+		R_PostFx_FSQuad();
+	}
+
+	// ---- Sharpen: unsharp mask over the finished (AA'd) frame; counteracts FXAA/mip softening. Runs after FXAA.
+	if ( doSharpen ) {
+		float amt = ( r_ppSharpenAmount ? r_ppSharpenAmount->value : 0.35f );
+		qglBindTexture( GL_TEXTURE_2D, s.sceneColor );
+		glState.currenttextures[0] = s.sceneColor;
+		qglCopyTexSubImage2D( GL_TEXTURE_2D, 0, 0, 0, 0, 0, s.width, s.height );
+
+		qglBindFramebuffer( GL_FRAMEBUFFER, 0 );
+		qglViewport( 0, 0, glConfig.vidWidth, glConfig.vidHeight );
+		GL_State( GLS_DEPTHTEST_DISABLE );
+		qglUseProgram( s.sharpenProgram );
+		R_PostFx_SetTex( s.sharpenProgram );
+		loc = qglGetUniformLocation( s.sharpenProgram, "u_rcp" );
+		if ( loc >= 0 ) qglUniform2f( loc, 1.0f / (float)s.width, 1.0f / (float)s.height );
+		loc = qglGetUniformLocation( s.sharpenProgram, "u_amount" );
+		if ( loc >= 0 ) qglUniform1f( loc, amt );
 		qglBindTexture( GL_TEXTURE_2D, s.sceneColor );
 		R_PostFx_FSQuad();
 	}

@@ -63,6 +63,7 @@ static qboolean s_inRegistration;
 
 cvar_t *s_mixPreStep;
 cvar_t *s_dialogscale;
+cvar_t *s_sfxvolume; // HZM coop - effect-channel volume (everything except dialog, music and menu sounds)
 
 int         numLoopSounds;
 loopSound_t loopSounds[MAX_LOOP_SOUNDS];
@@ -112,6 +113,7 @@ void S_Init(qboolean full_startup)
     s_show           = Cvar_Get("s_show", "0", CVAR_CHEAT);
     s_testsound      = Cvar_Get("s_testsound", "0", CVAR_CHEAT);
     s_dialogscale    = Cvar_Get("s_dialogscale", "1", CVAR_ARCHIVE);
+    s_sfxvolume      = Cvar_Get("s_sfxvolume", "1", CVAR_ARCHIVE); // HZM coop - SFX channel volume
     s_bLastInitSound = false;
 
     cv = Cvar_Get("s_initsound", "1", 0);
@@ -523,6 +525,12 @@ void S_StartSound(
 
     if (entnum && (entchannel == CHAN_DIALOG || entchannel == CHAN_DIALOG_SECONDARY) && s_dialogscale->value > 0) {
         volume *= s_dialogscale->value;
+    }
+    // HZM coop - SFX channel volume: scale every effect channel; dialog has its own
+    // slider above, menu/local UI sounds stay at master so the menus remain audible.
+    else if (entchannel != CHAN_MENU && entchannel != CHAN_LOCAL && entchannel != CHAN_LOCAL_SOUND
+             && s_sfxvolume->value >= 0) {
+        volume *= s_sfxvolume->value;
     }
 
     S_Driver_StartSound(origin, entnum, entchannel, sfxHandle, volume, min_dist, pitch, maxDist, streamed);

@@ -3603,9 +3603,21 @@ void Entity::Sound(
         _tmp       = true;
     }
 
+    // HZM coop - the sound-done callback drives 'waittill sounddone' and the whole vanilla say/dialog system.
+    // Upstream disabled it for ALL non-single-player gametypes, so scripted CAMPAIGN dialogue HANGS in coop
+    // (the waittill is registered but EventSoundDone is never posted). On a LISTEN server the game shares the
+    // host's sound system, so EventSoundDone's S_IsSoundPlaying poll works exactly like SP - allow the callback
+    // there. Only a DEDICATED server has no sound system to poll, so keep it disabled there (dialogue scripts on
+    // dedicated should use coop_mod/replace.scr::say_wait's pre-timed waits instead).
     if (doCallback && g_gametype->integer != GT_SINGLE_PLAYER) {
-        Com_Printf("^~^~^ Callback of sound '%s' ignored.\n", sound_name.c_str());
-        doCallback = 0;
+        static cvar_t *pDedicated = NULL;
+        if (!pDedicated) {
+            pDedicated = gi.Cvar_Get("dedicated", "1", 0);
+        }
+        if (pDedicated && pDedicated->integer) {
+            Com_Printf("^~^~^ Callback of sound '%s' ignored.\n", sound_name.c_str());
+            doCallback = 0;
+        }
     }
 
     if (sound_name.length() > 0) {

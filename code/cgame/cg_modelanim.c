@@ -289,6 +289,11 @@ static void CG_ActorOverheadIcon(refEntity_t *pModel, int iconType)
     }
     iconEnt.shaderRGBA[3] = (int)(fAlpha * 255.0f);
 
+    // HZM coop - sprite world size = image pixel dims * scale (tr_model sprite path), so the HD icon
+    // upscale (textures/hud/coop_*_icon.tga 32 -> 128) quadrupled the on-screen size ("overhead icons
+    // are now MASSIVE"). Normalize back to the 32px-authored world size the distance curve above expects.
+    iconEnt.scale *= 32.0f / 128.0f;
+
     if (fAlpha > 0.0f) {
         cgi.R_AddRefSpriteToScene(&iconEnt);
     }
@@ -675,15 +680,28 @@ qboolean CG_EntityShadow(centity_t *cent, refEntity_t *model)
     // sun-oriented ground decal per model (overrides the straight-down foot/blob shadow). Uses fixed
     // sun-angle cvars (coop_shadowAz/El) so it needs no renderer sun-direction bridge. Pure cgame.
     {
-        static cvar_t *sDir, *sAz, *sEl, *sLen;
+        static cvar_t *sDir, *sAz, *sEl, *sLen, *sAuto, *sSunAz, *sSunEl, *sSunValid;
         if (!sDir) {
             sDir = cgi.Cvar_Get("coop_shadowDir", "1",   CVAR_ARCHIVE);
-            sAz  = cgi.Cvar_Get("coop_shadowAz",  "45",  CVAR_ARCHIVE);   // sun azimuth (deg)
-            sEl  = cgi.Cvar_Get("coop_shadowEl",  "45",  CVAR_ARCHIVE);   // sun elevation (deg); lower = longer shadow
+            sAz  = cgi.Cvar_Get("coop_shadowAz",  "45",  CVAR_ARCHIVE);   // MANUAL sun azimuth (deg)
+            sEl  = cgi.Cvar_Get("coop_shadowEl",  "45",  CVAR_ARCHIVE);   // MANUAL sun elevation (deg); lower = longer
             sLen = cgi.Cvar_Get("coop_shadowLen", "1.5", CVAR_ARCHIVE);   // extra length multiplier
+            // AUTO: follow the map's REAL sun (published each frame by the renderer, RE_RenderScene) when it has
+            // one; otherwise fall back to the manual coop_shadowAz/El above. coop_shadowAuto 0 forces manual.
+            sAuto     = cgi.Cvar_Get("coop_shadowAuto", "1",  CVAR_ARCHIVE);
+            sSunAz    = cgi.Cvar_Get("r_coopSunAz",     "45", 0);
+            sSunEl    = cgi.Cvar_Get("r_coopSunEl",     "45", 0);
+            sSunValid = cgi.Cvar_Get("r_coopSunValid",  "0",  0);
         }
         if (sDir->integer) {
-            float w = model->scale * cgi.R_ModelRadius(model->hModel);
+            float azDeg = sAz->value;
+            float elDeg = sEl->value;
+            float w;
+            if (sAuto->integer && sSunValid->integer) {
+                azDeg = sSunAz->value;   // the map's real sun
+                elDeg = sSunEl->value;
+            }
+            w = model->scale * cgi.R_ModelRadius(model->hModel);
             if (w < 1) {
                 return qfalse;
             }
@@ -695,8 +713,8 @@ qboolean CG_EntityShadow(centity_t *cent, refEntity_t *model)
             }
             alpha = (1.0 - trace.fraction) * 0.65f;
             {
-                float elr = sEl->value * ((float)M_PI / 180.0f);
-                float azr = sAz->value * ((float)M_PI / 180.0f);
+                float elr = elDeg * ((float)M_PI / 180.0f);
+                float azr = azDeg * ((float)M_PI / 180.0f);
                 float stretch = 1.0f + sLen->value / tan(elr < 0.17f ? 0.17f : elr);
                 vec3_t sunH, pos;
                 sunH[0] = (float)cos(azr);
@@ -706,7 +724,7 @@ qboolean CG_EntityShadow(centity_t *cent, refEntity_t *model)
                 VectorMA(trace.endpos, -w * (stretch - 1.0f) * 0.5f, sunH, pos);
                 CG_ImpactMark(
                     cgs.media.shadowMarkShader, pos, trace.plane.normal,
-                    sAz->value, w * stretch, w, alpha, alpha, alpha, 1,
+                    azDeg, w * stretch, w, alpha, alpha, alpha, 1,
                     qfalse, qtrue, qfalse, qfalse, 0.5f, 0.5f);
             }
             return qtrue;
@@ -1136,30 +1154,30 @@ void CG_ProcessPlayerModel()
 // fall back to the global cg_ads* cvars. cg_modelanim applies the rotations; cg_view applies the shift.
 static const adsGunTune_t s_adsGunTune[] = {
     //  name                     sP     sY     sR    sSx    sSy      cP     cY    cR    cSx    cSy
-    { "Colt 45",               -2.5f, -2.0f,  1.5f, -0.02f,-0.02f,  -2.5f,-11.0f, 4.0f,-0.14f, 0.10f },
-    { "Walther P38",           -1.5f, -0.5f,  1.5f,  0.0f, -0.02f,   0.5f, -9.5f, 1.0f,-0.14f, 0.02f },
-    { "Webley Revolver",        2.5f, -1.5f,  0.0f, -0.02f, 0.12f,   0.5f,-10.0f, 1.0f,-0.14f, 0.02f },
-    { "Nagant Revolver",        2.5f, -1.5f,  0.0f, -0.02f, 0.08f,   0.5f,-10.0f, 1.0f,-0.14f, 0.02f },
-    { "Beretta",                2.5f, -1.5f, -2.0f,  0.0f,  0.08f,   0.5f,-10.0f, 1.0f,-0.14f, 0.02f },
-    { "Hi-Standard Silenced",   0.0f, -1.0f, -2.0f, -0.02f, 0.02f,   1.0f, -8.0f, 1.0f,-0.10f, 0.02f },
-    { "M1 Garand",             -7.5f, -1.0f, -1.0f, -0.02f,-0.22f,   3.5f,-38.5f, 3.5f,-0.62f, 0.08f },
-    { "Mauser KAR 98K",        -7.5f, -1.0f, -1.0f, -0.02f,-0.22f,   3.5f,-37.0f, 3.5f,-0.58f, 0.08f },
-    { "Lee-Enfield",           -7.0f, -1.0f,  1.0f, -0.02f,-0.26f,   3.5f,-33.0f, 3.0f,-0.50f, 0.02f },
-    { "Mosin Nagant Rifle",    -6.5f, -1.5f,  0.5f, -0.02f,-0.24f,   4.0f,-33.5f, 3.0f,-0.52f, 0.12f },
-    { "Carcano",               -6.0f, -1.0f,  0.5f, -0.02f,-0.22f,   4.0f,-34.0f, 3.0f,-0.54f, 0.10f },
+    { "Colt 45", -2.5f, -2.0f,  1.5f, -0.02f, -0.02f,   1.5f, -8.5f,  4.0f,  -0.14f,  0.04f },
+    { "Walther P38", -1.5f, -0.5f,  1.5f,   0.0f, -0.02f,   0.5f, -9.5f,  1.0f, -0.145f,  0.02f },
+    { "Webley Revolver",        2.5f, -1.5f,  0.0f, -0.02f, 0.12f,   0.5f,-10.0f, 1.0f,-0.16f, 0.08f },
+    { "Nagant Revolver",        2.5f, -1.5f,  0.0f, -0.02f, 0.08f,   0.5f,-10.0f, 1.0f,-0.16f, 0.02f },
+    { "Beretta",                2.5f, -1.5f, -2.0f,  0.0f,  0.08f,  -1.0f, -8.5f, 1.0f,-0.14f, 0.02f },
+    { "Hi-Standard Silenced",   0.0f, -1.0f, -2.0f, -0.02f, 0.02f,   1.0f, -8.0f, 1.0f,-0.12f, 0.02f },
+    { "M1 Garand", -7.5f, -1.0f, -1.0f, -0.02f, -0.22f,   3.5f,-38.5f,  3.5f,  -0.75f,  0.08f },
+    { "Mauser KAR 98K", -7.5f, -1.0f, -1.0f, -0.02f, -0.22f,   4.5f,-34.5f,  6.5f, -0.625f,  0.08f },
+    { "Lee-Enfield", -7.0f, -1.0f,  1.0f, -0.02f, -0.26f,   2.0f,-34.5f,  0.0f, -0.625f, 0.045f },
+    { "Mosin Nagant Rifle", -6.5f, -1.5f,  0.5f, -0.02f, -0.24f,   4.0f,-33.5f,  3.0f,  -0.61f, 0.105f },
+    { "Carcano", -6.0f, -1.0f,  0.5f, -0.02f, -0.22f,   4.0f,-41.0f,  0.5f, -0.805f, 0.095f },
     { "DeLisle",                1.0f, -3.0f,  2.0f, -0.04f, 0.02f,   4.0f,-34.0f, 3.0f,-0.56f, 0.14f },
-    { "Thompson",               1.0f,  2.0f,  0.0f,  0.02f, 0.0f,    1.0f,-10.5f, 1.5f,-0.14f, 0.02f },
-    { "MP40",                   0.5f,  2.0f, -1.5f,  0.02f, 0.0f,    1.0f,-20.0f, 1.5f,-0.28f, 0.02f },
+    { "Thompson",  1.0f,  2.0f,  0.0f,  0.02f,   0.0f,   1.0f,-10.5f,  1.5f, -0.165f,  0.02f },
+    { "MP40",  0.5f,  2.0f, -1.5f,  0.02f,   0.0f,   2.5f,-20.0f,  1.5f, -0.335f,  0.05f },
     { "Sten Mark II",           1.0f,  1.5f, -1.5f,  0.02f,-0.04f,   1.0f,-20.0f, 1.5f,-0.28f, 0.02f },
-    { "PPSH SMG",              -2.5f, 11.0f, -2.0f,  0.14f,-0.08f,   1.5f,-19.0f, 1.5f,-0.26f, 0.04f },
-    { "Moschetto",             -8.0f,  6.0f, -2.0f,  0.10f,-0.28f,   2.0f,-18.5f, 1.5f,-0.26f, 0.04f },
-    { "BAR",                    1.0f, -0.5f,  0.0f,  0.0f,  0.04f,  -1.0f,-23.0f, 1.5f,-0.32f, 0.16f },
-    { "StG 44",                 0.0f,  2.5f,  0.0f,  0.04f, 0.02f,   1.5f,-20.5f, 2.0f,-0.28f, 0.06f },
-    { "Vickers-Berthier",       7.0f,-11.5f, -1.0f, -0.12f, 0.28f,   1.5f,-22.0f, 2.5f,-0.34f, 0.10f },
-    { "Bazooka",               11.0f,  7.5f, -1.0f,  0.20f, 0.16f,   1.5f, -7.0f, 3.5f,-0.08f, 0.04f },
+    { "PPSH SMG", -2.5f, 11.0f, -2.0f,  0.14f, -0.08f,   1.5f,-18.0f,  2.5f,  -0.26f,  0.04f },
+    { "Moschetto", -8.0f,  6.0f, -2.0f,  0.10f, -0.28f,   2.0f,-18.5f,  1.5f, -0.285f,-0.005f },
+    { "BAR",  1.0f, -0.5f,  0.0f,   0.0f,  0.04f,   2.0f,-23.0f,  1.5f,  -0.38f, 0.155f },
+    { "StG 44",  0.0f,  2.5f,  0.0f,  0.04f,  0.02f,   2.5f,-20.5f,  2.5f, -0.325f,  0.06f },
+    { "Vickers-Berthier",  7.0f,-11.5f, -1.0f, -0.12f,  0.28f,   1.5f,-26.5f,  1.5f, -0.505f,  0.18f },
+    { "Bazooka", 11.0f,  7.5f, -1.0f,  0.20f,  0.16f,   1.5f, -7.0f,  3.5f,  -0.06f, 0.055f },
     { "Panzerschreck",         11.0f,  7.5f, -1.0f,  0.08f, 0.30f,   1.5f, -7.0f, 1.0f,-0.06f, 0.04f },
     { "PIAT",                 -12.5f, 21.0f,  2.0f,  0.24f,-0.32f,   1.5f, -7.0f, 1.0f,-0.10f, 0.02f },
-    { "shotgun",              -12.5f, 12.0f,  2.0f,  0.12f,-0.42f,  -3.0f,-43.0f, 1.0f,-0.64f, 0.02f },
+    { "shotgun",-12.5f, 12.0f,  2.0f,  0.12f, -0.42f,  -3.0f,-43.0f,  1.0f, -0.715f, -0.02f },
 };
 
 const adsGunTune_t *CG_FindAdsTune(const char *wpn)

@@ -2185,6 +2185,8 @@ Player::Player()
     // start with a full stamina pool on (re)spawn; TickSprint clamps this down to the cvar max each frame
     m_fCoopStamina    = 9999.0f;
     m_bCoopSprinting  = false;
+    m_bCoopGearLoop  = false; // HZM coop - gear rattle off
+    m_fCoopSprintDur  = 0.0f;
     m_bHasJumped      = false;
 
     m_fLastInvulnerableTime      = 0;
@@ -11994,6 +11996,39 @@ void Player::TickSprint()
                 m_fCoopStamina += dt * regen;
                 if (m_fCoopStamina > maxStam) { m_fCoopStamina = maxStam; }
             }
+        }
+
+        // HZM coop - GEAR RATTLE: a soft equipment-rattle loop rides the sprint state (3D on the player,
+        // so nearby teammates/enemies hear the sprinter too). coop_sprintGear 0 disables.
+        {
+            cvar_t *pGear = gi.Cvar_Get("coop_sprintGear", "1", CVAR_ARCHIVE);
+            bool    gearOn = (pGear && pGear->integer) ? true : false;
+            if (gearOn && m_bCoopSprinting && !m_bCoopGearLoop) {
+                LoopSound("coop_gear_run", 0.85f);
+                m_bCoopGearLoop = true;
+            } else if (m_bCoopGearLoop && (!m_bCoopSprinting || !gearOn)) {
+                StopLoopSound();
+                m_bCoopGearLoop = false;
+            }
+        }
+
+        // HZM coop - OUT-OF-BREATH pant. Accumulate CONTINUOUS sprint time; the moment a sprint ENDS having
+        // lasted at least coop_sprintBreathTime seconds, play one of two interchangeable "out of breath" takes
+        // on the player (same "breath sound on the player entity" idea as DBNO). A sprint shorter than the
+        // threshold just resets the timer with no sound. The -0.05 tolerance lets a full-pool sprint (default
+        // coop_sprintStamina 5 == the default 5s threshold) reliably trigger despite frame-step rounding.
+        if (m_bCoopSprinting) {
+            m_fCoopSprintDur += dt;
+        } else if (m_fCoopSprintDur > 0.0f) {
+            cvar_t *pBreathOn = gi.Cvar_Get("coop_sprintBreath", "1", CVAR_ARCHIVE);
+            cvar_t *pBreathT  = gi.Cvar_Get("coop_sprintBreathTime", "5", CVAR_ARCHIVE);
+            float   breathT   = pBreathT ? pBreathT->value : 5.0f;
+
+            if (pBreathOn && pBreathOn->integer && !deadflag && m_fCoopSprintDur >= (breathT - 0.05f)) {
+                const char *snd = (G_Random() < 0.5f) ? "coop_sprint_breath1" : "coop_sprint_breath2";
+                Sound(snd, CHAN_VOICE, -1.0f, 160, NULL, -1.0f, 1, 0, 1, 1200);
+            }
+            m_fCoopSprintDur = 0.0f;
         }
     }
     //====

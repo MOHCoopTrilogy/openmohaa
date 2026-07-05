@@ -5124,6 +5124,17 @@ void Actor::EventGiveWeaponInternal(Event *ev)
     const str weapName = ev->GetString(1);
     if (weapName.length() > 0 && giveItem(weapName)) {
         Unholster();
+    } else {
+        // HZM coop - WEAPDBG: a FAILED give leaves the actor holstered + weaponless (Holster/RemoveWeapons
+        // above already ran) while its anims keep posing "armed" - a prime suspect for the persistent
+        // "friendly's gun absent from his hands" bug. Log it loudly. coop_weapDebug 0 = off.
+        static cvar_t *pWeapDbg3 = gi.Cvar_Get("coop_weapDebug", "1", 0);
+        if (pWeapDbg3->integer) {
+            gi.Printf(
+                "^~^~^ WEAPDBG GIVE-FAILED actor=%d '%s' weapName='%s' -> actor left UNARMED+holstered t=%.1f\n",
+                entnum, TargetName().c_str(), weapName.c_str(), level.time
+            );
+        }
     }
 }
 
@@ -5285,6 +5296,35 @@ void Actor::HandleKilled(Event *ev, bool bPlayDeathAnim)
 {
     deadflag = DEAD_DEAD;
     health   = 0.0;
+
+    // HZM coop - DEATH IMPULSE: explosive kills shove the dying body along the blast
+    // direction so deaths read physical (bodies fall *with* the blow, can get thrown off
+    // ledges). killed-event args: 2=damage 5=direction 9=meansofdeath. The actor's own
+    // fall/toss handling settles the body. g_corpseImpulse 0 disables, value scales.
+    if (g_corpseImpulse->value > 0 && bPlayDeathAnim && ev->NumArgs() >= 9) {
+        int iMod = ev->GetInteger(9);
+
+        if (iMod == MOD_EXPLOSION || iMod == MOD_EXPLODEWALL || iMod == MOD_GRENADE
+            || iMod == MOD_ROCKET || iMod == MOD_THROWNOBJECT) {
+            Vector vDir = ev->GetVector(5);
+            float  fDmg = ev->GetFloat(2);
+            float  fPush;
+
+            if (fDmg < 0) {
+                fDmg = 0;
+            }
+            fPush = 120.0f + fDmg * 1.5f;
+            if (fPush > 420.0f) {
+                fPush = 420.0f;
+            }
+            fPush *= g_corpseImpulse->value;
+
+            vDir.z = 0;
+            vDir.normalize();
+            velocity += vDir * fPush;
+            velocity.z += fPush * 0.55f;
+        }
+    }
 
     if (bPlayDeathAnim) {
         Event event(EV_Listener_ExecuteScript, ev->NumArgs() + 1);

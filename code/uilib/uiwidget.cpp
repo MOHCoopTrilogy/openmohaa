@@ -23,6 +23,73 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 #include "ui_local.h"
 #include "../qcommon/localization.h"
 
+//==========================================================================
+// HZM coop - HD UI TEXEL SCALE TABLE
+// tileshader/linkcvartoshader widgets draw a fixed TEXEL window of their material
+// (see the WF_TILESHADER virtual branch in UIWidget::Draw), so HD-upscaled UI
+// textures need the engine told their upscale factor. The mod ships an optional
+// ui/hd_texel_scale.cfg with one "<materialname> <scale>" pair per line (name as
+// the urc references it, no extension). Unlisted materials return 1.0 = stock
+// behavior. Parsed once, linear lookup (a handful of entries, few widgets/frame).
+//==========================================================================
+#define HZM_HDUI_MAX 128
+static int   s_iHdUiCount = -1; // -1 = not loaded yet
+static str   s_hdUiNames[HZM_HDUI_MAX];
+static float s_hdUiScales[HZM_HDUI_MAX];
+
+static void UI_LoadHDTexelScales(void)
+{
+    void *buffer = NULL;
+    long  len;
+
+    s_iHdUiCount = 0;
+    len          = uii.File_OpenFile("ui/hd_texel_scale.cfg", &buffer);
+    if (len <= 0 || !buffer) {
+        return;
+    }
+
+    const char *p = (const char *)buffer;
+    const char *end = p + len;
+    while (p < end && s_iHdUiCount < HZM_HDUI_MAX) {
+        // skip whitespace/newlines
+        while (p < end && (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n')) p++;
+        if (p >= end) break;
+        if (*p == '/' || *p == '#') { // comment line
+            while (p < end && *p != '\n') p++;
+            continue;
+        }
+        // name token
+        str name;
+        while (p < end && *p != ' ' && *p != '\t' && *p != '\r' && *p != '\n') { name += *p; p++; }
+        while (p < end && (*p == ' ' || *p == '\t')) p++;
+        // scale token
+        str sc;
+        while (p < end && *p != ' ' && *p != '\t' && *p != '\r' && *p != '\n') { sc += *p; p++; }
+        float f = (float)atof(sc.c_str());
+        if (name.length() && f > 0.0f) {
+            s_hdUiNames[s_iHdUiCount]  = name;
+            s_hdUiScales[s_iHdUiCount] = f;
+            s_iHdUiCount++;
+        }
+    }
+    uii.File_FreeFile(buffer);
+}
+
+float UI_HDTexelScale(str name)
+{
+    int i;
+
+    if (s_iHdUiCount < 0) {
+        UI_LoadHDTexelScales();
+    }
+    for (i = 0; i < s_iHdUiCount; i++) {
+        if (!str::icmp(s_hdUiNames[i], name)) {
+            return s_hdUiScales[i];
+        }
+    }
+    return 1.0f;
+}
+
 Event W_Destroyed
 (
     "widget_destroyed",
@@ -1947,10 +2014,17 @@ void UIWidget::Display(const UIRect2D& drawframe, float parent_alpha)
 
         if (m_flags & WF_TILESHADER) {
             if (m_bVirtual) {
-                float fvWidth =
-                    m_frame.size.width / m_vVirtualScale[0] / uii.Rend_GetShaderWidth(m_material->GetMaterial());
-                float fvHeight =
-                    m_frame.size.height / m_vVirtualScale[1] / uii.Rend_GetShaderHeight(m_material->GetMaterial());
+                // HZM coop - HD UI SCALE. This branch maps the widget to a fixed TEXEL window
+                // (widget virtual px / texture px), so a texture upscaled to 4x renders as an
+                // empty top-left window instead of its full art. UI_HDTexelScale() returns the
+                // per-material scale from ui/hd_texel_scale.cfg (shipped by the mod, listing each
+                // HD-replaced UI texture and its upscale factor); unlisted materials return 1.0
+                // and render byte-identically to stock.
+                float fHdScale = UI_HDTexelScale(m_material->GetName());
+                float fvWidth  = m_frame.size.width / m_vVirtualScale[0]
+                              / uii.Rend_GetShaderWidth(m_material->GetMaterial()) * fHdScale;
+                float fvHeight = m_frame.size.height / m_vVirtualScale[1]
+                              / uii.Rend_GetShaderHeight(m_material->GetMaterial()) * fHdScale;
 
                 uii.Rend_DrawPicStretched(
                     0, 0, m_frame.size.width, m_frame.size.height, 0, 0, fvWidth, fvHeight, m_material->GetMaterial()

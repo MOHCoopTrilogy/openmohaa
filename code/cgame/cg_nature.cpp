@@ -334,6 +334,27 @@ void CG_RainGlobal(void)
             iLife = 10000;
         }
 
+        // HZM coop - WALL CLAMP: the sky gate above only checks the drop's START column, but rain streaks
+        // slant up to rain_slant (250) horizontal units as they fall (+ wind) and beams render THROUGH
+        // geometry - so drops spawned legitimately outside a building knifed diagonally through the roof /
+        // walls into interiors (user screenshot: rain inside a closed room). Trace along the streak and cut
+        // it at the first solid surface so rain visibly stops at walls and roofs. Snow (slant 1) barely
+        // drifts, so this mostly no-ops there.
+        {
+            trace_t wallTr;
+            cgi.CM_BoxTrace(&wallTr, vStart, vEnd, vZero, vZero, 0, MASK_SOLID, qfalse);
+            if (wallTr.fraction < 1.0f) {
+                if (wallTr.fraction < 0.1f) {
+                    continue; // streak would be a stub - skip the drop entirely
+                }
+                VectorCopy(wallTr.endpos, vEnd);
+                iLife = (int)(iLife * wallTr.fraction); // die on impact so the visible speed stays constant
+                if (iLife < 50) {
+                    continue;
+                }
+            }
+        }
+
         CG_CreateBeam(
             vStart, vec_zero, 0, 1, 1.0, cg.rain.width, BEAM_INVERTED_FAST, 1000.0, iLife, qtrue,
             vEnd, 0, 0, 0, 1, 0, shadername, fcolor, 0, 0.0, cg.rain.length, 1.0, 0, "raineffect"

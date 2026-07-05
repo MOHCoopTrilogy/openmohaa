@@ -1409,6 +1409,34 @@ void Sentient::ArmorDamage(Event *ev)
         return;
     }
 
+    // HZM coop - SELECTIVE ally protection. The coop OFFICER and all its reinforcements/bodyguards carry the
+    // RF_COOP_BOSS render flag. Drop any damage a GERMAN "boss" actor deals to an ALLIED AI actor (an Actor --
+    // not a player -- on the american team), so the mission's scripted squad survives the coop boss waves.
+    // Normal (untagged) enemies still hurt allies, so a map's "too many casualties" fail can still fire, and
+    // players still take boss damage (a Player is not an Actor).
+    // FIXED 2026-07-03: the check used to drop damage from ANY boss-flagged attacker to ANY cross-team actor --
+    // but allied PARADROP troopers also carry RF_COOP_BOSS (it drives their overhead star icon), so every
+    // paratrooper bullet into a german Actor was silently zeroed (ALLYFIRE log: hits=1 dmg=0 -> "paratroopers
+    // shooting the shit out of the enemy AI and they aren't dying"). Protection is now DIRECTIONAL: only a
+    // german boss attacking an american AI is blocked.
+    if (attacker && attacker != this && (attacker->edict->s.renderfx & RF_COOP_BOSS)
+        && attacker->m_Team == TEAM_GERMAN && IsSubclassOfActor() && m_Team == TEAM_AMERICAN) {
+        return;
+    }
+
+    // HZM coop - script blast shield for allied mission NPCs. The player-callable bombing run delivers its
+    // damage via the script radiusdamage command, which attributes the explosion to WORLD (see
+    // ScriptThread::EventRadiusDamage: RadiusDamage(origin, world, world, ..., MOD_EXPLOSION, ...)). Allied
+    // escort actors have ~100hp, so one 600-damage bomb instantly killed mission-critical NPCs -- on t1l3 the
+    // captain's death fires missionfailed and the private/colonel deaths break the ride/balcony gags ("bombing
+    // run killed the colonel"). Drop world-attributed explosion damage to AMERICAN AI actors in coop only;
+    // players and german AI still take full blast damage, and weapon/grenade explosions (attributed to their
+    // owner) still hurt allies.
+    if (g_gametype->integer != GT_SINGLE_PLAYER && meansofdeath == MOD_EXPLOSION && IsSubclassOfActor()
+        && m_Team == TEAM_AMERICAN && (!attacker || (Entity *)attacker == (Entity *)world)) {
+        return;
+    }
+
     if ((!isClient() || g_gametype->integer != GT_SINGLE_PLAYER)
         && (location > HITLOC_GENERAL && location < NUMBODYLOCATIONS)) {
         damage *= m_fDamageMultipliers[location];

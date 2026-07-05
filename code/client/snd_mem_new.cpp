@@ -436,7 +436,10 @@ qboolean S_LoadSound(const char *fileName, sfx_t *sfx, int streamed, qboolean fo
     char         tempName[MAX_RES_NAME + 1];
     int          realKhz;
 
-    Com_Printf("^E3DBG S_LoadSound ENTER file='%s' streamed=%i force=%i\n", fileName ? fileName : "(null)", streamed, force_load);
+    // HZM coop - E3DBG load traces gated behind s_show_sounds 2 (they flooded qconsole.log at map load)
+    if (s_show_sounds->integer > 1) {
+        Com_Printf("^E3DBG S_LoadSound ENTER file='%s' streamed=%i force=%i\n", fileName ? fileName : "(null)", streamed, force_load);
+    }
 
     sfx->buffer = 0;
 
@@ -462,7 +465,9 @@ qboolean S_LoadSound(const char *fileName, sfx_t *sfx, int streamed, qboolean fo
     }
 
     size = FS_FOpenFileRead(fileName, &file_handle, qfalse, qtrue);
-    Com_Printf("^E3DBG S_LoadSound '%s' fileSize=%i\n", fileName, size);
+    if (s_show_sounds->integer > 1) {
+        Com_Printf("^E3DBG S_LoadSound '%s' fileSize=%i\n", fileName, size);
+    }
     if (size <= 0) {
         if (file_handle) {
             FS_FCloseFile(file_handle);
@@ -474,12 +479,26 @@ qboolean S_LoadSound(const char *fileName, sfx_t *sfx, int streamed, qboolean fo
 
     FS_Read(sfx->data, size, file_handle);
     FS_FCloseFile(file_handle);
-    Com_Printf("^E3DBG S_LoadSound BEFORE GetWavinfo '%s' size=%i\n", fileName, size);
+    if (s_show_sounds->integer > 1) {
+        Com_Printf("^E3DBG S_LoadSound BEFORE GetWavinfo '%s' size=%i\n", fileName, size);
+    }
     sfx->info = GetWavinfo(fileName, sfx->data, size);
-    Com_Printf("^E3DBG S_LoadSound AFTER GetWavinfo '%s' rate=%i width=%i ch=%i samples=%i dataofs=%i datasize=%i\n", fileName, sfx->info.rate, sfx->info.width, sfx->info.channels, sfx->info.samples, sfx->info.dataofs, sfx->info.datasize);
+    if (s_show_sounds->integer > 1) {
+        Com_Printf("^E3DBG S_LoadSound AFTER GetWavinfo '%s' rate=%i width=%i ch=%i samples=%i dataofs=%i datasize=%i\n", fileName, sfx->info.rate, sfx->info.width, sfx->info.channels, sfx->info.samples, sfx->info.dataofs, sfx->info.datasize);
+    }
 
     if (sfx->info.channels != 1 && !streamed) {
         Com_Printf("%s is a stereo wav file\n", fileName);
+        Z_Free(sfx->data);
+        sfx->data = NULL;
+        return qfalse;
+    }
+
+    // HZM coop - a WAV that failed to parse comes back with rate=0/width=0; reject it here instead
+    // of letting rate=0 reach the time_length divide below (divide-by-zero on a corrupt file).
+    if (sfx->info.rate <= 0 || sfx->info.width <= 0 || sfx->info.samples <= 0) {
+        Com_Printf("S_LoadSound: unsupported or corrupt wav '%s' (rate=%i width=%i samples=%i)\n",
+                   fileName, (int)sfx->info.rate, (int)sfx->info.width, sfx->info.samples);
         Z_Free(sfx->data);
         sfx->data = NULL;
         return qfalse;

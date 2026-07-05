@@ -2739,6 +2739,17 @@ void Weapon::DetachGun(void)
             Player *p = (Player *)owner.Pointer();
             p->ZoomOff();
         }
+        // HZM coop - WEAPDBG: trace AI weapon detach/hide (hunting the "friendly's gun absent from hands"
+        // bug). AI owners only so player weapon churn doesn't spam. coop_weapDebug 0 = off.
+        {
+            static cvar_t *pWeapDbg = gi.Cvar_Get("coop_weapDebug", "1", 0);
+            if (pWeapDbg->integer && owner && !owner->IsSubclassOfPlayer()) {
+                gi.Printf(
+                    "^~^~^ WEAPDBG DETACH+HIDE weap='%s' owner=%d '%s' t=%.1f\n",
+                    model.c_str(), owner->entnum, owner->TargetName().c_str(), level.time
+                );
+            }
+        }
         StopSound(CHAN_WEAPONIDLE);
         attached = false;
         detach();
@@ -2797,6 +2808,19 @@ void Weapon::AttachGun(weaponhand_t hand, qboolean holstering)
     default:
         warning("Weapon::AttachGun", "Invalid hand for attachment of weapon specified");
         break;
+    }
+
+    // HZM coop - WEAPDBG (see DetachGun): log every AI attach outcome, incl. the two SILENT hidden-gun paths
+    // (empty holster tag -> return with the model still hidden from DetachGun; tag lookup failure).
+    {
+        static cvar_t *pWeapDbg2 = gi.Cvar_Get("coop_weapDebug", "1", 0);
+        if (pWeapDbg2->integer && owner && !owner->IsSubclassOfPlayer()) {
+            gi.Printf(
+                "^~^~^ WEAPDBG ATTACH weap='%s' owner=%d '%s' holster=%d tag='%s' t=%.1f\n",
+                model.c_str(), owner->entnum, owner->TargetName().c_str(), holstering,
+                current_attachToTag.c_str(), level.time
+            );
+        }
     }
 
     if (!current_attachToTag.length()) {

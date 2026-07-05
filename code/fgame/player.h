@@ -355,6 +355,10 @@ public:
     // m_bCoopSprinting = the per-frame "is actually sprinting right now" flag (set in ClientMove).
     float m_fCoopStamina;
     bool  m_bCoopSprinting;
+    bool  m_bCoopGearLoop; // HZM coop - gear-rattle loop currently playing (follows sprint state)
+    // HZM coop - seconds of CONTINUOUS sprinting so far (accumulates while sprinting, resets to 0 the moment
+    // sprint stops). On the stop transition, if it reached coop_sprintBreathTime we play an out-of-breath pant.
+    float m_fCoopSprintDur;
     bool  m_bHasJumped;
     float m_fLastInvulnerableTime;
     int   m_iInvulnerableTimeRemaining;

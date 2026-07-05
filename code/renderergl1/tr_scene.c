@@ -462,6 +462,22 @@ void RE_RenderScene( const refdef_t *fd ) {
 		R_AddLightGridSurfacesToScene();
 	}
 
+	// HZM coop - publish this map's real SUN direction so cgame's directional decal shadow (CG_EntityShadow,
+	// coop_shadowAuto) can align shadows to the actual sun instead of a fixed cvar angle. az/el in degrees;
+	// r_coopSunValid = 1 only when the map defines a sun (tr.sunLight > 0), otherwise cgame keeps its manual
+	// coop_shadowAz/El. tr.sunDirection points TOWARD the sun; the cgame side trails the shadow away from it.
+	if ( tr.world ) {
+		float sunSum = tr.sunLight[0] + tr.sunLight[1] + tr.sunLight[2];
+		float sz     = tr.sunDirection[2];
+		float azDeg  = (float)atan2( tr.sunDirection[1], tr.sunDirection[0] ) * ( 180.0f / (float)M_PI );
+		float elDeg;
+		if ( sz < -1.0f ) { sz = -1.0f; } else if ( sz > 1.0f ) { sz = 1.0f; }
+		elDeg = (float)asin( sz ) * ( 180.0f / (float)M_PI );
+		ri.Cvar_Set( "r_coopSunAz",    va( "%g", azDeg ) );
+		ri.Cvar_Set( "r_coopSunEl",    va( "%g", elDeg ) );
+		ri.Cvar_Set( "r_coopSunValid", ( sunSum > 0.05f ) ? "1" : "0" );
+	}
+
 	R_VisDebug();
 	TIKI_Reset_Caches();
 

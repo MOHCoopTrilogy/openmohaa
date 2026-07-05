@@ -35,6 +35,7 @@ extern cvar_t *s_loadas8bit;
 extern cvar_t *s_separation;
 extern cvar_t *s_musicVolume;
 extern cvar_t *s_ambientVolume;
+extern cvar_t *s_sfxvolume; // HZM coop
 extern cvar_t *s_sfxduck; // HZM coop - effect-channel cinematic duck (music exempt)
 
 #define MAX_SOUNDSYSTEM_CHANNELS_3D        32

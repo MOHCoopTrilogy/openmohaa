@@ -392,9 +392,12 @@ void CG_UpdateEnvReverb(void)
         preset = eax_generic; level = 0.0f;                                   // open sky / no ceiling -> dry
     } else {
         float ceilDist = tr.fraction * 2048.0f;
-        if (ceilDist < 256.0f)      { preset = eax_room;      level = 0.30f; } // low/small room
-        else if (ceilDist < 640.0f) { preset = eax_stoneroom; level = 0.42f; } // medium room
-        else                        { preset = eax_hallway;   level = 0.52f; } // tall / large space
+        // HZM coop - retuned 2026-07-04: 'room' (0.4s decay) was inaudible under gunfire and
+        // most MOHAA interiors have <256u ceilings, so everything indoor sounded dry. Hard
+        // WWII masonry reads as stoneroom (2.3s decay); genuinely big volumes get auditorium.
+        if (ceilDist < 256.0f)      { preset = eax_stoneroom;  level = 0.38f; } // low/small room
+        else if (ceilDist < 640.0f) { preset = eax_stoneroom;  level = 0.55f; } // medium room
+        else                        { preset = eax_auditorium; level = 0.50f; } // tall / large space
     }
 
     if (preset != s_lastEnvPreset) {
@@ -439,6 +442,13 @@ qboolean CG_GetBreathState(float *outFrac, qboolean *outCooldown)
         if (*outFrac > 1.0f) { *outFrac = 1.0f; }
     }
     return qtrue;
+}
+
+// HZM coop - true only while the player is ACTIVELY holding breath to steady the sights this frame (drives
+// the extra "focus-in" ADS vignette darkening in cg_drawtools).
+qboolean CG_IsBreathSteady(void)
+{
+    return s_breathSteady;
 }
 
 /*

@@ -2244,6 +2244,20 @@ float BulletAttack(
         }
     }
 
+    // HZM coop - PLAYER RIFLE ACCURACY: tighten the PLAYER's own rifle bullet spread without touching enemy AI,
+    // who fire the same rifle models. Player-only (IsSubclassOfPlayer) + rifle-class-only so SMGs/pistols are
+    // unaffected. coop_playerRifleSpread < 1 = tighter grouping (0.5 = half spread; set 1 to disable). spread is
+    // passed BY VALUE so scaling it here only affects this fire event.
+    if (weap && owner && owner->IsSubclassOfPlayer() && (weap->GetWeaponClass() & WEAPON_CLASS_RIFLE)) {
+        static cvar_t *pRifleAcc = gi.Cvar_Get("coop_playerRifleSpread", "0.5", CVAR_ARCHIVE);
+        float rsc = pRifleAcc->value;
+        if (rsc < 0.0f) { rsc = 0.0f; }
+        if (rsc != 1.0f) {
+            spread.x *= rsc;
+            spread.y *= rsc;
+        }
+    }
+
     for (i = 0; i < count; i++) {
         trace_t tracethrough;
 
@@ -2696,6 +2710,20 @@ float BulletAttack(
     }
 
     gi.MSG_EndCGM();
+
+    // HZM coop - ALLYFIRE debug: log every ALLIED-AI fire event (paratroopers etc.) with hit count + damage
+    // dealt, to answer "are the paratroopers actually hitting / damaging the germans?". Player and german-AI
+    // fire are not logged. coop_allyFireDebug 0 = off.
+    if (owner && !owner->IsSubclassOfPlayer() && owner->IsSubclassOfSentient()
+        && static_cast<Sentient *>(owner)->m_Team == TEAM_AMERICAN) {
+        static cvar_t *pAllyDbg = gi.Cvar_Get("coop_allyFireDebug", "1", 0);
+        if (pAllyDbg->integer) {
+            gi.Printf(
+                "^~^~^ ALLYFIRE owner=%d '%s' hits=%d dmg=%.0f t=%.1f\n",
+                owner->entnum, owner->TargetName().c_str(), iNumHit, damage_total, level.time
+            );
+        }
+    }
 
     if (damage_total > 0) {
         return damage_total;
@@ -3275,6 +3303,37 @@ void RadiusDamage(
             origin, radius + 128.0f, 0.05f, Vector(damage * 0.05f, damage * 0.05f, damage * 0.06f), 0, vec_zero, 0
         );
     }
+
+    // HZM coop - CORPSE IMPULSE: blasts shove settled corpses. Corpses are SOLID_NOT +
+    // MOVETYPE_NONE and skipped by the damage loop above, so sweep them separately:
+    // flip to MOVETYPE_TOSS with a blast velocity and let the toss integrator re-settle
+    // them. g_corpseImpulse 0 disables; the value scales the strength.
+    if (g_corpseImpulse->value > 0 && radius > 0) {
+        Entity *pBody;
+
+        for (pBody = findradius(NULL, origin, radius); pBody; pBody = findradius(pBody, origin, radius)) {
+            Vector vPush;
+            float  fFrac;
+
+            if (!pBody->IsSubclassOfSentient() || pBody->IsSubclassOfPlayer()
+                || pBody->deadflag != DEAD_DEAD) {
+                continue;
+            }
+
+            vPush = pBody->centroid - origin;
+            fFrac = 1.0f - vPush.length() / radius;
+            if (fFrac <= 0) {
+                continue;
+            }
+
+            vPush.z = 0;
+            vPush.normalize();
+            pBody->setMoveType(MOVETYPE_TOSS);
+            pBody->velocity += vPush * (300.0f * fFrac * g_corpseImpulse->value);
+            pBody->velocity.z += 210.0f * fFrac * g_corpseImpulse->value;
+        }
+    }
+
 }
 
 void FlashPlayers(Vector org, float r, float g, float b, float a, float radius, float time, int type)

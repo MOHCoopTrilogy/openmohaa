@@ -154,6 +154,7 @@ cvar_t *g_droppeditemlife;
 cvar_t *g_dropclips;
 cvar_t *g_animdump;
 cvar_t *g_showdamage;
+cvar_t *g_corpseImpulse; // HZM coop
 cvar_t *g_ai_notifyradius;
 cvar_t *g_ai_noticescale;
 cvar_t *g_ai_soundscale;
@@ -452,6 +453,7 @@ void CVAR_Init(void)
     g_animdump = gi.Cvar_Get("g_animdump", "0", 0);
 
     g_showdamage = gi.Cvar_Get("g_showdamage", "0", 0);
+    g_corpseImpulse = gi.Cvar_Get("g_corpseImpulse", "1", CVAR_ARCHIVE); // HZM coop - explosive blasts shove corpses / dying bodies (0=off, scales strength)
 
     g_ai_notifyradius = gi.Cvar_Get("g_ai_notifyradius", "1024", 0);
     g_ai_noticescale  = gi.Cvar_Get("g_ai_noticescale", "1", 0);

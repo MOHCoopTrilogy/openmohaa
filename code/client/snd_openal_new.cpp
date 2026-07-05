@@ -94,6 +94,22 @@ static LPALSOURCE3I                  qalSource3i                  = NULL;
 static ALuint al_efx_effect = 0;
 static ALuint al_efx_slot   = 0;
 
+// HZM coop - OCCLUSION: per-3D-channel lowpass filters (sounds muffled behind walls).
+// Filter entry points loaded in S_OPENAL_InitEFX alongside the reverb ones.
+static LPALGENFILTERS    qalGenFilters    = NULL;
+static LPALDELETEFILTERS qalDeleteFilters = NULL;
+static LPALFILTERI       qalFilteri       = NULL;
+static LPALFILTERF       qalFilterf       = NULL;
+static bool   al_use_occlusion = false;
+static ALuint al_occ_filter[MAX_SOUNDSYSTEM_CHANNELS_3D];
+static float  al_occ_cur[MAX_SOUNDSYSTEM_CHANNELS_3D];      // smoothed occlusion 0..1
+static float  al_occ_tgt[MAX_SOUNDSYSTEM_CHANNELS_3D];      // traced target
+static int    al_occ_nexttrace[MAX_SOUNDSYSTEM_CHANNELS_3D];
+static int    al_occ_stamp[MAX_SOUNDSYSTEM_CHANNELS_3D];    // channel iStartTime when last traced
+cvar_t       *s_occlusion;
+cvar_t       *s_occlusionStrength;
+cvar_t       *s_reverbGain; // HZM coop
+
 // MSS reverb preset indices 0-25 mapped to EFX EAXREVERB parameters (from efx-presets.h)
 static const EFXEAXREVERBPROPERTIES al_reverb_presets[26] = {
     /* 0  GENERIC         */ { 1.0000f,1.0000f,0.3162f,0.8913f,1.0000f, 1.49f,0.83f,1.00f,0.0500f,0.0070f,{0,0,0},1.2589f,0.0110f,{0,0,0},0.2500f,0.00f,0.25f,0.00f,0.9943f,5000.00f,250.00f,0.00f,1},
@@ -294,7 +310,16 @@ static void S_OPENAL_ApplyEFXPreset(const EFXEAXREVERBPROPERTIES *p, float level
     if (al_use_eaxreverb) {
         qalEffectf(al_efx_effect,  AL_EAXREVERB_DENSITY,              p->flDensity);
         qalEffectf(al_efx_effect,  AL_EAXREVERB_DIFFUSION,            p->flDiffusion);
-        qalEffectf(al_efx_effect,  AL_EAXREVERB_GAIN,                 p->flGain * level);
+        {
+            // HZM coop - s_reverbGain lifts the wet level out of the mud: the stock chain
+            // (preset gain x MSS table x zone level) lands around -28dB, inaudible under
+            // gunfire. Clamp to the EAXREVERB legal max.
+            float fWet = p->flGain * level * (s_reverbGain ? s_reverbGain->value : 1.0f);
+            if (fWet > 1.0f) {
+                fWet = 1.0f;
+            }
+            qalEffectf(al_efx_effect,  AL_EAXREVERB_GAIN,             fWet);
+        }
         qalEffectf(al_efx_effect,  AL_EAXREVERB_GAINHF,               p->flGainHF);
         qalEffectf(al_efx_effect,  AL_EAXREVERB_GAINLF,               p->flGainLF);
         qalEffectf(al_efx_effect,  AL_EAXREVERB_DECAY_TIME,           p->flDecayTime);
@@ -396,6 +421,38 @@ static bool S_OPENAL_InitEFX()
         Com_Printf("OpenAL: EFX standard REVERB initialized (EAXREVERB unavailable).\n");
     }
 
+    // HZM coop - OCCLUSION: load AL filter entry points + one lowpass filter per 3D channel
+    al_use_occlusion = false;
+    qalGenFilters    = (LPALGENFILTERS)   qalGetProcAddress("alGenFilters");
+    qalDeleteFilters = (LPALDELETEFILTERS)qalGetProcAddress("alDeleteFilters");
+    qalFilteri       = (LPALFILTERI)      qalGetProcAddress("alFilteri");
+    qalFilterf       = (LPALFILTERF)      qalGetProcAddress("alFilterf");
+    if (qalGenFilters && qalDeleteFilters && qalFilteri && qalFilterf) {
+        int  j;
+        bool ok = true;
+        qalGetError();
+        qalGenFilters(MAX_SOUNDSYSTEM_CHANNELS_3D, al_occ_filter);
+        if (qalGetError() == AL_NO_ERROR) {
+            for (j = 0; j < MAX_SOUNDSYSTEM_CHANNELS_3D; j++) {
+                qalFilteri(al_occ_filter[j], AL_FILTER_TYPE, AL_FILTER_LOWPASS);
+                al_occ_cur[j] = al_occ_tgt[j] = 0;
+                al_occ_nexttrace[j] = 0;
+                al_occ_stamp[j] = -1;
+            }
+            if (qalGetError() == AL_NO_ERROR) {
+                al_use_occlusion = true;
+                Com_Printf("OpenAL: occlusion lowpass filters initialized.\n");
+            } else {
+                ok = false;
+            }
+        } else {
+            ok = false;
+        }
+        if (!ok) {
+            Com_Printf("OpenAL: occlusion filter setup failed; occlusion disabled.\n");
+        }
+    }
+
     return true;
 }
 
@@ -406,6 +463,11 @@ S_OPENAL_DestroyEFX
 */
 static void S_OPENAL_DestroyEFX()
 {
+    if (al_use_occlusion && qalDeleteFilters) {
+        qalDeleteFilters(MAX_SOUNDSYSTEM_CHANNELS_3D, al_occ_filter); // HZM coop - occlusion filters
+        memset(al_occ_filter, 0, sizeof(al_occ_filter));
+    }
+    al_use_occlusion = false;
     if (al_efx_effect && qalDeleteEffects) {
         qalDeleteEffects(1, &al_efx_effect);
         al_efx_effect = 0;
@@ -617,9 +679,10 @@ static bool S_OPENAL_InitContext()
 #endif
 
 #ifdef ALC_SOFT_output_limiter
-    // Disable limiter
+    // HZM coop - ENABLE the output limiter (was ALC_FALSE = force-disabled). Prevents hard output
+    // clipping when many loud sounds stack (known issue: 06-24 audio regression "clipping" reports).
     attrlist[8] = ALC_OUTPUT_LIMITER_SOFT;
-    attrlist[9] = ALC_FALSE;
+    attrlist[9] = ALC_TRUE;
 #endif
     attrlist[10] = 0;
     attrlist[11] = 0;
@@ -637,6 +700,15 @@ static bool S_OPENAL_InitContext()
     qalcMakeContextCurrent(al_context_id);
     alDieIfError();
 
+#ifdef ALC_HRTF_SOFT
+    {
+        // HZM coop - report whether HRTF is actually active (Speaker Setup: Headphones requests it)
+        ALCint iHrtf = 0;
+        qalcGetIntegerv(al_device, ALC_HRTF_SOFT, 1, &iHrtf);
+        Com_Printf("OpenAL: HRTF is %s.\n", iHrtf ? "ENABLED" : "disabled");
+    }
+#endif
+
     Com_Printf("AL_VENDOR: %s\n", qalGetString(AL_VENDOR));
     alDieIfError();
 
@@ -649,7 +721,11 @@ static bool S_OPENAL_InitContext()
     Com_Printf("AL_EXTENSIONS: %s\n", qalGetString(AL_EXTENSIONS));
     alDieIfError();
 
-    qalDistanceModel(AL_INVERSE_DISTANCE_CLAMPED);
+    // HZM coop - LINEAR falloff to match the original Miles-engine tuning the stock aliases were
+    // authored for (min/max dist define the audible envelope). Under INVERSE_DISTANCE_CLAMPED a
+    // gunshot with mindist 480 drops to ~24% at 2000u; the original carried ~80% there — this is
+    // why gunfire "always sounded weak" on OpenAL ports. Linear-clamped restores map-wide gunfire.
+    qalDistanceModel(AL_LINEAR_DISTANCE_CLAMPED);
     alDieIfError();
 
     qalcProcessContext(al_context_id);
@@ -769,6 +845,98 @@ static bool S_OPENAL_InitChannel(int idx, openal_channel *chan)
 S_OPENAL_Init
 ==============
 */
+
+// HZM coop - AUDIO OUTPUT DEVICE CYCLING ("s_cycledevice", wired to the Audio menu's CHANGE OUTPUT
+// DEVICE row). Steps s_openaldevice through the devices enumerated into s_alAvailableDevices at init
+// ("" = system default is part of the cycle), then restarts the sound system to apply immediately.
+static void S_OPENAL_CycleDevice_f(void)
+{
+    cvar_t     *pList = Cvar_Get("s_alAvailableDevices", "", CVAR_ROM);
+    const char *cur   = s_openaldevice ? s_openaldevice->string : "";
+    char        names[16384];
+    char       *lines[64];
+    int         count = 0, i, curIdx = -1;
+    char       *p;
+
+    Q_strncpyz(names, pList->string, sizeof(names));
+    p = names;
+    while (p && *p && count < 64) {
+        lines[count] = p;
+        p = strchr(p, '\n');
+        if (p) {
+            *p = 0;
+            p++;
+        }
+        if (lines[count][0]) {
+            count++;
+        }
+    }
+    if (!count) {
+        Com_Printf("s_cycledevice: no audio devices enumerated\n");
+        return;
+    }
+    for (i = 0; i < count; i++) {
+        if (!Q_stricmp(lines[i], cur)) {
+            curIdx = i;
+            break;
+        }
+    }
+    // advance: {default}("") -> device 0 -> 1 ... -> last -> back to {default}
+    if (curIdx == count - 1) {
+        Cvar_Set("s_openaldevice", "");
+        Com_Printf("OpenAL: output device -> {system default}\n");
+    } else {
+        Cvar_Set("s_openaldevice", lines[curIdx + 1]);
+        Com_Printf("OpenAL: output device -> \"%s\"\n", lines[curIdx + 1]);
+    }
+    Cbuf_AddText("snd_restart\n");
+}
+
+// HZM coop - "s_setdevice <index>": set the audio output device by its index in the
+// s_alAvailableDevices enumeration (-1 = system default), then restart sound. Used by the
+// Audio menu's OUTPUT DEVICE dropdown (device names contain spaces/parens, which urc popup
+// commands can't quote - an index sidesteps that entirely).
+static void S_OPENAL_SetDevice_f(void)
+{
+    cvar_t *pList = Cvar_Get("s_alAvailableDevices", "", CVAR_ROM);
+    char    names[16384];
+    char   *lines[64];
+    int     count = 0, want, i;
+    char   *p;
+
+    if (Cmd_Argc() < 2) {
+        Com_Printf("usage: s_setdevice <index|-1 for default>\n%s\n", pList->string);
+        return;
+    }
+    want = atoi(Cmd_Argv(1));
+    if (want < 0) {
+        Cvar_Set("s_openaldevice", "");
+        Com_Printf("OpenAL: output device -> {system default}\n");
+        Cbuf_AddText("snd_restart\n");
+        return;
+    }
+    Q_strncpyz(names, pList->string, sizeof(names));
+    p = names;
+    while (p && *p && count < 64) {
+        lines[count] = p;
+        p = strchr(p, '\n');
+        if (p) {
+            *p = 0;
+            p++;
+        }
+        if (lines[count][0]) {
+            count++;
+        }
+    }
+    if (want >= count) {
+        Com_Printf("s_setdevice: index %d out of range (%d devices)\n", want, count);
+        return;
+    }
+    Cvar_Set("s_openaldevice", lines[want]);
+    Com_Printf("OpenAL: output device -> \"%s\"\n", lines[want]);
+    Cbuf_AddText("snd_restart\n");
+}
+
 qboolean S_OPENAL_Init()
 {
     int i;
@@ -788,7 +956,25 @@ qboolean S_OPENAL_Init()
 
     s_milesdriver            = Cvar_Get("s_milesdriver", "auto", CVAR_SOUND_LATCH | CVAR_ARCHIVE);
     s_openaldevice           = Cvar_Get("s_openaldevice", "", CVAR_SOUND_LATCH);
-    s_reverb                 = Cvar_Get("s_reverb", "0", CVAR_SOUND_LATCH | CVAR_ARCHIVE);
+    // HZM coop - the output device is a per-session choice: every launch starts on the
+    // system default device (empty string = alcOpenDevice(NULL)), so the game follows
+    // whatever Windows is set to. A stray 'seta' can burn a device name into omconfig;
+    // strip the archive flag and clear the value once per process. Devices picked via
+    // s_setdevice during the session still survive snd_restart (this only runs once).
+    {
+        static qboolean bDeviceSanitized = qfalse;
+        if (!bDeviceSanitized) {
+            bDeviceSanitized = qtrue;
+            s_openaldevice->flags &= ~CVAR_ARCHIVE;
+            if (s_openaldevice->string[0]) {
+                Cvar_Set("s_openaldevice", "");
+            }
+        }
+    }
+    s_reverb                 = Cvar_Get("s_reverb", "1", CVAR_SOUND_LATCH | CVAR_ARCHIVE); // HZM coop - default ON (auto env reverb)
+    s_occlusion              = Cvar_Get("s_occlusion", "1", CVAR_ARCHIVE);           // HZM coop - muffle sounds behind walls
+    s_occlusionStrength      = Cvar_Get("s_occlusionStrength", "1.0", CVAR_ARCHIVE); // HZM coop - 0..1 lowpass depth
+    s_reverbGain             = Cvar_Get("s_reverbGain", "3.0", CVAR_ARCHIVE);        // HZM coop - master wet-level boost (stock triple-multiply lands at -28dB)
     s_show_cpu               = Cvar_Get("s_show_cpu", "0", 0);
     s_show_num_active_sounds = Cvar_Get("s_show_num_active_sounds", "0", 0);
     s_show_sounds            = Cvar_Get("s_show_sounds", "0", 0);
@@ -823,13 +1009,13 @@ qboolean S_OPENAL_Init()
 
     al_use_reverb    = false;
     al_use_eaxreverb = false;
-    if (s_reverb->integer) {
-        al_use_reverb = S_OPENAL_InitEFX();
-        if (al_use_reverb) {
-            S_OPENAL_SetReverb(s_iReverbType, s_fReverbLevel);
-        } else {
-            Com_Printf("OpenAL: No reverb support. Reverb is disabled.\n");
-        }
+    // HZM coop - ALWAYS initialize EFX: runtime s_reverb toggling needs the slot to exist,
+    // and the occlusion lowpass filters need the entry points regardless of reverb state.
+    al_use_reverb = S_OPENAL_InitEFX();
+    if (al_use_reverb) {
+        S_OPENAL_SetReverb(s_iReverbType, s_fReverbLevel);
+    } else {
+        Com_Printf("OpenAL: No EFX support. Reverb and occlusion are disabled.\n");
     }
     s_reverb->modified = false;
 
@@ -895,6 +1081,7 @@ qboolean S_OPENAL_Init()
     if (!S_OPENAL_InitChannel(SOUNDSYSTEM_CHANNEL_TRIGGER_MUSIC_ID, &openal.chan_trig_music)) {
         return false;
     }
+    // (s_cycledevice registered below; implementation lives in S_OPENAL_CycleDevice_f above this function)
 
     if (!S_OPENAL_InitChannel(SOUNDSYSTEM_CHANNEL_MOVIE_ID, &openal.chan_movie)) {
         return false;
@@ -911,6 +1098,8 @@ qboolean S_OPENAL_Init()
     openal.chan_trig_music.set_no_virtualization();
     openal.chan_movie.set_no_virtualization();
 
+    Cmd_AddCommand("s_cycledevice", S_OPENAL_CycleDevice_f); // HZM coop - cycle audio output device
+    Cmd_AddCommand("s_setdevice", S_OPENAL_SetDevice_f);     // HZM coop - set device by enumeration index (Audio menu dropdown)
     Cmd_AddCommand("playmp3", S_OPENAL_PlayMP3);
     Cmd_AddCommand("stopmp3", S_OPENAL_StopMP3);
     Cmd_AddCommand("loadsoundtrack", S_loadsoundtrack);
@@ -2464,6 +2653,86 @@ void S_OPENAL_AddLoopSounds(const vec3_t vTempAxis)
 S_OPENAL_Respatialize
 ==============
 */
+/*
+==============
+S_OPENAL_UpdateOcclusion
+
+HZM coop - OCCLUSION: muffle 3D sounds whose path to the listener is blocked by world
+geometry. A 3-ray fan (direct + two lateral offsets) gives partial occlusion in thirds;
+traces are staggered per channel (s_obstruction_cal_time ms, a previously-dead Miles-era
+cvar), and the value is smoothed per frame before driving an EFX lowpass on the direct
+path. The reverb send stays unfiltered - hearing an occluded sound through the room
+is exactly right when the env reverb is on.
+==============
+*/
+static void S_OPENAL_UpdateOcclusion(int i, openal_channel *pChannel, const vec3_t vListener, const vec3_t vSoundPos)
+{
+    float fStrength;
+    float fLerp;
+
+    if (!al_use_occlusion || i >= MAX_SOUNDSYSTEM_CHANNELS_3D || !pChannel->source) {
+        return;
+    }
+
+    if (!s_occlusion->integer || (pChannel->iFlags & CHANNEL_FLAG_LOCAL_LISTENER)
+        || pChannel->iEntNum == s_iListenerNumber) {
+        // never muffle your own gun / local UI sounds; drive smoothly back to clear
+        al_occ_tgt[i] = 0;
+    } else if (cls.realtime >= al_occ_nexttrace[i] || al_occ_stamp[i] != pChannel->iStartTime) {
+        trace_t trace;
+        vec3_t  vDir, vSide, vFrom, vTo;
+        int     iBlocked = 0;
+        int     j;
+
+        al_occ_nexttrace[i] = cls.realtime
+                            + (s_obstruction_cal_time->integer > 0 ? s_obstruction_cal_time->integer : 250)
+                            + ((i * 37) % 100);
+
+        VectorSubtract(vSoundPos, vListener, vDir);
+        // lateral offset axis (horizontal, perpendicular to the sound direction)
+        vSide[0] = -vDir[1];
+        vSide[1] = vDir[0];
+        vSide[2] = 0;
+        VectorNormalize(vSide);
+
+        for (j = -1; j <= 1; j++) {
+            VectorCopy(vListener, vFrom);
+            VectorCopy(vSoundPos, vTo);
+            VectorMA(vFrom, j * 40.f, vSide, vFrom);
+            VectorMA(vTo, j * 40.f, vSide, vTo);
+            CM_BoxTrace(&trace, vFrom, vTo, vec3_origin, vec3_origin, 0, CONTENTS_SOLID, qfalse);
+            if (trace.fraction < 1.0f) {
+                iBlocked++;
+            }
+        }
+
+        if (al_occ_stamp[i] != pChannel->iStartTime) {
+            // new sound on this channel: snap instead of smoothing from a stale value
+            al_occ_stamp[i] = pChannel->iStartTime;
+            al_occ_cur[i]   = iBlocked / 3.0f;
+        }
+        al_occ_tgt[i] = iBlocked / 3.0f;
+    }
+
+    // smooth roughly 8/s toward the target
+    fLerp = cls.frametime * 0.008f;
+    if (fLerp > 1) {
+        fLerp = 1;
+    }
+    al_occ_cur[i] += (al_occ_tgt[i] - al_occ_cur[i]) * fLerp;
+
+    fStrength = s_occlusionStrength->value * al_occ_cur[i];
+    if (fStrength < 0) {
+        fStrength = 0;
+    } else if (fStrength > 1) {
+        fStrength = 1;
+    }
+
+    qalFilterf(al_occ_filter[i], AL_LOWPASS_GAIN, 1.0f - 0.45f * fStrength);
+    qalFilterf(al_occ_filter[i], AL_LOWPASS_GAINHF, 1.0f - 0.88f * fStrength);
+    qalSourcei(pChannel->source, AL_DIRECT_FILTER, al_occ_filter[i]);
+}
+
 void S_OPENAL_Respatialize(int iEntNum, const vec3_t vHeadPos, const vec3_t vAxis[3])
 {
     int             i;
@@ -2631,6 +2900,8 @@ void S_OPENAL_Respatialize(int iEntNum, const vec3_t vHeadPos, const vec3_t vAxi
             pChannel->set_sample_pan(iPan);
         }
 
+        S_OPENAL_UpdateOcclusion(i, pChannel, vListenerOrigin, vOrigin); // HZM coop - occlusion lowpass
+
         if (s_bReverbChanged) {
             S_OPENAL_reverb(i, s_iReverbType, s_fReverbLevel);
         }
@@ -2686,6 +2957,16 @@ static void S_OPENAL_reverb(int iChannel, int iReverbType, float fReverbLevel)
         return;
     }
 
+    // HZM coop - keep 2D/local and streamed-VO channels (32..95) DRY: "inside your head" audio
+    // (tinnitus ring, DBNO duck cues, playlocalsound, dialogue streams) must not carry room reverb.
+    // Sources are recycled and the send routing is sticky, so explicitly disconnect (rather than
+    // just skip) in case this source was routed while living on a 3D channel earlier.
+    if (iChannel >= MAX_SOUNDSYSTEM_CHANNELS_3D) {
+        qalSource3i(source, AL_AUXILIARY_SEND_FILTER, AL_EFFECTSLOT_NULL, 0, AL_FILTER_NULL);
+        qalGetError();
+        return;
+    }
+
     // Route send 0 of this source through the global reverb slot
     qalSource3i(source, AL_AUXILIARY_SEND_FILTER, (ALint)al_efx_slot, 0, AL_FILTER_NULL);
     qalGetError();
@@ -2702,6 +2983,11 @@ void S_OPENAL_SetReverb(int iType, float fLevel)
     s_iReverbType  = iType;
     if (!al_use_reverb || !al_efx_effect) {
         return;
+    }
+    // HZM coop - EFX is always initialized now; s_reverb gates the audible effect
+    if (s_reverb && !s_reverb->integer) {
+        iType  = 0;
+        fLevel = 0;
     }
     if (iType < 0 || iType >= 26) {
         iType = 0;
@@ -2775,6 +3061,14 @@ void S_OPENAL_Update()
     if (s_speaker_type->modified) {
         Cbuf_AddText("snd_restart\n");
         s_speaker_type->modified = false;
+    }
+
+    if (s_reverbGain && s_reverbGain->modified) {
+        // HZM coop - live wet-level tuning: re-apply the current preset
+        s_reverbGain->modified = false;
+        if (al_use_reverb && s_reverb->integer) {
+            S_OPENAL_SetReverb(s_iReverbType, s_fReverbLevel);
+        }
     }
 
     if (s_reverb->modified) {

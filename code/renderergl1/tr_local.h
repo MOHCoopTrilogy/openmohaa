@@ -1161,7 +1161,7 @@ typedef struct model_s {
 } model_t;
 
 
-#define	MAX_MOD_KNOWN	1024
+#define	MAX_MOD_KNOWN	2048
 
 void		R_ModelInit (void);
 model_t		*R_GetModelByHandle( qhandle_t hModel );
@@ -1173,7 +1173,7 @@ void		R_Modellist_f (void);
 //====================================================
 extern	refimport_t		ri;
 
-#define	MAX_DRAWIMAGES			2048
+#define	MAX_DRAWIMAGES			4096
 #define	MAX_LIGHTMAPS			256
 #define	MAX_SKINS				1024
 #define MAX_SPHERE_LIGHTS		512
@@ -1427,6 +1427,8 @@ extern cvar_t		*r_ppExposure;		// HZM post-FX: exposure
 extern cvar_t		*r_ppContrast;		// HZM post-FX: contrast
 extern cvar_t		*r_ppSaturation;	// HZM post-FX: saturation
 extern cvar_t		*r_ppFXAA;			// HZM post-FX: FXAA on/off
+extern cvar_t		*r_ppSharpen;		// HZM post-FX: sharpen on/off
+extern cvar_t		*r_ppSharpenAmount;	// HZM post-FX: sharpen strength
 extern cvar_t		*r_ppGrade;			// HZM post-FX: color-grade preset
 extern cvar_t		*r_ppLowHealth;		// HZM post-FX: low-health screen effect on/off
 extern cvar_t		*r_ppHealthFrac;	// HZM post-FX: health fraction (cgame-written)
@@ -2498,8 +2500,8 @@ typedef enum {
 // dropping dynamic polys with the "Exceeded MAX POLYS" warning in RE_AddPolyToScene.
 // These also serve as the default for the r_maxpolys / r_maxpolyverts cvars and the
 // floor clamp in R_Init, so raising them here covers every map globally.
-#define	MAX_POLYS		16384
-#define	MAX_POLYVERTS	65536
+#define	MAX_POLYS		32768
+#define	MAX_POLYVERTS	131072
 #define	MAX_TERMARKS	1024
 
 // all of the information needed by the back end must be

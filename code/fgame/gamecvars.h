@@ -159,6 +159,7 @@ extern cvar_t *g_droppeditemlife;
 extern cvar_t *g_dropclips;
 extern cvar_t *g_animdump;
 extern cvar_t *g_showdamage;
+extern cvar_t *g_corpseImpulse; // HZM coop
 extern cvar_t *g_ai_notifyradius;
 extern cvar_t *g_ai_noticescale;
 extern cvar_t *g_ai_soundscale;
