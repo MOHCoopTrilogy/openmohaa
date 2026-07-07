@@ -801,6 +801,23 @@ void G_ClientUserinfoChanged(gentity_t *ent, const char *u)
     if (ent->entity) {
         float fov;
 
+        // HZM coop - 3P shoulder-aim stage mirror (set by cgame CG_UpdateAdsStage via the
+        // u_shoulderaim CVAR_USERINFO cvar). Lets ClientMove slow the shoulder stage to an
+        // aimed walk while first-person irons keep normal ADS speed. Absent key -> 0.
+        if (ent->entity->IsSubclassOfPlayer()) {
+            s = Info_ValueForKey(u, "u_shoulderaim");
+            static_cast<Player *>(ent->entity)->m_bCoopShoulderAim = (s && atoi(s)) ? true : false;
+
+            s = Info_ValueForKey(u, "u_view3p");
+            static_cast<Player *>(ent->entity)->m_bCoopView3p = (s && atoi(s)) ? true : false;
+
+            // HZM coop - XP system identity: expose the client's persistent cl_guid (engine
+            // userinfo, MD5 of qkey) to SCRIPT as self.coop_guid. There is no script-level
+            // userinfo getter, so the engine pushes it; re-runs on every userinfo change.
+            s = Info_ValueForKey(u, "cl_guid");
+            ent->entity->Vars()->SetVariable("coop_guid", (s && s[0]) ? s : "");
+        }
+
         s = Info_ValueForKey(u, "fov");
 
         fov = atof(s);

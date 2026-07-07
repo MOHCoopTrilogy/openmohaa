@@ -2278,6 +2278,8 @@ static int S_OPENAL_Start2DLoopSound(
                          * (float)(cls.realtime - pLoopSound->iStartTime) / 1000.0);
     pChannel->set_sample_offset(iSoundOffset % pLoopSound->pSfx->length);
     pChannel->set_sample_loop_count(0);
+    pChannel->iFlags |= CHANNEL_FLAG_LOOPING;  // HZM coop - mark 2D ambient loops so the category
+                                               // mixer in set_gain treats them as ambience, not SFX
     pChannel->fVolume = fVolumeToPlay;
     pChannel->set_gain(fVolumeToPlay);
     pChannel->start_sample();
@@ -2542,7 +2544,10 @@ void S_OPENAL_AddLoopSounds(const vec3_t vTempAxis)
             fTotalVolume = fMaxVolume * fMaxFactor;
         }
 
-        if (fTotalVolume <= 0 && !(pLoopSound->iFlags & LOOPSOUND_FLAG_NO_PAN)) {
+        // HZM coop - also stop 2D/NO_PAN ambient loops (wind, generators, room tone) when they
+        // fall silent. The original '&& !NO_PAN' left those looping forever at ~0 gain, so the
+        // Ambience slider could never actually mute them. Small epsilon catches slider-near-zero.
+        if (fTotalVolume <= 0.0005f) {
             if (pLoopSound->bPlaying) {
                 if (s_show_sounds->integer > 0) {
                     Com_DPrintf(
@@ -3422,28 +3427,50 @@ void openal_channel::set_position(float v0, float v1, float v2)
 openal_channel::set_gain
 ==============
 */
+extern cvar_t *s_dialogscale;
+
 void openal_channel::set_gain(float gain)
 {
-    // HZM coop - cinematic effects duck: when s_sfxduck < 1, lower EFFECT channels only. The music
-    // / stream channels (chan_song / chan_mp3 / chan_trig_music) are exempt so the soundtrack stays
-    // full while gunfire/voices/ambience recede. Effect gains are re-applied every frame by
-    // S_OPENAL_Respatialize, so this ducks already-playing sounds in real time too.
-    if (s_sfxduck && s_sfxduck->value < 1.f) {
-        qboolean bMusic = qfalse;
-        if ((void *)this == (void *)&openal.chan_mp3 || (void *)this == (void *)&openal.chan_trig_music) {
-            bMusic = qtrue;
-        } else {
-            int i;
-            for (i = 0; i < MAX_SOUNDSYSTEM_SONGS; i++) {
-                if ((void *)this == (void *)&openal.chan_song[i]) {
-                    bMusic = qtrue;
-                    break;
-                }
+    // HZM coop - CATEGORY MIXER. This is the ONE place category volume actually sticks: every sound's
+    // gain flows through set_gain every frame (S_OPENAL_Respatialize re-applies it), so scaling done
+    // once at start-time gets overwritten here. Classify by channel and apply the matching slider:
+    //   - Music (chan_song / chan_mp3 / chan_trig_music): carries s_musicVolume at its own set_gain
+    //     call site -> skip.
+    //   - Looping ambience (CHANNEL_FLAG_LOOPING): s_ambientVolume is already folded into its gain -> skip.
+    //   - Dialogue channels (CHAN_DIALOG / _SECONDARY): follow the Dialogue slider (all VO, incl. enemy).
+    //   - Menu / UI channels (CHAN_MENU / CHAN_LOCAL / CHAN_LOCAL_SOUND): stay at master so the menus
+    //     are usable at any SFX setting.
+    //   - Everything else (gunfire, footsteps, explosions, reloads, vehicles, breathing, cracks, ...):
+    //     follow the SFX slider. This is the user's rule: SFX = everything that isn't music, dialogue,
+    //     or ambience.
+    qboolean bMusic = ((void *)this == (void *)&openal.chan_mp3 || (void *)this == (void *)&openal.chan_trig_music);
+    if (!bMusic) {
+        for (int i = 0; i < MAX_SOUNDSYSTEM_SONGS; i++) {
+            if ((void *)this == (void *)&openal.chan_song[i]) {
+                bMusic = qtrue;
+                break;
             }
         }
-        if (!bMusic) {
-            gain *= s_sfxduck->value;
+    }
+    qboolean bLoop = (iFlags & CHANNEL_FLAG_LOOPING) != 0;
+
+    if (!bMusic && !bLoop) {
+        if (iEntChannel == CHAN_DIALOG || iEntChannel == CHAN_DIALOG_SECONDARY) {
+            if (s_dialogscale && s_dialogscale->value >= 0.f) {
+                gain *= s_dialogscale->value;
+            }
+        } else if (iEntChannel == CHAN_MENU || iEntChannel == CHAN_LOCAL || iEntChannel == CHAN_LOCAL_SOUND) {
+            // menu / UI - master only
+        } else {
+            if (s_sfxvolume && s_sfxvolume->value >= 0.f) {
+                gain *= s_sfxvolume->value;
+            }
         }
+    }
+
+    // cinematic effects duck (music exempt so the soundtrack stays full while effects recede)
+    if (s_sfxduck && s_sfxduck->value < 1.f && !bMusic) {
+        gain *= s_sfxduck->value;
     }
 
     qalSourcef(source, AL_GAIN, gain);

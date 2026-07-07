@@ -355,10 +355,34 @@ public:
     // m_bCoopSprinting = the per-frame "is actually sprinting right now" flag (set in ClientMove).
     float m_fCoopStamina;
     bool  m_bCoopSprinting;
+    // HZM coop - client is in the 3P over-the-shoulder AIM stage (a pure client concept: cg_adsStage
+    // cvar + camera envelopes), mirrored to the server via the u_shoulderaim userinfo key so the
+    // aimed-walk slowdown applies ONLY to the shoulder stage (FP irons keep normal ADS speed).
+    bool  m_bCoopShoulderAim;
+    bool  m_bCoopView3p; // HZM coop - client renders third person (u_view3p userinfo mirror; manned-turret world-gun visibility)
     bool  m_bCoopGearLoop; // HZM coop - gear-rattle loop currently playing (follows sprint state)
     // HZM coop - seconds of CONTINUOUS sprinting so far (accumulates while sprinting, resets to 0 the moment
     // sprint stops). On the stop transition, if it reached coop_sprintBreathTime we play an out-of-breath pant.
     float m_fCoopSprintDur;
+    // HZM coop - TAKE COVER [214]. Script requests the pose via the coop_setcover event (bind ->
+    // name-append bus 26 -> coop_mod/takecover.scr); TickCoopCover() validates it per frame with
+    // world traces (standing back-to-wall / crouched low-front) and feeds the results to the
+    // COOP_COVER / COOP_COVER_LOW / COOP_BLINDFIRE statemap conditions. The engine - not the
+    // statemap or script - is the single authority for dropping out (movement, jump, death,
+    // mount, geometry gone), so the .st "!" exits restore the default states cleanly.
+    bool  m_bCoopCoverRequested; // player asked for cover (toggled by coop_setcover)
+    bool  m_bCoopCoverWall;      // requested + standing back-to-wall pose valid this frame
+    bool  m_bCoopCoverLow;       // requested + crouched low-cover pose valid this frame
+    bool  m_bCoopBlindfire;      // covered + fire held + blindfire-capable weapon this frame
+    Vector m_vCoopCoverNormal;   // anchored cover OUT normal (wall: away from wall; low: back at player) [215]
+    int    m_iCoopCoverSide;     // 1 = opening LEFT of the pose, -1 = RIGHT [215]
+    bool   m_bCoopCoverPeek;     // RMB peek-aim from cover (real aiming, cover held) [215]
+    float  m_fCoopVehTurretTime; // level.time stamp while manning a VEHICLE turret (jeep .30cal pose) [219]
+    float  m_fCoopProbeTime;     // GUNNERPROBE diagnostic throttle [221 - REMOVE after bug-309 closes]
+    int    m_iCoopSpeedBase;     // SPEEDPROBE: ps.speed before the ADS/weapon mults [222 - REMOVE with probe]
+    Vector m_vCoopCoverBaseOrg;  // pose position at cover entry (peek slides away from it and back) [216]
+    float  m_fCoopPeekFrac;      // 0..1 eased peek step-out fraction [216]
+    float m_fCoopCoverBadTime;   // level.time the pose first went invalid (grace before drop)
     bool  m_bHasJumped;
     float m_fLastInvulnerableTime;
     int   m_iInvulnerableTimeRemaining;
@@ -509,6 +533,13 @@ public:
     qboolean CondAttackButtonPrimary(Conditional& condition);
     qboolean CondAttackButtonSecondary(Conditional& condition);
     qboolean CondCoopAds(Conditional& condition); // HZM coop - aim down sights (dedicated bind)
+    qboolean CondCoopSprinting(Conditional& condition); // HZM coop - sprinting this frame (legs statemap)
+    qboolean CondCoopCover(Conditional& condition);     // HZM coop - standing back-to-wall cover pose valid (TickCoopCover)
+    qboolean CondCoopCoverLow(Conditional& condition);  // HZM coop - crouched low-cover pose valid (TickCoopCover)
+    qboolean CondCoopCoverPeek(Conditional& condition);      // HZM coop - RMB peek-aim from cover [215]
+    qboolean CondCoopCoverOpenRight(Conditional& condition); // HZM coop - opening is RIGHT of the wall pose [215]
+    qboolean CondCoopOnTurret(Conditional& condition);        // HZM coop - raw m_pTurret check (manning pose; vanilla edges need !HAS_WEAPON) [216]
+    qboolean CondCoopBlindfire(Conditional& condition); // HZM coop - covered + fire held -> blind-fire states
 
     //
     // Added in OPM
@@ -825,6 +856,8 @@ public:
     void       EventGetPrimaryFireHeld(Event *ev);
     void       EventGetSecondaryFireHeld(Event *ev);
     void       EventGetCoopAdsHeld(Event *ev); // HZM coop - aim-down-sights button held (for ads.scr move slowdown)
+    void       EventCoopSetCover(Event *ev);   // HZM coop - take-cover request on/off (coop_setcover, from takecover.scr)
+    void       EventGetCoopCover(Event *ev);   // HZM coop - cover state getter (coop_incover: 0/1/2/3)
     void       Score(Event *ev);
     void       Join_DM_Team(Event *ev);
     void       Auto_Join_DM_Team(Event *ev);
@@ -915,6 +948,15 @@ public:
     float GetRunSpeed() const;
     // HZM coop - is the player currently sprinting this frame (read by cgame-independent consumers if needed)
     bool  IsCoopSprinting() const { return m_bCoopSprinting; }
+    // HZM coop - TAKE COVER: per-frame pose validation (called from ClientThink next to TickSprint)
+    void  TickCoopCover();
+    // HZM coop - read by Weapon::Shoot (blind-fire spread penalty) and Weapon::GetMuzzlePosition
+    // (raise the fire origin over low cover while blind-firing)
+    bool  IsCoopBlindfiring() const { return m_bCoopBlindfire; }
+    bool  IsCoopCoverLow() const { return m_bCoopCoverLow; }
+    bool  IsCoopCoverWall() const { return m_bCoopCoverWall; }
+    int   GetCoopCoverSide() const { return m_iCoopCoverSide; }
+    const Vector& GetCoopCoverNormal() const { return m_vCoopCoverNormal; }
     void  FireWeapon(int number, firemode_t mode) override;
     void  SetInvulnerable();
     void  TickInvulnerable();

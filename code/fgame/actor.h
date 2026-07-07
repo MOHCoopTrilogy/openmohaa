@@ -1472,6 +1472,7 @@ public:
     void           EventSetDisguiseAcceptThread(Event *ev);
     void           EventGetDisguiseAcceptThread(Event *ev);
     void           EventAttackPlayer(Event *ev);
+    void           EventAttackEntity(Event *ev); // HZM coop: attackplayer for arbitrary sentients
     void           ForceAttackPlayer(void);
     void           EventSetAlarmNode(Event *ev);
     void           EventGetAlarmNode(Event *ev);

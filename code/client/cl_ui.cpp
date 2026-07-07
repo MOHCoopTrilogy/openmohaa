@@ -1827,6 +1827,63 @@ UI_Update
 Updates the UI.
 ====================
 */
+/*
+====================
+UI_ApplyHudFadeAlpha
+
+HZM coop - HUD fade: apply the cgame-computed chrome alpha (published in ui_hudAlpha by
+CG_UpdateHudFade, activity-driven) to the fading panels. The COMPASS is exempt by user
+design (always fully visible); weapon bar/items/boss manage their own show timers.
+====================
+*/
+static void UI_SetMenuWidgetsAlpha(Menu *pMenu, float a)
+{
+    int i;
+
+    if (!pMenu) {
+        return;
+    }
+    // a Menu is a FLAT list of sibling widgets (GetContainerWidget() returns only item #1,
+    // NOT a parent of the rest - bug-253), so the fade must touch every item; each widget's
+    // own children then inherit through Display()'s parent_alpha chain. Uses the post-Motion
+    // MULTIPLIER, not m_alpha - urc 'fadein' widgets (hud_items) rewrite m_alpha every frame
+    // once their intro fade finished and stomped the first implementation (bug-255).
+    for (i = 1; i <= pMenu->m_itemlist.NumObjects(); i++) {
+        pMenu->m_itemlist.ObjectAt(i)->SetHudFadeMul(a);
+    }
+}
+
+static void UI_ApplyHudFadeAlpha(void)
+{
+    static cvar_t *pHudAlpha = NULL;
+    float          fHudA;
+
+    if (!pHudAlpha) {
+        pHudAlpha = Cvar_Get("ui_hudAlpha", "1", 0);
+    }
+    fHudA = pHudAlpha->value;
+    if (fHudA < 0.0f) {
+        fHudA = 0.0f;
+    } else if (fHudA > 1.0f) {
+        fHudA = 1.0f;
+    }
+
+    UI_SetMenuWidgetsAlpha(hud_health, fHudA);
+    UI_SetMenuWidgetsAlpha(hud_ammo, fHudA);
+    UI_SetMenuWidgetsAlpha(hud_weapons, fHudA);
+    UI_SetMenuWidgetsAlpha(hud_items, fHudA); // "available mission gadgets" icons
+
+    // ui_addhud panels (hud_score, coop_objectives, ...) fade too - EXCEPT interaction
+    // prompts, which must stay readable the moment they appear regardless of calm.
+    for (int i = 1; i <= hudList.NumObjects(); i++) {
+        Menu *pM = hudList.ObjectAt(i);
+        if (!pM || !pM->m_name.icmp("coop_jeepEnter")) {
+            continue;
+        }
+        UI_SetMenuWidgetsAlpha(pM, fHudA);
+    }
+}
+
 void UI_Update(void)
 {
     Menu    *currentMenu;
@@ -1845,6 +1902,8 @@ void UI_Update(void)
         view3d->Display(frame, 1.0);
 
         if (ui_hud && !view3d->LetterboxActive()) {
+            UI_ApplyHudFadeAlpha(); // HZM coop - HUD fade (m_alpha rides into the Displays below)
+
             // draw the health hud
             if (hud_health) {
                 hud_health->ForceShow();
@@ -2374,6 +2433,8 @@ void UI_Update(void)
                 hud_compass->ForceHide();
             }
         }
+
+        UI_ApplyHudFadeAlpha(); // HZM coop - HUD fade on the persistent chrome (compass exempt)
 
         //
         // show the boss health
@@ -5257,7 +5318,7 @@ void CL_InitializeUI(void)
     ui_gmbox           = Cvar_Get("ui_gmbox", "1", 1);
     ui_consoleposition = Cvar_Get("ui_consoleposition", "", 1);
     ui_console         = Cvar_Get("ui_console", "0", 1);
-    ui_crosshair       = Cvar_Get("ui_crosshair", "1", 1);
+    ui_crosshair       = Cvar_Get("ui_crosshair", "0", 1); // HZM coop - default OFF; archived user choice must persist (no autoexec stomp)
     ui_weaponsbar      = Cvar_Get("ui_weaponsbar", "1", 1);
     ui_weaponsbartime  = Cvar_Get("ui_weaponsbartime", "2500", 1);
     ui_itemsbar        = Cvar_Get("ui_itemsbar", "0", 1);

@@ -63,6 +63,28 @@ static void CG_CalcVrect(void)
 
 //==============================================================================
 
+// HZM coop - STAGED THIRD-PERSON ADS envelopes (see CG_UpdateAdsStage, updated once per frame in
+// CG_CalcViewValues; same first-order ease style as the ADS zoom s_adsZoomCur in CG_CalcFov).
+// s_adsShoulderEnv: 0 = normal chase framing -> 1 = over-the-RIGHT-SHOULDER aim framing (ADS held in 3P).
+// s_adsFpEnv:       0 = shoulder framing     -> 1 = collapsed onto the head (the wheel-up handoff into
+//                   first-person irons; the view flips to first person once it crosses cg_adsFpFlip).
+static float s_adsShoulderEnv = 0.0f;
+static float s_adsFpEnv       = 0.0f;
+// s_shoulderSideSign: +1 = right shoulder, -1 = left. MOUSE3 while shoulder-aiming toggles the
+// archived cg_adsShoulderRight cvar (CG_CheckCaptureKey, cg_ui.cpp); this eases toward the target
+// so the camera SWEEPS across the back to the other shoulder instead of snapping.
+static float s_shoulderSideSign = 1.0f;
+
+// HZM coop - THIRD-PERSON FREE CAM envelope + capture state (see CG_UpdateFreecam, updated once per frame
+// in CG_CalcViewValues right after CG_UpdateAdsStage; same first-order ease as the ADS envelopes above).
+// s_freecamEnv: 0 = normal chase camera -> 1 = free orbit fully applied. The ORBIT ANGLES themselves live
+// in the CLIENT exe (cl_main.cpp camera_offset, accumulated from mouse deltas in CL_MouseMove while the
+// cgame publishes cg_freecamCapture 1) and are read here through the existing cgi.get_camera_offset()
+// import - no new cgame ABI. ADS/turret/scope/etc drop the capture (mouse aims the player again) and the
+// env eases the applied orbit back behind the shoulder rather than snapping.
+static float    s_freecamEnv     = 0.0f;
+static qboolean s_freecamCapture = qfalse;
+
 /*
 ===============
 CG_OffsetThirdPersonView
@@ -87,32 +109,102 @@ static void CG_OffsetThirdPersonView(void)
     qboolean      lookactive, resetview;
     static vec3_t saved_look_offset;
     vec3_t        camera_offset;
+    float         fCamDist, fCamSide, fCamHeight, fCamVert;
+    qboolean      bTurret3p;
 
     target_angles   = cg.refdefViewAngles;
     target_position = cg.refdef.vieworg;
 
-    // see if angles are absolute
-    if (cg.predicted_player_state.camera_flags & CF_CAMERA_ANGLES_ABSOLUTE) {
-        VectorClear(target_angles);
+    // HZM coop - 3P ON A MOUNTED TURRET (jeep .30cal / MG42 / halftrack): normally the turret's bound
+    // server camera owns the view, which in third person left the view at the gun's eye-bone INSIDE
+    // the drawn player model ("camera glitched inside my body"). When rendering third person on a
+    // turret we chase instead: this flag takes the turret camera's ANGLES as the aim reference
+    // (authoritative gun aim, interpolated in cg_predict.c) and skips the CF_CAMERA_* transition
+    // adjustments below (they configure the bound-camera view, not a chase). The stock pull-back and
+    // MASK_CAMERASOLID traces then frame the gunner like any other 3P view. First-person players are
+    // untouched (the PMF_CAMERA_VIEW copy in CG_CalcViewValues still runs for them).
+    bTurret3p = ((cg.predicted_player_state.pm_flags & PMF_TURRET)
+                 && (cg.predicted_player_state.pm_flags & PMF_CAMERA_VIEW)) ? qtrue : qfalse;
+
+    // HZM coop - staged 3P ADS framing blend: ease the chase framing toward the over-the-shoulder AIM
+    // framing while s_adsShoulderEnv is up (ADS held), then collapse toward the head as s_adsFpEnv rises
+    // (mouse-wheel-up handoff into first-person irons). Live-tune cg_adsShoulderDist/Side/Up.
+    fCamDist   = cg_cameradist->value;
+    fCamSide   = cg_camerasideoffset->value;
+    fCamHeight = cg_cameraheight->value;
+    fCamVert   = cg_cameraverticaldisplacement->value;
+    // HZM coop - FREE CAM framing: while the free orbit is up, pull the camera out to cg_freecamDist and
+    // centre it (no shoulder side-bias while circling the character). Applied BEFORE the ADS blends below
+    // so the shoulder framing wins the handoff as its envelope rises. Pivot/height stay the chase cam's.
+    if (s_freecamEnv > 0.001f) {
+        static cvar_t *pFcDist = NULL;
+        if (!pFcDist) { pFcDist = cgi.Cvar_Get("cg_freecamDist", "100", CVAR_ARCHIVE); }
+        fCamDist += (pFcDist->value - fCamDist) * s_freecamEnv;
+        fCamSide += (0.0f - fCamSide) * s_freecamEnv;
+    }
+    if (s_adsShoulderEnv > 0.001f) {
+        static cvar_t *pShDist = NULL, *pShSide = NULL, *pShUp = NULL;
+        if (!pShDist) { pShDist = cgi.Cvar_Get("cg_adsShoulderDist", "45", CVAR_ARCHIVE); }
+        if (!pShSide) { pShSide = cgi.Cvar_Get("cg_adsShoulderSide", "26", CVAR_ARCHIVE); }
+        if (!pShUp)   { pShUp   = cgi.Cvar_Get("cg_adsShoulderUp",   "20", CVAR_ARCHIVE); }
+        fCamDist   += (pShDist->value - fCamDist)   * s_adsShoulderEnv;
+        // side target is signed: MOUSE3 swaps shoulders (s_shoulderSideSign eased in CG_UpdateAdsStage)
+        fCamSide   += (pShSide->value * s_shoulderSideSign - fCamSide) * s_adsShoulderEnv;
+        fCamHeight += (pShUp->value   - fCamHeight) * s_adsShoulderEnv;
+        fCamVert   += (0.0f           - fCamVert)   * s_adsShoulderEnv;
+    }
+    if (s_adsFpEnv > 0.001f) {
+        // fly the camera in to (nearly) the head; the 3P->1P flip happens at cg_adsFpFlip of this ease
+        fCamDist   += (2.0f - fCamDist)   * s_adsFpEnv;
+        fCamSide   += (0.0f - fCamSide)   * s_adsFpEnv;
+        fCamHeight += (0.0f - fCamHeight) * s_adsFpEnv;
+        fCamVert   += (0.0f - fCamVert)   * s_adsFpEnv;
     }
 
-    // see if we need to ignore yaw
-    if (cg.predicted_player_state.camera_flags & CF_CAMERA_ANGLES_IGNORE_YAW) {
-        target_angles[YAW] = 0;
-    }
+    if (bTurret3p) {
+        // chase the GUN's aim: the turret camera angles track the barrel exactly
+        VectorCopy(cg.camera_angles, target_angles);
+    } else {
+        // see if angles are absolute
+        if (cg.predicted_player_state.camera_flags & CF_CAMERA_ANGLES_ABSOLUTE) {
+            VectorClear(target_angles);
+        }
 
-    // see if we need to ignore pitch
-    if (cg.predicted_player_state.camera_flags & CF_CAMERA_ANGLES_IGNORE_PITCH) {
-        target_angles[PITCH] = 0;
-    }
+        // see if we need to ignore yaw
+        if (cg.predicted_player_state.camera_flags & CF_CAMERA_ANGLES_IGNORE_YAW) {
+            target_angles[YAW] = 0;
+        }
 
-    // offset the current angles by the camera offset
-    VectorSubtract(target_angles, cg.predicted_player_state.camera_offset, target_angles);
+        // see if we need to ignore pitch
+        if (cg.predicted_player_state.camera_flags & CF_CAMERA_ANGLES_IGNORE_PITCH) {
+            target_angles[PITCH] = 0;
+        }
+
+        // offset the current angles by the camera offset
+        VectorSubtract(target_angles, cg.predicted_player_state.camera_offset, target_angles);
+    }
 
     // Get the position of the camera after any needed rotation
     look_offset = cgi.get_camera_offset(&lookactive, &resetview);
 
-    if ((!resetview) && ((cg.predicted_player_state.camera_flags & CF_CAMERA_ANGLES_ALLOWOFFSET) || (lookactive))) {
+    // HZM coop - THIRD-PERSON FREE CAM orbit: look_offset IS the client-side orbit accumulator (mouse
+    // deltas routed there by CL_MouseMove while cg_freecamCapture is up). Add it yaw+pitch onto the
+    // chase angles, scaled by the envelope so engaging ADS (or any other capture drop) EASES the camera
+    // back behind the shoulder instead of snapping. Everything downstream - the pull-back along the
+    // orbit direction, the MASK_CAMERASOLID wall traces and the wall-pitch fallback - is inherited, so
+    // the orbit gets the stock collision handling for free. Pitch is clamped ~+/-85 (no pole flip);
+    // the legacy look path below is skipped while we own the offset (saved_look_offset kept synced so
+    // handing back is seamless).
+    if (s_freecamEnv > 0.001f) {
+        target_angles[YAW] += look_offset[YAW] * s_freecamEnv;
+        target_angles[PITCH] += look_offset[PITCH] * s_freecamEnv;
+        if (target_angles[PITCH] > 85) {
+            target_angles[PITCH] = 85;
+        } else if (target_angles[PITCH] < -85) {
+            target_angles[PITCH] = -85;
+        }
+        VectorCopy(look_offset, saved_look_offset);
+    } else if ((!resetview) && ((cg.predicted_player_state.camera_flags & CF_CAMERA_ANGLES_ALLOWOFFSET) || (lookactive))) {
         VectorSubtract(look_offset, saved_look_offset, camera_offset);
         VectorAdd(target_angles, camera_offset, target_angles);
         if (target_angles[PITCH] > 90) {
@@ -129,7 +221,7 @@ static void CG_OffsetThirdPersonView(void)
 
     // Move reference point up
 
-    target_position[2] += cg_cameraheight->value;
+    target_position[2] += fCamHeight; // HZM coop - staged-ADS blended framing (== cg_cameraheight when idle)
 
     VectorCopy(target_position, original_camera_position);
 
@@ -137,12 +229,12 @@ static void CG_OffsetThirdPersonView(void)
 
     AngleVectors(target_angles, forward, right, NULL);
 
-    VectorMA(target_position, -cg_cameradist->value, forward, new_vieworg);
+    VectorMA(target_position, -fCamDist, forward, new_vieworg);
 
-    new_vieworg[2] += cg_cameraverticaldisplacement->value;
+    new_vieworg[2] += fCamVert;
 
     // HZM coop - shift the camera to the right shoulder (over-the-shoulder third person)
-    VectorMA(new_vieworg, cg_camerasideoffset->value, right, new_vieworg);
+    VectorMA(new_vieworg, fCamSide, right, new_vieworg);
 
     // Create a bounding box for our camera
 
@@ -155,7 +247,22 @@ static void CG_OffsetThirdPersonView(void)
     max[2] = 5;
 
     // Make sure camera does not collide with anything
-    CG_Trace(&trace, cg.playerHeadPos, min, max, new_vieworg, 0, MASK_CAMERASOLID, qfalse, qtrue, "ThirdPersonTrace 1");
+    // HZM coop - bTurret3p: trace against the WORLD only (cliptoentities false). The gunner's head sits
+    // inside the mounted gun's/vehicle's collision, so an entity-clipping trace is startsolid and pins
+    // the camera at the head ("camera under the receiver" bug). World brushes still clip - the camera
+    // never goes through terrain/walls; it may briefly intersect the vehicle model, which reads fine.
+    CG_Trace(
+        &trace,
+        cg.playerHeadPos,
+        min,
+        max,
+        new_vieworg,
+        0,
+        MASK_CAMERASOLID,
+        qfalse,
+        bTurret3p ? qfalse : qtrue,
+        "ThirdPersonTrace 1"
+    );
 
     VectorCopy(trace.endpos, target_position);
 
@@ -188,12 +295,12 @@ static void CG_OffsetThirdPersonView(void)
 
                 AngleVectors(target_angles, forward, right, NULL);
 
-                VectorMA(original_camera_position, -cg_cameradist->value, forward, new_vieworg);
+                VectorMA(original_camera_position, -fCamDist, forward, new_vieworg);
 
-                new_vieworg[2] += cg_cameraverticaldisplacement->value;
+                new_vieworg[2] += fCamVert;
 
                 // HZM coop - keep the right-shoulder offset in the wall-pitch fallback too
-                VectorMA(new_vieworg, cg_camerasideoffset->value, right, new_vieworg);
+                VectorMA(new_vieworg, fCamSide, right, new_vieworg);
 
                 CG_Trace(
                     &trace,
@@ -204,7 +311,7 @@ static void CG_OffsetThirdPersonView(void)
                     0,
                     MASK_CAMERASOLID,
                     qfalse,
-                    qtrue,
+                    bTurret3p ? qfalse : qtrue, // HZM coop - world-only on turrets (see Trace 1)
                     "ThirdPersonTrace 3"
                 );
 
@@ -264,6 +371,7 @@ void CG_AddSuppression(float amount)
     if (s_coopSuppress > 1.0f) {
         s_coopSuppress = 1.0f;
     }
+    CG_HudFadeTouch(); // HZM coop - under fire: bring the HUD chrome back
 }
 
 // HZM coop - HEAT HAZE intensity 0..1. Bumped by CG_AddHeat (nearby explosions, from cg_parsemsg.cpp),
@@ -1115,6 +1223,287 @@ qboolean CG_AimingDownSights(void)
     return (cmd.buttons & BUTTON_COOPADS) ? qtrue : qfalse; // ADS on its own button, decoupled from secondary-fire/bash
 }
 
+/*
+====================
+HZM coop - STAGED THIRD-PERSON ADS
+
+For cg_3rd_person players, holding the ADS button no longer snaps straight to first person: it eases
+the chase camera into an over-the-right-shoulder AIM view (stage 0). While still holding ADS, one
+mouse-wheel-up notch (captured in CG_CheckCaptureKey, cg_ui.cpp - the weapnext/weapprev bind does NOT
+run) sets cg_adsStage 1: the camera flies in to the head and the view flips to the full first-person
+iron-sight ADS (all existing ADS behavior: world/gun fov, breath-hold, sway). Wheel-down while held
+returns to the shoulder view symmetrically. Releasing ADS resets the stage and eases (fast) back to
+the normal chase framing. First-person players (cg_3rd_person 0) keep today's instant behavior.
+The stage lives in the cg_adsStage cvar (0 = shoulder, 1 = irons) - NO new usercmd button bits.
+====================
+*/
+// HZM coop - SCOPED weapons (native zoom): the shoulder stage must never engage for them - the
+// ADS button toggles the server zoom (player.cpp ToggleZoom on BUTTON_COOPADS), so 3P ADS goes
+// STRAIGHT to the scope like it always did. Without this bypass the shoulder ease fought the
+// zoom's forced first-person for a few frames on scope-in/out ("glitches"). List = every trilogy
+// weapon TIK with zoom, plus our binocular-type items.
+static qboolean CG_ActiveWeaponHasScope(void)
+{
+    const char *wpn;
+
+    if (!cg.snap || cg.snap->ps.activeItems[1] < 0) {
+        return qfalse;
+    }
+    wpn = CG_ConfigString(CS_WEAPONS + cg.snap->ps.activeItems[1]);
+    if (!wpn || !wpn[0]) {
+        return qfalse;
+    }
+    return (!Q_stricmp(wpn, "KAR98 - Sniper") || !Q_stricmp(wpn, "Springfield '03 Sniper")
+            || !Q_stricmp(wpn, "Enfield L42A1") || !Q_stricmp(wpn, "SVT 40") || !Q_stricmp(wpn, "G 43")
+            || !Q_stricmp(wpn, "FG 42") || !Q_stricmp(wpn, "Bombing Run") || strstr(wpn, "inocular") != NULL)
+               ? qtrue
+               : qfalse;
+}
+
+static qboolean CG_AdsStagedOn(void)
+{
+    // staged shoulder ADS is a third-person feature; cg_adsShoulder 0 restores the instant 3P->1P snap
+    static cvar_t *pOn = NULL;
+    if (!pOn) { pOn = cgi.Cvar_Get("cg_adsShoulder", "1", CVAR_ARCHIVE); }
+    if (CG_ActiveWeaponHasScope()) {
+        return qfalse; // snipers/scoped: straight to the scope, no shoulder stage
+    }
+    return (pOn->integer && cg_3rd_person->integer) ? qtrue : qfalse;
+}
+
+// HZM coop - the wheel capture (cg_ui.cpp CG_CheckCaptureKey) must use the exact same decision,
+// so a scoped rifle keeps its normal wheel (weapon switch) while aiming.
+qboolean CG_AdsShoulderWheelActive(void)
+{
+    return (CG_AdsStagedOn() && CG_AimingDownSights()) ? qtrue : qfalse;
+}
+
+static int CG_AdsStage(void)
+{
+    // 0 = over-the-shoulder aim, 1 = first-person irons. Written by the wheel capture + the reset below.
+    static cvar_t *pStage = NULL;
+    if (!pStage) { pStage = cgi.Cvar_Get("cg_adsStage", "0", 0); } // runtime state - deliberately NOT archived
+    return pStage->integer;
+}
+
+// Once per frame from CG_CalcViewValues, BEFORE the third-person decision: advance both stage envelopes
+// (same first-order ease as s_adsZoomCur below) and reset the stage when the ADS button is released.
+static void CG_UpdateAdsStage(void)
+{
+    qboolean       bAds    = CG_AimingDownSights();
+    qboolean       bStaged = CG_AdsStagedOn();
+    float          fShoulderTgt, fFpTgt, dt, rate, step;
+    static cvar_t *pSpeed = NULL;
+
+    if (!pSpeed) { pSpeed = cgi.Cvar_Get("cg_adsShoulderSpeed", "10", CVAR_ARCHIVE); }
+
+    // release resets the stage so every fresh ADS hold starts at the shoulder view
+    if (!bAds && CG_AdsStage() != 0) {
+        cgi.Cvar_Set("cg_adsStage", "0");
+    }
+
+    fShoulderTgt = (bAds && bStaged) ? 1.0f : 0.0f;
+    fFpTgt       = (bAds && bStaged && CG_AdsStage() >= 1) ? 1.0f : 0.0f;
+
+    dt   = (cg.frametime > 0) ? (float)cg.frametime / 1000.0f : 0.0f;
+    rate = (pSpeed->value > 0.0f) ? pSpeed->value : 10.0f;
+
+    // ease-OUT (release / wheel-down) runs 1.5x faster: "snap back with a fast ease, not a hard cut"
+    step = dt * ((fShoulderTgt < s_adsShoulderEnv) ? rate * 1.5f : rate);
+    if (step > 1.0f) { step = 1.0f; }
+    s_adsShoulderEnv += (fShoulderTgt - s_adsShoulderEnv) * step;
+    if (s_adsShoulderEnv > fShoulderTgt - 0.003f && s_adsShoulderEnv < fShoulderTgt + 0.003f) {
+        s_adsShoulderEnv = fShoulderTgt; // settle
+    }
+
+    step = dt * ((fFpTgt < s_adsFpEnv) ? rate * 1.5f : rate);
+    if (step > 1.0f) { step = 1.0f; }
+    s_adsFpEnv += (fFpTgt - s_adsFpEnv) * step;
+    if (s_adsFpEnv > fFpTgt - 0.003f && s_adsFpEnv < fFpTgt + 0.003f) {
+        s_adsFpEnv = fFpTgt; // settle
+    }
+
+    // HZM coop - MOUSE3 SHOULDER SWAP: ease the side sign toward +1 (right) / -1 (left) per the
+    // archived cg_adsShoulderRight cvar (toggled by MOUSE3 in CG_CheckCaptureKey while shouldered).
+    // Slightly slower than the shoulder ease so the sweep across the back reads as a camera move,
+    // not a cut. Runs unconditionally so a swap done mid-aim also settles while NOT aiming.
+    {
+        static cvar_t *pRight = NULL;
+        float          fSignTgt;
+        if (!pRight) { pRight = cgi.Cvar_Get("cg_adsShoulderRight", "1", CVAR_ARCHIVE); }
+        fSignTgt = pRight->integer ? 1.0f : -1.0f;
+        step     = dt * rate * 0.6f;
+        if (step > 1.0f) { step = 1.0f; }
+        s_shoulderSideSign += (fSignTgt - s_shoulderSideSign) * step;
+        if (s_shoulderSideSign > fSignTgt - 0.003f && s_shoulderSideSign < fSignTgt + 0.003f) {
+            s_shoulderSideSign = fSignTgt; // settle
+        }
+    }
+
+    // HZM coop - mirror the shoulder-aim state to the SERVER via userinfo (u_shoulderaim): the stage is
+    // a pure client concept (cvar + envelopes), but the aimed-walk movement slowdown must be applied by
+    // the server (ClientMove). CVAR_USERINFO means the client engine auto-sends a reliable userinfo
+    // update whenever the value changes (rare: ADS press/release in 3P + wheel stage flips).
+    {
+        static cvar_t *pMirror    = NULL;
+        int            inShoulder = (bAds && bStaged && CG_AdsStage() == 0) ? 1 : 0;
+        if (!pMirror) { pMirror = cgi.Cvar_Get("u_shoulderaim", "0", CVAR_USERINFO); }
+        if (pMirror->integer != inShoulder) {
+            cgi.Cvar_Set("u_shoulderaim", va("%d", inShoulder));
+        }
+    }
+}
+
+// HZM coop - shoulder-stage camera envelope (0 = normal chase, 1 = fully in the shoulder AIM framing).
+// Exposed so 2D effects (ADS vignette/DoF in cg_drawtools.cpp) can follow the shoulder stage exactly.
+float CG_AdsShoulderFrac(void)
+{
+    return s_adsShoulderEnv;
+}
+
+/*
+====================
+HZM coop - THIRD-PERSON FREE CAM (cg_freecam)
+
+With cg_freecam 1 and cg_3rd_person 1, the mouse orbits the chase camera FREELY around the character
+(full 360 yaw, pitch ~+/-85) WITHOUT turning the character: the model keeps its facing, WASD stays
+relative to that frozen facing (the legs statemap plays the proper strafe/backpedal anims), and you can
+fly the camera around to look at your soldier from the front. MOUSE OWNERSHIP: while eligible we publish
+cg_freecamCapture 1 and the CLIENT (CL_MouseMove, cl_input.cpp) routes mouse deltas into the previously
+vestigial camera_offset/camera_active look channel instead of cl.viewangles; the orbit is read back here
+through the existing cgi.get_camera_offset() import and applied inside CG_OffsetThirdPersonView (so it
+inherits the stock camera collision). Holding ADS drops the capture instantly - the mouse aims the player
+again and the EXISTING staged shoulder-ADS takes over - while s_freecamEnv eases the applied orbit back
+behind the shoulder at the same rate the shoulder framing rises (one camera gesture, no snap). Scoped
+rifles, turrets, cutscene/statemap cameras, spectating, DBNO and death all drop the orbit the same way.
+exe+cgame pair: ships with the matching client (CL_MouseMove capture routing).
+====================
+*/
+static qboolean CG_FreecamEligible(void)
+{
+    static cvar_t *pOn = NULL, *pDbnoV = NULL;
+    playerState_t *ps;
+
+    if (!pOn)    { pOn    = cgi.Cvar_Get("cg_freecam", "0", CVAR_ARCHIVE); }
+    if (!pDbnoV) { pDbnoV = cgi.Cvar_Get("coop_dbnoView", "0", CVAR_ARCHIVE); }
+
+    if (!cg.snap) {
+        return qfalse;
+    }
+    // HZM coop - IN COVER always gets the free orbit (even for first-person players / cg_freecam 0):
+    // the pose forces third person, and the mouse must LOOK AROUND (peek the doorway) without turning
+    // the body - turning viewangles would break the server's wall-sustain trace and dump you back out
+    // (user report). ADS still drops the capture below = mouse aims again = deliberate cover exit.
+    if (!(cg.predicted_player_state.pm_flags & PMF_COOP_COVER)
+        && (!pOn->integer || !cg_3rd_person->integer)) {
+        return qfalse;
+    }
+    ps = &cg.predicted_player_state;
+    if (cg.snap->ps.stats[STAT_HEALTH] <= 0) {
+        return qfalse; // dead / waiting to respawn: the mouse drives the normal death view
+    }
+    if (cg.snap->ps.stats[STAT_INZOOM]) {
+        return qfalse; // native scope/binoculars force first person (reticle = true aim)
+    }
+    if (ps->pm_flags & (PMF_CAMERA_VIEW | PMF_TURRET | PMF_SPECTATING | PMF_INTERMISSION | PMF_FROZEN)) {
+        return qfalse; // server-owned views: script/turret cameras, spectate, intermission, freeze
+    }
+    if (ps->camera_flags
+        & (CF_CAMERA_ANGLES_ABSOLUTE | CF_CAMERA_ANGLES_IGNORE_YAW | CF_CAMERA_ANGLES_IGNORE_PITCH
+           | CF_CAMERA_ANGLES_ALLOWOFFSET)) {
+        return qfalse; // statemap camera types (CAMERA_FRONT/SIDE/TOPDOWN...) own the 3P framing
+    }
+    if (ps->camera_offset[YAW] != 0.0f || ps->camera_offset[PITCH] != 0.0f) {
+        return qfalse; // ditto - the server is driving a seat/state look offset (vehicle looks etc.)
+    }
+    if (pDbnoV->integer) {
+        return qfalse; // DBNO forces first person (bleed-out view)
+    }
+    if (CG_AimingDownSights()) {
+        return qfalse; // ADS hold hands the mouse back for real aiming (shoulder/irons/scope, as today)
+    }
+    if (CG_AdsForceFirstPerson()) {
+        return qfalse; // still first person (wheel-up irons fly-out after release): wait for the 3P view
+    }
+    return qtrue;
+}
+
+// Exposed for the crosshair (cg_drawtools.cpp): while the free orbit owns the mouse the camera direction
+// is NOT the aim direction, so the crosshair (incl. the 3P true-aim projection) would lie - hide it.
+qboolean CG_FreecamCaptureActive(void)
+{
+    return s_freecamCapture;
+}
+
+// Once per frame from CG_CalcViewValues (right after CG_UpdateAdsStage): decide the mouse capture, ease
+// the orbit envelope, and retire the client orbit accumulator once it has fully eased out.
+static void CG_UpdateFreecam(void)
+{
+    qboolean       bWant = CG_FreecamEligible();
+    float          fTgt  = bWant ? 1.0f : 0.0f;
+    float          dt, rate, step;
+    static cvar_t *pSpeed = NULL, *pCapture = NULL;
+
+    // same transition rate as the shoulder-ADS ease, so the ADS handoff (orbit swinging home while the
+    // shoulder framing rises) reads as ONE camera gesture
+    if (!pSpeed)   { pSpeed   = cgi.Cvar_Get("cg_adsShoulderSpeed", "10", CVAR_ARCHIVE); }
+    if (!pCapture) { pCapture = cgi.Cvar_Get("cg_freecamCapture", "0", 0); } // runtime state - never archived
+
+    // publish the capture flag for the client input layer (CL_MouseMove). Compared against the LIVE cvar
+    // (not a cached bool) so it self-heals if anything else reset it (CG_Shutdown, a stray console set).
+    s_freecamCapture = bWant;
+    if (pCapture->integer != (bWant ? 1 : 0)) {
+        cgi.Cvar_Set("cg_freecamCapture", bWant ? "1" : "0");
+    }
+
+    dt   = (cg.frametime > 0) ? (float)cg.frametime / 1000.0f : 0.0f;
+    rate = (pSpeed->value > 0.0f) ? pSpeed->value : 10.0f;
+
+    // ease-out (handoff/release) runs 1.5x faster, mirroring the shoulder envelope
+    step = dt * ((fTgt < s_freecamEnv) ? rate * 1.5f : rate);
+    if (step > 1.0f) { step = 1.0f; }
+    s_freecamEnv += (fTgt - s_freecamEnv) * step;
+    if (s_freecamEnv > fTgt - 0.003f && s_freecamEnv < fTgt + 0.003f) {
+        s_freecamEnv = fTgt; // settle
+    }
+
+    // fully eased out and not wanted: zero the client orbit accumulator (through the same live pointer
+    // the orbit reads) so the NEXT activation starts centred behind the character. No visual change at
+    // this point - the applied offset is already accumulator * 0.
+    if (!bWant && s_freecamEnv <= 0.0f) {
+        float   *ofs;
+        qboolean la, rv;
+        ofs = cgi.get_camera_offset(&la, &rv);
+        if (ofs[0] != 0.0f || ofs[1] != 0.0f || ofs[2] != 0.0f) {
+            VectorClear(ofs);
+        }
+    }
+}
+
+/*
+====================
+CG_AdsForceFirstPerson
+
+HZM coop - "the ADS system wants a FIRST-person view this frame". Replaces the raw CG_AimingDownSights()
+term in BOTH third-person deciders (cg.renderingThirdPerson in CG_CalcViewValues AND bThirdPerson in
+cg_modelanim.c CG_ModelAnim) so camera and own-model draw stay in lockstep. Without the staged system
+(first-person players / cg_adsShoulder 0) this is exactly CG_AimingDownSights() = today's behavior;
+with it, first person engages only once the wheel-up fly-in envelope crosses cg_adsFpFlip (and eases
+back out through the same threshold, so release/wheel-down leaves first person smoothly too).
+====================
+*/
+qboolean CG_AdsForceFirstPerson(void)
+{
+    static cvar_t *pFlip = NULL;
+    if (!pFlip) { pFlip = cgi.Cvar_Get("cg_adsFpFlip", "0.7", CVAR_ARCHIVE); }
+
+    if (CG_AimingDownSights() && !CG_AdsStagedOn()) {
+        return qtrue; // no staged 3P system in play -> instant first-person ADS (stock coop behavior)
+    }
+    // staged: first person while the fly-in envelope is past the flip point (works easing in AND out)
+    return (s_adsFpEnv > pFlip->value) ? qtrue : qfalse;
+}
+
 static int CG_CalcFov(void)
 {
     float x;
@@ -1144,12 +1533,23 @@ static int CG_CalcFov(void)
         float        step;
 
         // ADS is gated off while a native scope/zoom is active (snipers) - see CG_AimingDownSights.
-        if (cg_adsZoom && cg_adsZoom->value < 1.0f && cg_adsZoom->value >= 0.2f && CG_AimingDownSights()) {
-            fTarget = cg_adsZoom->value;
-            // HZM coop - holding breath (steady) zooms in slightly MORE for focus; eases back when it ends.
-            if (s_breathSteady) {
-                cvar_t *pBZ = cgi.Cvar_Get("cg_breathZoom", "0.85", CVAR_ARCHIVE);
-                fTarget *= (pBZ ? pBZ->value : 0.85f);
+        if (CG_AimingDownSights()) {
+            if (cg.renderingThirdPerson) {
+                // HZM coop - staged 3P ADS: while the camera is still THIRD person (shoulder stage /
+                // fly-in) apply only the milder shoulder zoom; the moment the wheel-up handoff flips to
+                // first person the target switches to the full cg_adsZoom and the ease masks the cut.
+                static cvar_t *pShZoom = NULL;
+                if (!pShZoom) { pShZoom = cgi.Cvar_Get("cg_adsShoulderZoom", "0.9", CVAR_ARCHIVE); }
+                if (pShZoom->value < 1.0f && pShZoom->value >= 0.2f) {
+                    fTarget = pShZoom->value;
+                }
+            } else if (cg_adsZoom && cg_adsZoom->value < 1.0f && cg_adsZoom->value >= 0.2f) {
+                fTarget = cg_adsZoom->value;
+                // HZM coop - holding breath (steady) zooms in slightly MORE for focus; eases back when it ends.
+                if (s_breathSteady) {
+                    cvar_t *pBZ = cgi.Cvar_Get("cg_breathZoom", "0.85", CVAR_ARCHIVE);
+                    fTarget *= (pBZ ? pBZ->value : 0.85f);
+                }
             }
         }
         // ease toward the target so ADS zooms in QUICKLY but smoothly (no jarring instant snap)
@@ -1638,17 +2038,123 @@ static int CG_CalcViewValues(void)
     AnglesToAxis(SoundAngles, cg.SoundAxis);
 
     // decide on third person view
-    // HZM coop - while aiming down sights (RMB held), snap to FIRST person so the iron-sight ADS works,
-    // then back to third person on release. NO turret special-case: a mounted turret uses its bound server
-    // camera (per-gun TIKI viewOffset, weapturret.cpp), so the view comes from there - we don't override
-    // renderingThirdPerson for turrets (the 3rd-person turret experiment is fully reverted to stock).
+    // HZM coop - STAGED ADS: in third person, holding ADS eases into an over-the-shoulder aim view
+    // (CG_OffsetThirdPersonView blend); a wheel-up notch while held flies the camera in and flips to the
+    // full FIRST-person iron-sight ADS (CG_AdsForceFirstPerson). First-person players are unchanged
+    // (instant ADS). TURRETS: a mounted turret's bound server camera (per-gun TIKI viewOffset,
+    // weapturret.cpp) owns the view for FIRST-person players only. Third-person players keep the chase:
+    // the PMF_CAMERA_VIEW copy below is skipped for turret cameras in 3P and CG_OffsetThirdPersonView
+    // chases the gun's aim (bTurret3p). Script/cutscene cameras (no PMF_TURRET) always win, any view.
     {
         static cvar_t *pDbnoV = NULL;
         if (!pDbnoV) { pDbnoV = cgi.Cvar_Get("coop_dbnoView", "0", CVAR_ARCHIVE); }
-        cg.renderingThirdPerson = (cg_3rd_person->integer && !CG_AimingDownSights()) ? qtrue : qfalse;
+        CG_UpdateAdsStage(); // advance the shoulder/first-person envelopes + handle the release reset
+        CG_UpdateFreecam();  // HZM coop - free-cam orbit: decide mouse capture + ease the orbit envelope
+        cg.renderingThirdPerson = (cg_3rd_person->integer && !CG_AdsForceFirstPerson()) ? qtrue : qfalse;
+        // HZM coop - a NATIVE zoom (sniper scope / binoculars, STAT_INZOOM) also forces FIRST person:
+        // in third person the scope reticle implies the eye-line while the camera sits off-shoulder,
+        // so long-range shots land visibly off the reticle ("3rd-person snipers way inaccurate").
+        // Scoping snaps to first person (reticle = true aim), releasing the zoom returns the view.
+        // EXCEPT on mounted turrets: VehicleTurretGun force-"zooms" its gunner (ToggleZoom(80),
+        // vehicleturret.cpp ~:950) purely to pin the fov - fov 80 is no magnification and there is
+        // no reticle-accuracy problem on an MG, so the jeep .30cal/halftrack must keep the chase.
+        if (ps->stats[STAT_INZOOM] && !(ps->pm_flags & PMF_TURRET)) { cg.renderingThirdPerson = qfalse; }
         // DBNO forces FIRST person (you're crawling / bleeding out - the downed pistol + bleed-out vignette
         // read in 1st person). Returns to your chosen view the instant you're revived / dead / respawned.
         if (pDbnoV && pDbnoV->integer) { cg.renderingThirdPerson = qfalse; }
+        // HZM coop - IN COVER forces THIRD person (the pose/peek only reads from outside; user:
+        // "1st person cover should auto shift to third"). Server drops PMF_COOP_COVER the frame
+        // cover ends, so a first-person player snaps straight back to first person on exit.
+        if (ps->pm_flags & PMF_COOP_COVER) { cg.renderingThirdPerson = qtrue; }
+        // On ENTERING cover, seed the free-look orbit toward the detected opening (client-side
+        // wall probe mirroring the server's): the first thing you see is the doorway you're
+        // covering against, not your own back ("default view should be at the door" - user).
+        {
+            static qboolean bWasCover     = qfalse;
+            static int      iLastCoverMs  = -10000;
+            qboolean        bIsCover      = (ps->pm_flags & PMF_COOP_COVER) ? qtrue : qfalse;
+            // HZM coop [228] - FRESH entries only: a one-frame pose flicker (server grace) or a
+            // brief 1P/3P toggle used to RE-fire this seed and yank the camera/aim +/-55 toward
+            // the "opening" mid-fight ("camera snaps in a completely different direction" - user).
+            qboolean        bFreshEntry   = (cg.time - iLastCoverMs) > 500 ? qtrue : qfalse;
+
+            if (bIsCover) { iLastCoverMs = cg.time; }
+
+            if (bIsCover && !bWasCover && bFreshEntry) {
+                vec3_t   vOut, vStart, vEnd;
+                vec3_t   vAng = {0, ps->viewangles[YAW], 0};
+                qboolean bLookActive, bResetView; // get_camera_offset WRITES these unconditionally - NULL crashes
+                float   *pOrbit = cgi.get_camera_offset(&bLookActive, &bResetView);
+                trace_t  tr;
+                float    fSeed = 0.0f;
+
+                AngleVectors(vAng, vOut, NULL, NULL); // body faces OUT; the wall is behind
+                VectorCopy(ps->origin, vStart);
+                vStart[2] += 48;
+                // probe LEFT of the pose: sidestep, then trace back toward the wall plane
+                vEnd[0] = vStart[0] - vOut[1] * 44 - vOut[0] * 64;
+                vEnd[1] = vStart[1] + vOut[0] * 44 - vOut[1] * 64;
+                vEnd[2] = vStart[2];
+                { vec3_t s = {vStart[0] - vOut[1] * 44, vStart[1] + vOut[0] * 44, vStart[2]};
+                  CG_Trace(&tr, s, vec3_origin, vec3_origin, vEnd, 0, MASK_SOLID, qfalse, qfalse, "cover-seed-left"); }
+                if (tr.fraction >= 1.0f && !tr.startsolid) {
+                    fSeed = 55.0f; // opening on the LEFT (+yaw = left)
+                } else {
+                    vEnd[0] = vStart[0] + vOut[1] * 44 - vOut[0] * 64;
+                    vEnd[1] = vStart[1] - vOut[0] * 44 - vOut[1] * 64;
+                    { vec3_t s = {vStart[0] + vOut[1] * 44, vStart[1] - vOut[0] * 44, vStart[2]};
+                      CG_Trace(&tr, s, vec3_origin, vec3_origin, vEnd, 0, MASK_SOLID, qfalse, qfalse, "cover-seed-right"); }
+                    if (tr.fraction >= 1.0f && !tr.startsolid) {
+                        fSeed = -55.0f; // opening on the RIGHT
+                    }
+                }
+                if (pOrbit && fSeed != 0.0f) {
+                    pOrbit[YAW]   = fSeed;
+                    pOrbit[PITCH] = 0;
+                }
+            }
+            // HZM coop [223] - PITCH UN-JAM: the exe-side orbit clamp (CL_MouseMove) sums against the
+            // CLIENT's frozen viewangles, but while covered the SERVER re-pins the view (entry
+            // auto-turn, peek return) - the two drift apart and the summed camera pitch can wedge
+            // past the pole, which reads as "camera locked up/down in cover" (user report). Re-clamp
+            // the orbit against the SERVER pitch every covered frame so the mouse always has
+            // headroom both ways; 82 sits inside the exe's 85 so a wedged offset actively recovers.
+            if (bIsCover) {
+                qboolean bCLLook, bCLReset; // get_camera_offset WRITES these unconditionally - NULL crashes
+                float   *pOrbFix = cgi.get_camera_offset(&bCLLook, &bCLReset);
+                if (pOrbFix) {
+                    float fSrvPitch = AngleNormalize180(cg.predicted_player_state.viewangles[PITCH]);
+                    if (fSrvPitch + pOrbFix[PITCH] > 82.0f) {
+                        pOrbFix[PITCH] = 82.0f - fSrvPitch;
+                    } else if (fSrvPitch + pOrbFix[PITCH] < -82.0f) {
+                        pOrbFix[PITCH] = -82.0f - fSrvPitch;
+                    }
+                }
+            }
+            bWasCover = bIsCover;
+        }
+        // HZM coop - mirror the FINAL view mode to the server (u_view3p userinfo, u_shoulderaim
+        // pattern): the manned-turret code un-filters the WORLD gun for third-person gunners
+        // (SVF_NOTSINGLECLIENT is a server-side send filter the client cannot override).
+        {
+            static cvar_t *pV3 = NULL;
+            int            v3  = cg.renderingThirdPerson ? 1 : 0;
+            if (!pV3) { pV3 = cgi.Cvar_Get("u_view3p", "0", CVAR_USERINFO); }
+            if (pV3->integer != v3) { cgi.Cvar_Set("u_view3p", va("%d", v3)); }
+        }
+        // HZM coop [226] - IN-COVER aim-follow signal for the exe (cl_input): while covered, the
+        // usercmd carries the COMPOSITED camera direction (so blindfire/torso track the camera)
+        // and peek enter/exit FOLDS the orbit instead of easing (seamless shoulder handoff).
+        {
+            static cvar_t *pFold = NULL;
+            int            fold  = (ps->pm_flags & PMF_COOP_COVER) ? 1 : 0;
+            if (!pFold) { pFold = cgi.Cvar_Get("cg_freecamFold", "0", 0); }
+            if (pFold->integer != fold) { cgi.Cvar_Set("cg_freecamFold", va("%d", fold)); }
+        }
+        // HZM coop - staged ADS: the breath-hold machinery only updates in the first-person view-weapon
+        // path (CG_OffsetFirstPersonView), which does not run in third person - clear it so a stale
+        // "steady" can't leak breath-zoom/vignette into the shoulder stage.
+        if (cg.renderingThirdPerson) { s_breathSteady = qfalse; }
     }
 
     if (cg.renderingThirdPerson) {
@@ -1657,7 +2163,11 @@ static int CG_CalcViewValues(void)
     }
 
     // if we are in a camera view, we take our audio cues directly from the camera
-    if (ps->pm_flags & PMF_CAMERA_VIEW) {
+    // HZM coop - EXCEPT a turret camera while rendering third person: the chase framing from
+    // CG_OffsetThirdPersonView stands (otherwise the gun-eye camera lands INSIDE the drawn player
+    // model). Script/cutscene cameras never set PMF_TURRET and keep winning unconditionally.
+    if ((ps->pm_flags & PMF_CAMERA_VIEW)
+        && !(cg.renderingThirdPerson && (ps->pm_flags & PMF_TURRET))) {
         // Set the aural position to that of the camera
         VectorCopy(cg.camera_origin, cg.refdef.vieworg);
 

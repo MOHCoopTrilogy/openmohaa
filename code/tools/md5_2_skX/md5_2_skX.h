@@ -43,7 +43,16 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 typedef struct tBone_s {
 	char name[32];
 	int parent; // -1 == no parent
-	//skdJointType_t type; // TODO ?
+	// HZM coop 2026-07-06: joint-type support for human rigs (decompile path).
+	// Only meaningful when the model came from readSKD; the md5 compile path
+	// leaves these zeroed (loadMD5Mesh) and writes plain POSROT bones.
+	int jointType;                        // JT_* (skx_format.h), JT_POSROT for md5-loaded models
+	int numBaseData;                      // number of valid floats in baseData
+	float baseData[SKX_MAX_BONE_BASEDATA];// raw per-type base data from the skd
+	int hoseRotType;                      // HRTYPE_* (JT_HOSEROT only)
+	int numRefs;                          // bone references (JT_AVROT 2, elbow/wrist/hoserot 1)
+	int refIndex[2];                      // resolved bone indexes, -1 if unresolved
+	char refName[2][32];
 } tBone_t;
 
 typedef struct {
@@ -130,6 +139,10 @@ extern qboolean createTIK;
 extern char outTIKI[MAX_TOOLPATH];
 extern char outSKDMesh[MAX_TOOLPATH];
 extern char outSKCAnim[MAX_TOOLPATH][256];
+// HZM coop 2026-07-06: optional reference skc (-refskc). When compiling an
+// edited md5anim back to skc, per-frame movement deltas / total delta / loop
+// flags are copied from this vanilla skc (md5 files cannot carry them).
+extern char refSKC[MAX_TOOLPATH];
 // globals
 extern int numAnims;
 extern tAnim_t *anims[256];

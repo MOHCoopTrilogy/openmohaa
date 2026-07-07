@@ -2349,6 +2349,9 @@ void Vehicle::AttachTurretSlot(int slot, Entity *ent, Vector vExitPosition, Vect
         if (ent->IsSubclassOfPlayer()) {
             Player *pPlayer     = (Player *)ent;
             pPlayer->m_pVehicle = this;
+
+            // HZM coop [221] - bug-309 probe: what did the slot attach actually leave on the player?
+            gi.Printf("^~^~^ GUNNERPROBE attach: pTur=%d pVeh=1 (slot use-event done)\n", pPlayer->m_pTurret ? 1 : 0);
         }
 
         if (pTurret->IsSubclassOfTurretGun()) {
@@ -2433,6 +2436,70 @@ void Vehicle::DetachTurretSlot(int slot, Vector vExitPosition, Vector *vExitAngl
     Entity *passenger = Turrets[slot].ent;
 
     if (!passenger) {
+        return;
+    }
+
+    /* HZM coop v3: Turrets[slot].ent is the GUN, and a script-attached PLAYER rides ON that
+       gun - vanilla DetachTurretSlot only ever released the gun entity and NEVER dismounted
+       a rider (e3l3 AB41 "stuck inside, still firing"; v1 teleported the GUN and wedged the
+       vehicle; v2 ran on init-time vec_zero re-attach detaches and segfaulted e3l3 spawn).
+       ONLY when a script passes an explicit exit position: if the slot's gun has a player
+       riding it, dismount the rider through the full engine exit path, place them at the
+       scripted position (script owns final floor-safe placement), and leave the gun mounted.
+       Every vec_zero call (engine/init) takes the untouched vanilla path. */
+    if (vExitPosition != vec_zero && passenger->IsSubclassOfTurretGun()) {
+        TurretGun *pGun  = static_cast<TurretGun *>(passenger);
+        Sentient  *rider = pGun->GetOwner();
+        if (!rider && pGun->IsSubclassOfVehicleTurretGun()) {
+            rider = static_cast<VehicleTurretGun *>(pGun)->GetRawRemoteOwner();
+        }
+        if (rider && rider->IsSubclassOfPlayer()) {
+            /* v5: explicit full teardown of BOTH seat mechanisms. v4's EV_Use toggle was
+               wrong: TurretUsed SEATS a non-owner (that is how attach works), so pressing
+               F re-seated the rider = still frozen. Here we tear down the remote-control
+               link (vehicle turrets), the direct-owner link (regular turret guns), the
+               turret camera state, the player's vehicle pointer, and movement - then place
+               the player at the scripted exit position. */
+            Player *pPlayer = static_cast<Player *>(rider);
+
+            gi.Printf(
+                "^~^~^ VDETACH slot=%d gun=%s directOwner=%d remote=%d\n",
+                slot,
+                pGun->getClassname(),
+                pGun->GetOwner() == pPlayer,
+                pGun->IsSubclassOfVehicleTurretGun()
+                    && static_cast<VehicleTurretGun *>(pGun)->GetRawRemoteOwner() == pPlayer
+            );
+
+            if (pGun->IsSubclassOfVehicleTurretGun()) {
+                static_cast<VehicleTurretGun *>(pGun)->EndRemoteControl();
+            }
+            if (pGun->GetOwner() == pPlayer) {
+                pGun->P_TurretEndUsed();
+            }
+
+            // belt + suspenders: camera, zoom, turret pointer, movetype, vehicle pointer
+            pPlayer->SetCamera(NULL, 1.0f);
+            pPlayer->ZoomOff();
+            pPlayer->client->ps.camera_flags &= ~CF_CAMERA_ANGLES_TURRETMODE;
+            if (pPlayer->m_pTurret) {
+                pPlayer->ExitTurret(); // derefs m_pTurret on entry - only valid when seated
+            } else {
+                pPlayer->flags &= ~FL_PARTIAL_IMMOBILE;
+                pPlayer->setMoveType(MOVETYPE_WALK);
+            }
+            pPlayer->m_pVehicle = NULL;
+            pPlayer->setOrigin(vExitPosition);
+            return;
+        }
+
+        /* v6: an explicit-position detach is a CREW-EJECT order - never yeet the gun itself.
+           The vanilla fall-through moved the UNMANNED gun to the exit position (e3l3: solid
+           slot-1 gun floated at head height over the landing zone, wedging players until they
+           crouched) and freed the slot (breaking the later queryturretslotentity hide).
+           Leave unmanned/AI-manned guns mounted; the slot stays intact so the vehicle keeps
+           driving the gun and scripts can still query/hide/remove it. AttachTurretSlot
+           overwrites slots unconditionally, so re-attach flows (e1l1 playerTank) still work. */
         return;
     }
 

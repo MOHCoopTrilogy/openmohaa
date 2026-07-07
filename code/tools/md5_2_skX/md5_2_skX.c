@@ -40,6 +40,10 @@ tAnim_t *anims[256];
 char outTIKI[MAX_TOOLPATH];
 // that's a path where skc/skd files should be put
 char modelDataDir[MAX_TOOLPATH];
+// HZM coop 2026-07-06: optional -refskc vanilla animation. md5 files cannot
+// carry MoHAA's per-frame movement deltas / loop flag, so when recompiling an
+// edited md5anim we copy them from the vanilla skc being replaced.
+char refSKC[MAX_TOOLPATH];
 
 
 static float null = 0;
@@ -52,6 +56,31 @@ void ConvertAnimation(tAnim_t *a, const char *outFName) {
 	tAnimBone_t *bd;
 	char name[SKC_MAX_CHANNEL_CHARS];
 	int ofsChannelNames;
+	skcHeader_t *refH;
+	skcFrame_t *refFrames;
+
+	// load the optional reference skc (movement deltas / flags)
+	refH = 0;
+	refFrames = 0;
+	if(refSKC[0]) {
+		int refLen = F_LoadBuf(refSKC,(byte**)&refH);
+		if(refLen == -1) {
+			T_Printf("Warning: -refskc %s not found, deltas will be zero\n",refSKC);
+			refH = 0;
+		} else if(refH->ident != SKC_IDENT || refH->version != SKC_VERSION) {
+			T_Printf("Warning: -refskc %s is not an skc v%i, ignoring\n",refSKC,SKC_VERSION);
+			F_FreeBuf((byte*)refH);
+			refH = 0;
+		} else if(refH->numFrames != a->numFrames) {
+			T_Printf("Warning: -refskc %s has %i frames, anim has %i - ignoring\n",
+				refSKC,refH->numFrames,a->numFrames);
+			F_FreeBuf((byte*)refH);
+			refH = 0;
+		} else {
+			refFrames = (skcFrame_t *)( (byte *)refH + sizeof(*refH) );
+			T_Printf("Copying flags/deltas from reference skc %s\n",refSKC);
+		}
+	}
 
 	out = F_Open(outFName,"wb");
 	if(out == 0) {
@@ -64,6 +93,12 @@ void ConvertAnimation(tAnim_t *a, const char *outFName) {
 	h.numFrames = a->numFrames;
 	h.frameTime = 1.f / a->frameRate;
 	h.numChannels = a->numBones * 2;
+	if(refH) {
+		h.flags = refH->flags;
+		h.frameTime = refH->frameTime;
+		VectorCopy(refH->totalDelta,h.totalDelta);
+		h.totalAngleDelta = refH->totalAngleDelta;
+	}
 
 	fwrite(&h,sizeof(h),1,out);
 
@@ -74,7 +109,11 @@ void ConvertAnimation(tAnim_t *a, const char *outFName) {
 		outFrame.radius = RadiusFromBounds(f->mins,f->maxs);
 		VectorSet(outFrame.delta,0,0,0);
 		outFrame.unknown = 0;
-		outFrame.ofsValues = sizeof(h) + sizeof(skcFrame_t) * a->numFrames 
+		if(refFrames) {
+			VectorCopy(refFrames[i].delta,outFrame.delta);
+			outFrame.unknown = refFrames[i].unknown; // angleDelta
+		}
+		outFrame.ofsValues = sizeof(h) + sizeof(skcFrame_t) * a->numFrames
 			+ (a->numBones * sizeof(float)*8) * i;
 
 		fwrite(&outFrame,sizeof(outFrame),1,out);
@@ -115,6 +154,9 @@ void ConvertAnimation(tAnim_t *a, const char *outFName) {
 		T_Error("Fatal file write error\n");
 	}
 	fclose(out);
+	if(refH) {
+		F_FreeBuf((byte*)refH);
+	}
 	T_Printf("Wrote MoHAA animation %s\n",outFName);
 }
 void CalcModelBB(tModel_t *m, bone_t *bones, vec3_t outMins, vec3_t outMaxs, float *outRadius) {
@@ -603,13 +645,18 @@ void constructPath(char *out, const char *source, const char *ext) {
 	} else {
 		const char *dataPath;
 		const char *p;
-	
+
 		dataPath = extractTIKIDataPath(modelDataDir);
 		strcpy(out,dataPath);
 
+		// HZM coop 2026-07-06: source may be a bare filename (no directory);
+		// strchr_r returns NULL then and the old p++ crashed.
 		p = strchr_r(source,'/','\\');
-
-		p++;
+		if(p) {
+			p++;
+		} else {
+			p = source;
+		}
 
 		strcat(out,p);
 		stripExt(out);
@@ -823,7 +870,11 @@ void printHelp() {
 		"Example3: (converting MoHAA tik file to Doom3 md5mesh/md5anim): \n"
 		"md5_2_skX -decompile C:/MoHAA/main/pak0_unpacked/models/weapons/mp44.tik\n"
 		" -outdir C:/MoHAA/main/decompiledmodels/\n"
-		"Note that paths can be relative.\n");
+		"Note that paths can be relative.\n"
+		"\n"
+		"-refskc <vanilla.skc>: when compiling an edited md5anim back to skc,\n"
+		" copy the loop flag and per-frame movement deltas from this vanilla\n"
+		" animation (md5 files cannot store them; without it they are zero).\n");
 	T_Printf("\n");
 	T_Printf("=================================================\n");
 }
@@ -925,7 +976,15 @@ int main(int argc, const char **argv) {
 			i++;
 			strcpy(inAnimFNames[numAnims],argv[i]);
 			backSlashesToSlashes(inAnimFNames[numAnims]); // fix slashes!
-			numAnims++;		
+			numAnims++;
+		} else if(!Q_stricmp(argv[i], "-refskc")) {
+			// HZM coop 2026-07-06: vanilla skc to copy movement deltas /
+			// loop flags from when compiling an edited md5anim back to skc
+			i++;
+			if(i < argc) {
+				strcpy(refSKC,argv[i]);
+				backSlashesToSlashes(refSKC);
+			}
 		} else if(!Q_stricmp(argv[i], "-mesh")) {
 			// get mesh filename
 			i++;

@@ -748,6 +748,7 @@ UIWidget::UIWidget()
     m_direction                = D_NONE;
     m_fadetime                 = 0.0f;
     m_alpha                    = 1.0f;
+    m_hudFadeMul               = 1.0f; // HZM coop - HUD fade multiplier default = no fade
     m_motiontime               = 0.0f;
     m_starttime                = 0.0f;
     m_direction_orig           = D_NONE;
@@ -1978,7 +1979,17 @@ void UIWidget::Display(const UIRect2D& drawframe, float parent_alpha)
         Motion();
     }
 
-    m_local_alpha = m_alpha * parent_alpha;
+    m_local_alpha = m_alpha * parent_alpha * m_hudFadeMul; // HZM coop - HUD fade folds in AFTER Motion()
+
+    // HZM coop - HUD fade: fully faded-out panels draw NOTHING (guarantees the hidden end state
+    // even for shaders that ignore vertex alpha). Scoped to the FADE MULTIPLIER only - some
+    // widgets have a DESIGNED zero base alpha (dm/gm chat boxes: transparent container with
+    // self-alpha'd text drawn in Draw()) and must still run their Draw path (bug-261: gating on
+    // m_local_alpha muted ALL chat/feed text).
+    if (m_hudFadeMul <= 0.02f) {
+        return;
+    }
+
     set2D();
 
     col[3] = m_local_alpha;

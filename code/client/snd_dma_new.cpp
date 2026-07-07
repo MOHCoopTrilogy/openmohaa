@@ -523,15 +523,9 @@ void S_StartSound(
         return;
     }
 
-    if (entnum && (entchannel == CHAN_DIALOG || entchannel == CHAN_DIALOG_SECONDARY) && s_dialogscale->value > 0) {
-        volume *= s_dialogscale->value;
-    }
-    // HZM coop - SFX channel volume: scale every effect channel; dialog has its own
-    // slider above, menu/local UI sounds stay at master so the menus remain audible.
-    else if (entchannel != CHAN_MENU && entchannel != CHAN_LOCAL && entchannel != CHAN_LOCAL_SOUND
-             && s_sfxvolume->value >= 0) {
-        volume *= s_sfxvolume->value;
-    }
+    // HZM coop - category volume (SFX / Dialogue / Ambience / Music) is applied in the OpenAL
+    // driver's openal_channel::set_gain, which runs every frame. Applying it here too would
+    // double-scale (start-time gain gets overwritten by the per-frame respatialize anyway).
 
     S_Driver_StartSound(origin, entnum, entchannel, sfxHandle, volume, min_dist, pitch, maxDist, streamed);
 }

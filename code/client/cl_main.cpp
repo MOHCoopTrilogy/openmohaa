@@ -38,6 +38,9 @@ extern "C" {
 
 #include "../gamespy/gcdkey/gcdkeyc.h"
 
+#include <exception>
+#include <new>
+
 #include <climits>
 
 #ifdef USE_RENDERER_DLOPEN
@@ -2672,6 +2675,19 @@ void CL_Frame ( int msec ) {
 		return;
 	}
 
+	/* HZM coop: mirror "actually playing" into ui_ingame so menus can gate widgets with
+	   enabledcvar "ui_ingame" (e.g. the multiplayer room's DISCONNECT FROM GAME button,
+	   which vanilla draws even at the pre-game menu). Works for hosts and joining clients
+	   alike and can never go stale - it tracks the real connection state every frame. */
+	{
+		static int s_lastIngame = -1;
+		int        ingame       = (clc.state == CA_ACTIVE) ? 1 : 0;
+		if ( ingame != s_lastIngame ) {
+			Cvar_SetValue( "ui_ingame", ingame );
+			s_lastIngame = ingame;
+		}
+	}
+
 #ifdef USE_CURL
 	if(clc.downloadCURLM) {
 		CL_cURL_PerformDownload();
@@ -3532,6 +3548,50 @@ static void CL_GenerateQKey(void)
 CL_Init
 ====================
 */
+/*
+HZM coop: name the killer before dying. An uncaught C++ exception (in the field:
+std::bad_alloc when a 16GB machine exhausts commit during HD-asset precache at map load)
+previously ended as a bare WER 0xC0000409 fast-fail with no log line, so crash reports
+could not say WHY. Log what() to qconsole.log and to hzm_fatal.log (cwd, next to the
+updater log where report_problem.ps1 picks it up), then abort() so WER still writes the
+minidump. set_new_handler fires BEFORE the bad_alloc unwind, catching the OOM case even
+if the terminate path itself cannot allocate.
+*/
+static void HZM_LogFatal( const char *what ) {
+	FILE *f = fopen( "hzm_fatal.log", "ab" );
+	if ( f ) {
+		fprintf( f, "FATAL: %s (map load/frame; see qconsole.log tail)\n", what );
+		fclose( f );
+	}
+	fprintf( stderr, "FATAL: %s\n", what );
+	Com_Printf( "^~^~^ FATAL: %s\n", what );
+}
+
+static void HZM_NewHandler() {
+	std::set_new_handler( NULL );      // next failed new throws bad_alloc normally
+	HZM_LogFatal( "out of memory (operator new failed - close background apps / add RAM or pagefile)" );
+}
+
+static void HZM_TerminateHandler() {
+	static volatile long entered = 0;
+	if ( ++entered == 1 ) {
+		const char *what = "terminate() - unknown non-std exception";
+		try {
+			if ( std::current_exception() ) {
+				std::rethrow_exception( std::current_exception() );
+			} else {
+				what = "terminate() with no active exception";
+			}
+		}
+		catch ( const std::bad_alloc & ) { what = "std::bad_alloc - OUT OF MEMORY during load"; }
+		catch ( const std::exception &e ) { what = e.what(); }
+		catch ( const char *s ) { what = s; }
+		catch ( ... ) {}
+		HZM_LogFatal( what );
+	}
+	abort();
+}
+
 void CL_Init( void ) {
 	int start, end;
 
@@ -3540,6 +3600,9 @@ void CL_Init( void ) {
 	}
 
 	cl_bCLSystemStarted = qtrue;
+
+	std::set_terminate( HZM_TerminateHandler );
+	std::set_new_handler( HZM_NewHandler );
 
 	Com_Printf( "----- Client Initialization -----\n" );
 
@@ -3694,6 +3757,15 @@ void CL_Init( void ) {
 	Cvar_Get ("password", "", CVAR_USERINFO);
 	Cvar_Get ("dm_playermodel", "american_army", CVAR_USERINFO | CVAR_ARCHIVE );
 	Cvar_Get ("dm_playergermanmodel", "german_wehrmacht_soldier", CVAR_USERINFO | CVAR_ARCHIVE );
+	// HZM coop - native FOV: the video-options slider links this cvar; the server reads the
+	// "fov" userinfo key (G_ClientUserinfoChanged, clamps 80-160) and applies it via EV_Player_Fov
+	// on connect AND on every userinfo change (so uniform swaps self-heal). ARCHIVE = persists.
+	Cvar_Get ("fov", "80", CVAR_USERINFO | CVAR_ARCHIVE );
+	// HZM coop - 3P free-cam toggle + shoulder side: registered HERE (exe startup) with ARCHIVE so
+	// flipping them from the MAIN MENU persists. The cgame registers them too, but the cgame only
+	// loads once in-game - a menu toggle before that created a flagless cvar that never archived.
+	Cvar_Get ("cg_freecam", "0", CVAR_ARCHIVE );
+	Cvar_Get ("cg_adsShoulderRight", "1", CVAR_ARCHIVE );
 
 	//
 	// register our commands

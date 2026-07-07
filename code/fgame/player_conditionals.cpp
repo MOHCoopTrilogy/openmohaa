@@ -977,6 +977,14 @@ qboolean Player::CondAttackButtonSecondary(Conditional& condition)
 // HZM coop - AIM DOWN SIGHTS condition. Mirrors CondAttackSecondary (requires an active main weapon)
 // but reads the dedicated BUTTON_COOPADS bit instead of BUTTON_ATTACKRIGHT, so iron-sight aiming is
 // driven by its own bind (RMB) while secondary-fire/bash stays on the native right-attack button (V).
+// HZM coop - TRUE while the sprint system says the player is actually sprinting this frame
+// (m_bCoopSprinting, computed in TickSprint: Shift + forward + stamina + not aiming). Drives the
+// SPRINT_FORWARD legs state (coop_mod/player_legs.st) so sprinting shows a real sprint cycle.
+qboolean Player::CondCoopSprinting(Conditional& condition)
+{
+    return m_bCoopSprinting;
+}
+
 qboolean Player::CondCoopAds(Conditional& condition)
 {
     Weapon *weapon;
@@ -999,6 +1007,54 @@ qboolean Player::CondCoopAds(Conditional& condition)
     }
 
     return false;
+}
+
+// HZM coop - TAKE COVER [214]. Pure mirrors of the per-frame flags computed in
+// Player::TickCoopCover (single authority - same pattern as CondCoopSprinting). They drive the
+// COVER_WALL / COVER_LOW / COVER_*_FIRE legs states and the COVER_TORSO torso state
+// (coop_mod/player_legs.st / player_Torso.st).
+qboolean Player::CondCoopCover(Conditional& condition)
+{
+    return m_bCoopCoverWall;
+}
+
+qboolean Player::CondCoopCoverLow(Conditional& condition)
+{
+    return m_bCoopCoverLow;
+}
+
+// HZM coop - take cover [215]: RMB peek-aim is active (torso leaves COVER_TORSO for real aiming)
+qboolean Player::CondCoopCoverPeek(Conditional& condition)
+{
+    return m_bCoopCoverPeek;
+}
+
+// HZM coop - take cover [215]: the detected opening is on the RIGHT of the wall pose
+qboolean Player::CondCoopCoverOpenRight(Conditional& condition)
+{
+    return (m_iCoopCoverSide < 0);
+}
+
+// HZM coop [216] - manning a turret (ground MG42 or vehicle .30cal), weapon inventory irrelevant.
+// The vanilla TURRET_START edges require !HAS_WEAPON, which a coop player never satisfies - this
+// condition keys the COOP_TURRET_MAN pose off the ground truth instead.
+qboolean Player::CondCoopOnTurret(Conditional& condition)
+{
+    // ground turret (MG42 nest) OR a vehicle-mounted gun: the jeep .30cal gunner has
+    // m_pVehicle set and m_pTurret NULL (VehicleMove path) - VehicleTurretGun::
+    // UpdateRemoteControl stamps m_fCoopVehTurretTime every manned frame [219]
+    if (m_pTurret != NULL) {
+        return qtrue;
+    }
+    // remote-control path: BOTH m_pTurret and m_pVehicle are NULL for the jeep gunner
+    // (neither TurretMove nor VehicleMove ever ran - diagnostics proved it); the per-frame
+    // stamp from VehicleTurretGun::UpdateRemoteControl is the ONLY reliable signal
+    return ((level.time - m_fCoopVehTurretTime) < 0.25f);
+}
+
+qboolean Player::CondCoopBlindfire(Conditional& condition)
+{
+    return m_bCoopBlindfire;
 }
 
 qboolean Player::CondPositionType(Conditional& condition)
@@ -2071,6 +2127,13 @@ Condition<Player> Player::m_conditions[] = {
     {"ATTACK_PRIMARY_BUTTON",           &Player::CondAttackButtonPrimary     }, // Checks to see if the left attack button is pressed
     {"ATTACK_SECONDARY_BUTTON",         &Player::CondAttackButtonSecondary   },
     {"COOP_ADS",                        &Player::CondCoopAds                 }, // HZM coop - aim down sights (dedicated bind), see CondCoopAds
+    {"COOP_SPRINTING",                  &Player::CondCoopSprinting           }, // HZM coop - sprint state for the legs statemap
+    {"COOP_COVER",                      &Player::CondCoopCover               }, // HZM coop - take cover: standing back-to-wall pose valid [214]
+    {"COOP_COVER_LOW",                  &Player::CondCoopCoverLow            }, // HZM coop - take cover: crouched low-cover pose valid [214]
+    {"COOP_COVER_PEEK",                 &Player::CondCoopCoverPeek           }, // HZM coop - take cover: RMB peek-aim active [215]
+    {"COOP_COVER_OPENRIGHT",            &Player::CondCoopCoverOpenRight      }, // HZM coop - take cover: opening is on the RIGHT [215]
+    {"COOP_ON_TURRET",                  &Player::CondCoopOnTurret            }, // HZM coop - manning any turret (m_pTurret set) [216]
+    {"COOP_BLINDFIRE",                  &Player::CondCoopBlindfire           }, // HZM coop - take cover: blind-fire (covered + fire held) [214]
     {"CHECK_MOVEMENT_SPEED",            &Player::CondCheckMovementSpeed      },
 
     //

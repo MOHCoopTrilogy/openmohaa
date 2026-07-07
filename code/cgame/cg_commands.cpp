@@ -5306,6 +5306,10 @@ extern "C" {
     void CG_AnimationDebugMessage(int number, const char *fmt, ...);
 }
 
+// HZM coop [225] - defined in cg_modelanim.c (C): while true, only sound-family frame commands
+// run (the draw-skipped 1P turret viewmodel keeps its fire audio but not its muzzle flash).
+extern "C" qboolean cg_bCoopMuteVisualCmds;
+
 //=================
 // CG_ProcessEntityCommands
 //=================
@@ -5329,6 +5333,16 @@ qboolean CG_ProcessEntityCommands(int frame, int anim, int entnum, refEntity_t *
             num_args = tikicmds.cmds[i].num_args;
 
             if (num_args > 0) {
+                // HZM coop [225] - hidden-viewmodel dispatch: sound family only (fire audio stays,
+                // tagdlight/tagspawnlinked muzzle flash and any other visual spawn is skipped).
+                if (cg_bCoopMuteVisualCmds) {
+                    const char *szCoopCmd = tikicmds.cmds[i].args[0];
+                    if (Q_stricmp(szCoopCmd, "sound") && Q_stricmp(szCoopCmd, "stopsound")
+                        && Q_stricmp(szCoopCmd, "loopsound") && Q_stricmp(szCoopCmd, "stopaliaschannel")) {
+                        continue;
+                    }
+                }
+
                 // Create the event and Process it.
                 ev = new Event(tikicmds.cmds[i].args[0]);
 

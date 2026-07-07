@@ -1679,6 +1679,18 @@ void Weapon::GetMuzzlePosition(vec3_t position, vec3_t vBarrelPos, vec3_t forwar
 
             VectorCopy(player->m_vViewPos, position);
 
+            // HZM coop - BLIND FIRE over LOW cover [214]: the crouched eye (m_vViewPos, ~48u)
+            // sits level with the obstacle the player is tucked behind, so shots would hit the
+            // cover itself. The blind-fire anim holds the gun OVERHEAD - raise the fire origin
+            // to match (coop_blindfireRaise units, default clears any pose-valid obstacle, whose
+            // top is always below the 58u head trace). Wall blind-fire shoots away from the wall
+            // and needs no offset.
+            if (player->IsCoopBlindfiring() && player->IsCoopCoverLow()) {
+                cvar_t *pRaise = gi.Cvar_Get("coop_blindfireRaise", "26", CVAR_ARCHIVE);
+
+                position[2] += pRaise ? pRaise->value : 26.0f;
+            }
+
             if (this->GetRawTag(GetTagBarrel(), &barrel_or) && vBarrelPos) {
                 VectorCopy(owner->origin, vBarrelPos);
                 for (i = 0; i < 3; i++) {
@@ -1906,6 +1918,19 @@ void Weapon::Shoot(Event *ev)
                                 vSpread *= 1.0f + fSpreadFactor * (m_fZoomSpreadMult - 1.0f);
                             }
                         }
+
+                        // HZM coop - BLIND FIRE [214]: while the shooter is spraying from the
+                        // take-cover pose (Player::TickCoopCover sets m_bCoopBlindfire), scale the
+                        // bullet spread up by coop_blindfireSpread - unaimed fire is a suppression
+                        // tool, not a free accurate shot. Live-tunable for feel.
+                        if (player->IsSubclassOfPlayer() && player->IsCoopBlindfiring()) {
+                            cvar_t *pBlind  = gi.Cvar_Get("coop_blindfireSpread", "3.0", CVAR_ARCHIVE);
+                            float   fBlind  = pBlind ? pBlind->value : 3.0f;
+
+                            if (fBlind > 0.0f) {
+                                vSpread *= fBlind;
+                            }
+                        }
                     }
                 } else {
                     vSpread = (bulletspreadmax[mode] + bulletspread[mode]) * 0.5f;
@@ -1929,6 +1954,40 @@ void Weapon::Shoot(Event *ev)
                 if (!owner && IsSubclassOfVehicleTurretGun()) {
                     VehicleTurretGun *turretGun = static_cast<VehicleTurretGun *>(this);
                     ownerPtr                    = turretGun->GetRemoteOwner();
+                }
+
+                // HZM coop - WALL BLIND FIRE steering [215]: swing the burst AROUND the corner
+                // toward the detected opening (rounds were going straight into the wall the
+                // character leans on) and push the muzzle out past the edge so they clear it.
+                // Peek-aiming (RMB) never gets here - blindfire is disabled while peeking.
+                if (ownerPtr && ownerPtr->IsSubclassOfPlayer()) {
+                    Player *pBf = static_cast<Player *>(ownerPtr.Pointer());
+
+                    if (pBf->IsCoopBlindfiring() && pBf->IsCoopCoverWall()) {
+                        cvar_t *pYawC = gi.Cvar_Get("coop_blindfireYaw", "50", CVAR_ARCHIVE);
+                        cvar_t *pOutC = gi.Cvar_Get("coop_blindfireOut", "20", CVAR_ARCHIVE);
+                        float   fSide = (pBf->GetCoopCoverSide() < 0) ? -1.0f : 1.0f;
+                        float   fRad  = DEG2RAD(fSide * (pYawC ? pYawC->value : 50.0f));
+                        float   fCos  = cos(fRad);
+                        float   fSin  = sin(fRad);
+                        vec3_t  vTmp;
+                        Vector  vSideDir;
+
+                        // rotate the aim basis around Z toward the open side (+yaw = left)
+                        vTmp[0] = forward[0] * fCos - forward[1] * fSin;
+                        vTmp[1] = forward[0] * fSin + forward[1] * fCos;
+                        vTmp[2] = forward[2];
+                        VectorCopy(vTmp, forward);
+                        vTmp[0] = right[0] * fCos - right[1] * fSin;
+                        vTmp[1] = right[0] * fSin + right[1] * fCos;
+                        vTmp[2] = right[2];
+                        VectorCopy(vTmp, right);
+
+                        // slide the fire origin toward the corner so rounds clear the wall edge
+                        vSideDir = Vector(0.0f - pBf->GetCoopCoverNormal()[1], pBf->GetCoopCoverNormal()[0], 0);
+                        pos += vSideDir * (fSide * (pOutC ? pOutC->value : 20.0f));
+                        pos += pBf->GetCoopCoverNormal() * 8;
+                    }
                 }
 
                 // HZM coop - PLAYER bullet penetration. WOOD: always punch through (g_bulletThroughWood power,

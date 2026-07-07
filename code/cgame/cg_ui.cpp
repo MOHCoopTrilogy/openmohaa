@@ -197,6 +197,37 @@ qboolean CG_CheckCaptureKey(int key, qboolean down, unsigned int time)
 {
     char minKey = '1', maxKey = '9';
 
+    // HZM coop - STAGED 3P ADS wheel capture. While a third-person player HOLDS the ADS button, the
+    // mouse wheel changes the ADS stage instead of running its weapnext/weapprev binds: wheel-UP =
+    // into first-person irons (cg_adsStage 1), wheel-DOWN = back to the shoulder view (cg_adsStage 0).
+    // Swallow BOTH the down and the up half of the wheel event so the bind never fires (the wheel's
+    // binding itself is untouched - it works normally the moment ADS is released). This hook runs from
+    // CL_KeyEvent only when no UI/console catcher is active, so menus/console still get the wheel.
+    if (key == K_MWHEELUP || key == K_MWHEELDOWN) {
+        // single decider shared with the camera stage logic (cg_view.c): also FALSE for scoped
+        // rifles (they go straight to the native zoom - the wheel keeps switching weapons).
+        if (CG_AdsShoulderWheelActive()) {
+            if (down) {
+                cgi.Cvar_Set("cg_adsStage", (key == K_MWHEELUP) ? "1" : "0");
+            }
+            return qtrue;
+        }
+    }
+
+    // HZM coop - MOUSE3 while shoulder-aiming = SWAP SHOULDERS. Toggles the archived
+    // cg_adsShoulderRight cvar; cg_view.c eases the side sign so the camera sweeps across the back.
+    // Same decider + swallow pattern as the wheel steal above: the MOUSE3 bind never fires while the
+    // shoulder view is up, and works normally the moment ADS is released.
+    if (key == K_MOUSE3) {
+        if (CG_AdsShoulderWheelActive()) {
+            if (down) {
+                cvar_t *pRight = cgi.Cvar_Get("cg_adsShoulderRight", "1", CVAR_ARCHIVE);
+                cgi.Cvar_Set("cg_adsShoulderRight", pRight->integer ? "0" : "1");
+            }
+            return qtrue;
+        }
+    }
+
     if (!cg.iInstaMessageMenu || !down) {
         return qfalse;
     }

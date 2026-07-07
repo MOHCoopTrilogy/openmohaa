@@ -917,17 +917,26 @@ void writeMD5Anim(tAnim_t *a, const char *outFName) {
 	fprintf(out,"}\n");
 
 	// write separate frames
+	// HZM: one line PER ANIMATED JOINT (each line = exactly that joint's flagged components),
+	// the id-software convention. Blender importers (io_scene_md5) parse frames line-by-line
+	// and pop one line's floats per joint - the old fixed per-line wrapping made them run dry
+	// mid-frame (IndexError: pop from empty list).
 	for(i = 0, f = a->frames; i < a->numFrames; i++, f++) {
+		int c = 0;
 		fprintf(out,"\nframe %i {",i);
-		// write frame components
-		for(j = 0; j < a->numAnimatedComponents; j++) {
-			if(j % COMPONENTS_PER_LINE == 0)
-				fprintf(out,"\n\t");
-			fprintf(out,"%f ",f->components[j]);
+		for(j = 0, ab = a->boneData; j < a->numBones; j++, ab++) {
+			int bit;
+			if(!ab->componentBits)
+				continue;
+			fprintf(out,"\n\t");
+			for(bit = 0; bit < 6; bit++) {
+				if(ab->componentBits & (1 << bit)) {
+					fprintf(out,"%f ",f->components[c]);
+					c++;
+				}
+			}
 		}
-		if(j % COMPONENTS_PER_LINE != 1)
-			fprintf(out,"\n");
-		fprintf(out,"}\n\n");
+		fprintf(out,"\n}\n\n");
 	}
 
 	fclose(out);

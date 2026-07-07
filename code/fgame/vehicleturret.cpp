@@ -939,6 +939,34 @@ void VehicleTurretGun::UpdateOwner(Sentient *pOwner)
         pOwner->setOrigin(bone_or.origin);
         MatrixToEulerAngles(bone_or.axis, ang);
         pOwner->setAngles(ang);
+    } else if (pOwner->IsSubclassOfPlayer()) {
+        // HZM coop [222] - pedestal guns (jeep .30cal) have NO tag_seat: vanilla parked the gunner
+        // exactly AT the turret origin and never touched his angles, so the body kept its
+        // mount-time facing and stood inside the gun. Face the body WITH the aim yaw every frame
+        // and park it a touch behind the grips so the standing MG42_stand manning pose lines up.
+        // Live-tunable: coop_vehTurretBack (units behind the gun) and coop_vehTurretDown (units
+        // below the turret origin). Defaults 35/15 = the user's dialled-in jeep .30cal numbers
+        // (2026-07-07 live tuning session).
+        static cvar_t *pBackCv = NULL;
+        static cvar_t *pDownCv = NULL;
+        vec3_t         vSeatAng;
+        vec3_t         vSeatFwd;
+        Vector         vSeatPos;
+
+        if (!pBackCv) {
+            pBackCv = gi.Cvar_Get("coop_vehTurretBack", "35", CVAR_ARCHIVE);
+        }
+        if (!pDownCv) {
+            pDownCv = gi.Cvar_Get("coop_vehTurretDown", "15", CVAR_ARCHIVE);
+        }
+        vSeatAng[0] = 0;
+        vSeatAng[1] = m_vUserViewAng[1];
+        vSeatAng[2] = 0;
+        AngleVectors(vSeatAng, vSeatFwd, NULL, NULL);
+        vSeatPos = origin - Vector(vSeatFwd) * pBackCv->value;
+        vSeatPos[2] -= pDownCv->value;
+        pOwner->setOrigin(vSeatPos);
+        pOwner->setAngles(Vector(vSeatAng));
     } else {
         // no seat
         pOwner->setOrigin(origin);
@@ -952,6 +980,19 @@ void VehicleTurretGun::UpdateOwner(Sentient *pOwner)
         }
 
         player->client->ps.camera_flags |= CF_CAMERA_ANGLES_TURRETMODE;
+
+        // HZM coop [219] - manning-pose marker: the gunner never has m_pTurret (VehicleMove
+        // path); this per-frame stamp drives COOP_ON_TURRET for vehicle guns
+        player->m_fCoopVehTurretTime = level.time;
+
+        // HZM coop - third-person gunner must SEE the world gun (vanilla filters it from the
+        // owner via SVF_NOTSINGLECLIENT because the 1P view uses the eyes-bone viewmodel, which
+        // the cgame now skips in 3P). Toggled live off the u_view3p userinfo mirror.
+        if (player->m_bCoopView3p) {
+            edict->r.svFlags &= ~SVF_NOTSINGLECLIENT;
+        } else {
+            edict->r.svFlags |= SVF_NOTSINGLECLIENT;
+        }
     }
 }
 

@@ -541,6 +541,16 @@ void CL_JoystickMove( usercmd_t *cmd ) {
 	cmd->upmove = ClampChar( cmd->upmove + (int)up );
 }
 
+// HZM coop - THIRD-PERSON FREE CAM mouse routing. These are the (previously vestigial - nothing in the
+// engine ever wrote them) client camera-look globals from cl_main.cpp that the cgame already reads every
+// frame through cgi.get_camera_offset() in CG_OffsetThirdPersonView. While the cgame flags the free cam
+// as owning the mouse (cg_freecamCapture, written once per frame by CG_UpdateFreecam in cg_view.c), mouse
+// deltas accumulate HERE instead of turning cl.viewangles - so the character keeps its facing (usercmd
+// angles freeze) while the chase camera orbits. DEPLOY NOTE: this exe change ships as a PAIR with the
+// matching cgame.dll (the cgame applies/eases the orbit and owns the capture cvar).
+extern qboolean camera_active;
+extern vec3_t   camera_offset;
+
 /*
 =================
 CL_MouseMove
@@ -625,6 +635,87 @@ void CL_MouseMove( usercmd_t *cmd ) {
 	my *= cgameSensitivity;
 
 	cmd->buttons |= BUTTON_ANY;
+
+	// HZM coop - THIRD-PERSON FREE CAM: when the cgame owns the mouse (free orbit around the character),
+	// route the deltas into the camera_offset orbit accumulator and leave cl.viewangles untouched. The
+	// full sensitivity chain (accel / cl_sensitivity / cgame scale) is already folded into mx/my above,
+	// and m_yaw/m_pitch below match the normal look feel exactly (including pitch invert). The total
+	// orbit pitch (frozen aim pitch + orbit offset) is clamped to +/-85 so the camera never flips over
+	// the poles; yaw is free 360 (kept normalized so the cgame ease-out always takes the short way home).
+	{
+		static cvar_t  *cl_freecamCapture  = NULL;
+		static cvar_t  *cl_freecamFold    = NULL;
+		static qboolean bWasFreecamCapture = qfalse;
+		if ( !cl_freecamCapture ) {
+			cl_freecamCapture = Cvar_Get( "cg_freecamCapture", "0", 0 );
+			cl_freecamFold    = Cvar_Get( "cg_freecamFold", "0", 0 ); // published by the cgame while IN COVER
+		}
+		if ( cge && cl_freecamCapture->integer ) {
+			float aimPitch;
+
+			// HZM coop [226] - capture RE-ENGAGED while covered (peek just released): zero the
+			// orbit so the camera resumes exactly AT the aim held while peeked ("camera should
+			// always go back to where you were aiming when you let go" - user).
+			if ( !bWasFreecamCapture && cl_freecamFold->integer ) {
+				camera_offset[YAW]   = 0;
+				camera_offset[PITCH] = 0;
+			}
+			bWasFreecamCapture = qtrue;
+
+			aimPitch = AngleNormalize180( cl.viewangles[PITCH] );
+
+			camera_offset[YAW]   -= m_yaw->value * mx;
+			camera_offset[YAW]    = AngleNormalize180( camera_offset[YAW] );
+			camera_offset[PITCH] += m_pitch->value * my;
+			if ( aimPitch + camera_offset[PITCH] > 85.0f ) {
+				camera_offset[PITCH] = 85.0f - aimPitch;
+			} else if ( aimPitch + camera_offset[PITCH] < -85.0f ) {
+				camera_offset[PITCH] = -85.0f - aimPitch;
+			}
+			camera_active = qtrue;
+			return; // the player's viewangles stay frozen while the free cam owns the mouse
+		}
+		// HZM coop [226] - capture DROPPED while covered (peek just started): FOLD the orbit into
+		// the real viewangles so the shoulder aim opens exactly where the camera was looking
+		// ("default to where you were just aiming before you went to shoulder view" - user).
+		// [228] fold-GRACE: when cover ENDS, the fold flag and the capture can clear in the SAME
+		// frame - the un-folded orbit was discarded and the view snapped to the stale pre-cover
+		// angles. Remember the fold flag for a short grace window so that drop still folds.
+		{
+			static int iLastFoldMs = -10000;
+			if ( cl_freecamFold->integer ) {
+				iLastFoldMs = cls.realtime;
+			}
+			if ( bWasFreecamCapture && !cl_freecamFold->integer
+				&& ( cls.realtime - iLastFoldMs ) < 600 ) {
+				bWasFreecamCapture = qfalse;
+				cl.viewangles[YAW]    = AngleNormalize180( cl.viewangles[YAW] + camera_offset[YAW] );
+				cl.viewangles[PITCH] += camera_offset[PITCH];
+				if ( cl.viewangles[PITCH] > 85.0f ) {
+					cl.viewangles[PITCH] = 85.0f;
+				} else if ( cl.viewangles[PITCH] < -85.0f ) {
+					cl.viewangles[PITCH] = -85.0f;
+				}
+				camera_offset[YAW]   = 0;
+				camera_offset[PITCH] = 0;
+			}
+		}
+		if ( bWasFreecamCapture ) {
+			bWasFreecamCapture = qfalse;
+			if ( cl_freecamFold->integer ) {
+				cl.viewangles[YAW]    = AngleNormalize180( cl.viewangles[YAW] + camera_offset[YAW] );
+				cl.viewangles[PITCH] += camera_offset[PITCH];
+				if ( cl.viewangles[PITCH] > 85.0f ) {
+					cl.viewangles[PITCH] = 85.0f;
+				} else if ( cl.viewangles[PITCH] < -85.0f ) {
+					cl.viewangles[PITCH] = -85.0f;
+				}
+				camera_offset[YAW]   = 0;
+				camera_offset[PITCH] = 0;
+			}
+		}
+		camera_active = qfalse;
+	}
 
 	// add mouse X/Y movement to cmd
 	if(in_strafe.active)
@@ -715,6 +806,31 @@ void CL_FinishMove( usercmd_t *cmd ) {
 	for (i=0 ; i<3 ; i++) {
 		cmd->angles[i] = ANGLE2SHORT(cl.viewangles[i]);
 	}
+
+	// HZM coop [226] - IN-COVER free-look AIMS THE SERVER: while covered (cg_freecamFold,
+	// published by the cgame) and the free orbit owns the mouse, send the COMPOSITED camera
+	// direction (frozen viewangles + orbit offset) as the usercmd angles. cl.viewangles stay
+	// frozen (they are the fold base for the peek handoff above); the server's viewangles now
+	// track the camera, so LOW-cover blindfire fires where the camera points and the torso
+	// aim-twist leans the upper body toward it. Wall-corner blindfire keeps its anchored steer.
+	{
+		static cvar_t *fm_freecamFold    = NULL;
+		static cvar_t *fm_freecamCapture = NULL;
+		if ( !fm_freecamFold ) {
+			fm_freecamFold    = Cvar_Get( "cg_freecamFold", "0", 0 );
+			fm_freecamCapture = Cvar_Get( "cg_freecamCapture", "0", 0 );
+		}
+		if ( cge && fm_freecamFold->integer && fm_freecamCapture->integer ) {
+			float fAimPitch = cl.viewangles[PITCH] + camera_offset[PITCH];
+			if ( fAimPitch > 85.0f ) {
+				fAimPitch = 85.0f;
+			} else if ( fAimPitch < -85.0f ) {
+				fAimPitch = -85.0f;
+			}
+			cmd->angles[YAW]   = ANGLE2SHORT( AngleNormalize180( cl.viewangles[YAW] + camera_offset[YAW] ) );
+			cmd->angles[PITCH] = ANGLE2SHORT( fAimPitch );
+		}
+	}
 }
 
 
@@ -750,6 +866,41 @@ usercmd_t CL_CreateCmd( void ) {
 		cl.viewangles[PITCH] = oldAngles[PITCH] + 90;
 	} else if ( oldAngles[PITCH] - cl.viewangles[PITCH] > 90 ) {
 		cl.viewangles[PITCH] = oldAngles[PITCH] - 90;
+	}
+
+	// HZM coop - FREE CAM v2 "modern third person" movement: while the free orbit owns the mouse
+	// AND the player is giving movement input, steer the CHARACTER toward the camera-relative
+	// movement direction (hold W = run where the camera looks, A/D = camera-relative strafes,
+	// the classic GTA/Souls scheme) and counter-rotate the orbit by the same amount so the CAMERA
+	// itself does not move. The facing eases at cl_freecamTurnRate deg/s (turn-to-face, not a snap)
+	// and the move vector is re-expressed against the NEW facing each frame, so the world-space
+	// run direction is exactly what was asked from frame one even while the body is still turning.
+	// No movement input = no turning (pure orbit-and-inspect is untouched). ADS still drops the
+	// capture and instantly restores precise aim. cl_freecamAutoFace 0 = old character-relative WASD.
+	{
+		static cvar_t *fcCap = NULL, *fcAuto = NULL, *fcRate = NULL;
+		if ( !fcCap )  { fcCap  = Cvar_Get( "cg_freecamCapture", "0", 0 ); }
+		if ( !fcAuto ) { fcAuto = Cvar_Get( "cl_freecamAutoFace", "1", CVAR_ARCHIVE ); }
+		if ( !fcRate ) { fcRate = Cvar_Get( "cl_freecamTurnRate", "480", CVAR_ARCHIVE ); }
+		if ( fcCap->integer && fcAuto->integer && ( cmd.forwardmove || cmd.rightmove ) ) {
+			float fm      = (float)cmd.forwardmove;
+			float rm      = (float)cmd.rightmove;
+			float mag     = sqrtf( fm * fm + rm * rm );
+			float moveAng = RAD2DEG( atan2f( -rm, fm ) );
+			float heading = cl.viewangles[YAW] + camera_offset[YAW] + moveAng;
+			float diff    = AngleNormalize180( heading - cl.viewangles[YAW] );
+			float step    = fcRate->value * 0.001f * cls.frametime;
+			float rel;
+			if ( step < 0 ) { step = 0; }
+			if ( fabsf( diff ) <= step ) { step = fabsf( diff ); }
+			if ( diff < 0 ) { step = -step; }
+			cl.viewangles[YAW] = AngleNormalize180( cl.viewangles[YAW] + step );
+			camera_offset[YAW] = AngleNormalize180( camera_offset[YAW] - step );
+			rel = (float)DEG2RAD( AngleNormalize180( heading - cl.viewangles[YAW] ) );
+			if ( mag > 127.0f ) { mag = 127.0f; }
+			cmd.forwardmove = ClampChar( (int)( cosf( rel ) * mag ) );
+			cmd.rightmove   = ClampChar( (int)( -sinf( rel ) * mag ) );
+		}
 	}
 
 	// store out the final values

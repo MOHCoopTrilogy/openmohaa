@@ -3015,6 +3015,14 @@ void Sentient::AssertValidSquad()
 
 bool Sentient::IsTeamMate(Sentient *pOther)
 {
+    // HZM coop: NULL guard. Actor::MoveOnPathWithSquad walks the squad ring and can hand a
+    // NULL/dangling mate here when an actor was removed without a ring unlink (this crashed
+    // EVERY machine at client connect on m1l2a/m1l2b/m1l3c once patrol AI activated - the
+    // "map load crash" trio; bug-242 root cause, corrected from the earlier OOM misdiagnosis).
+    // A missing mate is simply not a team mate.
+    if (!pOther) {
+        return false;
+    }
     return (pOther->m_bIsDisguised || pOther->m_Team == m_Team);
 }
 

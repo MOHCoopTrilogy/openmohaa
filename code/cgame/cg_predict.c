@@ -338,10 +338,16 @@ static void CG_InterpolatePlayerStateCamera(void)
     //
     if (cg.predicted_player_state.stats[STAT_INZOOM]) {
         cg.camera_fov = cg.predicted_player_state.fov;
+    } else if (cg.predicted_player_state.fov > 0) {
+        // HZM coop - honor the server-applied fov (the "fov" userinfo cvar the video-options slider
+        // archives, clamped 80-160 in G_ClientUserinfoChanged) OUTSIDE zoom too. Upstream OPM only
+        // trusted ps.fov while zoomed and pinned everything else to cg_fov (80), so the slider never
+        // changed the live first-person view. Zoom/turret fovs still come through the branch above.
+        cg.camera_fov = cg.predicted_player_state.fov;
     } else {
         cg.camera_fov = cg_fov->value;
     }
-    
+
     // if the next frame is a teleport, we can't lerp to it
     if (cg.nextFrameCameraCut) {
         return;
@@ -355,6 +361,9 @@ static void CG_InterpolatePlayerStateCamera(void)
 
     if (cg.predicted_player_state.stats[STAT_INZOOM]) {
         // interpolate fov
+        cg.camera_fov = prev->ps.fov + f * (next->ps.fov - prev->ps.fov);
+    } else if (cg.predicted_player_state.fov > 0) {
+        // HZM coop - same server-fov honor as above for the interpolated path
         cg.camera_fov = prev->ps.fov + f * (next->ps.fov - prev->ps.fov);
     } else {
         cg.camera_fov = cg_fov->value;

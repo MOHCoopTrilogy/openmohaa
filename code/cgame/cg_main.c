@@ -199,7 +199,7 @@ void CG_RegisterCvars(void)
         // as it doesn't have crosshair_friend texture
         cg_crosshair_friend = cgi.Cvar_Get("cg_crosshair_friend", "textures/hud/crosshair", CVAR_ARCHIVE);
     }
-    ui_crosshair                  = cgi.Cvar_Get("ui_crosshair", "1", CVAR_ARCHIVE);
+    ui_crosshair                  = cgi.Cvar_Get("ui_crosshair", "0", CVAR_ARCHIVE); // HZM coop - default OFF (was autoexec seta, which stomped the archived user choice every launch)
     vm_offset_max                 = cgi.Cvar_Get("vm_offset_max", "8.0", 0);
     vm_offset_speed               = cgi.Cvar_Get("vm_offset_speed", "8.0", 0);
     vm_sway_front                 = cgi.Cvar_Get("vm_sway_front", "0.1", 0);
@@ -503,8 +503,15 @@ void CG_ProcessConfigString(int num, qboolean modelOnly)
 
         if (num >= CS_OBJECTIVES && num < CS_OBJECTIVES + MAX_OBJECTIVES) {
             cobjective_t *objective = &cg.Objectives[num - CS_OBJECTIVES];
-            objective->flags        = atoi(Info_ValueForKey(str, "flags"));
-            Q_strncpyz(objective->text, Info_ValueForKey(str, "text"), sizeof(objective->text));
+            int           newFlags  = atoi(Info_ValueForKey(str, "flags"));
+            const char   *newText   = Info_ValueForKey(str, "text");
+            // HZM coop - objective ACTUALLY changed -> bring the HUD chrome back (scripts re-push
+            // identical objective strings; those must not count as activity for the HUD fade)
+            if (objective->flags != newFlags || Q_stricmp(objective->text, newText)) {
+                CG_HudFadeTouch();
+            }
+            objective->flags = newFlags;
+            Q_strncpyz(objective->text, newText, sizeof(objective->text));
         }
 
         switch (num) {
@@ -842,6 +849,10 @@ void CG_Shutdown(void)
     L_ShutdownEvents();
     // Shutdown radar
     cgi.CL_InitRadar(NULL, NULL, -1);
+
+    // HZM coop - free cam: release the mouse capture so the client input layer can never be left
+    // orbiting (viewangles frozen) across a level change / cgame reload
+    cgi.Cvar_Set("cg_freecamCapture", "0");
 
     // some mods may need to do cleanup work here,
     // like closing files or archiving session data

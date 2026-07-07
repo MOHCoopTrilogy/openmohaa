@@ -28,6 +28,11 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 
 static qboolean cg_forceModelAllowed = qfalse;
 
+// HZM coop [225] - set while dispatching frame commands for the draw-skipped 1P turret viewmodel
+// in 3P: CG_ProcessEntityCommands (cg_commands.cpp) then runs only the SOUND-family commands, so
+// the hidden gun keeps firing audio but never spawns its muzzle flash at the player's eyes.
+qboolean cg_bCoopMuteVisualCmds = qfalse;
+
 /*
 ===============
 CG_GetPlayerModelTiki
@@ -1209,12 +1214,18 @@ void CG_ModelAnim(centity_t *cent, qboolean bDoShaderTime)
     const char    *szTagName;
     int            iAnimFlags;
     qboolean       bThirdPerson = qfalse;
+    qboolean       bCoopHideDraw = qfalse; // HZM coop - process commands/sounds but do not render [219]
 
     s1 = &cent->currentState;
 
-    // HZM coop - aiming down sights forces first person (so the viewmodel + iron-sight ADS render),
-    // matching the camera switch in cg_view.c. Reuses the exact ADS gate.
-    bThirdPerson |= (cg_3rd_person->integer && !CG_AimingDownSights()) ? qtrue : qfalse;
+    // HZM coop - STAGED ADS: first person is forced only when the ADS system asks for it (instant for
+    // first-person players / cg_adsShoulder 0; for third-person players the over-the-shoulder aim stage
+    // KEEPS the body drawn, and the wheel-up handoff flips this in LOCKSTEP with cg.renderingThirdPerson
+    // in cg_view.c - both sides must use CG_AdsForceFirstPerson or you get the camera-in-body bug).
+    bThirdPerson |= (cg_3rd_person->integer && !CG_AdsForceFirstPerson()) ? qtrue : qfalse;
+    // HZM coop - IN COVER auto-3P: draw the own body whenever the cover view force is active
+    // (lockstep with cg_view.c renderingThirdPerson - turret-camera-regression rule 2)
+    bThirdPerson |= (cg.snap->ps.pm_flags & PMF_COOP_COVER) ? qtrue : qfalse;
     // Fixed in OPM
     //  Draw world model body when in camera
     bThirdPerson |= (cg.snap->ps.pm_flags & PMF_CAMERA_VIEW && !(cg.snap->ps.pm_flags & PMF_TURRET));
@@ -1414,6 +1425,19 @@ void CG_ModelAnim(centity_t *cent, qboolean bDoShaderTime)
             return;
         }
 
+        // HZM coop - a mounted turret's FIRST-PERSON overlay gun (<model>_viewmodel.tik,
+        // attached to the local player's "eyes bone" by TurretGun::P_CreateViewModel) must
+        // never DRAW in third person - attached to the visible body it renders skewered
+        // through the head (jeep .30cal report). DRAW-only skip: the early-return version
+        // also killed the viewmodel's client frame commands = the owner's FIRE SOUND went
+        // silent in 3P (bug-315). First person keeps it (it IS the gun view).
+        if (s1->parent == cg.snap->ps.clientNum && bThirdPerson && model.tiki) {
+            const char *szTikiName = cgi.TIKI_Name(model.tiki);
+            if (szTikiName && strstr(szTikiName, "_viewmodel")) {
+                bCoopHideDraw = qtrue;
+            }
+        }
+
         if (s1->parent != cg.snap->ps.clientNum || bThirdPerson) {
             // attach the model to the world model
 
@@ -1577,7 +1601,7 @@ void CG_ModelAnim(centity_t *cent, qboolean bDoShaderTime)
         }
     }
 
-    if (!(s1->renderfx & RF_DONTDRAW) && (model.renderfx & RF_SHADOW)) {
+    if (!(s1->renderfx & RF_DONTDRAW) && !bCoopHideDraw && (model.renderfx & RF_SHADOW)) {
         // add the shadow
         CG_EntityShadow(cent, &model);
     }
@@ -1850,7 +1874,7 @@ void CG_ModelAnim(centity_t *cent, qboolean bDoShaderTime)
     }
 
     model.reType = RT_MODEL;
-    if (!(s1->renderfx & RF_DONTDRAW)) {
+    if (!(s1->renderfx & RF_DONTDRAW) && !bCoopHideDraw) {
         cgi.R_Model_GetHandle(model.hModel);
         if (VectorCompare(model.origin, vec3_origin)) {
             VectorCopy(s1->origin, model.origin);
@@ -1862,6 +1886,13 @@ void CG_ModelAnim(centity_t *cent, qboolean bDoShaderTime)
     }
 
     CG_UpdateEntityEmitters(s1->number, &model, cent);
+
+    // HZM coop [225] - the hidden 1P viewmodel still processes its frame commands for the FIRE
+    // SOUND (bug-315 kept them), but its VISUAL commands (tagdlight + tagspawnlinked muzzle
+    // flash) spawned at the player's eyes-bone gun - "the burst comes from the left" while the
+    // real turret flashes at its own barrel (shot0020). Mute non-sound commands for the whole
+    // command dispatch below when this entity is the draw-skipped viewmodel.
+    cg_bCoopMuteVisualCmds = bCoopHideDraw;
 
     if (s1->usageIndex == cent->usageIndexLast) {
         // process the exit commands of the last animations
@@ -1899,6 +1930,8 @@ void CG_ModelAnim(centity_t *cent, qboolean bDoShaderTime)
             cent->animLastWeight &= ~(1 << i);
         }
     }
+
+    cg_bCoopMuteVisualCmds = qfalse; // HZM coop [225] - never leak the mute past this entity
 
     cent->usageIndexLast = cent->currentState.usageIndex;
 }

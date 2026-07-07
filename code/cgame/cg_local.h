@@ -634,6 +634,11 @@ extern "C" {
     qboolean CG_FrustumCullSphere(const vec3_t vPos, float fRadius);
     void  CG_OffsetFirstPersonView(refEntity_t *pREnt, qboolean bUseWorldPosition);
     qboolean CG_AimingDownSights(void); // HZM coop - RMB-held iron-sight ADS gate (zoom + 3rd->1st person)
+    qboolean CG_AdsForceFirstPerson(void); // HZM coop - staged 3P ADS: "render FIRST person this frame" (camera + own-model draw MUST both use this)
+    float CG_AdsShoulderFrac(void); // HZM coop - shoulder-stage camera envelope 0..1 (2D ADS effects follow the camera ease)
+    qboolean CG_AdsShoulderWheelActive(void); // HZM coop - wheel steals ADS-stage events this frame (FALSE for scoped rifles)
+    qboolean CG_FreecamCaptureActive(void); // HZM coop - free-cam orbit owns the mouse this frame (crosshair hides: camera != aim)
+    void  CG_HudFadeTouch(void); // HZM coop - HUD fade: mark HUD-relevant activity (objective updates, suppression, ...)
     void  CG_AddSuppression(float amount); // HZM coop - bump the under-fire suppression FX (near-miss zings / hits)
     void  CG_AddHeat(float amount); // HZM coop - bump the heat-haze shimmer FX (nearby explosions)
     void  CG_AddMuzzleHeat(float amount); // HZM coop - bump the LOCALIZED gun-muzzle heat shimmer (gunfire)

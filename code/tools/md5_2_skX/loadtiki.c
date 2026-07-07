@@ -63,27 +63,104 @@ tModel_t *readSKD(const char *fname, float scale) {
 
 	out->numSurfaces = h->numSurfaces;
 	out->numBones = h->numBones;
+	if(out->numBones > 512) {
+		T_Error("readSKD: too many bones (%i) in %s\n",out->numBones,fname);
+	}
 	out->surfs = T_Malloc(sizeof(tSurf_t)*out->numSurfaces);
 	out->bones = T_Malloc(sizeof(tBone_t)*out->numBones);
 
 	// load bones
+	// HZM coop 2026-07-06: all joint types are read now (human rigs use
+	// ROTATION/IKSHOULDER/IKELBOW/IKWRIST/HOSEROT/AVROT besides POSROT).
+	// Per-type base data + bone refs are kept on tBone_t; appendSKC derives
+	// bind poses / anim channels from them. See skx_format.h for the layouts.
 
 	b = (skdBone_t *) ( (byte *)h + h->ofsBones );
 	ob = out->bones;
 	for ( i = 0; i < h->numBones; i++, ob++) {
+		int numRefs, n;
+		const char *refName;
+
 		strcpy(ob->name,b->name);
-		if(b->jointType != 1) {
-			T_Error("readSKD: joints types other than 1 are not supported yet (skd file %s)\n",fname);
+		if(b->jointType < 0 || b->jointType >= JT_NUMJOINTTYPES) {
+			T_Error("readSKD: unknown joint type %i on bone %s (skd file %s)\n",
+				b->jointType,b->name,fname);
 		}
+		ob->jointType = b->jointType;
+
+		// raw base data floats (layout depends on type - see skx_format.h)
+		n = (b->ofsChannels - b->ofsValues) / 4;
+		if(n < 0) n = 0;
+		if(n > SKX_MAX_BONE_BASEDATA) n = SKX_MAX_BONE_BASEDATA;
+		ob->numBaseData = n;
+		memcpy(ob->baseData,(byte *)b + b->ofsValues,n * sizeof(float));
+
+		// hoserot variant flag - an int at ofsBaseData+36
+		// (the engine reads it via fileData->parent[fileData->ofsBaseData + 4])
+		ob->hoseRotType = HRTYPE_PLAIN;
+		if(ob->jointType == JT_HOSEROT && (b->ofsChannels - b->ofsValues) >= 40) {
+			ob->hoseRotType = *(int *)((byte *)b + b->ofsValues + 36);
+		}
+
+		// bone reference names (resolved to indexes in the second pass)
+		switch(ob->jointType) {
+		case JT_AVROT:
+			numRefs = 2;
+			break;
+		case JT_IKELBOW:
+		case JT_IKWRIST:
+		case JT_HOSEROT:
+			numRefs = 1;
+			break;
+		default:
+			numRefs = 0;
+			break;
+		}
+		ob->numRefs = numRefs;
+		ob->refIndex[0] = ob->refIndex[1] = -1;
+		refName = (const char *)b + b->ofsRefs;
+		for(j = 0; j < numRefs; j++) {
+			if(refName >= (const char *)b + b->ofsEnd) {
+				T_Printf("Warning: bone %s in %s is missing ref name %i\n",ob->name,fname,j);
+				ob->refName[j][0] = 0;
+				continue;
+			}
+			Q_strncpyz(ob->refName[j],refName,sizeof(ob->refName[j]));
+			refName += strlen(refName) + 1;
+		}
+
 		b = (skdBone_t *)( (byte *)b + b->ofsEnd );
-	}		
+	}
 
 	b = (skdBone_t *) ( (byte *)h + h->ofsBones );
 	ob = out->bones;
 	for ( i = 0; i < h->numBones; i++, ob++) {
 		ob->parent = getBoneIndex(out,b->parent);
+		if(ob->parent >= i && ob->parent != -1) {
+			// md5AnimateBones and the md5 format itself assume parents-first
+			// ordering; every vanilla skd satisfies this.
+			T_Printf("Warning: bone %s (%i) has forward parent %s (%i) in %s\n",
+				ob->name,i,b->parent,ob->parent,fname);
+		}
+		// IK goal bones (wrist/foot): their skc channels hold the MODEL-SPACE
+		// IK target, not a parent-relative transform. Reparent them to
+		// worldbone so their md5 "local" data == model space. This keeps the
+		// decompiled animation correct in Blender AND lets the type-blind
+		// recompile path write channels the engine interprets correctly
+		// (the shipped skd keeps the original IKWRIST hierarchy - only the
+		// md5 working copy is flattened).
+		if(ob->jointType == JT_IKWRIST && ob->parent != -1) {
+			T_Printf("note: IK goal bone %s reparented from %s to worldbone for md5\n",
+				ob->name,b->parent);
+			ob->parent = -1;
+		}
+		for(j = 0; j < ob->numRefs; j++) {
+			if(ob->refName[j][0]) {
+				ob->refIndex[j] = getBoneIndex(out,ob->refName[j]);
+			}
+		}
 		b = (skdBone_t *)( (byte *)b + b->ofsEnd );
-	}		
+	}
 
 	// load surfaces
 	sf = (skdSurface_t *) ( (byte *)h + h->ofsSurfaces );
@@ -191,45 +268,231 @@ float *findRotChannel_raw(skcHeader_t *h, const char *name, int frameNum) {
 	strcat(channelName," rot");
 	return getChannelValue(h,channelName,frameNum);
 }
-float *findRotChannel(skcHeader_t *h, const char *name, int frameNum, int parentIndex) {
-#if 0
-	char channelName[32];
-	strcpy(channelName,name);
-	strcat(channelName," rot");
-	return getChannelValue(h,channelName,frameNum);
-#else
+// HZM coop 2026-07-06: generalized so the IK bones can read their baked-FK
+// helper channels ("<name> rotFK") through the exact same processing path.
+// Returns 0 when the channel does not exist in the skc.
+float *findRotChannelSuffix(skcHeader_t *h, const char *name, const char *suffix, int frameNum) {
 static int i = 0;
 	static quat_t qs[1024];
 	float *q;
-	char channelName[32];
+	char channelName[40];
 	float *f;
 	float len;
-	
+
+	strcpy(channelName,name);
+	strcat(channelName,suffix);
+	f = getChannelValue(h,channelName,frameNum);
+	if(f == 0) {
+		return 0;
+	}
+
 	i++;
 	i %= 1024;
 	q = qs[i];
 
-	strcpy(channelName,name);
-	strcat(channelName," rot");
-	f = getChannelValue(h,channelName,frameNum);
-	if(f == 0) {
-		//return quat_identity;
-		QuatSet(q,0,0,0,-1);
-	} else {
-		QuatCopy(f,q);
-	}
-	//QuatInverse(q);
-	////if(parentIndex == -1)
-	//	QuatInverse(q);
+	QuatCopy(f,q);
 	len = QuatNormalize(q);
 	if(abs(len-1.f) > 0.1) {
 		T_Error("Non-normalized quat in skc file (%f)\n",len);
 	}
-#if 1
 	FixQuatForMD5_P(q);
-#endif
 	return q;
-#endif
+}
+float *findRotChannel(skcHeader_t *h, const char *name, int frameNum, int parentIndex) {
+static int i = 0;
+	static quat_t qs[1024];
+	float *q;
+	float *f;
+
+	f = findRotChannelSuffix(h,name," rot",frameNum);
+	if(f) {
+		return f;
+	}
+	// missing channel: identity (matches the engine's SKELBONE_ZERO fallback)
+	i++;
+	i %= 1024;
+	q = qs[i];
+	QuatSet(q,0,0,0,-1);
+	FixQuatForMD5_P(q);
+	return q;
+}
+
+/*
+====================================================================
+HZM coop 2026-07-06 - joint-type aware channel/bind-pose helpers.
+
+Which skc channels drive which bone type (ground truth:
+skeletorbones.cpp GetDirtyTransform per class + GetNumChannels):
+
+  JT_POSROT     "<n> pos" + "<n> rot"  - local, as before
+  JT_ROTATION   "<n> rot"              - local; POSITION is static skd base data
+  JT_IKWRIST    "<n> pos" + "<n> rot"  - MODEL-SPACE IK goal (bone is reparented
+                                         to worldbone by readSKD, so treating the
+                                         channels as local stays correct)
+  JT_IKSHOULDER "<n> rotFK"            - baked local FK rot (engine ignores it,
+                                         the IK solver recomputes it at runtime);
+                                         position static base[4..6]
+  JT_IKELBOW    "<n> rotFK"            - baked local FK rot; position static base[0..2]
+  JT_HOSEROT/JT_AVROT/JT_ZERO  none    - fully procedural; static approximation
+
+Verified vs vanilla data: composing Pelvis->Thigh(rotFK)->Calf(rotFK) with the
+static base offsets reproduces the "Foot pos" goal channel to ~1e-5 on every
+frame of alert_sprint.skc for both legs.
+====================================================================
+*/
+
+// type-aware "does this bone have a pos channel, and what is its value"
+static float *bonePosChannel(tModel_t *m, int boneNum, skcHeader_t *h, int frameNum) {
+	tBone_t *b = m->bones + boneNum;
+	switch(b->jointType) {
+	case JT_POSROT:
+	case JT_IKWRIST:
+		return findPosChannel(h,b->name,frameNum);
+	default:
+		return 0;
+	}
+}
+
+// type-aware rot channel; returns 0 when the bone's rotation is not animated
+static float *boneRotChannel(tModel_t *m, int boneNum, skcHeader_t *h, int frameNum) {
+	tBone_t *b = m->bones + boneNum;
+	switch(b->jointType) {
+	case JT_POSROT:
+	case JT_ROTATION:
+	case JT_IKWRIST:
+		return findRotChannelSuffix(h,b->name," rot",frameNum);
+	case JT_IKSHOULDER:
+	case JT_IKELBOW:
+		// baked FK helper channels written by the original exporter
+		return findRotChannelSuffix(h,b->name," rotFK",frameNum);
+	default:
+		return 0;
+	}
+}
+
+// static (non-animated) local transform of a bone, derived from its skd base
+// data. Used for every piece a bone has no channel for. Rotations are in the
+// same convention findRotChannelSuffix returns (normalized, W >= 0).
+static void boneStaticLocal(tModel_t *m, int boneNum, float scale, bone_t *out) {
+	tBone_t *b = m->bones + boneNum;
+
+	VectorSet(out->p,0,0,0);
+	QuatSet(out->q,0,0,0,1);
+
+	switch(b->jointType) {
+	case JT_ROTATION:
+		// base data [0..2] = offset from parent (rotation comes from channel)
+		if(b->numBaseData >= 3) {
+			VectorScale(b->baseData,scale,out->p);
+		}
+		break;
+	case JT_IKSHOULDER:
+		// base data [0..3] = bind orientation quat, [4..6] = offset from parent
+		if(b->numBaseData >= 7) {
+			VectorScale(b->baseData + 4,scale,out->p);
+			QuatCopy(b->baseData,out->q);
+			QuatNormalize(out->q);
+			FixQuatForMD5_P(out->q);
+		}
+		break;
+	case JT_IKELBOW:
+	case JT_IKWRIST:
+		// base data [0..2] = bind offset from parent, no bind rotation
+		if(b->numBaseData >= 3) {
+			VectorScale(b->baseData,scale,out->p);
+		}
+		break;
+	case JT_HOSEROT:
+		// base data [3..5] = offset. The 180y variants evaluate against the
+		// parent frame with X/Z axes inverted, which for a small bind bend is
+		// a plain 180 deg rotation about local Y (and the loader's basePos
+		// x/z negation cancels against it - file offset applies as-is).
+		if(b->numBaseData >= 6) {
+			VectorScale(b->baseData + 3,scale,out->p);
+		}
+		if(b->hoseRotType != HRTYPE_PLAIN) {
+			QuatSet(out->q,0,1,0,0);
+		}
+		break;
+	case JT_AVROT:
+		// base data [0] = slerp weight, [1..3] = offset from parent.
+		// Rotation is refined from the refs by buildFrame0Locals.
+		if(b->numBaseData >= 4) {
+			VectorScale(b->baseData + 1,scale,out->p);
+		}
+		break;
+	default:
+		// JT_POSROT with missing channels / JT_ZERO: identity at parent -
+		// same as the engine's SKELBONE_ZERO behavior.
+		break;
+	}
+}
+
+// Builds the frame-0 LOCAL pose for every bone (channels where available,
+// static base data otherwise) and refines JT_AVROT rotations to
+// slerp(ref1, ref2, weight) so their bind orientation matches the engine.
+static void buildFrame0Locals(tModel_t *m, skcHeader_t *h, float scale, bone_t *f0) {
+	static bone_t w[512];
+	int i;
+
+	for(i = 0; i < m->numBones; i++) {
+		float *p, *q;
+
+		boneStaticLocal(m,i,scale,&f0[i]);
+
+		p = bonePosChannel(m,i,h,0);
+		if(p) {
+			VectorScale(p,scale,f0[i].p);
+		}
+		q = boneRotChannel(m,i,h,0);
+		if(q) {
+			QuatCopy(q,f0[i].q);
+		}
+	}
+
+	// world transforms with the identity-rotation avrot placeholders
+	memcpy(w,f0,sizeof(bone_t)*m->numBones);
+	md5AnimateBones(m,w);
+
+	// refine avrot bones: world rotation = slerp of the two referenced bones'
+	// world rotations. Recovered as a local rotation by inverting the exact
+	// composition md5AnimateBones performs:
+	//   world.q = QuaternionMultiply(inv(local.q), parentWorld.q)
+	//   => local.q = inv( QuaternionMultiply(world.q's inverse-side...) )
+	// i.e. local.q = inv(world.q) (x) parentWorld.q
+	for(i = 0; i < m->numBones; i++) {
+		tBone_t *b = m->bones + i;
+		quat_t wq, invw;
+		float weight;
+
+		if(b->jointType != JT_AVROT) {
+			continue;
+		}
+		if(b->refIndex[0] < 0 || b->refIndex[1] < 0 ||
+		   b->refIndex[0] >= m->numBones || b->refIndex[1] >= m->numBones) {
+			T_Printf("Warning: avrot bone %s has unresolved refs, keeping identity\n",b->name);
+			continue;
+		}
+		weight = (b->numBaseData >= 1) ? b->baseData[0] : 0.5f;
+
+		QuatSlerp(w[b->refIndex[0]].q,w[b->refIndex[1]].q,weight,wq);
+		QuatNormalize(wq);
+		// keep the refined world rot available for later avrot bones/children
+		QuatCopy(wq,w[i].q);
+
+		QuatCopy(wq,invw);
+		QuatInverse(invw);
+		if(b->parent == -1) {
+			// root: world.q = inv(local.q)
+			QuatCopy(invw,f0[i].q);
+		} else {
+			// local.q = inv(world.q) (x) parentWorld.q
+			// (QuaternionMultiply(out,first,second) computes second (x) first)
+			QuaternionMultiply(f0[i].q,w[b->parent].q,invw);
+		}
+		QuatNormalize(f0[i].q);
+		FixQuatForMD5_P(f0[i].q);
+	}
 }
 tAnim_t *appendSKC(tModel_t *m, const char *fname, float scale) {
 	int len;
@@ -241,6 +504,7 @@ tAnim_t *appendSKC(tModel_t *m, const char *fname, float scale) {
 	int i, j;
 	int cFlags[512];
 	bone_t baseFrame[512];
+	static bone_t f0locals[512];
 	int numAnimatedComponents;
 
 	T_Printf("Loading MoHAA skc animation file %s...\n",fname);
@@ -253,6 +517,10 @@ tAnim_t *appendSKC(tModel_t *m, const char *fname, float scale) {
 	}
 
 	memset(cFlags,0,sizeof(cFlags));
+
+	// HZM coop 2026-07-06: frame-0 local pose for every bone, including the
+	// static/procedural joint types that have no channels in the skc.
+	buildFrame0Locals(m,h,scale,f0locals);
 
 	out = T_Malloc(sizeof(tAnim_t));
 	out->frameRate = 1.f / h->frameTime;
@@ -271,18 +539,20 @@ tAnim_t *appendSKC(tModel_t *m, const char *fname, float scale) {
 	}
 
 	// detect which components changes
+	// HZM coop 2026-07-06: channel lookups are joint-type aware now; bones
+	// whose type has no pos/rot channel fall back to their static local pose.
 	for(j = 0; j < m->numBones; j++) {
 		float *baseRot, *testRot;
 		float *basePos, *testPos;
 
-		basePos = findPosChannel(h,m->bones[j].name,0);
+		basePos = bonePosChannel(m,j,h,0);
 		if(basePos == 0) {
-			VectorSet(baseFrame[j].p,0,0,0);
+			VectorCopy(f0locals[j].p,baseFrame[j].p);
 		} else {
 			VectorScale(basePos,scale,basePos);
 			VectorCopy(basePos,baseFrame[j].p);
 			for(i = 1; i < h->numFrames; i++) {
-				testPos = findPosChannel(h,m->bones[j].name,i);
+				testPos = bonePosChannel(m,j,h,i);
 				VectorScale(testPos,scale,testPos);
 				// detect X change
 				if(testPos[0] != basePos[0]) {
@@ -296,16 +566,19 @@ tAnim_t *appendSKC(tModel_t *m, const char *fname, float scale) {
 				if(testPos[2] != basePos[2]) {
 					cFlags[j] |= COMPONENT_BIT_TZ;
 				}
-			}	
+			}
 		}
 
-		baseRot = findRotChannel(h,m->bones[j].name,0,m->bones[j].parent);
+		baseRot = boneRotChannel(m,j,h,0);
 		if(baseRot == 0) {
-			QuatSet(baseFrame[j].q,0,0,0,-1);
+			QuatCopy(f0locals[j].q,baseFrame[j].q);
 		} else {
 			QuatCopy(baseRot,baseFrame[j].q);
 			for(i = 1; i < h->numFrames; i++) {
-				testRot = findRotChannel(h,m->bones[j].name,i,m->bones[j].parent);
+				testRot = boneRotChannel(m,j,h,i);
+				if(testRot == 0) {
+					continue;
+				}
 				// detect X change
 				if(testRot[0] != baseRot[0]) {
 					cFlags[j] |= COMPONENT_BIT_QX;
@@ -319,7 +592,7 @@ tAnim_t *appendSKC(tModel_t *m, const char *fname, float scale) {
 					cFlags[j] |= COMPONENT_BIT_QZ;
 				}
 				// NOTE: quaternion W component is not stored at all in md5 files
-			}	
+			}
 		}
 	}
 
@@ -359,7 +632,7 @@ tAnim_t *appendSKC(tModel_t *m, const char *fname, float scale) {
 		for(j = 0; j < m->numBones; j++) {
 			float *pos, *rot;
 
-			pos = findPosChannel(h,m->bones[j].name,i);
+			pos = bonePosChannel(m,j,h,i);
 			if(pos) {
 				VectorScale(pos,scale,pos);
 				// write X change
@@ -379,7 +652,7 @@ tAnim_t *appendSKC(tModel_t *m, const char *fname, float scale) {
 				}
 			}
 
-			rot = findRotChannel(h,m->bones[j].name,i,m->bones[j].parent);
+			rot = boneRotChannel(m,j,h,i);
 			if(rot) {
 				// write X change
 				if(cFlags[j] & COMPONENT_BIT_QX) {
@@ -426,32 +699,11 @@ tAnim_t *appendSKC(tModel_t *m, const char *fname, float scale) {
 	// generate baseFrame, but only once,
 	// from the first appended SKC
 	if(m->baseFrame == 0) {
-#if 0
-		// FIXME!
-		bone_t *b = setupMD5AnimBones(out,0); 
-		//for(i = 0; i < m->numBones; i++) {
-		//	QuatInverse(b[i].q);
-		//}
-#else
+		// HZM coop 2026-07-06: frame-0 locals already carry the joint-type
+		// aware static poses (and the avrot slerp refinement), so the mesh
+		// bind pose is just their hierarchical composition.
 		bone_t b[512];
-		for(i = 0; i < m->numBones; i++) {
-			float *p, *q;
-			
-			p = findPosChannel(h,m->bones[i].name,0);
-			if(p) {
-				VectorScale(p,scale,b[i].p);
-			} else {
-				VectorSet(b[i].p,0,0,0);
-			}
-
-			q = findRotChannel(h,m->bones[i].name,0,m->bones[i].parent);
-			if(q) {
-				QuatCopy(q,b[i].q);
-			} else {
-				QuatSet(b[i].q,0,0,0,1);
-			}
-		}
-#endif
+		memcpy(b,f0locals,sizeof(bone_t)*m->numBones);
 		md5AnimateBones(m,b);
 		m->baseFrame = T_Malloc(m->numBones*sizeof(bone_t));
 		memcpy(m->baseFrame,b,m->numBones*sizeof(bone_t));

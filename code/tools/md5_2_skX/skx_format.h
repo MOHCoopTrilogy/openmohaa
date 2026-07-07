@@ -42,10 +42,48 @@ Depends on q_shared.h (vec2_t/vec3_t/byte) being included first (md5_2_skX.h doe
 // Channel-name stride. Fork: skeletor/skeletor_name_lists.h MAX_CHANNEL_NAME.
 #define SKC_MAX_CHANNEL_CHARS 32
 
-// Joint type written for every bone. The fork's loader requires jointType == 1
-// (loadtiki.c readSKD also asserts this); 1 == SKELBONE_POSROT in the fork's
-// boneType_e (skeletor_model_file_format.h). su44 emits a pos+rot channel pair.
+// Joint type written for every bone by the COMPILE path. su44 emits a pos+rot
+// channel pair for every bone (1 == SKELBONE_POSROT in the fork's boneType_e).
 #define JT_POSROT_SKC         1
+
+// HZM coop 2026-07-06: full on-disk joint-type set, mirroring boneType_e in
+// skeletor/skeletor_model_file_format.h. The DECOMPILE path (readSKD/appendSKC)
+// now understands all of them. Per-type base data layout (floats at ofsBaseData,
+// verified against tiki_skel.cpp LoadBoneFromBuffer2 + hexdumps of vanilla
+// USarmyplyr.skd / usarmy.skd):
+//   JT_ROTATION   [0..2] offset from parent            (+[3..5] pad 1,1,1)
+//   JT_POSROT     [0..2] pad 1,1,1 (pos+rot channels)
+//   JT_IKSHOULDER [0..3] bind orientation quat x,y,z,w  [4..6] offset from parent
+//   JT_IKELBOW    [0..2] bind offset from parent (engine uses only its length)
+//   JT_IKWRIST    [0..2] bind offset from parent (engine uses only its length);
+//                 has "<name> rot"/"<name> pos" channels = MODEL-SPACE IK goal
+//   JT_HOSEROT    [0]=bendRatio [1]=bendMax [2]=spinRatio [3..5] offset
+//                 (+[6..8] pad 1,1,1, [9] = int hoseRotType: 0=plain,
+//                  1=rotate parent 180y, 2=rotate both 180y - the engine reads
+//                  this int at ofsBaseData+36, see LoadBoneFromBuffer2)
+//   JT_AVROT      [0]=slerp weight toward ref2  [1..3] offset from parent
+//                 (+[4..6] pad 1,1,1); 2 bone refs
+// Bone refs (NUL-separated names at ofsBoneNames): AVROT=2,
+// IKELBOW/IKWRIST/HOSEROT=1, others 0.
+// IK bones additionally have baked-FK helper channels "<name> rotFK" in vanilla
+// skc files (LOCAL rotations; ignored by the engine, GetBoneChannelType -> CHANNEL_NONE).
+#define JT_ROTATION           0
+#define JT_POSROT             1
+#define JT_IKSHOULDER         2
+#define JT_IKELBOW            3
+#define JT_IKWRIST            4
+#define JT_HOSEROT            5
+#define JT_AVROT              6
+#define JT_ZERO               7
+#define JT_NUMJOINTTYPES      8
+
+// hoseRotType values (mirror hoseRotType_t)
+#define HRTYPE_PLAIN            0
+#define HRTYPE_ROTPARENT180Y    1
+#define HRTYPE_ROTBOTH180Y      2
+
+// max floats of per-bone base data we keep (IKSHOULDER/HOSEROT use 10 dwords)
+#define SKX_MAX_BONE_BASEDATA 10
 
 // ============================ SKD (mesh) ============================
 

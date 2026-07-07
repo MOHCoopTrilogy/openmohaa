@@ -1206,6 +1206,23 @@ Event EV_GetCoopAdsHeld // HZM coop
      "returns 1 if this player is holding the aim-down-sights button, or 0 if not",
      EV_GETTER
 );
+Event EV_Player_CoopSetCover // HZM coop - TAKE COVER [214]
+(
+    "coop_setcover",
+     EV_DEFAULT,
+     "i",
+     "active",
+     "HZM coop - request (1) or release (0) the take-cover pose; the engine validates it per frame"
+);
+Event EV_Player_GetCoopCover // HZM coop - TAKE COVER [214]
+(
+    "coop_incover",
+     EV_DEFAULT,
+     NULL,
+     NULL,
+     "HZM coop - cover state: 0 none, 1 requested (no valid pose), 2 wall pose, 3 low pose",
+     EV_GETTER
+);
 Event EV_Player_GetReady
 (
     "ready",
@@ -1910,6 +1927,8 @@ CLASS_DECLARATION(Sentient, Player, "player") {
     {&EV_GetPrimaryFireHeld,              &Player::EventGetPrimaryFireHeld      },
     {&EV_GetSecondaryFireHeld,            &Player::EventGetSecondaryFireHeld    },
     {&EV_GetCoopAdsHeld,                  &Player::EventGetCoopAdsHeld          },
+    {&EV_Player_CoopSetCover,             &Player::EventCoopSetCover            }, // HZM coop - take cover [214]
+    {&EV_Player_GetCoopCover,             &Player::EventGetCoopCover            }, // HZM coop - take cover [214]
     {&EV_Player_GetReady,                 &Player::EventGetReady                },
     {&EV_Player_SetReady,                 &Player::EventSetReady                },
     {&EV_Player_SetNotReady,              &Player::EventSetNotReady             },
@@ -2185,8 +2204,23 @@ Player::Player()
     // start with a full stamina pool on (re)spawn; TickSprint clamps this down to the cvar max each frame
     m_fCoopStamina    = 9999.0f;
     m_bCoopSprinting  = false;
+    m_bCoopShoulderAim = false; // HZM coop - 3P shoulder-aim stage (userinfo mirror)
+    m_bCoopView3p      = false; // HZM coop - client view mode (u_view3p userinfo mirror)
+    m_vCoopCoverNormal = vec_zero; // HZM coop - anchored cover OUT normal [215]
+    m_iCoopCoverSide   = 1;        // HZM coop - 1 = opening LEFT, -1 = RIGHT [215]
+    m_bCoopCoverPeek   = false;    // HZM coop - RMB peek-aim from cover [215]
+    m_fCoopVehTurretTime = -10.0f; // HZM coop - vehicle-turret manning stamp [219]
+    m_fCoopProbeTime   = -10.0f;   // HZM coop - GUNNERPROBE throttle [221]
+    m_vCoopCoverBaseOrg = vec_zero; // HZM coop - cover pose anchor position [216]
+    m_fCoopPeekFrac    = 0.0f;     // HZM coop - eased peek step-out fraction [216]
     m_bCoopGearLoop  = false; // HZM coop - gear rattle off
     m_fCoopSprintDur  = 0.0f;
+    // HZM coop - TAKE COVER [214]: start clear (no request, no valid pose)
+    m_bCoopCoverRequested = false;
+    m_bCoopCoverWall      = false;
+    m_bCoopCoverLow       = false;
+    m_bCoopBlindfire      = false;
+    m_fCoopCoverBadTime   = 0.0f;
     m_bHasJumped      = false;
 
     m_fLastInvulnerableTime      = 0;
@@ -4133,6 +4167,8 @@ void Player::ClientMove(usercmd_t *ucmd)
         // coop_adsSpeedMult scales it (1.0 = no slowdown). Suppressed while sprinting (you can't sprint + ADS).
         // DEFAULT 1.0 = OFF (reverted: the 0.55 aimed-walk felt far too slow). Footstep cadence will be
         // handled separately. Left in place + tunable: lower coop_adsSpeedMult below 1.0 to re-enable.
+        m_iCoopSpeedBase = client->ps.speed; // HZM coop [222] - SPEEDPROBE: speed before the ADS/weapon mults
+
         if ((last_ucmd.buttons & BUTTON_COOPADS) && !m_bCoopSprinting) {
             cvar_t *pAdsMult = gi.Cvar_Get("coop_adsSpeedMult", "1.0", CVAR_ARCHIVE);
             float   amult    = pAdsMult ? pAdsMult->value : 1.0f;
@@ -4140,6 +4176,10 @@ void Player::ClientMove(usercmd_t *ucmd)
             if (amult < 1.0f) {
                 client->ps.speed = (float)client->ps.speed * amult;
             }
+
+            // HZM coop [227] - the 3P shoulder-aim SLOW-walk block that lived here was removed:
+            // shoulder movement now gets a hard speed FLOOR after the full multiplier chain (see
+            // the block just above SPEEDPROBE below). coop_adsSpeedMult3p scales that floor.
         }
 
         if (m_iMovePosFlags & MPF_POSITION_CROUCHING) {
@@ -4176,6 +4216,53 @@ void Player::ClientMove(usercmd_t *ucmd)
         client->ps.speed = (int)((float)client->ps.speed * speed_multiplier[i]);
     }
     //====
+
+    // HZM coop [227] - 3P SHOULDER-AIM SPEED FLOOR. The measured shoulder-move speed (45) never
+    // matched anything the audited multiplier chain could produce ("starts off very very slow" -
+    // user), so instead of scaling the possibly-poisoned value, FLOOR it after ALL multipliers:
+    // while the shoulder stage is live you move at least GetRunSpeed * sv_dmspeedmult *
+    // coop_adsSpeedMult3p (def 1.0 = full run pace, no heavy-weapon drag; raiseable to 1.6).
+    // Crouch keeps its own scale so crouch-aiming doesn't rocket. SPEEDPROBE below still reports
+    // the chain so the underlying culprit can be identified.
+    if (m_bCoopShoulderAim && !m_bCoopSprinting) {
+        cvar_t *p3pMult = gi.Cvar_Get("coop_adsSpeedMult3p", "1.0", CVAR_ARCHIVE);
+        float   m3      = p3pMult ? p3pMult->value : 1.0f;
+        float   fFloor;
+
+        if (m3 < 0.5f) { m3 = 0.5f; } else if (m3 > 1.6f) { m3 = 1.6f; }
+        fFloor = GetRunSpeed() * sv_dmspeedmult->value * m3;
+        if (m_iMovePosFlags & MPF_POSITION_CROUCHING) {
+            fFloor *= sv_crouchspeedmult->value;
+        }
+        if ((float)client->ps.speed < fFloor) {
+            client->ps.speed = (int)fFloor;
+        }
+    }
+
+    // HZM coop [222] - SPEEDPROBE: once/sec while ADS is held (1P irons OR the 3P shoulder stage),
+    // print the FULL speed chain: base (before ADS/weapon mults), final, and every factor - the
+    // measured 45 could not be reproduced from the audited mults, so dump them all. Remove once the
+    // "ADS side-step slow/weird" report closes.
+    if (((last_ucmd.buttons & BUTTON_COOPADS) || m_bCoopShoulderAim) && level.time - m_fCoopProbeTime > 1.0f) {
+        m_fCoopProbeTime = level.time;
+        Weapon *pWProbe  = GetActiveWeapon(WEAPON_MAIN);
+        gi.Printf(
+            "^~^~^ SPEEDPROBE final=%d base=%d runspd=%.0f svrun=%.0f zoomed=%d wms=%.2f zmv=%.2f dm=%.2f gun='%s' fwd=%d side=%d legs='%s' torso='%s'\n",
+            client->ps.speed,
+            m_iCoopSpeedBase,
+            GetRunSpeed(),
+            sv_runspeed->value,
+            IsZoomed() ? 1 : 0,
+            pWProbe ? pWProbe->GetMovementSpeed() : -1.0f,
+            pWProbe ? pWProbe->GetZoomMovement() : -1.0f,
+            sv_dmspeedmult->value,
+            pWProbe ? pWProbe->item_name.c_str() : "none",
+            (int)last_ucmd.forwardmove,
+            (int)last_ucmd.rightmove,
+            currentState_Legs ? currentState_Legs->getName() : "?",
+            currentState_Torso ? currentState_Torso->getName() : "?"
+        );
+    }
 
     client->ps.gravity = sv_gravity->value * gravity;
 
@@ -4272,6 +4359,18 @@ void Player::VehicleMove(usercmd_t *ucmd)
     // disable prediction
     client->ps.pm_flags |= PMF_TURRET | PMF_NO_PREDICTION;
 
+    // HZM coop [219] - bug-309 root cause: the jeep .30cal gunner runs THIS path (m_pVehicle set,
+    // m_pTurret NULL - TurretMove/COOP_ON_TURRET never fired). Legs-state diagnostic mirrored here.
+    {
+        static str sLastVehLegs;
+
+        if (currentState_Legs && sLastVehLegs != currentState_Legs->getName()) {
+            sLastVehLegs = currentState_Legs->getName();
+            gi.Printf("^~^~^ VEHSTATE legs='%s' manned=%d\n", sLastVehLegs.c_str(),
+                (level.time - m_fCoopVehTurretTime < 0.25f) ? 1 : 0);
+        }
+    }
+
     if (level.playerfrozen || m_bFrozen) {
         client->ps.pm_flags |= PMF_FROZEN;
     }
@@ -4293,6 +4392,17 @@ void Player::TurretMove(usercmd_t *ucmd)
 {
     if (!m_pTurret) {
         return;
+    }
+
+    // HZM coop [217] - bug-309 diagnostic: name the ACTUAL legs state while manning a turret
+    // (the COOP_TURRET_MAN pose never engaged; hub-edge theory unverified - measure, don't guess)
+    {
+        static str sLastTurretLegs;
+
+        if (currentState_Legs && sLastTurretLegs != currentState_Legs->getName()) {
+            sLastTurretLegs = currentState_Legs->getName();
+            gi.Printf("^~^~^ TURRETSTATE legs='%s'\n", sLastTurretLegs.c_str());
+        }
     }
 
     oldorigin = origin;
@@ -4543,6 +4653,50 @@ void Player::ClientThink(void)
     }
 
     TickSprint();
+
+    // HZM coop [223] - Shift is the SPRINT key, so BUTTON_RUN arrives CLEAR while it's held (legacy
+    // walk semantics). The speed branch already keeps RUN speed in that case, but the LEGS statemap
+    // still saw BUTTON_RUN clear and picked the WALK anims - run speed + walk animation = skating,
+    // worst right after stamina runs out mid-sprint (user report). With the sprint system enabled,
+    // re-assert BUTTON_RUN for everything downstream (statemap RUN conditions + ClientMove) unless
+    // the dedicated Alt walk key is held (that one really means walk). TickSprint above already read
+    // the raw ucmd, so sprint detection is unaffected; last_ucmd is re-copied fresh every frame.
+    {
+        static cvar_t *pSprintRunBtn = NULL;
+        if (!pSprintRunBtn) { pSprintRunBtn = gi.Cvar_Get("coop_sprint", "1", CVAR_ARCHIVE); }
+        if (pSprintRunBtn->integer && !(last_ucmd.buttons & BUTTON_RUN)
+            && !(last_ucmd.buttons & BUTTON_COOPWALK)) {
+            last_ucmd.buttons |= BUTTON_RUN;
+        }
+    }
+
+    TickCoopCover(); // HZM coop - take cover [214]: validate the pose with this frame's traces
+    // HZM coop [221] - bug-309 GUNNERPROBE: once/sec truth table of every candidate manning
+    // signal while any is live (or the player is entity-attached, e.g. script-seated gunner).
+    if (level.time - m_fCoopProbeTime > 1.0f
+        && (m_pTurret || m_pVehicle || edict->s.parent != ENTITYNUM_NONE
+            || (client->ps.pm_flags & PMF_TURRET))) {
+        m_fCoopProbeTime = level.time;
+        gi.Printf(
+            "^~^~^ GUNNERPROBE pTur=%d pVeh=%d parent=%d pmTURRET=%d legs='%s' torso='%s' tAnim='%s'\n",
+            m_pTurret ? 1 : 0, m_pVehicle ? 1 : 0, edict->s.parent,
+            (client->ps.pm_flags & PMF_TURRET) ? 1 : 0,
+            currentState_Legs ? currentState_Legs->getName() : "?",
+            currentState_Torso ? currentState_Torso->getName() : "?",
+            partAnim[torso].c_str());
+    }
+
+
+    // HZM coop [219] - manning diagnostic (bug-309): neither TurretMove nor VehicleMove runs for
+    // the jeep .30cal gunner (remote-control path) - watch the legs state from HERE instead
+    if (m_pTurret || (level.time - m_fCoopVehTurretTime) < 0.25f) {
+        static str sLastManLegs;
+
+        if (currentState_Legs && sLastManLegs != currentState_Legs->getName()) {
+            sLastManLegs = currentState_Legs->getName();
+            gi.Printf("^~^~^ MANSTATE legs='%s'\n", sLastManLegs.c_str());
+        }
+    }
 
     if (g_gametype->integer != GT_SINGLE_PLAYER && dm_team == TEAM_SPECTATOR && !IsSpectator()) {
         Spectator();
@@ -7662,6 +7816,14 @@ void Player::UpdateStats(void)
         client->ps.stats[STAT_INZOOM] = 0;
     }
 
+    // HZM coop - replicate the cover pose to the client (auto third-person while covered;
+    // drops the same frame cover ends, so the view snaps back to the player's own choice)
+    if (m_bCoopCoverWall || m_bCoopCoverLow) {
+        client->ps.pm_flags |= PMF_COOP_COVER;
+    } else {
+        client->ps.pm_flags &= ~PMF_COOP_COVER;
+    }
+
     client->ps.stats[STAT_CROSSHAIR] =
         ((!client->ps.stats[STAT_INZOOM] || client->ps.stats[STAT_INZOOM] > 30)
          && (activeweap && !activeweap->IsSubclassOfInventoryItem() && activeweap->GetUseCrosshair()))
@@ -8055,12 +8217,22 @@ void Player::DumpState(Event *ev)
 void Player::ForceTorsoState(Event *ev)
 {
     State *ts = statemap_Torso->FindState(ev->GetString(1));
+    // HZM coop - a missing state used to be a SILENT no-op (FindState returns NULL and
+    // EvaluateState just re-evaluates) - cost hours on the emote feature. Say so.
+    if (!ts) {
+        gi.Printf("^~^~^ ForceTorsoState: state '%s' not found in %s\n", ev->GetString(1).c_str(), g_statefile->string);
+        return;
+    }
     EvaluateState(ts);
 }
 
 void Player::ForceLegsState(Event *ev)
 {
     State *ls = statemap_Legs->FindState(ev->GetString(1));
+    if (!ls) {
+        gi.Printf("^~^~^ ForceLegsState: state '%s' not found in %s\n", ev->GetString(1).c_str(), g_statefile->string);
+        return;
+    }
     EvaluateState(NULL, ls);
 }
 
@@ -11529,6 +11701,41 @@ void Player::EventGetCoopAdsHeld(Event *ev) // HZM coop - aim-down-sights button
     ev->AddInteger(buttons & BUTTON_COOPADS ? true : false);
 }
 
+// HZM coop - TAKE COVER [214]: script-side toggle (coop_mod/takecover.scr) requests/releases the
+// pose. Validate IMMEDIATELY so the script can read coop_incover right after coop_setcover 1 for
+// instant feedback; if nothing coverable is around on the initial engage, clear the request on the
+// spot (no grace) so the toggle stays in sync ("No cover here" instead of a latent request).
+void Player::EventCoopSetCover(Event *ev)
+{
+    m_bCoopCoverRequested = ev->GetInteger(1) ? true : false;
+    m_fCoopCoverBadTime   = 0.0f;
+
+    TickCoopCover();
+
+    if (m_bCoopCoverRequested && !m_bCoopCoverWall && !m_bCoopCoverLow) {
+        m_bCoopCoverRequested = false;
+        m_bCoopBlindfire      = false;
+    }
+}
+
+// HZM coop - TAKE COVER [214]: state getter for script (property syntax: local.player.coop_incover)
+void Player::EventGetCoopCover(Event *ev)
+{
+    int state = 0;
+
+    if (m_bCoopCoverRequested) {
+        state = 1;
+        if (m_bCoopCoverWall) {
+            state = 2;
+        }
+        if (m_bCoopCoverLow) {
+            state = 3;
+        }
+    }
+
+    ev->AddInteger(state);
+}
+
 void Player::BeginTempSpectator(void)
 {
     m_bTempSpectator = true;
@@ -12033,6 +12240,267 @@ void Player::TickSprint()
     }
     //====
 }
+
+//====
+// HZM coop - TAKE COVER [214] per-frame validation.
+// Runs from ClientThink (right after TickSprint, same last_ucmd timing). While the player has
+// cover REQUESTED (coop_setcover 1 via the keybind bus), decide which pose is valid THIS frame:
+//
+//   WALL (standing): a chest-height trace BACKWARD along -yaw_forward hits a mostly-vertical
+//   solid within coop_coverWallDist -> the character presses their back to it (the AI cornering
+//   wall_alert pose faces out from the wall, so back-to-wall is the direction that reads right).
+//
+//   LOW (crouched tuck): a crouch-chest trace FORWARD hits a mostly-vertical solid within
+//   coop_coverLowDist AND a head-height trace over the same line is CLEAR -> waist-high cover
+//   (sandbags, low walls, crates) the character can tuck behind and blind-fire OVER.
+//
+// Stance is NOT checked here - the statemap owns height (the COVER_LOW state's modheight "duck"
+// tucks the player automatically when the low pose engages from STAND).
+//
+// The request is CANCELLED outright on: death, spectate, vehicle/turret/ladder mounts, freeze,
+// jump or any WASD movement input (matching the emote UX - moving breaks the pose). If only the
+// GEOMETRY goes invalid (crouch/stand morph, doorway edge), a short grace window
+// (coop_coverGrace) keeps the request alive so the pose can re-engage without re-pressing.
+// BLIND FIRE: pose valid + primary fire held + a shootable-class weapon -> m_bCoopBlindfire,
+// which drives the COVER_*_FIRE statemap states (their anims carry the vanilla "N fire" frame
+// commands) plus the spread penalty in Weapon::Shoot and the low-cover muzzle raise in
+// Weapon::GetMuzzlePosition.
+//====
+void Player::TickCoopCover()
+{
+    qboolean wallValid = qfalse;
+    qboolean lowValid  = qfalse;
+
+    if (!m_bCoopCoverRequested) {
+        m_bCoopCoverWall    = false;
+        m_bCoopCoverLow     = false;
+        m_bCoopBlindfire    = false;
+        m_bCoopCoverPeek    = false;
+        m_fCoopCoverBadTime = 0.0f;
+        return;
+    }
+
+    // hard cancels - things that end cover instantly (the statemap "!" exits fire this frame)
+    if (deadflag || IsSpectator() || m_pVehicle || m_pTurret || m_pLadder || level.playerfrozen || m_bFrozen
+        || (flags & FL_IMMOBILE) || last_ucmd.forwardmove || last_ucmd.rightmove || last_ucmd.upmove > 0) {
+        m_bCoopCoverRequested = false;
+        m_bCoopCoverWall      = false;
+        m_bCoopCoverLow       = false;
+        m_bCoopBlindfire      = false;
+        m_bCoopCoverPeek      = false;
+        m_fCoopCoverBadTime   = 0.0f;
+        return;
+    }
+
+    {
+        cvar_t *pWallD = gi.Cvar_Get("coop_coverWallDist", "40", CVAR_ARCHIVE);
+        cvar_t *pLowD  = gi.Cvar_Get("coop_coverLowDist", "48", CVAR_ARCHIVE);
+        cvar_t *pGrace = gi.Cvar_Get("coop_coverGrace", "0.5", CVAR_ARCHIVE);
+        float   fWallD = pWallD ? pWallD->value : 40.0f;
+        float   fLowD  = pLowD ? pLowD->value : 48.0f;
+        float   fGrace = pGrace ? pGrace->value : 0.5f;
+        Vector  vFwd   = yaw_forward; // flat view yaw (same source CondSolidForward uses)
+        trace_t trace;
+
+        // WALL: standing chest height (48u). ENTRY is what the player FACES (walk up to a wall,
+        // press cover, the character TURNS and puts their back to it); the wall OUT normal is
+        // ANCHORED (m_vCoopCoverNormal) so the SUSTAIN check is view-independent: the mouse can
+        // orbit (free-look) and the RMB peek can aim anywhere without breaking the pose - only
+        // physically leaving the wall (or moving) drops it.
+        {
+            Vector vStart = origin + Vector(0, 0, 48);
+
+            if (m_bCoopCoverWall) {
+                // sustain: the ANCHORED wall must still be behind the POSE POSITION - while the peek
+                // step-out displaces the body toward the corner (often past the wall edge!), the check
+                // runs from the stored base so peeking can never drop the cover
+                Vector vSusStart = vStart;
+
+                if (m_fCoopPeekFrac > 0.01f) {
+                    vSusStart = m_vCoopCoverBaseOrg + Vector(0, 0, 48);
+                }
+                trace = G_Trace(
+                    vSusStart, vec_zero, vec_zero, vSusStart - m_vCoopCoverNormal * fWallD, this, MASK_SOLID, false,
+                    "Player::TickCoopCover wall"
+                );
+                if (!trace.startsolid && trace.fraction < 1.0f && trace.plane.normal[2] < 0.7f
+                    && trace.plane.normal[2] > -0.7f && DotProduct(trace.plane.normal, m_vCoopCoverNormal) > 0.5f) {
+                    wallValid = qtrue;
+                }
+            } else {
+                // entry: wall we are FACING - snap our back onto it (face along its normal)
+                trace = G_Trace(
+                    vStart, vec_zero, vec_zero, vStart + vFwd * fWallD, this, MASK_SOLID, false,
+                    "Player::TickCoopCover wall-enter"
+                );
+                if (!trace.startsolid && trace.fraction < 1.0f && trace.plane.normal[2] < 0.7f
+                    && trace.plane.normal[2] > -0.7f && DotProduct(trace.plane.normal, vFwd) < -0.5f) {
+                    Vector va = GetViewAngles();
+                    va[YAW]   = vectoyaw(trace.plane.normal);
+                    SetViewAngles(va);
+                    m_vCoopCoverNormal  = Vector(trace.plane.normal);
+                    m_vCoopCoverBaseOrg = origin;
+                    wallValid           = qtrue;
+                } else {
+                    // fallback: already standing back-to-wall
+                    trace = G_Trace(
+                        vStart, vec_zero, vec_zero, vStart - vFwd * fWallD, this, MASK_SOLID, false,
+                        "Player::TickCoopCover wall"
+                    );
+                    if (!trace.startsolid && trace.fraction < 1.0f && trace.plane.normal[2] < 0.7f
+                        && trace.plane.normal[2] > -0.7f && DotProduct(trace.plane.normal, vFwd) > 0.5f) {
+                        m_vCoopCoverNormal  = Vector(trace.plane.normal);
+                        m_vCoopCoverBaseOrg = origin;
+                        wallValid           = qtrue;
+                    }
+                }
+            }
+
+            // OPEN-SIDE probe (wall cover only): step sideways along the wall and re-trace toward
+            // it - no wall there means that is the corner to shoot/peek around. Drives the left vs
+            // right blind-fire anim (COOP_COVER_OPENRIGHT) + the bullet steering in Weapon::Shoot.
+            // Left wins ties; a long unbroken wall keeps the previous side.
+            if (wallValid) {
+                // left of the OUT facing (flat normal): perp = (-y, x, 0)
+                Vector vLeft = Vector(0.0f - m_vCoopCoverNormal[1], m_vCoopCoverNormal[0], 0);
+
+                trace = G_Trace(
+                    vStart + vLeft * 44, vec_zero, vec_zero,
+                    vStart + vLeft * 44 - m_vCoopCoverNormal * (fWallD + 24), this, MASK_SOLID, false,
+                    "Player::TickCoopCover side-left"
+                );
+                if (trace.fraction >= 1.0f && !trace.startsolid) {
+                    m_iCoopCoverSide = 1; // opening on the LEFT
+                } else {
+                    trace = G_Trace(
+                        vStart - vLeft * 44, vec_zero, vec_zero,
+                        vStart - vLeft * 44 - m_vCoopCoverNormal * (fWallD + 24), this, MASK_SOLID, false,
+                        "Player::TickCoopCover side-right"
+                    );
+                    if (trace.fraction >= 1.0f && !trace.startsolid) {
+                        m_iCoopCoverSide = -1; // opening on the RIGHT
+                    }
+                }
+            }
+        }
+
+        // LOW: crouch-chest height (36u) forward must HIT, head height (58u) forward must be CLEAR.
+        // The obstacle OUT normal is anchored on entry too, so peeking (RMB aim over the top)
+        // does not break the tuck.
+        {
+            Vector vChest = origin + Vector(0, 0, 36);
+            Vector vHead  = origin + Vector(0, 0, 58);
+            Vector vProbe = vFwd;
+
+            if (m_bCoopCoverLow) {
+                vProbe = Vector(0, 0, 0) - m_vCoopCoverNormal;
+            }
+
+            trace = G_Trace(
+                vChest, vec_zero, vec_zero, vChest + vProbe * fLowD, this, MASK_SOLID, false,
+                "Player::TickCoopCover low"
+            );
+            if (!trace.startsolid && trace.fraction < 1.0f && trace.plane.normal[2] < 0.7f
+                && trace.plane.normal[2] > -0.7f && DotProduct(trace.plane.normal, vProbe) < -0.5f) {
+                trace = G_Trace(
+                    vHead, vec_zero, vec_zero, vHead + vProbe * fLowD, this, MASK_SOLID, false,
+                    "Player::TickCoopCover head"
+                );
+                if (!trace.startsolid && trace.fraction >= 1.0f) {
+                    if (!m_bCoopCoverLow) {
+                        m_vCoopCoverNormal  = Vector(0, 0, 0) - vProbe; // out = back toward the player
+                        m_vCoopCoverBaseOrg = origin;
+                    }
+                    lowValid = qtrue;
+                }
+            }
+        }
+
+        // geometry grace: brief invalid gaps (stance morph, clipping a doorway edge while turning)
+        // keep the request; a sustained miss drops it so the toggle can't go stale out in the open
+        if (!wallValid && !lowValid) {
+            if (m_fCoopCoverBadTime <= 0.0f) {
+                m_fCoopCoverBadTime = level.time;
+            } else if (level.time - m_fCoopCoverBadTime > fGrace) {
+                m_bCoopCoverRequested = false;
+            }
+        } else {
+            m_fCoopCoverBadTime = 0.0f;
+        }
+    }
+
+    {
+        bool bWasPeek = m_bCoopCoverPeek;
+
+        m_bCoopCoverWall = (m_bCoopCoverRequested && wallValid) ? true : false;
+        m_bCoopCoverLow  = (m_bCoopCoverRequested && lowValid) ? true : false;
+
+        // PEEK (RMB while covered): pop out and AIM for real - the torso leaves COVER_TORSO for
+        // the normal aim chain (statemap COOP_COVER_PEEK edge), the cgame shoulder-ADS camera
+        // engages on the same button, and the anchored sustain above keeps the cover alive while
+        // the view swings. Releasing RMB snaps the facing back onto the wall pose.
+        m_bCoopCoverPeek =
+            ((m_bCoopCoverWall || m_bCoopCoverLow) && (last_ucmd.buttons & BUTTON_COOPADS)) ? true : false;
+        if (bWasPeek && !m_bCoopCoverPeek && (m_bCoopCoverWall || m_bCoopCoverLow)) {
+            Vector va = GetViewAngles();
+
+            if (m_bCoopCoverWall) {
+                va[YAW] = vectoyaw(m_vCoopCoverNormal); // face out from the wall again
+            } else {
+                Vector vIn = Vector(0, 0, 0) - m_vCoopCoverNormal;
+                va[YAW]    = vectoyaw(vIn); // face the low obstacle again
+            }
+            va[PITCH] = 0;
+            SetViewAngles(va);
+        }
+    }
+
+    // PEEK STEP-OUT [216]: physically slide the body toward the detected corner while peeking
+    // (that IS the pop-out - camera, muzzle and silhouette all clear the doorframe), and slide
+    // back into the pose on release. Eased, collision-traced with the player bbox, and the
+    // sustain check above runs from the stored base so the displacement can't break cover.
+    {
+        cvar_t *pStep = gi.Cvar_Get("coop_peekStep", "30", CVAR_ARCHIVE);
+        cvar_t *pOut2 = gi.Cvar_Get("coop_peekOut", "8", CVAR_ARCHIVE);
+        float   fTgt  = (m_bCoopCoverPeek && m_bCoopCoverWall) ? 1.0f : 0.0f;
+        float   fRate = 6.0f * level.frametime;
+
+        if (fRate > 1.0f) {
+            fRate = 1.0f;
+        }
+        m_fCoopPeekFrac += (fTgt - m_fCoopPeekFrac) * fRate;
+        if (m_fCoopPeekFrac < 0.01f && fTgt == 0.0f) {
+            m_fCoopPeekFrac = 0.0f;
+        }
+
+        if ((m_bCoopCoverWall || m_fCoopPeekFrac > 0.0f) && m_bCoopCoverRequested) {
+            Vector vLeft2(0.0f - m_vCoopCoverNormal[1], m_vCoopCoverNormal[0], 0);
+            float  fSide2 = (m_iCoopCoverSide < 0) ? -1.0f : 1.0f;
+            Vector vWant  = m_vCoopCoverBaseOrg + vLeft2 * (fSide2 * (pStep ? pStep->value : 30.0f) * m_fCoopPeekFrac)
+                         + m_vCoopCoverNormal * ((pOut2 ? pOut2->value : 8.0f) * m_fCoopPeekFrac);
+            trace_t tSlide = G_Trace(
+                origin, mins, maxs, vWant, this, MASK_PLAYERSOLID, false, "Player::TickCoopCover peekslide"
+            );
+
+            if (!tSlide.startsolid) {
+                setOrigin(tSlide.endpos);
+            }
+        }
+    }
+
+    // BLIND FIRE: covered + fire held + a gun that makes sense poked over/around cover - but
+    // NOT while peek-aiming (RMB = real aimed fire at full accuracy instead)
+    m_bCoopBlindfire = false;
+    if ((m_bCoopCoverWall || m_bCoopCoverLow) && !m_bCoopCoverPeek && (last_ucmd.buttons & BUTTON_ATTACKLEFT)) {
+        Weapon *weapon = GetActiveWeapon(WEAPON_MAIN);
+
+        if (weapon
+            && (weapon->GetWeaponClass() & (WEAPON_CLASS_PISTOL | WEAPON_CLASS_RIFLE | WEAPON_CLASS_SMG | WEAPON_CLASS_MG))) {
+            m_bCoopBlindfire = true;
+        }
+    }
+}
+//====
 
 float Player::GetRunSpeed() const
 {

@@ -859,9 +859,12 @@ int main( int argc, char **argv )
 	Sys_InitEx(); // Added in OPM
 	NET_Init( );
 
-	signal( SIGILL, Sys_SigHandler );
-	signal( SIGFPE, Sys_SigHandler );
-	signal( SIGSEGV, Sys_SigHandler );
+	/* HZM coop: do NOT trap hardware faults (SIGSEGV/SIGILL/SIGFPE). The CRT maps those
+	   exceptions to signals and Sys_SigHandler "handled" them into a generic abort() -
+	   every crash dump then carried the same useless 0xC0000409 abort stack instead of
+	   the real faulting instruction (masked the m1l2a load crash for a full day). With
+	   no handler the exception reaches WER unhandled and the dump preserves the true
+	   crash context. SIGTERM/SIGINT stay registered for clean shutdown. */
 	signal( SIGTERM, Sys_SigHandler );
 	signal( SIGINT, Sys_SigHandler );
 

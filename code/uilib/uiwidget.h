@@ -144,6 +144,7 @@ protected:
     float                 m_starttime;
     float                 m_fadetime;
     float                 m_alpha;
+    float                 m_hudFadeMul; // HZM coop - HUD fade multiplier (post-Motion, see SetHudFadeMul)
     float                 m_local_alpha;
     float                 m_motiontime;
     float                 m_fadeSequenceDelay;
@@ -204,6 +205,12 @@ protected:
 public:
     UIWidget();
     virtual ~UIWidget();
+
+    // HZM coop - HUD fade: post-Motion alpha MULTIPLIER for this widget. Display() folds it into
+    // m_local_alpha AFTER Motion() ran, so urc 'fadein' sequences (which rewrite m_alpha to 1.0
+    // every frame once finished - hud_items, bug-255) cannot stomp the HUD fade. Children inherit
+    // through Display()'s parent_alpha chain.
+    void SetHudFadeMul(float f) { m_hudFadeMul = f; }
 
     virtual void Shutdown(void);
     virtual void InitFrame(

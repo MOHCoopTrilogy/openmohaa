@@ -800,6 +800,16 @@ void TurretGun::P_ThinkActive(void)
     Vector  vMaxs;
     trace_t trace;
 
+    // HZM coop - third-person gunner must SEE the world gun (mirror of the vehicleturret
+    // UpdateRemoteControl sync; the 1P eyes-bone viewmodel is skipped client-side in 3P)
+    if (m_pViewModel && owner && owner->IsSubclassOfPlayer()) {
+        if (static_cast<Player *>(owner.Pointer())->m_bCoopView3p) {
+            edict->r.svFlags &= ~SVF_NOTSINGLECLIENT;
+        } else {
+            edict->r.svFlags |= SVF_NOTSINGLECLIENT;
+        }
+    }
+
     // Limit the pitch
     if (m_vUserViewAng[0] < m_fPitchUpCap) {
         m_vUserViewAng[0] = m_fPitchUpCap;
@@ -1254,10 +1264,55 @@ void TurretGun::AI_DoAiming()
     }
 }
 
+// HZM coop: AI gunners hit far softer than the TIK bulletdamage - coop_mg42AiDamage is the
+// PERCENT of TIK damage an AI-manned turret deals (default 40, live-tunable, clamped 0..200).
+static float HZM_AiTurretDamageScale()
+{
+    cvar_t *cv = gi.Cvar_Get("coop_mg42AiDamage", "40", 0);
+    float   f  = cv->value / 100.0f;
+    if (f < 0.0f) {
+        f = 0.0f;
+    }
+    if (f > 2.0f) {
+        f = 2.0f;
+    }
+    return f;
+}
+
 void TurretGun::AI_DoFiring()
 {
     float minBurstTime, maxBurstTime;
     float minBurstDelay, maxBurstDelay;
+    float fSavedDamage;
+
+    // HZM coop: AI-manned turrets run the SAME heat cycle as player-manned ones (P_ThinkActive
+    // above): ~2s of sustained fire cooks the barrel, then a lockout while it cools (25/s),
+    // slow bleed (8/s) between bursts. The 3D steam sound doubles as the player's cue that the
+    // enemy gun is down - that is the window to advance.
+    if (m_bOverheated) {
+        m_iFiring = TURRETFIRESTATE_NONE;
+        m_fHeat -= 25.0f * level.frametime;
+        if (m_fHeat <= 0.0f) {
+            m_fHeat       = 0.0f;
+            m_bOverheated = false;
+        }
+        return;
+    }
+    if (m_iFiring == TURRETFIRESTATE_FIRING) {
+        m_fHeat += 50.0f * level.frametime;
+        if (m_fHeat >= 100.0f) {
+            m_fHeat       = 100.0f;
+            m_bOverheated = true;
+            m_iFiring     = TURRETFIRESTATE_NONE;
+            Sound("coop_mg_overheat");
+            return;
+        }
+    } else if (m_fHeat > 0.0f) {
+        m_fHeat -= 8.0f * level.frametime;
+        if (m_fHeat < 0.0f) {
+            m_fHeat = 0.0f;
+        }
+    }
 
     if (g_target_game == target_game_e::TG_MOH) {
         //
@@ -1269,7 +1324,12 @@ void TurretGun::AI_DoFiring()
         }
 
         if (IsFiring() && ReadyToFire(FIRE_PRIMARY)) {
+            // HZM coop: scale the AI's bullet damage for this shot only (restore right after -
+            // the same turret TIK is used player-manned, which keeps full damage)
+            fSavedDamage               = bulletdamage[FIRE_PRIMARY];
+            bulletdamage[FIRE_PRIMARY] = fSavedDamage * HZM_AiTurretDamageScale();
             Fire(FIRE_PRIMARY);
+            bulletdamage[FIRE_PRIMARY] = fSavedDamage;
         }
 
         return;
@@ -1299,7 +1359,11 @@ void TurretGun::AI_DoFiring()
         }
         break;
     case TURRETFIRESTATE_FIRING:
+        // HZM coop: AI damage scale for this shot only (see TG_MOH path above)
+        fSavedDamage               = bulletdamage[FIRE_PRIMARY];
+        bulletdamage[FIRE_PRIMARY] = fSavedDamage * HZM_AiTurretDamageScale();
         Fire(FIRE_PRIMARY);
+        bulletdamage[FIRE_PRIMARY] = fSavedDamage;
 
         if (m_fMaxBurstTime > 0) {
             if (m_fFireToggleTime < level.time) {

@@ -574,7 +574,11 @@ CL_StartLocalSound
 ====================
 */
 void CL_StartLocalSound(const char* soundName, qboolean forceLoad) {
-	S_StartLocalSound(soundName, qfalse );
+	// HZM coop - cgame's local 2D gameplay sounds (breathing, bullet cracks, tinnitus, etc.)
+	// went through CHAN_MENU, which the SFX slider exempts so menu UI stays audible. That left
+	// them uncontrollable by SFX. Route them through CHAN_AUTO instead so the SFX slider scales
+	// them like every other effect. Menu clicks use UI_StartLocalSound (still CHAN_MENU).
+	S_StartLocalSoundChannel(soundName, qfalse, CHAN_AUTO);
 }
 
 /*

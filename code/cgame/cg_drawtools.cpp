@@ -27,6 +27,11 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 
 extern "C" void CG_DrawCoopIcons(void);
 
+// HZM coop - HUD FADE state (logic lives above CG_Draw2D; declared here because huddraw/
+// magazines drawing earlier in the file multiplies the same alpha)
+static int   s_hudTouchTime = -100000; // cg.time of the last HUD-relevant activity
+static float s_hudFadeAlpha = 1.0f;
+
 /*
 ================
 CG_AdjustFrom640
@@ -640,7 +645,14 @@ void CG_HudDrawElements()
             }
         }
 
-        cgi.R_SetColor(cgi.HudDrawElements[i].vColor);
+        // HZM coop - HUD fade: scripted huddraw chrome (score, reward icons, counters) follows the
+        // same activity-driven fade as the health/ammo panels (compass exempt - it is not huddraw).
+        {
+            vec4_t vFadedCol;
+            Vector4Copy(cgi.HudDrawElements[i].vColor, vFadedCol);
+            vFadedCol[3] *= s_hudFadeAlpha;
+            cgi.R_SetColor(vFadedCol);
+        }
         if (cgi.HudDrawElements[i].string[0]) {
             fontheader_t *pFont = cgi.HudDrawElements[i].pFont;
             if (!pFont) {
@@ -873,7 +885,13 @@ void CG_DrawPlayerTeam()
     }
 
     if (handle) {
-        cgi.R_SetColor(NULL);
+        // HZM coop - HUD fade: the team logo is persistent chrome, follow the fade
+        vec4_t vTeamCol = {1.0f, 1.0f, 1.0f, 1.0f};
+        vTeamCol[3] = s_hudFadeAlpha;
+        if (vTeamCol[3] <= 0.02f) {
+            return;
+        }
+        cgi.R_SetColor(vTeamCol);
         cgi.R_DrawStretchPic(
             96.0 * cgs.uiHiResScale[0],
             cgs.glconfig.vidHeight - 46 * cgs.uiHiResScale[1],
@@ -1358,13 +1376,27 @@ void CG_DrawCrosshair()
         return;
     }
 
+    // HZM coop - THIRD-PERSON FREE CAM: while the free orbit owns the mouse the camera direction is NOT
+    // the aim direction (the character keeps its facing), so any crosshair - including the 3P true-aim
+    // projection below - would lie. Hide it; the ADS handoff drops the capture, so it pops back the
+    // instant you hold aim (shoulder stage shows the projected true-aim crosshair exactly as today).
+    // [229] EXCEPT IN COVER: since [226] the usercmd carries the composited camera direction while
+    // covered, so camera == aim == where blindfire fires and where the peek will open - the
+    // crosshair is truthful there and wanted ("so you know where you will be firing when you
+    // stand up" - user). Normal (non-cover) free orbit still hides it.
+    if (CG_FreecamCaptureActive() && !(cg.snap->ps.pm_flags & PMF_COOP_COVER)) {
+        return;
+    }
+
     // HZM coop - hide the crosshair while aiming down sights (ADS button held) so the iron sights are used.
     // Sniper scopes already hide it via STAT_INZOOM below; this covers the iron-sight ADS (not scoped).
+    // STAGED 3P ADS: while the camera is still THIRD person (over-the-shoulder aim stage) the crosshair
+    // is the aiming reference, so keep it - hide only once the view is actually first-person irons.
     {
         usercmd_t adsCmd;
         cgi.GetUserCmd(cgi.GetCurrentCmdNumber(), &adsCmd);
         if ((adsCmd.buttons & BUTTON_COOPADS) && cg.snap->ps.stats[STAT_HEALTH] > 0
-            && !cg.snap->ps.stats[STAT_INZOOM]) {
+            && !cg.snap->ps.stats[STAT_INZOOM] && !cg.renderingThirdPerson) {
             return;
         }
     }
@@ -1429,14 +1461,52 @@ void CG_DrawCrosshair()
     }
 
     if (shader) {
+        qboolean bProjected = qfalse;
+
         width  = cgi.R_GetShaderWidth(shader);
         height = cgi.R_GetShaderHeight(shader);
         x      = (cgs.glconfig.vidWidth - width) * 0.5f;
         y      = (cgs.glconfig.vidHeight - height) * 0.5f;
 
-        // HZM coop - FREE-AIM: move the crosshair to the actual aim point (offset from screen centre by the
-        // deadzone offset) so it marks where bullets go, not the camera centre.
+        // HZM coop - THIRD-PERSON TRUE AIM: in 3P the camera sits behind/beside the shoulder, so the
+        // screen-centre crosshair marks the CAMERA ray, not the bullet ray (bullets leave the EYE along
+        // ps->viewangles). Trace the actual bullet ray and re-project its impact point through the
+        // offset camera, so the crosshair sits exactly where the shot will land at any range.
         {
+            static cvar_t *p3p = NULL;
+            if (!p3p) { p3p = cgi.Cvar_Get("cg_crosshair3p", "1", CVAR_ARCHIVE); }
+            if (p3p->integer && cg.renderingThirdPerson) {
+                vec3_t  vEye, vFwd, vAimEnd, vDir;
+                trace_t trAim;
+                float   f, r, u, tanx, tany;
+
+                VectorCopy(cg.predicted_player_state.origin, vEye);
+                vEye[2] += cg.predicted_player_state.viewheight;
+                AngleVectorsLeft(cg.predicted_player_state.viewangles, vFwd, NULL, NULL);
+                VectorMA(vEye, 8192, vFwd, vAimEnd);
+                CG_Trace(
+                    &trAim, vEye, vec3_origin, vec3_origin, vAimEnd, cg.snap->ps.clientNum, MASK_SHOT,
+                    qfalse, qtrue, "CG_DrawCrosshair3P"
+                );
+
+                VectorSubtract(trAim.endpos, cg.refdef.vieworg, vDir);
+                f = DotProduct(vDir, cg.refdef.viewaxis[0]);
+                if (f > 1.0f) { // impact in front of the camera; else keep the centre crosshair
+                    r    = DotProduct(vDir, cg.refdef.viewaxis[1]); // viewaxis[1] = LEFT
+                    u    = DotProduct(vDir, cg.refdef.viewaxis[2]);
+                    tanx = tan(DEG2RAD(((cg.refdef.fov_x > 1.0f) ? cg.refdef.fov_x : 90.0f) * 0.5f));
+                    tany = tan(DEG2RAD(((cg.refdef.fov_y > 1.0f) ? cg.refdef.fov_y : 73.0f) * 0.5f));
+                    x    = (cgs.glconfig.vidWidth  * 0.5f) * (1.0f - (r / f) / tanx) - width * 0.5f;
+                    y    = (cgs.glconfig.vidHeight * 0.5f) * (1.0f - (u / f) / tany) - height * 0.5f;
+                    bProjected = qtrue;
+                }
+            }
+        }
+
+        // HZM coop - FREE-AIM: move the crosshair to the actual aim point (offset from screen centre by the
+        // deadzone offset) so it marks where bullets go, not the camera centre. (First-person mechanism;
+        // skipped when the 3P projection above already placed the crosshair.)
+        if (!bProjected) {
             float faYaw, faPitch;
             if (CG_GetFreeAim(&faYaw, &faPitch)) {
                 float fovx = (cg.refdef.fov_x > 1.0f) ? cg.refdef.fov_x : 90.0f;
@@ -1715,8 +1785,12 @@ static void CG_DrawAdsVignette(void)
         return;
     }
 
+    // HZM coop - the focus vignette/DoF applies in first-person irons AND the 3P over-the-shoulder aim
+    // stage (user request 2026-07-06: shoulder aim gets the same base-ADS effects). In 3P we key off the
+    // shoulder camera envelope so the effect engages with the camera ease; breath-hold deepening below
+    // stays FP-only (there is no breath system in 3P).
     step = (cg.frametime > 0) ? ((float)cg.frametime / 150.0f) : 1.0f; // ~0.15s in/out
-    if (CG_AimingDownSights()) {
+    if (CG_AimingDownSights() && (!cg.renderingThirdPerson || CG_AdsShoulderFrac() > 0.5f)) {
         fAlpha += step;
         if (fAlpha > 1.0f) { fAlpha = 1.0f; }
     } else {
@@ -1727,7 +1801,7 @@ static void CG_DrawAdsVignette(void)
     // HZM coop - breath-hold DEEPENS the ADS focus: ease a second value up while ACTIVELY steadying breath
     // (the same state that applies cg_breathZoom), and back down when the hold ends/recharges.
     bstep   = (cg.frametime > 0) ? ((float)cg.frametime / 250.0f) : 1.0f; // ~0.25s, a hair slower than the base
-    bBreath = (CG_AimingDownSights() && CG_IsBreathSteady()) ? qtrue : qfalse;
+    bBreath = (CG_AimingDownSights() && !cg.renderingThirdPerson && CG_IsBreathSteady()) ? qtrue : qfalse;
     if (bBreath) {
         fBreath += bstep;
         if (fBreath > 1.0f) { fBreath = 1.0f; }
@@ -1827,7 +1901,10 @@ static void CG_DrawMagazines(void)
     col[0] = 0.80f;
     col[1] = 0.72f;
     col[2] = 0.35f;
-    col[3] = 1.0f; // muted gold, matching the old ammo text
+    col[3] = 1.0f * s_hudFadeAlpha; // muted gold, matching the old ammo text; follows the HUD fade
+    if (col[3] <= 0.02f) {
+        return;
+    }
     cgi.R_SetColor(col);
     // small "MAGS" caption above the number (offsets are in virtual units, like sx/sy)
     cgi.R_DrawString(cgs.media.objectiveFont, "MAGS", sx, sy - 14.0f, -1, cgs.uiHiResScale);
@@ -1835,8 +1912,123 @@ static void CG_DrawMagazines(void)
     cgi.R_SetColor(NULL);
 }
 
+/*
+===============================================================================
+HZM coop - HUD FADE (user design 2026-07-06)
+
+The persistent HUD chrome (health + ammo panels; the COMPASS is exempt by user
+request) fades out after coop_hudFadeTime seconds of "calm" and fades back fast
+on any HUD-relevant activity:
+  - firing (either barrel) or holding ADS (deliberate engagement)
+  - health change (damage taken / heals), ammo or clip change (shots, reloads,
+    pickups), weapon switch or weapon pickup
+  - objective updates (CS_OBJECTIVES hook in cg_main.c) and incoming suppression
+    (CG_AddSuppression hook in cg_view.c) via CG_HudFadeTouch()
+Safety: below 25% max health (or dead/DBNO) the HUD never fades.
+cgame computes one alpha and publishes it in ui_hudAlpha for the client UI layer
+(cl_ui.cpp applies it to the hud_health / hud_ammo menu containers). Transient
+panels (objectives list, prompts, weapon bar) keep their own lifetimes.
+coop_hudFade 0 disables (classic always-on HUD).
+===============================================================================
+*/
+
+// coop_hudFadeDebug 1: print every fade-touch with its reason (rate-limited per reason) so a stuck
+// always-visible HUD can be diagnosed from qconsole.log.
+static void CG_HudFadeDebug(const char *reason)
+{
+    static cvar_t *pDbg = NULL;
+    static int     lastPrint = -100000;
+    if (!pDbg) { pDbg = cgi.Cvar_Get("coop_hudFadeDebug", "0", 0); }
+    if (pDbg->integer && cg.time - lastPrint > 250) {
+        cgi.Printf("^~^~^ HUDFADE touch: %s (t=%d)\n", reason, cg.time);
+        lastPrint = cg.time;
+    }
+}
+
+void CG_HudFadeTouch(void)
+{
+    s_hudTouchTime = cg.time;
+    CG_HudFadeDebug("external (objective/suppression)");
+}
+
+static void CG_UpdateHudFade(void)
+{
+    static cvar_t *pOn = NULL, *pHold = NULL;
+    static int     lastHealth = -99999, lastWeap = -99999, lastAmmoSig = -99999, lastOwned = -99999;
+    static float   lastPub = -2.0f;
+    usercmd_t      ucmd;
+    int            h, maxh, weap, ammoSig, owned;
+    float          target, step;
+
+    if (!pOn)   { pOn   = cgi.Cvar_Get("coop_hudFade", "1", CVAR_ARCHIVE); }
+    if (!pHold) { pHold = cgi.Cvar_Get("coop_hudFadeTime", "5", CVAR_ARCHIVE); }
+    if (!cg.snap) {
+        return;
+    }
+
+    // deliberate inputs: firing or aiming (ADS hold; NOT free-look - that never rests)
+    memset(&ucmd, 0, sizeof(ucmd));
+    cgi.GetUserCmd(cgi.GetCurrentCmdNumber(), &ucmd);
+    if (ucmd.buttons & (BUTTON_ATTACKLEFT | BUTTON_ATTACKRIGHT | BUTTON_COOPADS)) {
+        s_hudTouchTime = cg.time;
+        CG_HudFadeDebug(va("buttons 0x%x", ucmd.buttons));
+    }
+
+    // state deltas: health, ammo+clip, active weapon, owned-weapons mask (pickups)
+    h       = cg.snap->ps.stats[STAT_HEALTH];
+    weap    = cg.snap->ps.activeItems[1];
+    ammoSig = cg.snap->ps.stats[STAT_AMMO] * 1024 + cg.snap->ps.stats[STAT_CLIPAMMO];
+    owned   = cg.snap->ps.stats[STAT_WEAPONS];
+    if (h != lastHealth || weap != lastWeap || ammoSig != lastAmmoSig || owned != lastOwned) {
+        if (lastHealth != -99999) { // very first snapshot is baseline, not activity
+            CG_HudFadeDebug(
+                va("delta h %d->%d weap %d->%d ammo %d->%d owned %d->%d",
+                   lastHealth, h, lastWeap, weap, lastAmmoSig, ammoSig, lastOwned, owned)
+            );
+        }
+        s_hudTouchTime = cg.time;
+        lastHealth = h;
+        lastWeap = weap;
+        lastAmmoSig = ammoSig;
+        lastOwned = owned;
+    }
+
+    // hurt/downed safety: the red health warning must never hide
+    maxh = cg.snap->ps.stats[STAT_MAXHEALTH];
+    if (h <= 0 || (maxh > 0 && h * 4 <= maxh)) {
+        s_hudTouchTime = cg.time;
+        CG_HudFadeDebug(va("low health %d/%d", h, maxh));
+    }
+
+    if (pOn->integer) {
+        float hold = pHold->value;
+        if (hold < 1.0f) { hold = 1.0f; }
+        target = (cg.time - s_hudTouchTime < (int)(hold * 1000.0f)) ? 1.0f : 0.0f;
+    } else {
+        target = 1.0f;
+    }
+
+    // fast in (~0.2s), gentle out (~0.75s)
+    step = (cg.frametime > 0) ? (float)cg.frametime / ((target > s_hudFadeAlpha) ? 200.0f : 750.0f) : 1.0f;
+    if (target > s_hudFadeAlpha) {
+        s_hudFadeAlpha += step;
+        if (s_hudFadeAlpha > 1.0f) { s_hudFadeAlpha = 1.0f; }
+    } else {
+        s_hudFadeAlpha -= step;
+        if (s_hudFadeAlpha < 0.0f) { s_hudFadeAlpha = 0.0f; }
+    }
+
+    // publish for the client UI layer - on change only (no per-frame cvar churn at rest)
+    if (s_hudFadeAlpha < lastPub - 0.002f || s_hudFadeAlpha > lastPub + 0.002f
+        || (s_hudFadeAlpha != lastPub && (s_hudFadeAlpha == 0.0f || s_hudFadeAlpha == 1.0f))) {
+        cgi.Cvar_Set("ui_hudAlpha", va("%.3f", s_hudFadeAlpha));
+        lastPub = s_hudFadeAlpha;
+    }
+}
+
 void CG_Draw2D(void)
 {
+    CG_UpdateHudFade();
     CG_UpdateCountdown();
     CG_DrawZoomOverlay();
     CG_DrawAdsVignette();

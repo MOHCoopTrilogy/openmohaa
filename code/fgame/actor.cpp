@@ -1320,6 +1320,18 @@ Event EV_Actor_AttackPlayer
     "Force Actor to attack the player",
     EV_NORMAL
 );
+// HZM coop: like attackplayer but for an arbitrary sentient. Needed so allied AI
+// (paratroopers) can be handed officer-wave enemies: waves are hard-locked onto players
+// and never damage AI, so the damage-driven notice path never fires on either side.
+Event EV_Actor_AttackEntity
+(
+    "attackentity",
+    EV_DEFAULT,
+    "e",
+    "target",
+    "Force Actor to attack the given sentient",
+    EV_NORMAL
+);
 Event EV_Actor_SetSoundAwareness
 (
     "sound_awareness",
@@ -2624,6 +2636,7 @@ CLASS_DECLARATION(SimpleActor, Actor, "Actor") {
     {&EV_Actor_SetDisguiseAcceptThread2,      &Actor::EventSetDisguiseAcceptThread      },
     {&EV_Actor_GetDisguiseAcceptThread,       &Actor::EventGetDisguiseAcceptThread      },
     {&EV_Actor_AttackPlayer,                  &Actor::EventAttackPlayer                 },
+    {&EV_Actor_AttackEntity,                  &Actor::EventAttackEntity                 },
     {&EV_Actor_SetAlarmNode,                  &Actor::EventSetAlarmNode                 },
     {&EV_Actor_SetAlarmNode2,                 &Actor::EventSetAlarmNode                 },
     {&EV_Actor_GetAlarmNode,                  &Actor::EventGetAlarmNode                 },
@@ -3325,7 +3338,11 @@ void Actor::GetMoveInfo(mmove_t *mm)
 
             p = static_cast<Player *>(G_GetEntity(0));
 
-            if (!IsTeamMate(p)) {
+            // HZM coop: G_GetEntity(0) is NULL while client 0 is still connecting (CS_PRIMED,
+            // before ClientBegin spawns the player). Patrol AI bumping a temp obstacle in that
+            // window crashed every machine on m1l2a/m1l2b/m1l3c (bug-242 root cause). No player
+            // entity = nobody to blame for the obstacle - just skip the aggression branch.
+            if (p && !IsTeamMate(p)) {
                 if (!m_bEnableEnemy) {
                     m_bDesiredEnableEnemy = true;
                     UpdateEnableEnemy();
@@ -3345,7 +3362,9 @@ void Actor::GetMoveInfo(mmove_t *mm)
                 m_Path.Clear();
                 p = static_cast<Player *>(G_GetEntity(0));
 
-                if (!IsTeamMate(p)) {
+                // HZM coop: NULL while client 0 is connecting - see the ANIM_MODE_NORMAL
+                // obstacle branch above (bug-242)
+                if (p && !IsTeamMate(p)) {
                     if (!m_bEnableEnemy) {
                         m_bDesiredEnableEnemy = true;
                         UpdateEnableEnemy();
@@ -9208,6 +9227,31 @@ void Actor::EventAttackPlayer(Event *ev)
     }
 
     ForceAttackPlayer();
+}
+
+/*
+===============
+Actor::EventAttackEntity
+
+HZM coop: hand this actor a specific sentient as its confirmed enemy (attackplayer for
+arbitrary targets). Dead/invalid targets are ignored silently - callers poll from script
+loops and a hard ScriptError would kill the calling thread.
+===============
+*/
+void Actor::EventAttackEntity(Event *ev)
+{
+    Entity *pEnt = ev->GetEntity(1);
+
+    if (!pEnt || !pEnt->IsSubclassOfSentient()) {
+        return;
+    }
+
+    Sentient *pSent = static_cast<Sentient *>(pEnt);
+    if (pSent->IsDead()) {
+        return;
+    }
+
+    m_PotentialEnemies.ConfirmEnemy(this, pSent);
 }
 
 /*

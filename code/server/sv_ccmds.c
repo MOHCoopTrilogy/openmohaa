@@ -29,6 +29,7 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 #endif
 
 #include "../sys/win_localization.h"
+#include "../qcommon/tiki.h" // HZM TEMP diag (bug-259 tikiprobe)
 
 /*
 ===============================================================================
@@ -1944,6 +1945,39 @@ static void SV_TIKI_DumpBones_f( void ) {
 SV_AddOperatorCommands
 ==================
 */
+
+/*
+==================
+SV_TikiProbe_f
+
+HZM TEMP diag (bug-259 follow-up): load a TIKI and resolve anim aliases, writing the verdict
+to tikiprobe_result.txt in the homepath - dedicated harness logs do not reliably carry
+script/console prints, so a file is the only dependable channel.
+usage: tikiprobe <modelpath> <alias> [alias...]
+==================
+*/
+static void SV_TikiProbe_f(void) {
+	dtiki_t *tiki;
+	char     out[4096];
+	int      len = 0;
+	int      i;
+
+	if (Cmd_Argc() < 3) {
+		Com_Printf("usage: tikiprobe <model> <alias...>\n");
+		return;
+	}
+	tiki = TIKI_RegisterTiki(Cmd_Argv(1));
+	len += Com_sprintf(out + len, sizeof(out) - len, "model=%s tiki=%s\n", Cmd_Argv(1), tiki ? "LOADED" : "NULL");
+	if (tiki) {
+		len += Com_sprintf(out + len, sizeof(out) - len, "num_anims=%d\n", TIKI_NumAnims(tiki));
+		for (i = 2; i < Cmd_Argc(); i++) {
+			int num = TIKI_Anim_NumForName(tiki, Cmd_Argv(i));
+			len += Com_sprintf(out + len, sizeof(out) - len, "alias '%s' -> %d\n", Cmd_Argv(i), num);
+		}
+	}
+	FS_WriteFile("tikiprobe_result.txt", out, len);
+}
+
 void SV_AddOperatorCommands(void) {
 	static qboolean	initialized;
 
@@ -1970,6 +2004,7 @@ void SV_AddOperatorCommands(void) {
 	Cmd_AddCommand("serverinfo", SV_Serverinfo_f);
 	Cmd_AddCommand("systeminfo", SV_Systeminfo_f);
 	Cmd_AddCommand("dumpuser", SV_DumpUser_f);
+	Cmd_AddCommand("tikiprobe", SV_TikiProbe_f); // HZM TEMP diag (bug-259)
 	Cmd_AddCommand("restart", SV_MapRestart_f);
 	Cmd_AddCommand("sectorlist", SV_SectorList_f);
 	Cmd_AddCommand("spmap", SV_Map_f);

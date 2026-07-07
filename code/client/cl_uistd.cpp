@@ -480,7 +480,17 @@ void UIFakkLabel::DrawStatbar(float frac)
     alpha = 1.0 - ((float)uid.time - m_flashtime) / 1500.0;
     alpha = Q_clamp_float(alpha, 0, 1);
 
-    col[3] = alpha;
+    // HZM coop - HUD fade: the main bar used to rely on the render color left set by
+    // UIWidget::Display (which happened to carry m_local_alpha); set it explicitly, and
+    // scale the change-flash overlay by the same widget alpha so it can't pop full-bright
+    // through a faded panel.
+    {
+        vec4_t colBase;
+        colBase[0] = colBase[1] = colBase[2] = 1.0;
+        colBase[3] = m_local_alpha;
+        re.SetColor(colBase);
+    }
+    col[3] = alpha * m_local_alpha;
 
     if (m_statbar_material) {
         if (m_flags & WF_TILESHADER) {
@@ -1407,7 +1417,10 @@ void UIFakkLabel::Draw(void)
     }
 
     if (m_stat_configstring != -1) {
-        m_font->setColor(m_foreground_color);
+        m_font->setColor(UColor(
+            m_foreground_color.r, m_foreground_color.g, m_foreground_color.b,
+            m_foreground_color.a * m_local_alpha // HZM coop - HUD fade: stat text follows widget alpha
+        ));
 
         if (m_bOutlinedText) {
             m_font->PrintOutlinedJustified(
@@ -1434,7 +1447,10 @@ void UIFakkLabel::Draw(void)
         int delta = cl.snap.ps.stats[m_stat];
 
         if (m_statbar_or == L_STATBAR_NONE) {
-            m_font->setColor(m_foreground_color);
+            m_font->setColor(UColor(
+            m_foreground_color.r, m_foreground_color.g, m_foreground_color.b,
+            m_foreground_color.a * m_local_alpha // HZM coop - HUD fade: stat text follows widget alpha
+        ));
 
             if (m_bOutlinedText) {
                 m_font->PrintOutlinedJustified(
@@ -1528,7 +1544,10 @@ void UIFakkLabel::Draw(void)
             return;
         }
 
-        m_font->setColor(m_foreground_color);
+        m_font->setColor(UColor(
+            m_foreground_color.r, m_foreground_color.g, m_foreground_color.b,
+            m_foreground_color.a * m_local_alpha // HZM coop - HUD fade: stat text follows widget alpha
+        ));
 
         if (m_bOutlinedText) {
             m_font->PrintOutlinedJustified(

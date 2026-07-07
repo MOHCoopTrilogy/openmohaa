@@ -84,3 +84,8 @@ INSTALL(TARGETS fgame DESTINATION ${CMAKE_INSTALL_LIBDIR}/${LIB_INSTALL_SUBDIR})
 if(MSVC)
 	INSTALL(FILES $<TARGET_PDB_FILE:fgame> DESTINATION ${CMAKE_INSTALL_LIBDIR}/${LIB_INSTALL_SUBDIR} OPTIONAL)
 endif()
+
+# HZM TEMP: linker map for crash symbolication (m1l2a hunt)
+if(MSVC)
+    target_link_options(fgame PRIVATE /MAP /DEBUG)
+endif()
