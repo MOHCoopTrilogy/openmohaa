@@ -73,6 +73,7 @@ set(SOURCES_COMMON
 	"${CMAKE_SOURCE_DIR}/code/qcommon/memory.c"
 	"${CMAKE_SOURCE_DIR}/code/qcommon/msg.cpp"
 	"${CMAKE_SOURCE_DIR}/code/qcommon/net_chan.c"
+	"${CMAKE_SOURCE_DIR}/code/qcommon/net_rendezvous.c"
 	"${CMAKE_SOURCE_DIR}/code/qcommon/net_ip.c"
 	"${CMAKE_SOURCE_DIR}/code/qcommon/q_math.c"
 	"${CMAKE_SOURCE_DIR}/code/qcommon/q_shared.c"

@@ -1029,6 +1029,13 @@ qboolean Player::CondCoopCoverPeek(Conditional& condition)
     return m_bCoopCoverPeek;
 }
 
+// HZM coop [231] - 3P over-the-shoulder aim stage live (u_shoulderaim mirror): the legs statemap
+// swaps run/walk anims for the aimed-locomotion set while it holds
+qboolean Player::CondCoopShoulderAim(Conditional& condition)
+{
+    return m_bCoopShoulderAim ? qtrue : qfalse;
+}
+
 // HZM coop - take cover [215]: the detected opening is on the RIGHT of the wall pose
 qboolean Player::CondCoopCoverOpenRight(Conditional& condition)
 {
@@ -2131,6 +2138,7 @@ Condition<Player> Player::m_conditions[] = {
     {"COOP_COVER",                      &Player::CondCoopCover               }, // HZM coop - take cover: standing back-to-wall pose valid [214]
     {"COOP_COVER_LOW",                  &Player::CondCoopCoverLow            }, // HZM coop - take cover: crouched low-cover pose valid [214]
     {"COOP_COVER_PEEK",                 &Player::CondCoopCoverPeek           }, // HZM coop - take cover: RMB peek-aim active [215]
+    {"COOP_SHOULDERAIM",                &Player::CondCoopShoulderAim         }, // HZM coop - 3P shoulder-aim stage live [231]
     {"COOP_COVER_OPENRIGHT",            &Player::CondCoopCoverOpenRight      }, // HZM coop - take cover: opening is on the RIGHT [215]
     {"COOP_ON_TURRET",                  &Player::CondCoopOnTurret            }, // HZM coop - manning any turret (m_pTurret set) [216]
     {"COOP_BLINDFIRE",                  &Player::CondCoopBlindfire           }, // HZM coop - take cover: blind-fire (covered + fire held) [214]

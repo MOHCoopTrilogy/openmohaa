@@ -662,7 +662,16 @@ void CL_MouseMove( usercmd_t *cmd ) {
 			}
 			bWasFreecamCapture = qtrue;
 
-			aimPitch = AngleNormalize180( cl.viewangles[PITCH] );
+			// HZM coop [237] - EFFECTIVE aim pitch including the server's delta_angles: reload /
+			// respawn / script view nudges land in delta_angles while cl.viewangles stays frozen
+			// under capture, so a clamp computed from cl.viewangles alone drifted its +/-85 window
+			// off the real pitch and could wedge with zero mouse headroom ("after you reload in
+			// free cam your camera gets stuck at an upwards angle" - user).
+			aimPitch = cl.viewangles[PITCH];
+			if ( cl.snap.valid ) {
+				aimPitch += SHORT2ANGLE( cl.snap.ps.delta_angles[PITCH] );
+			}
+			aimPitch = AngleNormalize180( aimPitch );
 
 			camera_offset[YAW]   -= m_yaw->value * mx;
 			camera_offset[YAW]    = AngleNormalize180( camera_offset[YAW] );
@@ -880,7 +889,7 @@ usercmd_t CL_CreateCmd( void ) {
 	{
 		static cvar_t *fcCap = NULL, *fcAuto = NULL, *fcRate = NULL;
 		if ( !fcCap )  { fcCap  = Cvar_Get( "cg_freecamCapture", "0", 0 ); }
-		if ( !fcAuto ) { fcAuto = Cvar_Get( "cl_freecamAutoFace", "1", CVAR_ARCHIVE ); }
+		if ( !fcAuto ) { fcAuto = Cvar_Get( "cl_freecamAutoFace", "0", CVAR_ARCHIVE ); } // [237] default OFF - camera rotation is mouse-only (user); WASD moves without turning the view
 		if ( !fcRate ) { fcRate = Cvar_Get( "cl_freecamTurnRate", "480", CVAR_ARCHIVE ); }
 		if ( fcCap->integer && fcAuto->integer && ( cmd.forwardmove || cmd.rightmove ) ) {
 			float fm      = (float)cmd.forwardmove;

@@ -380,6 +380,7 @@ public:
     float  m_fCoopVehTurretTime; // level.time stamp while manning a VEHICLE turret (jeep .30cal pose) [219]
     float  m_fCoopProbeTime;     // GUNNERPROBE diagnostic throttle [221 - REMOVE after bug-309 closes]
     int    m_iCoopSpeedBase;     // SPEEDPROBE: ps.speed before the ADS/weapon mults [222 - REMOVE with probe]
+    int    m_iCoopVarCoverLast;  // last coop_incover entity-var value pushed to script (change-gated) [235]
     Vector m_vCoopCoverBaseOrg;  // pose position at cover entry (peek slides away from it and back) [216]
     float  m_fCoopPeekFrac;      // 0..1 eased peek step-out fraction [216]
     float m_fCoopCoverBadTime;   // level.time the pose first went invalid (grace before drop)
@@ -537,6 +538,7 @@ public:
     qboolean CondCoopCover(Conditional& condition);     // HZM coop - standing back-to-wall cover pose valid (TickCoopCover)
     qboolean CondCoopCoverLow(Conditional& condition);  // HZM coop - crouched low-cover pose valid (TickCoopCover)
     qboolean CondCoopCoverPeek(Conditional& condition);      // HZM coop - RMB peek-aim from cover [215]
+    qboolean CondCoopShoulderAim(Conditional& condition);    // HZM coop - 3P shoulder-aim stage live [231]
     qboolean CondCoopCoverOpenRight(Conditional& condition); // HZM coop - opening is RIGHT of the wall pose [215]
     qboolean CondCoopOnTurret(Conditional& condition);        // HZM coop - raw m_pTurret check (manning pose; vanilla edges need !HAS_WEAPON) [216]
     qboolean CondCoopBlindfire(Conditional& condition); // HZM coop - covered + fire held -> blind-fire states

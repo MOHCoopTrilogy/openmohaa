@@ -212,6 +212,33 @@ qboolean CG_CheckCaptureKey(int key, qboolean down, unsigned int time)
             }
             return qtrue;
         }
+        // HZM coop [239] - FREE CAM wheel: wheel-up snaps to FIRST person (ADS-ready - hold RMB
+        // for the per-gun tuned irons, works for every aligned weapon), wheel-down returns to the
+        // 3P free cam while we own that trip. Without this the un-captured wheel fired its
+        // weapnext/weapprev bind - the "gun held in one hand" the user saw was the NEXT WEAPON'S
+        // pullout animation, not a broken ADS.
+        {
+            static qboolean bFcWheelFp = qfalse;
+
+            if (CG_FreecamCaptureActive()) {
+                if (down && key == K_MWHEELUP) {
+                    cgi.Cvar_Set("cg_3rd_person", "0");
+                    bFcWheelFp = qtrue;
+                }
+                return qtrue; // swallow both directions while the orbit owns the mouse
+            }
+            if (bFcWheelFp && !cg.renderingThirdPerson) {
+                if (key == K_MWHEELDOWN) {
+                    if (down) {
+                        cgi.Cvar_Set("cg_3rd_person", "1");
+                        bFcWheelFp = qfalse;
+                    }
+                    return qtrue; // the return trip belongs to the view, not weapprev
+                }
+            } else {
+                bFcWheelFp = qfalse; // view changed by other means - release the wheel
+            }
+        }
     }
 
     // HZM coop - MOUSE3 while shoulder-aiming = SWAP SHOULDERS. Toggles the archived

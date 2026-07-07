@@ -24,6 +24,7 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 #include "client.h"
 #include "../server/server.h"
 #include "cl_ui.h"
+#include "../qcommon/net_rendezvous.h" // HZM coop [238]
 #include "../qcommon/tiki.h"
 #include "../qcommon/cm_terrain.h"
 #include "../qcommon/localization.h"
@@ -2455,6 +2456,11 @@ void CL_ConnectionlessPacket( netadr_t from, msg_t *msg ) {
         return;
     }
 
+	// HZM coop [238] - rendezvous replies (peer endpoint / punch hole-openers / errors)
+	if (RDV_HandleClientOOB(from, c)) {
+		return;
+	}
+
 	Com_DPrintf ("Unknown connectionless packet command: \"%s\".\n", c);
 }
 
@@ -2824,6 +2830,9 @@ void CL_Frame ( int msec ) {
 
 	// resend a connection request if necessary
 	CL_CheckForResend();
+
+	// HZM coop [238] - rendezvous join-request resends/timeout
+	RDV_ClientFrame();
 
 	// decide on the serverTime to render
 	CL_SetCGameTime();
@@ -3766,6 +3775,8 @@ void CL_Init( void ) {
 	// loads once in-game - a menu toggle before that created a flagless cvar that never archived.
 	Cvar_Get ("cg_freecam", "0", CVAR_ARCHIVE );
 	Cvar_Get ("cg_adsShoulderRight", "1", CVAR_ARCHIVE );
+	// HZM coop [238] - NAT rendezvous cvars + the coop_join command
+	RDV_Init();
 
 	//
 	// register our commands

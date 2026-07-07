@@ -21,6 +21,7 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 */
 
 #include "server.h"
+#include "../qcommon/net_rendezvous.h" // HZM coop [238]
 #include "../gamespy/sv_gamespy.h"
 #include "../gamespy/sv_gqueryreporting.h"
 
@@ -787,6 +788,8 @@ void SV_ConnectionlessPacket( netadr_t from, msg_t *msg ) {
 		// if a client starts up a local server, we may see some spurious
 		// server disconnect messages when their new server sees our final
 		// sequenced messages to the old client
+	} else if (RDV_HandleServerOOB(from, c)) {
+		// HZM coop [238] - rendezvous daemon replies (regok / punchreq / err)
 	} else {
 		Com_DPrintf ("bad connectionless packet from %s:\n%s\n",
 			NET_AdrToString (from), s);
@@ -1155,6 +1158,9 @@ void SV_Frame( int msec ) {
 
 	// send a heartbeat to the master if needed
 	SV_MasterHeartbeat();
+
+	// HZM coop [238] - rendezvous registration keepalive + pending hole-punch bursts
+	RDV_ServerFrame();
 
 	// process all gamespy queries
 	SV_ProcessGamespyQueries();

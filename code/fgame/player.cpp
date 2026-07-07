@@ -2211,6 +2211,7 @@ Player::Player()
     m_bCoopCoverPeek   = false;    // HZM coop - RMB peek-aim from cover [215]
     m_fCoopVehTurretTime = -10.0f; // HZM coop - vehicle-turret manning stamp [219]
     m_fCoopProbeTime   = -10.0f;   // HZM coop - GUNNERPROBE throttle [221]
+    m_iCoopVarCoverLast = -1;      // HZM coop - force the first coop_incover var push [235]
     m_vCoopCoverBaseOrg = vec_zero; // HZM coop - cover pose anchor position [216]
     m_fCoopPeekFrac    = 0.0f;     // HZM coop - eased peek step-out fraction [216]
     m_bCoopGearLoop  = false; // HZM coop - gear rattle off
@@ -4225,7 +4226,7 @@ void Player::ClientMove(usercmd_t *ucmd)
     // Crouch keeps its own scale so crouch-aiming doesn't rocket. SPEEDPROBE below still reports
     // the chain so the underlying culprit can be identified.
     if (m_bCoopShoulderAim && !m_bCoopSprinting) {
-        cvar_t *p3pMult = gi.Cvar_Get("coop_adsSpeedMult3p", "1.0", CVAR_ARCHIVE);
+        cvar_t *p3pMult = gi.Cvar_Get("coop_adsSpeedMult3p", "0.7", CVAR_ARCHIVE); // [237] -0.10 again per user (was 0.8); live-tunable 0.5-1.6
         float   m3      = p3pMult ? p3pMult->value : 1.0f;
         float   fFloor;
 
@@ -12497,6 +12498,20 @@ void Player::TickCoopCover()
         if (weapon
             && (weapon->GetWeaponClass() & (WEAPON_CLASS_PISTOL | WEAPON_CLASS_RIFLE | WEAPON_CLASS_SMG | WEAPON_CLASS_MG))) {
             m_bCoopBlindfire = true;
+        }
+    }
+
+    // HZM coop [235] - script-visible stamps for the XP system (xp.scr xp_ai_killed reads
+    // self.coop_incover for the +3 covered-kill bonus and self.coop_bf_t, a level.time stamp
+    // refreshed every blind-firing frame, for the +5 blindfire-kill bonus).
+    {
+        int iCov = (m_bCoopCoverWall || m_bCoopCoverLow) ? 1 : 0;
+        if (iCov != m_iCoopVarCoverLast) {
+            m_iCoopVarCoverLast = iCov;
+            Vars()->SetVariable("coop_incover", iCov);
+        }
+        if (m_bCoopBlindfire) {
+            Vars()->SetVariable("coop_bf_t", level.time);
         }
     }
 }

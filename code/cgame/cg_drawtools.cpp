@@ -1376,17 +1376,9 @@ void CG_DrawCrosshair()
         return;
     }
 
-    // HZM coop - THIRD-PERSON FREE CAM: while the free orbit owns the mouse the camera direction is NOT
-    // the aim direction (the character keeps its facing), so any crosshair - including the 3P true-aim
-    // projection below - would lie. Hide it; the ADS handoff drops the capture, so it pops back the
-    // instant you hold aim (shoulder stage shows the projected true-aim crosshair exactly as today).
-    // [229] EXCEPT IN COVER: since [226] the usercmd carries the composited camera direction while
-    // covered, so camera == aim == where blindfire fires and where the peek will open - the
-    // crosshair is truthful there and wanted ("so you know where you will be firing when you
-    // stand up" - user). Normal (non-cover) free orbit still hides it.
-    if (CG_FreecamCaptureActive() && !(cg.snap->ps.pm_flags & PMF_COOP_COVER)) {
-        return;
-    }
+    // HZM coop [237] - the free-cam capture-hide that lived here was REMOVED: the user wants the
+    // crosshair IN free cam too. The 3P true-aim projection below draws it where the gun actually
+    // points (not screen center), so it stays truthful while the camera orbits freely.
 
     // HZM coop - hide the crosshair while aiming down sights (ADS button held) so the iron sights are used.
     // Sniper scopes already hide it via STAT_INZOOM below; this covers the iron-sight ADS (not scoped).

@@ -1390,12 +1390,18 @@ static qboolean CG_FreecamEligible(void)
     if (!cg.snap) {
         return qfalse;
     }
-    // HZM coop - IN COVER always gets the free orbit (even for first-person players / cg_freecam 0):
-    // the pose forces third person, and the mouse must LOOK AROUND (peek the doorway) without turning
-    // the body - turning viewangles would break the server's wall-sustain trace and dump you back out
-    // (user report). ADS still drops the capture below = mouse aims again = deliberate cover exit.
-    if (!(cg.predicted_player_state.pm_flags & PMF_COOP_COVER)
-        && (!pOn->integer || !cg_3rd_person->integer)) {
+    // HZM coop [232] - IN COVER the mouse aims DIRECTLY (no orbit capture). Historical: cover used
+    // to force the orbit because the old sustain trace was view-dependent (bug-303); sustain has
+    // been ANCHORED since cover v2, and since [226] the server view tracks the camera anyway -
+    // layering the orbit offset on top of that composited aim DOUBLE-applied the pitch, so the
+    // camera could wedge past vertical with the clamps fighting the mouse ("stuck looking up in
+    // cover, mouse-down won't work" - user, bug-327). With no capture the camera simply chases
+    // the live aim: crosshair always true, blindfire/peek aim exactly where you look, and every
+    // pitch limit is the engine's own +/-85.
+    if (cg.predicted_player_state.pm_flags & PMF_COOP_COVER) {
+        return qfalse;
+    }
+    if (!pOn->integer || !cg_3rd_person->integer) {
         return qfalse;
     }
     ps = &cg.predicted_player_state;
@@ -2066,73 +2072,16 @@ static int CG_CalcViewValues(void)
         // "1st person cover should auto shift to third"). Server drops PMF_COOP_COVER the frame
         // cover ends, so a first-person player snaps straight back to first person on exit.
         if (ps->pm_flags & PMF_COOP_COVER) { cg.renderingThirdPerson = qtrue; }
-        // On ENTERING cover, seed the free-look orbit toward the detected opening (client-side
-        // wall probe mirroring the server's): the first thing you see is the doorway you're
-        // covering against, not your own back ("default view should be at the door" - user).
-        {
-            static qboolean bWasCover     = qfalse;
-            static int      iLastCoverMs  = -10000;
-            qboolean        bIsCover      = (ps->pm_flags & PMF_COOP_COVER) ? qtrue : qfalse;
-            // HZM coop [228] - FRESH entries only: a one-frame pose flicker (server grace) or a
-            // brief 1P/3P toggle used to RE-fire this seed and yank the camera/aim +/-55 toward
-            // the "opening" mid-fight ("camera snaps in a completely different direction" - user).
-            qboolean        bFreshEntry   = (cg.time - iLastCoverMs) > 500 ? qtrue : qfalse;
-
-            if (bIsCover) { iLastCoverMs = cg.time; }
-
-            if (bIsCover && !bWasCover && bFreshEntry) {
-                vec3_t   vOut, vStart, vEnd;
-                vec3_t   vAng = {0, ps->viewangles[YAW], 0};
-                qboolean bLookActive, bResetView; // get_camera_offset WRITES these unconditionally - NULL crashes
-                float   *pOrbit = cgi.get_camera_offset(&bLookActive, &bResetView);
-                trace_t  tr;
-                float    fSeed = 0.0f;
-
-                AngleVectors(vAng, vOut, NULL, NULL); // body faces OUT; the wall is behind
-                VectorCopy(ps->origin, vStart);
-                vStart[2] += 48;
-                // probe LEFT of the pose: sidestep, then trace back toward the wall plane
-                vEnd[0] = vStart[0] - vOut[1] * 44 - vOut[0] * 64;
-                vEnd[1] = vStart[1] + vOut[0] * 44 - vOut[1] * 64;
-                vEnd[2] = vStart[2];
-                { vec3_t s = {vStart[0] - vOut[1] * 44, vStart[1] + vOut[0] * 44, vStart[2]};
-                  CG_Trace(&tr, s, vec3_origin, vec3_origin, vEnd, 0, MASK_SOLID, qfalse, qfalse, "cover-seed-left"); }
-                if (tr.fraction >= 1.0f && !tr.startsolid) {
-                    fSeed = 55.0f; // opening on the LEFT (+yaw = left)
-                } else {
-                    vEnd[0] = vStart[0] + vOut[1] * 44 - vOut[0] * 64;
-                    vEnd[1] = vStart[1] - vOut[0] * 44 - vOut[1] * 64;
-                    { vec3_t s = {vStart[0] + vOut[1] * 44, vStart[1] - vOut[0] * 44, vStart[2]};
-                      CG_Trace(&tr, s, vec3_origin, vec3_origin, vEnd, 0, MASK_SOLID, qfalse, qfalse, "cover-seed-right"); }
-                    if (tr.fraction >= 1.0f && !tr.startsolid) {
-                        fSeed = -55.0f; // opening on the RIGHT
-                    }
-                }
-                if (pOrbit && fSeed != 0.0f) {
-                    pOrbit[YAW]   = fSeed;
-                    pOrbit[PITCH] = 0;
-                }
-            }
-            // HZM coop [223] - PITCH UN-JAM: the exe-side orbit clamp (CL_MouseMove) sums against the
-            // CLIENT's frozen viewangles, but while covered the SERVER re-pins the view (entry
-            // auto-turn, peek return) - the two drift apart and the summed camera pitch can wedge
-            // past the pole, which reads as "camera locked up/down in cover" (user report). Re-clamp
-            // the orbit against the SERVER pitch every covered frame so the mouse always has
-            // headroom both ways; 82 sits inside the exe's 85 so a wedged offset actively recovers.
-            if (bIsCover) {
-                qboolean bCLLook, bCLReset; // get_camera_offset WRITES these unconditionally - NULL crashes
-                float   *pOrbFix = cgi.get_camera_offset(&bCLLook, &bCLReset);
-                if (pOrbFix) {
-                    float fSrvPitch = AngleNormalize180(cg.predicted_player_state.viewangles[PITCH]);
-                    if (fSrvPitch + pOrbFix[PITCH] > 82.0f) {
-                        pOrbFix[PITCH] = 82.0f - fSrvPitch;
-                    } else if (fSrvPitch + pOrbFix[PITCH] < -82.0f) {
-                        pOrbFix[PITCH] = -82.0f - fSrvPitch;
-                    }
-                }
-            }
-            bWasCover = bIsCover;
-        }
+        // HZM coop [237] - NATIVE ZOOM IS FINAL: re-assert first person AFTER every 3P force above.
+        // The cover force-3P ran after the zoom force, so scoping while covered/peeking left the
+        // camera in third person with the scope overlay drawn over the back of your own head
+        // ("scope is looking into the back of the players head" - user). A scoped RMB must read
+        // EXACTLY like first person from any 3P mode; turrets keep their fake fov-80 zoom chase.
+        if (ps->stats[STAT_INZOOM] && !(ps->pm_flags & PMF_TURRET)) { cg.renderingThirdPerson = qfalse; }
+        // HZM coop [232] - the cover orbit-seed / pitch un-jam machinery that lived here was
+        // REMOVED: cover no longer captures the mouse into the orbit at all (CG_FreecamEligible)
+        // - the aim is live, the camera chases it, and the engine's own +/-85 pitch clamp is the
+        // only limit (bug-327: layered orbit + composited aim double-applied pitch = stuck-up).
         // HZM coop - mirror the FINAL view mode to the server (u_view3p userinfo, u_shoulderaim
         // pattern): the manned-turret code un-filters the WORLD gun for third-person gunners
         // (SVF_NOTSINGLECLIENT is a server-side send filter the client cannot override).
@@ -2141,15 +2090,6 @@ static int CG_CalcViewValues(void)
             int            v3  = cg.renderingThirdPerson ? 1 : 0;
             if (!pV3) { pV3 = cgi.Cvar_Get("u_view3p", "0", CVAR_USERINFO); }
             if (pV3->integer != v3) { cgi.Cvar_Set("u_view3p", va("%d", v3)); }
-        }
-        // HZM coop [226] - IN-COVER aim-follow signal for the exe (cl_input): while covered, the
-        // usercmd carries the COMPOSITED camera direction (so blindfire/torso track the camera)
-        // and peek enter/exit FOLDS the orbit instead of easing (seamless shoulder handoff).
-        {
-            static cvar_t *pFold = NULL;
-            int            fold  = (ps->pm_flags & PMF_COOP_COVER) ? 1 : 0;
-            if (!pFold) { pFold = cgi.Cvar_Get("cg_freecamFold", "0", 0); }
-            if (pFold->integer != fold) { cgi.Cvar_Set("cg_freecamFold", va("%d", fold)); }
         }
         // HZM coop - staged ADS: the breath-hold machinery only updates in the first-person view-weapon
         // path (CG_OffsetFirstPersonView), which does not run in third person - clear it so a stale

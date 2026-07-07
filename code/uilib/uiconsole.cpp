@@ -539,6 +539,27 @@ qboolean UIConsole::KeyEvent(int key, unsigned int time)
 		m_refreshcompletionbuffer = true;
 	}
 
+	// HZM coop [236] - console PASTE: Ctrl+V or Shift+Insert inserts the clipboard's FIRST line
+	// at the caret (stops at a newline so a multi-line paste can never auto-execute commands).
+	// The clipboard plumbing (uii.GetClipboardData -> Sys_GetClipboardData) always existed;
+	// the console widget just never called it.
+	if ((key == 'v' && uii.Sys_IsKeyDown(K_CTRL)) || (key == K_INS && uii.Sys_IsKeyDown(K_SHIFT))) {
+		char szPaste[1024];
+		int  iP;
+
+		szPaste[0] = 0;
+		uii.GetClipboardData(szPaste, sizeof(szPaste));
+		for (iP = 0; szPaste[iP]; iP++) {
+			if (szPaste[iP] == '\n' || szPaste[iP] == '\r') {
+				break;
+			}
+			if ((unsigned char)szPaste[iP] >= 32) {
+				CharEvent(szPaste[iP]);
+			}
+		}
+		return qtrue;
+	}
+
 	switch (key) {
 	case K_TAB:
 		if (m_refreshcompletionbuffer) {

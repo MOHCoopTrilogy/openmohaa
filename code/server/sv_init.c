@@ -21,6 +21,7 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 */
 
 #include "server.h"
+#include "../qcommon/net_rendezvous.h" // HZM coop [238]
 #include "../client/client.h"
 #include "../qcommon/tiki.h"
 #include "../qcommon/bg_compat.h"
@@ -1041,6 +1042,9 @@ void SV_Init (void)
 	int index;
 
 	SV_AddOperatorCommands();
+
+	// HZM coop [238] - NAT rendezvous cvars (dedicated servers register here too)
+	RDV_Init();
 
 	// serverinfo vars
 	Cvar_Get ("dmflags", "0", CVAR_SERVERINFO);
