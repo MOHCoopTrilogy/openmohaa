@@ -539,22 +539,25 @@ qboolean UIConsole::KeyEvent(int key, unsigned int time)
 		m_refreshcompletionbuffer = true;
 	}
 
-	// HZM coop [236] - console PASTE: Ctrl+V or Shift+Insert inserts the clipboard's FIRST line
+	// HZM coop [236/242] - console PASTE: Ctrl+V or Shift+Insert inserts the clipboard's FIRST line
 	// at the caret (stops at a newline so a multi-line paste can never auto-execute commands).
-	// The clipboard plumbing (uii.GetClipboardData -> Sys_GetClipboardData) always existed;
-	// the console widget just never called it.
+	// [242] CRASH FIX: the first cut called uii.GetClipboardData(buf,len) - a struct field that is
+	// declared but NEVER wired up in cl_ui.cpp (NULL function pointer -> Ctrl+V crashed the game).
+	// The actually-assigned getter is uii.Sys_GetClipboard() (-> Sys_GetWholeClipboard); the
+	// working paste in uimledit.cpp uses it, and it returns NULL on an empty/non-text clipboard,
+	// so it MUST be null-checked before use.
 	if ((key == 'v' && uii.Sys_IsKeyDown(K_CTRL)) || (key == K_INS && uii.Sys_IsKeyDown(K_SHIFT))) {
-		char szPaste[1024];
-		int  iP;
+		const char *clip = uii.Sys_GetClipboard();
+		int         iP;
 
-		szPaste[0] = 0;
-		uii.GetClipboardData(szPaste, sizeof(szPaste));
-		for (iP = 0; szPaste[iP]; iP++) {
-			if (szPaste[iP] == '\n' || szPaste[iP] == '\r') {
-				break;
-			}
-			if ((unsigned char)szPaste[iP] >= 32) {
-				CharEvent(szPaste[iP]);
+		if (clip) {
+			for (iP = 0; clip[iP]; iP++) {
+				if (clip[iP] == '\n' || clip[iP] == '\r') {
+					break;
+				}
+				if ((unsigned char)clip[iP] >= 32) {
+					CharEvent(clip[iP]);
+				}
 			}
 		}
 		return qtrue;

@@ -804,6 +804,11 @@ public:
     void ExitTurret(Event *ev);
     void Holster(Event *ev);
     void HolsterToggle(Event *ev);
+    void CoopLobbyPose(Event *ev);   // HZM coop lobby: freeze player as a parade-rest mannequin
+    void CoopLobbyUnpose(Event *ev); // HZM coop lobby: release the mannequin freeze
+    void CoopLobbyRepose(Event *ev); // HZM coop lobby: atomically swap the frozen idle pose
+    void CoopLobbyCycleAnim(Event *ev); // HZM coop lobby DEV: cycle candidate idle poses to ID one
+    void CoopLobbyHoldPose(Event *ev);  // HZM coop lobby: per-frame re-assert of the hands-on-hips pose
 
     void            RemoveFromVehiclesAndTurretsInternal(void); // Added in 2.30
     void            RemoveFromVehiclesAndTurrets(void);

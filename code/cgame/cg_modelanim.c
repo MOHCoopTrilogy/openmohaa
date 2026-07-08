@@ -1229,6 +1229,13 @@ void CG_ModelAnim(centity_t *cent, qboolean bDoShaderTime)
     // Fixed in OPM
     //  Draw world model body when in camera
     bThirdPerson |= (cg.snap->ps.pm_flags & PMF_CAMERA_VIEW && !(cg.snap->ps.pm_flags & PMF_TURRET));
+    // HZM coop [241] - NATIVE ZOOM lockstep: the camera side (cg_view.c) forces FIRST person while
+    // scoped (STAT_INZOOM, turrets exempt) - the body draw must match or the 1P camera sits inside
+    // the still-drawn head ("sniper scope looks at the back of the player's head"). This is exactly
+    // the lockstep rule from the comment above, applied to the zoom term.
+    if (cg.snap->ps.stats[STAT_INZOOM] && !(cg.snap->ps.pm_flags & PMF_TURRET)) {
+        bThirdPerson = qfalse;
+    }
     // HZM coop - REMOVED the 3rd-person MG42 experiment's `bThirdPerson |= PMF_TURRET` line. It force-drew
     // your own body in 3rd person on EVERY turret (MG42 nest, jeep .30cal, halftrack), overriding the
     // upstream line above (which deliberately excludes turrets so the mounted view stays clean first-person).

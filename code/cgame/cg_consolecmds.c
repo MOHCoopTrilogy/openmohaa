@@ -459,6 +459,62 @@ void CG_AdsDown_f(void)  { CG_AdsNudge(0.0f, -1.0f); }
 void CG_AdsLeft_f(void)  { CG_AdsNudge(-1.0f, 0.0f); }
 void CG_AdsRight_f(void) { CG_AdsNudge( 1.0f, 0.0f); }
 
+// ===== HZM coop - LOBBY CAMERA tuning pad (mirrors the ADS pad) =====
+// Nudges the server-read coop_lobbyCam* / coop_lobbyLook* cvars live. On a listen server the game and
+// cgame share one cvar table, so these client sets reach coop_mod/lobby.scr::applyLobbyCam (which re-reads
+// them every 0.5s and re-positions the shared camera via movetopos/watch). Gated by coop_lobbyCamTune so
+// the numpad keys are inert until a mode is picked. Modes (coop_lobbyCamMode):
+//   0 MOVE  : up/down = camera height (coop_lobbyCamZ)   left/right = dolly in/out (coop_lobbyCamY)
+//   1 FRAME : up/down = FOV zoom (coop_lobbyCamFov)      left/right = side slide (coop_lobbyCamX)
+//   2 AIM   : up/down = aim height (coop_lobbyLookZ)     left/right = aim side (coop_lobbyLookX)
+static void CG_LobbyCamAdjust(const char *name, const char *def, float delta)
+{
+    cvar_t *c = cgi.Cvar_Get(name, def, CVAR_ARCHIVE);
+    char    val[32];
+    Com_sprintf(val, sizeof(val), "%g", c->value + delta);
+    cgi.Cvar_Set(name, val);
+}
+
+static void CG_LobbyCamNudge(float dx, float dy)
+{
+    int mode;
+    if (!cgi.Cvar_Get("coop_lobbyCamTune", "0", CVAR_ARCHIVE)->integer) {
+        return;
+    }
+    mode = cgi.Cvar_Get("coop_lobbyCamMode", "0", CVAR_ARCHIVE)->integer;
+    if (mode == 0) {
+        if (dy != 0.0f) { CG_LobbyCamAdjust("coop_lobbyCamZ", "-205", dy * 8.0f); }
+        if (dx != 0.0f) { CG_LobbyCamAdjust("coop_lobbyCamY", "-100", dx * 8.0f); }
+    } else if (mode == 1) {
+        if (dy != 0.0f) { CG_LobbyCamAdjust("coop_lobbyCamFov", "70", dy * 2.0f); }
+        if (dx != 0.0f) { CG_LobbyCamAdjust("coop_lobbyCamX", "-5347", dx * 8.0f); }
+    } else {
+        if (dy != 0.0f) { CG_LobbyCamAdjust("coop_lobbyLookZ", "-245", dy * 6.0f); }
+        if (dx != 0.0f) { CG_LobbyCamAdjust("coop_lobbyLookX", "-5347", dx * 6.0f); }
+    }
+}
+
+void CG_LcamModeMove_f(void)  { cgi.Cvar_Set("coop_lobbyCamMode", "0"); cgi.Cvar_Set("coop_lobbyCamTune", "1"); cgi.Printf("Lobby cam: MOVE  (8/2 = height, 4/6 = dolly in/out)\n"); }
+void CG_LcamModeFrame_f(void) { cgi.Cvar_Set("coop_lobbyCamMode", "1"); cgi.Cvar_Set("coop_lobbyCamTune", "1"); cgi.Printf("Lobby cam: FRAME (8/2 = FOV zoom, 4/6 = side slide)\n"); }
+void CG_LcamModeAim_f(void)   { cgi.Cvar_Set("coop_lobbyCamMode", "2"); cgi.Cvar_Set("coop_lobbyCamTune", "1"); cgi.Printf("Lobby cam: AIM   (8/2 = aim height, 4/6 = aim side)\n"); }
+void CG_LcamUp_f(void)    { CG_LobbyCamNudge(0.0f,  1.0f); }
+void CG_LcamDown_f(void)  { CG_LobbyCamNudge(0.0f, -1.0f); }
+void CG_LcamLeft_f(void)  { CG_LobbyCamNudge(-1.0f, 0.0f); }
+void CG_LcamRight_f(void) { CG_LobbyCamNudge( 1.0f, 0.0f); }
+void CG_LcamSave_f(void)
+{
+    cgi.Printf("=== LOBBY CAM  (paste these to bake as defaults) ===\n");
+    cgi.Printf("  cam  X %g  Y %g  Z %g   FOV %g\n",
+        cgi.Cvar_Get("coop_lobbyCamX", "-5347", 0)->value,
+        cgi.Cvar_Get("coop_lobbyCamY", "-100", 0)->value,
+        cgi.Cvar_Get("coop_lobbyCamZ", "-205", 0)->value,
+        cgi.Cvar_Get("coop_lobbyCamFov", "70", 0)->value);
+    cgi.Printf("  look X %g  Y %g  Z %g\n",
+        cgi.Cvar_Get("coop_lobbyLookX", "-5347", 0)->value,
+        cgi.Cvar_Get("coop_lobbyLookY", "-427", 0)->value,
+        cgi.Cvar_Get("coop_lobbyLookZ", "-245", 0)->value);
+}
+
 #if 0
 
 
@@ -642,6 +698,14 @@ static consoleCommand_t commands[] = {
     {"adsn_down",              &CG_AdsDown_f               },
     {"adsn_left",              &CG_AdsLeft_f               },
     {"adsn_right",             &CG_AdsRight_f              },
+    {"lcamm_move",             &CG_LcamModeMove_f          },
+    {"lcamm_frame",            &CG_LcamModeFrame_f         },
+    {"lcamm_aim",              &CG_LcamModeAim_f           },
+    {"lcamn_up",               &CG_LcamUp_f                },
+    {"lcamn_down",             &CG_LcamDown_f              },
+    {"lcamn_left",             &CG_LcamLeft_f              },
+    {"lcamn_right",            &CG_LcamRight_f             },
+    {"lcamsave",               &CG_LcamSave_f              },
 };
 
 /*

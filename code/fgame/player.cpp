@@ -586,6 +586,60 @@ Event EV_Player_SafeHolster
     "preserves state, so it will not holster or unholster unless necessary",
     EV_NORMAL
 );
+Event EV_Player_CoopLobbyPose
+(
+    "coop_lobbypose",
+    EV_DEFAULT,
+    NULL,
+    NULL,
+    "HZM coop lobby: freezes the player as a parade-rest mannequin - forces the EMOTE_ATEASE legs +\n"
+    "STAND torso states, slings the main weapon onto the back tag, then sets FL_IMMOBILE so the anim\n"
+    "state machine stops evaluating (the NEW_WEAPON/HAS_WEAPON edges can no longer twitch the pose or\n"
+    "redraw the rifle). Call once the spawn loadout has settled.",
+    EV_NORMAL
+);
+Event EV_Player_CoopLobbyUnpose
+(
+    "coop_lobbyunpose",
+    EV_DEFAULT,
+    NULL,
+    NULL,
+    "HZM coop lobby: releases the mannequin freeze set by coop_lobbypose (clears FL_IMMOBILE and\n"
+    "restores the slung weapon to the hands).",
+    EV_NORMAL
+);
+Event EV_Player_CoopLobbyRepose
+(
+    "coop_lobbyrepose",
+    EV_DEFAULT,
+    "s",
+    "legsstate",
+    "HZM coop lobby: atomically swaps a frozen mannequin's idle pose to the given legs state. Lifts\n"
+    "FL_IMMOBILE, forces STAND torso + that legs state, then re-sets FL_IMMOBILE - all in one call so\n"
+    "the per-frame statemap never ticks in between (no twitch) and the slung weapon is left alone.",
+    EV_NORMAL
+);
+Event EV_Player_CoopLobbyCycleAnim
+(
+    "coop_lobbycycleanim",
+    EV_CONSOLE,
+    "i",
+    "dir",
+    "HZM coop lobby DEV tool: step through the candidate standing-idle anims (dir >0 next, <0 prev),\n"
+    "holding each one, and print its name - used to visually identify the hands-on-hips pose. Bind to keys.",
+    EV_NORMAL
+);
+Event EV_Player_CoopLobbyHoldPose
+(
+    "coop_lobbyholdpose",
+    EV_DEFAULT,
+    NULL,
+    NULL,
+    "HZM coop lobby: re-assert the hands-on-hips pose (STAND torso + coop_pose_g100 legs + FL_IMMOBILE).\n"
+    "Called every frame by lobby.scr::lobbyLockWatch so the spawn/weapon settle churn can't clobber it -\n"
+    "it is the exact call the pose-cycler uses, and is a no-op once the pose is already correct.",
+    EV_NORMAL
+);
 Event EV_Player_SafeZoom
 (
     "safezoom",
@@ -1861,6 +1915,11 @@ CLASS_DECLARATION(Sentient, Player, "player") {
     {&EV_Player_FinishUseAnim,            &Player::FinishUseAnim                },
     {&EV_Player_Holster,                  &Player::HolsterToggle                },
     {&EV_Player_SafeHolster,              &Player::Holster                      },
+    {&EV_Player_CoopLobbyPose,           &Player::CoopLobbyPose                },
+    {&EV_Player_CoopLobbyUnpose,         &Player::CoopLobbyUnpose              },
+    {&EV_Player_CoopLobbyRepose,         &Player::CoopLobbyRepose              },
+    {&EV_Player_CoopLobbyCycleAnim,      &Player::CoopLobbyCycleAnim           },
+    {&EV_Player_CoopLobbyHoldPose,       &Player::CoopLobbyHoldPose            },
     {&EV_Player_SafeZoom,                 &Player::SafeZoomed                   },
     {&EV_Player_ZoomOff,                  &Player::ZoomOffEvent                 },
     {&EV_Player_StartUseObject,           &Player::StartUseObject               },
@@ -8369,6 +8428,174 @@ void Player::HolsterToggle(Event *ev)
 void Player::Holster(Event *ev)
 {
     SafeHolster(ev->GetBoolean(1));
+}
+
+//
+// HZM coop lobby - freeze the player as a parade-rest mannequin.
+//
+// The coop lobby seats each player at a fixed slot for a shared static camera. Posing them at ease
+// from script alone loses a per-frame fight: the anim state machine (EvaluateState) re-runs every tick,
+// and while the forced-respawn deploy leaves the weapon in the "banned -> re-allowed rifle" limbo the
+// weapon-change edges keep firing - STAND torso "RAISE_WEAPON : NEW_WEAPON" redraws the rifle, and
+// EMOTE_ATEASE legs "STAND : +/-HAS_WEAPON" kicks the pose out - so the rifle twitches in his hands.
+//
+// This does it the robust way, in one shot, at the point EvaluateState is defined:
+//   1. force EMOTE_ATEASE legs + STAND (action none) torso WHILE the statemap is still live,
+//   2. sling the main weapon straight onto the back holster tag (no putaway animation, no statemap
+//      dependency - AttachToHolster just re-parents the gun), and
+//   3. set FL_IMMOBILE, which makes EvaluateState early-return (see EvaluateState above), so no edge can
+//      ever fire again: the rifle can't be redrawn and the pose can't be twitched.
+// Paired with coop_lobbyunpose to release before the mission launches.
+//
+void Player::CoopLobbyPose(Event *ev)
+{
+    // The forced-respawn lobby deploy can leave the player noclip-flying: InitEdict sets MOVETYPE_NOCLIP
+    // whenever m_bSpectator is still true (player.cpp:2380), and the script 'respawn' skips the
+    // EndSpectator() that the fire-click deploy does. NOCLIP also makes EvaluateState early-return
+    // (player.cpp:5567), so the pose freezes but the body flies on WASD/space/ctrl. Force a normal
+    // grounded walker so movement can actually be locked.
+    if (IsSpectator()) {
+        EndSpectator();
+    }
+    setMoveType(MOVETYPE_WALK);
+
+    // Sling the wielded main weapon onto the back tag FIRST, so HAS_WEAPON / weapon-out is stable before
+    // we force the at-ease state. If we pose first (weapon still out), EMOTE_ATEASE immediately takes its
+    // "STAND : +/-HAS_WEAPON" exit back to STAND (that is why the pose came up as a plain stand). Kept in
+    // inventory so HAS_WEAPON stays true for the legs state, but out of the hands.
+    {
+        Weapon *rightWeap = GetActiveWeapon(WEAPON_MAIN);
+        if (rightWeap) {
+            rightWeap->AttachToHolster(WEAPON_MAIN);
+            holsteredWeapon = rightWeap;
+        }
+    }
+
+    // Static hands-on-hips parade rest: torso STAND (action none) + legs EMOTE_LOBBY_SELECT (plays
+    // coop_pose_g100 = misc/00G100_Axis_idle.skc, the hands-on-hips pose), then FL_IMMOBILE.
+    //
+    // FL_IMMOBILE IS REQUIRED here (this is exactly what the coop_lobbycycleanim dev tool does, which is
+    // how the pose was confirmed to render hands-on-hips). Without it the per-frame EvaluateState keeps
+    // running and the TORSO drifts off STAND (weapon-carry) which pulls the arms back to the sides,
+    // overriding g100's hands-on-hips -> "just standing". Freezing holds torso=STAND so the g100 legs clip
+    // owns the arms. The clip still self-loops (living idle). No cycling in this single-pose build.
+    if (statemap_Torso) {
+        State *torso = statemap_Torso->FindState("STAND");
+        if (torso) {
+            EvaluateState(torso, NULL);
+        }
+    }
+
+    // Set the legs anim DIRECTLY (exactly what the coop_lobbycycleanim dev tool does, which rendered
+    // hands-on-hips). Do NOT route this through EvaluateState(EMOTE_LOBBY_SELECT): EvaluateState
+    // re-evaluates the TORSO too and lets it drift off STAND (arms snap back to the sides, overriding
+    // g100). SetPartAnim touches only the legs channel, so torso stays the STAND we just forced and the
+    // g100 clip owns the arms (on hips). coop_pose_g100 = misc/00G100_Axis_idle.skc.
+    SetPartAnim("coop_pose_g100", legs);
+
+    flags |= FL_IMMOBILE;
+}
+
+void Player::CoopLobbyUnpose(Event *ev)
+{
+    flags &= ~FL_IMMOBILE;
+
+    if (holsteredWeapon) {
+        useWeapon(holsteredWeapon, WEAPON_MAIN);
+        holsteredWeapon = NULL;
+    }
+}
+
+//
+// HZM coop lobby - swap the frozen mannequin's idle pose (lobby idle-pose rotation).
+//
+// Momentarily lifts the FL_IMMOBILE freeze so EvaluateState will actually apply the forced states,
+// forces STAND torso + the requested legs state, then re-freezes - all inside this single call, so the
+// per-frame EvaluateState never ticks in between (no unfrozen window = no weapon/pose twitch). The
+// weapon was already slung onto the back tag by CoopLobbyPose and is deliberately left untouched.
+//
+void Player::CoopLobbyRepose(Event *ev)
+{
+    str legsName = ev->GetString(1);
+
+    flags &= ~FL_IMMOBILE;
+
+    if (statemap_Torso) {
+        State *torso = statemap_Torso->FindState("STAND");
+        if (torso) {
+            EvaluateState(torso, NULL);
+        }
+    }
+    if (statemap_Legs) {
+        State *legs = statemap_Legs->FindState(legsName);
+        if (legs) {
+            EvaluateState(NULL, legs);
+        }
+    }
+
+    flags |= FL_IMMOBILE;
+}
+
+//
+// HZM coop lobby DEV tool - cycle candidate standing idles to visually identify a pose (e.g. hands-on-hips).
+// Bound to keys (numpad +/-). Sets the legs directly to the next/prev candidate anim (torso STAND so the
+// full-body clip owns the skeleton), holds it, and prints the anim name on screen + console.
+//
+static int s_coopLobbyPoseIdx = 0;
+static const char *s_coopLobbyPoseList[] = {
+    "coop_pose_offic",   "coop_pose_g100",     "coop_pose_g101",
+    "coop_pose_stand1",  "coop_pose_stand2",   "coop_pose_stand3",
+    "coop_pose_stand4",  "coop_pose_stand5",   "coop_pose_generic",
+    "coop_pose_neutral1","coop_pose_neutral2", "coop_pose_a100",
+    "coop_pose_atease"
+};
+
+void Player::CoopLobbyCycleAnim(Event *ev)
+{
+    const int n   = (int)(sizeof(s_coopLobbyPoseList) / sizeof(s_coopLobbyPoseList[0]));
+    int       dir = (ev->GetInteger(1) < 0) ? -1 : 1;
+
+    s_coopLobbyPoseIdx = (s_coopLobbyPoseIdx + dir + n) % n;
+    const char *alias = s_coopLobbyPoseList[s_coopLobbyPoseIdx];
+
+    // lift the freeze, force STAND torso (action none), override the legs with the candidate anim, re-freeze
+    flags &= ~FL_IMMOBILE;
+    if (statemap_Torso) {
+        State *torso = statemap_Torso->FindState("STAND");
+        if (torso) {
+            EvaluateState(torso, NULL);
+        }
+    }
+    SetPartAnim(alias, legs);
+    flags |= FL_IMMOBILE;
+
+    gi.SendServerCommand(
+        edict - g_entities, "print \"" HUD_MESSAGE_WHITE "lobby pose %d/%d: %s\n\"", s_coopLobbyPoseIdx, n - 1, alias
+    );
+    Com_Printf("^~^~^ LOBBY POSE %d: %s\n", s_coopLobbyPoseIdx, alias);
+}
+
+//
+// HZM coop lobby - per-frame re-assert of the hands-on-hips pose (lobby.scr::lobbyLockWatch).
+//
+// coop_lobbypose sets the pose once at spawn, but the spawn/weapon settle churn then clobbers the legs
+// anim (direct SetPartAnim from the weapon/anim code bypasses the FL_IMMOBILE statemap freeze), leaving
+// him arms-at-side. This re-asserts the EXACT pose the cycler uses every frame, which just corrects any
+// clobber and is a no-op when already correct (SetPartAnim early-returns on the same anim). Torso is
+// re-forced to STAND (action none) so the g100 legs clip owns the arms; FL_IMMOBILE is briefly lifted so
+// EvaluateState can apply, then re-set - all within this one synchronous call, so no drift window.
+//
+void Player::CoopLobbyHoldPose(Event *ev)
+{
+    flags &= ~FL_IMMOBILE;
+    if (statemap_Torso) {
+        State *torso = statemap_Torso->FindState("STAND");
+        if (torso) {
+            EvaluateState(torso, NULL);
+        }
+    }
+    SetPartAnim("coop_pose_g100", legs);
+    flags |= FL_IMMOBILE;
 }
 
 void Player::WatchActor(Event *ev)
