@@ -2271,6 +2271,7 @@ float BulletAttack(
         iTravelDist    = 0;
         bBulletDone    = qfalse;
         bThroughThing  = qfalse;
+        qboolean bPenetratedAny = qfalse; // HZM coop - wallbang: set once this round passes through any solid
         newowner       = owner;
         newdamage      = damage;
 
@@ -2295,6 +2296,7 @@ float BulletAttack(
 
                 if (bThroughThing) {
                     bThroughThing = qfalse;
+                    bPenetratedAny = qtrue; // HZM coop - wallbang: this round has punched through a solid
 
                     tracethrough = G_Trace(
                         vTmpEnd,
@@ -2409,6 +2411,13 @@ float BulletAttack(
                         }
 
                         iNumHit++;
+
+                        // HZM coop - wallbang XP: flag the target when this PLAYER round reached it THROUGH a
+                        // solid (bPenetratedAny), so xp.scr::xp_ai_killed can pay the through-wall kill bonus.
+                        // Set on every player hit (0 when clean) so the value is fresh for the killing shot.
+                        if (owner && owner->IsSubclassOfPlayer()) {
+                            ent->Vars()->SetVariable("coop_wallbang", bPenetratedAny ? 1 : 0);
+                        }
 
                         // Get the original value of the victims health or water
 

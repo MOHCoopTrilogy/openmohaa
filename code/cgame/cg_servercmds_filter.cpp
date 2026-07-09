@@ -50,7 +50,14 @@ static const char *whiteListedVariables[] = {
     "s_volume",
     "s_musicvolume",
     "s_ambientvolume",
-    "s_sfxduck"
+    "s_sfxduck",
+
+    // HZM coop - pre-mission lobby: let the server lock in each player's chosen uniform as their default
+    // (dm_playermodel is CVAR_USERINFO|CVAR_ARCHIVE, so it carries into the launched mission AND persists),
+    // and force the bottom-left roster / control-help ihuddraw layer on for every client (host + remote)
+    // even while the engine HUD is hidden - neither is settable via server stufftext without this.
+    "dm_playermodel",
+    "cg_huddraw_force"
 };
 
 //

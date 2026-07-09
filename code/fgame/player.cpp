@@ -640,6 +640,17 @@ Event EV_Player_CoopLobbyHoldPose
     "it is the exact call the pose-cycler uses, and is a no-op once the pose is already correct.",
     EV_NORMAL
 );
+Event EV_Player_CoopLobbyInput
+(
+    "coop_lobbyinput",
+    EV_DEFAULT,
+    "i",
+    "onoff",
+    "HZM coop lobby: while enabled (1), read this player's A/D strafe (rightmove) + F (BUTTON_USE) from the\n"
+    "usercmd every frame and publish self.coop_lobbyInput (31=next uniform, 32=prev, 33=ready) so the lobby\n"
+    "script reacts WITHOUT any client key binds - works for every client, host and remote. 0 disables.",
+    EV_NORMAL
+);
 Event EV_Player_SafeZoom
 (
     "safezoom",
@@ -1920,6 +1931,7 @@ CLASS_DECLARATION(Sentient, Player, "player") {
     {&EV_Player_CoopLobbyRepose,         &Player::CoopLobbyRepose              },
     {&EV_Player_CoopLobbyCycleAnim,      &Player::CoopLobbyCycleAnim           },
     {&EV_Player_CoopLobbyHoldPose,       &Player::CoopLobbyHoldPose            },
+    {&EV_Player_CoopLobbyInput,          &Player::CoopLobbyInput               },
     {&EV_Player_SafeZoom,                 &Player::SafeZoomed                   },
     {&EV_Player_ZoomOff,                  &Player::ZoomOffEvent                 },
     {&EV_Player_StartUseObject,           &Player::StartUseObject               },
@@ -2271,6 +2283,9 @@ Player::Player()
     m_fCoopVehTurretTime = -10.0f; // HZM coop - vehicle-turret manning stamp [219]
     m_fCoopProbeTime   = -10.0f;   // HZM coop - GUNNERPROBE throttle [221]
     m_iCoopVarCoverLast = -1;      // HZM coop - force the first coop_incover var push [235]
+    m_bCoopLobbyInputOn   = false; // HZM coop - lobby usercmd input bridge stays off until the lobby enables it
+    m_iCoopLobbyRightPrev = 0;
+    m_bCoopLobbyUsePrev   = false;
     m_vCoopCoverBaseOrg = vec_zero; // HZM coop - cover pose anchor position [216]
     m_fCoopPeekFrac    = 0.0f;     // HZM coop - eased peek step-out fraction [216]
     m_bCoopGearLoop  = false; // HZM coop - gear rattle off
@@ -4731,6 +4746,7 @@ void Player::ClientThink(void)
     }
 
     TickCoopCover(); // HZM coop - take cover [214]: validate the pose with this frame's traces
+    TickCoopLobbyInput(); // HZM coop - lobby A/D/F input (no binds) -> self.coop_lobbyInput
     // HZM coop [221] - bug-309 GUNNERPROBE: once/sec truth table of every candidate manning
     // signal while any is live (or the player is entity-attached, e.g. script-seated gunner).
     if (level.time - m_fCoopProbeTime > 1.0f
@@ -12741,6 +12757,46 @@ void Player::TickCoopCover()
             Vars()->SetVariable("coop_bf_t", level.time);
         }
     }
+}
+//====
+
+// HZM coop - lobby input bridge: enable/disable reading A/D/F from the usercmd for this player.
+void Player::CoopLobbyInput(Event *ev)
+{
+    m_bCoopLobbyInputOn = ev->GetInteger(1) ? true : false;
+    // clear the edge state so enabling mid-hold doesn't fire a phantom tap on the first frame
+    m_iCoopLobbyRightPrev = 0;
+    m_bCoopLobbyUsePrev   = false;
+}
+
+// HZM coop - per-frame while in the lobby: turn A/D strafe + F (+use) into self.coop_lobbyInput edges.
+// No client binds are touched, so every client (host + remote) can pick a uniform and ready up, and there
+// is nothing to restore when the mission launches. 31 = next uniform (D), 32 = prev (A), 33 = ready (F).
+void Player::TickCoopLobbyInput(void)
+{
+    int  iRight;
+    bool bUse;
+
+    if (!m_bCoopLobbyInputOn) {
+        return;
+    }
+
+    iRight = 0;
+    if (last_ucmd.rightmove < -20) {
+        iRight = -1;
+    } else if (last_ucmd.rightmove > 20) {
+        iRight = 1;
+    }
+    if (iRight != 0 && m_iCoopLobbyRightPrev == 0) {
+        Vars()->SetVariable("coop_lobbyInput", (iRight > 0) ? 31 : 32);
+    }
+    m_iCoopLobbyRightPrev = iRight;
+
+    bUse = (last_ucmd.buttons & BUTTON_USE) ? true : false;
+    if (bUse && !m_bCoopLobbyUsePrev) {
+        Vars()->SetVariable("coop_lobbyInput", 33);
+    }
+    m_bCoopLobbyUsePrev = bUse;
 }
 //====
 

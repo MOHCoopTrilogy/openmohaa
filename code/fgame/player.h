@@ -381,6 +381,12 @@ public:
     float  m_fCoopProbeTime;     // GUNNERPROBE diagnostic throttle [221 - REMOVE after bug-309 closes]
     int    m_iCoopSpeedBase;     // SPEEDPROBE: ps.speed before the ADS/weapon mults [222 - REMOVE with probe]
     int    m_iCoopVarCoverLast;  // last coop_incover entity-var value pushed to script (change-gated) [235]
+    // HZM coop - LOBBY INPUT bridge: while in the pre-mission lobby, read A/D (rightmove) + F (BUTTON_USE)
+    // from the usercmd and publish self.coop_lobbyInput (31=next uniform, 32=prev, 33=ready) so the lobby
+    // script reacts with NO client key binds - works for every client (host + remote), nothing to restore.
+    bool   m_bCoopLobbyInputOn;   // enabled by the coop_lobbyinput script event for the duration of the lobby
+    int    m_iCoopLobbyRightPrev; // sign of last frame's rightmove (0/-1/1) for one-action-per-tap edge detect
+    bool   m_bCoopLobbyUsePrev;   // BUTTON_USE state last frame (F press edge)
     Vector m_vCoopCoverBaseOrg;  // pose position at cover entry (peek slides away from it and back) [216]
     float  m_fCoopPeekFrac;      // 0..1 eased peek step-out fraction [216]
     float m_fCoopCoverBadTime;   // level.time the pose first went invalid (grace before drop)
@@ -809,6 +815,8 @@ public:
     void CoopLobbyRepose(Event *ev); // HZM coop lobby: atomically swap the frozen idle pose
     void CoopLobbyCycleAnim(Event *ev); // HZM coop lobby DEV: cycle candidate idle poses to ID one
     void CoopLobbyHoldPose(Event *ev);  // HZM coop lobby: per-frame re-assert of the hands-on-hips pose
+    void CoopLobbyInput(Event *ev);     // HZM coop lobby: enable/disable reading A/D/F from the usercmd
+    void TickCoopLobbyInput(void);      // HZM coop lobby: per-frame A/D/F -> self.coop_lobbyInput (no binds)
 
     void            RemoveFromVehiclesAndTurretsInternal(void); // Added in 2.30
     void            RemoveFromVehiclesAndTurrets(void);

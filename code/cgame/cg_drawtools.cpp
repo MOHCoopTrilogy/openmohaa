@@ -647,10 +647,14 @@ void CG_HudDrawElements()
 
         // HZM coop - HUD fade: scripted huddraw chrome (score, reward icons, counters) follows the
         // same activity-driven fade as the health/ammo panels (compass exempt - it is not huddraw).
+        // Slots >= 100 are PERSISTENT lobby UI (the bottom-left roster + the top-left control help) and
+        // must stay fully visible - they are exempt from the fade.
         {
             vec4_t vFadedCol;
             Vector4Copy(cgi.HudDrawElements[i].vColor, vFadedCol);
-            vFadedCol[3] *= s_hudFadeAlpha;
+            if (i < 100) {
+                vFadedCol[3] *= s_hudFadeAlpha;
+            }
             cgi.R_SetColor(vFadedCol);
         }
         if (cgi.HudDrawElements[i].string[0]) {
