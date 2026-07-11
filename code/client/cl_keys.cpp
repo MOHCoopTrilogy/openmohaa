@@ -1258,6 +1258,83 @@ void CL_KeyEvent(int key, qboolean down, unsigned time)
 
 /*
 ===================
+CL_CoopBuildKeyRepeat
+
+HZM coop [user 07-09]: hold-to-repeat for BUILD MODE controls. A normal (non-'+') bind
+fires once per physical key press - the platform layer swallows OS auto-repeat - so every
+build key (model/category cycle, yaw/pitch/z/scale/dist/anim) otherwise has to be tapped.
+While build mode is active (coop_build 1, a host-only dev tool) this re-fires a HELD build
+bind on a controlled timer so the builder can just hold the key. Only binds that write
+"coop_build_cmd" repeat, so movement/attack are untouched; the one-shot actions
+(place/undo/solid/reset) are excluded - holding place would mass-spawn objects. Purely
+additive: returns immediately outside build mode. Rate/delay live-tunable via the
+coop_build_repeat* cvars. Called once per frame from CL_Frame.
+===================
+*/
+void CL_CoopBuildKeyRepeat(void)
+{
+    static int     nextRepeat[MAX_KEYS];   // Com_Milliseconds() at which key i may fire again; 0 = idle
+    static cvar_t *cb_delay = NULL;
+    static cvar_t *cb_rate  = NULL;
+    int            i, now, delay, rate;
+    const char    *kb;
+
+    // not building, or a menu/console owns the keyboard -> disarm every timer
+    if (clc.state != CA_ACTIVE || Key_GetCatcher() != 0
+        || Cvar_VariableIntegerValue("coop_build") != 1) {
+        for (i = 0; i < MAX_KEYS; i++) {
+            nextRepeat[i] = 0;
+        }
+        return;
+    }
+
+    if (!cb_delay) {
+        cb_delay = Cvar_Get("coop_build_repeatDelay", "260", CVAR_ARCHIVE);
+    }
+    if (!cb_rate) {
+        cb_rate = Cvar_Get("coop_build_repeatRate", "90", CVAR_ARCHIVE);
+    }
+    delay = cb_delay->integer;
+    if (delay < 50) {
+        delay = 50;
+    }
+    rate = cb_rate->integer;
+    if (rate < 20) {
+        rate = 20;
+    }
+
+    now = Com_Milliseconds();
+
+    for (i = 0; i < MAX_KEYS; i++) {
+        if (!keys[i].down) {
+            nextRepeat[i] = 0;
+            continue;
+        }
+        kb = keys[i].binding;
+        if (!kb || !strstr(kb, "coop_build_cmd")) {
+            nextRepeat[i] = 0;
+            continue;
+        }
+        // one-shots never repeat (holding these makes no sense / would spam-place)
+        if (strstr(kb, "place") || strstr(kb, "undo") || strstr(kb, "solid") || strstr(kb, "reset")) {
+            continue;
+        }
+        if (nextRepeat[i] == 0) {
+            // first frame held: the physical press already fired the bind once, so just
+            // arm the initial delay before auto-repeat kicks in
+            nextRepeat[i] = now + delay;
+            continue;
+        }
+        if (now >= nextRepeat[i]) {
+            Cbuf_AddText(kb);
+            Cbuf_AddText("\n");
+            nextRepeat[i] = now + rate;
+        }
+    }
+}
+
+/*
+===================
 CL_Key_ForceCommand
 ===================
 */

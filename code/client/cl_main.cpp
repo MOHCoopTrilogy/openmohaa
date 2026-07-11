@@ -2825,6 +2825,9 @@ void CL_Frame ( int msec ) {
 	// drop the connection
 	CL_CheckTimeout();
 
+	// HZM coop: hold-to-repeat for build-mode keys (no-op unless coop_build 1)
+	CL_CoopBuildKeyRepeat();
+
 	// send intentions now
 	CL_SendCmd();
 
@@ -3601,6 +3604,59 @@ static void HZM_TerminateHandler() {
 	abort();
 }
 
+/*
+====================
+CL_SendReport_f
+
+HZM coop - in-game "Report a Bug" -> Discord webhook. This build has NO libcurl (find_package(CURL) failed),
+so we build the message here (report text + auto context: version/map/maxclients/fps), write it RAW to a
+file in fs_homepath, and hand off to Sys_SendReport() which spawns PowerShell to POST it (PowerShell reads
+the file and JSON-encodes it, so arbitrary user text is safe). Best-effort: success is reported once the
+sender launches. coop_reportWebhook is seeded from the loose maintt/coop_reportwebhook.cfg (out of the repo).
+====================
+*/
+void CL_SendReport_f( void )
+{
+	const char *webhook = Cvar_VariableString( "coop_reportWebhook" );
+	const char *text    = Cvar_VariableString( "coop_reportText" );
+	char        payload[2400];
+	char        path[MAX_OSPATH];
+	FILE       *f;
+
+	if ( !webhook || !webhook[0] ) {
+		Com_Printf( "coop report: no webhook configured (coop_reportWebhook is empty)\n" );
+		Cvar_Set( "coop_reportResult", "0" );
+		return;
+	}
+	if ( !text || !text[0] ) {
+		Com_Printf( "coop report: type a description first\n" );
+		Cvar_Set( "coop_reportResult", "0" );
+		return;
+	}
+
+	Com_sprintf( payload, sizeof( payload ),
+		"**In-game bug report**\n%s\n\nver: %s | map: %s | maxclients: %s | fps: %s",
+		text,
+		Cvar_VariableString( "version" ),
+		Cvar_VariableString( "mapname" ),
+		Cvar_VariableString( "sv_maxclients" ),
+		Cvar_VariableString( "com_maxfps" ) );
+
+	Com_sprintf( path, sizeof( path ), "%s/coop_report_payload.txt", Cvar_VariableString( "fs_homepath" ) );
+	f = fopen( path, "wb" );
+	if ( !f ) {
+		Com_Printf( "coop report: cannot write %s\n", path );
+		Cvar_Set( "coop_reportResult", "0" );
+		return;
+	}
+	fwrite( payload, 1, strlen( payload ), f );
+	fclose( f );
+
+	Sys_SendReport( webhook, path );
+	Com_Printf( "coop report: submitted\n" );
+	Cvar_Set( "coop_reportResult", "1" );
+}
+
 void CL_Init( void ) {
 	int start, end;
 
@@ -3686,6 +3742,15 @@ void CL_Init( void ) {
 #ifdef USE_CURL
 	cl_cURLLib = Cvar_Get("cl_cURLLib", DEFAULT_CURL_LIB, CVAR_ARCHIVE);
 #endif
+	// HZM coop - in-game Report a Bug. This build has NO libcurl (find_package(CURL) failed -> HAS_LIBCURL
+	// undefined, and the legacy USE_CURL path is off too), so the POST is done by spawning PowerShell
+	// (CL_SendReport_f) instead of any in-engine HTTP. Registered unconditionally. coop_reportWebhook is
+	// seeded on the user's machine (loose maintt/coop_reportwebhook.cfg from updater.ini, kept out of the repo);
+	// the UI (coop_report menu) links coop_reportText and runs coop_sendreport.
+	Cvar_Get("coop_reportWebhook", "", CVAR_ARCHIVE);
+	Cvar_Get("coop_reportText", "", 0);
+	Cvar_Get("coop_reportResult", "", 0);
+	Cmd_AddCommand("coop_sendreport", CL_SendReport_f);
 
 	cl_altbindings = Cvar_Get( "cl_altbindings", "0", CVAR_ARCHIVE );
 	cl_ctrlbindings = Cvar_Get( "cl_altbindings", "0", CVAR_ARCHIVE );

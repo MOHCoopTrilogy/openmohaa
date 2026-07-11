@@ -530,7 +530,13 @@ static int GLimp_SetMode(int mode, qboolean fullscreen, qboolean noborder, qbool
 
 	if( fullscreen )
 	{
-		flags |= SDL_WINDOW_FULLSCREEN;
+		// HZM: r_desktopfullscreen 1 = "Borderless Window" (desktop-sized, no video mode change, alt-tab
+		// friendly); 0 = "Exclusive Fullscreen" (real mode change). Both report isFullscreen so input grab
+		// behaves the same. FULLSCREEN_DESKTOP includes the FULLSCREEN bit, so existing flag tests still match.
+		if( ri.Cvar_VariableIntegerValue( "r_desktopfullscreen" ) )
+			flags |= SDL_WINDOW_FULLSCREEN_DESKTOP;
+		else
+			flags |= SDL_WINDOW_FULLSCREEN;
 		glConfig.isFullscreen = qtrue;
 	}
 	else
@@ -1221,7 +1227,12 @@ void GLimp_EndFrame( void )
 
 		if( needToToggle )
 		{
-			sdlToggled = SDL_SetWindowFullscreen( SDL_window, r_fullscreen->integer ) >= 0;
+			{
+				Uint32 fsFlag = r_fullscreen->integer
+					? ( ri.Cvar_VariableIntegerValue( "r_desktopfullscreen" ) ? SDL_WINDOW_FULLSCREEN_DESKTOP : SDL_WINDOW_FULLSCREEN )
+					: 0;
+				sdlToggled = SDL_SetWindowFullscreen( SDL_window, fsFlag ) >= 0;
+			}
 
 			// SDL_WM_ToggleFullScreen didn't work, so do it the slow way
 			if( !sdlToggled )

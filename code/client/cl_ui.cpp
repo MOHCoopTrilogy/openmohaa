@@ -4979,7 +4979,14 @@ CL_TryStartIntro
 void CL_TryStartIntro(void)
 {
     if (developer->integer || !cl_playintro->integer) {
-        UI_ToggleConsole();
+        // No startup intro (developer mode, or the intro is disabled via `cl_playintro 0`).
+        // HZM fix: only drop the console when actually in developer mode. Previously this toggled the
+        // console whenever the intro was skipped, so setting `cl_playintro 0` to skip the EA logos (our
+        // autoexec default) re-opened the console over the main menu at every launch. A plain intro-skip
+        // must NOT show the console; the ~ key still toggles it.
+        if (developer->integer) {
+            UI_ToggleConsole();
+        }
     } else {
         // FIXME: no intro from now
         Cvar_Set(cl_playintro->name, "0");
@@ -5461,18 +5468,12 @@ void CL_InitializeUI(void)
     ui_static_materials.loading = uWinMan.RegisterShader("textures/menu/loading");
 
     if (ui_console->integer || developer->integer > 0) {
-        UColor bgColor = UWindowColor;
-
-        // Create the console
+        // Create the console (starts HIDDEN via getNewConsole/setShow(false); toggled with the console key).
+        // HZM fix: do NOT create the mini-console here. It was gated on ui_console (not ui_minicon) and never
+        // hidden, so with `ui_console 1` (console enabled in Advanced Options) a console box dropped over the
+        // menu at every launch. The mini-console is created only when ui_minicon is set - UI_CheckRestart
+        // (further down) already handles that. So ui_console now just enables the ~ console without auto-showing.
         fakk_console = getNewConsole();
-
-        bgColor = UColor(0.0, 0.5, 1.0, 1.0);
-
-        // Create the mini console
-        mini_console = new FakkMiniconsole;
-        mini_console->Create(UISize2D(500, 100), UWhite, bgColor, 0.2f);
-        mini_console->setAlwaysOnBottom(true);
-        mini_console->setBorderStyle(border_none);
     }
 
     // Create the dm console

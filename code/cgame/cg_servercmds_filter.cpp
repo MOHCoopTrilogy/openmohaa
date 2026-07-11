@@ -131,6 +131,14 @@ static qboolean CG_IsVariableAllowed(const char *name)
 {
     size_t i;
 
+    // HZM coop - always allow the server to set our own mod-namespaced client cvars (coop_*). These are
+    // used for script->client HUD/UI bridges (e.g. the briefing ready-up overlay's coop_gate_* cvars).
+    // They're user-created and mod-controlled, so this is safe, and it removes any doubt about the
+    // user-created-cvar path in CG_IsSetVariableAllowed.
+    if (!Q_stricmpn(name, "coop_", 5)) {
+        return qtrue;
+    }
+
     for (i = 0; i < ARRAY_LEN(whiteListedVariables); i++) {
         if (!Q_stricmp(name, whiteListedVariables[i])) {
             return qtrue;

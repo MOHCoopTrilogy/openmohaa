@@ -3217,7 +3217,7 @@ void MSG_ReadSounds(msg_t* msg, server_sound_t* sounds, int* snapshot_number_of_
 					}
 					sounds[i].entity_number = MSG_ReadBits(msg, 11);
 					sounds[i].channel = MSG_ReadBits(msg, 7);
-					sounds[i].sound_index = MSG_ReadBits(msg, 10); // HZM COOP: 9->10 bits (MAX_SOUNDS 512->1024); must match MSG_WriteSounds
+					sounds[i].sound_index = MSG_ReadBits(msg, 11); // HZM COOP: 9->10->11 bits (MAX_SOUNDS 512->1024->1280); must match MSG_WriteSounds
 
 					if (MSG_ReadBits(msg, 1) == 1) {
 						sounds[i].volume = MSG_ReadFloat(msg);
@@ -3282,7 +3282,7 @@ void MSG_WriteSounds(msg_t* msg, server_sound_t* sounds, int snapshot_number_of_
 				}
 				MSG_WriteBits(msg, sounds[i].entity_number, 11);
 				MSG_WriteBits(msg, sounds[i].channel, 7);
-				MSG_WriteBits(msg, sounds[i].sound_index, 10); // HZM COOP: 9->10 bits (MAX_SOUNDS 512->1024); must match MSG_ReadSounds
+				MSG_WriteBits(msg, sounds[i].sound_index, 11); // HZM COOP: 9->10->11 bits (MAX_SOUNDS 512->1024->1280); must match MSG_ReadSounds
 
 				if (sounds[i].volume != -1.0f) {
 					MSG_WriteBits(msg, 1, 1);

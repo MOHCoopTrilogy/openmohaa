@@ -1675,16 +1675,34 @@ typedef enum
 // HZM COOP: raised 512 -> 1024. The coop mod registers >512 unique sounds per map
 // (combat VO + ambience + vehicle + coop content), overflowing SV_SoundIndex and
 // silently dropping sounds (e.g. m1l1 truck engine). Requires matching changes:
-//   - MSG_WriteSounds/MSG_ReadSounds sound_index bits 9 -> 10 (qcommon/msg.cpp)
+//   - MSG_WriteSounds/MSG_ReadSounds sound_index bits 9 -> 10 -> 11 (qcommon/msg.cpp)
 //   - CS_SOUNDTRACK/CS_TEAMS..CS_AXIS made computed (fgame/bg_public.h) so the
 //     shifted CS_IMAGES/CS_WEAPONS arrays don't collide with them.
 // CS_MAX stays < MAX_CONFIGSTRINGS (2736), so no gamestate/protocol buffer change.
-#define	MAX_SOUNDS			1024	// raised from 512 (HZM coop) - see note above; cap is ~10 bits in MSG_*Sounds
+// [user 07-09] 1024 -> 1280: HD-audio-maxed maps (m3l2 with every HD pack incl hd_gunsounds) overflowed
+// the 1024 pool -> 56 "Couldn't load sound" + music/dialogue dropping mid-mission. 1280 needs the
+// sound_index at 11 bits (was 10); layout CS_WEAPONS=2516, CS_MAX=2650, still < 2736 (compile #error
+// guards it). NOTE: protocol change - client (cgame/exe) AND server (game/exe) must all be on this build.
+#define	MAX_SOUNDS			1280	// raised 512->1024->1280 (HZM coop); sound_index is 11 bits in MSG_*Sounds
 #define MAX_OBJECTIVES		20
 #define MAX_LIGHTSTYLES		32
-#define MAX_WEAPONS			64
+// [user 07-10] 64 -> 128: the DEBUG "give all" + big give-all arsenals (49 guns + FG42 + grenades +
+// Gewehrgranate) PLUS a map's own AI/pickup weapons overflowed the 64-weapon configstring pool
+// (itemindex+CS_WEAPONS), so the guns registered LAST (the newest ones) + all grenades silently
+// dropped. Unlike MAX_SOUNDS, MAX_WEAPONS is used ONLY in the CS layout (CS_SOUNDTRACK = CS_WEAPONS
+// + MAX_WEAPONS) - no network bit-field / fixed array - so this just shifts CS_SOUNDTRACK.. up by 64:
+// CS_MAX 2650 -> 2714, still < MAX_CONFIGSTRINGS (2736; the #error below guards it). PROTOCOL change:
+// client (cgame/exe) AND server (game/exe) must ALL be on this build.
+#define MAX_WEAPONS			128
 
-#define	MAX_CONFIGSTRINGS	2736
+// [user 07-10] 2736 -> 4096: the CS layout ceiling. After MAX_WEAPONS 64->128, CS_MAX was 2714 (only
+// 22 free), so any further MAX_SOUNDS/MODELS/WEAPONS bump would trip the CS_MAX #error. Raising this
+// is SAFE + cheap: it only sizes the gamestate stringOffsets[] + server configstrings[]/csUpdated[]
+// arrays (all MAX_CONFIGSTRINGS-symbolic, no hardcoded 2736, no bit-width/mask uses it), the CS index
+// is a 16-bit [short] so 4096 << 65535, and 4096 keeps the SAME 12-bit index width as 2736. The actual
+// string BYTES live in the separate MAX_GAMESTATE_CHARS (96KB) below - unchanged. PROTOCOL change:
+// client (cgame/exe) AND server (game/exe) must ALL be on this build (struct sizes must match).
+#define	MAX_CONFIGSTRINGS	4096
 #define MAX_HUDDRAW_ELEMENTS 256
 
 #define MAX_SUBTITLES 4

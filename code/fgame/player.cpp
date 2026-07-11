@@ -651,6 +651,18 @@ Event EV_Player_CoopLobbyInput
     "script reacts WITHOUT any client key binds - works for every client, host and remote. 0 disables.",
     EV_NORMAL
 );
+Event EV_Player_CoopLobbyCursor
+(
+    "coop_lobbycursor",
+    EV_DEFAULT,
+    "i",
+    "onoff",
+    "HZM coop lobby: while enabled (1), derive a MOUSE CURSOR from this player's usercmd view-angle deltas\n"
+    "and publish self.coop_lobbyCurX / self.coop_lobbyCurY (virtual 640x480) + self.coop_lobbyClick (1 on a\n"
+    "left-mouse press edge) so the lobby script can draw a cursor and hit-test clickable buttons. 0 disables.\n"
+    "Foundation for the clickable lobby UI (challenges now, loadout / skill trees later). coop_lobbyCursorSens tunes speed.",
+    EV_NORMAL
+);
 Event EV_Player_SafeZoom
 (
     "safezoom",
@@ -1932,6 +1944,7 @@ CLASS_DECLARATION(Sentient, Player, "player") {
     {&EV_Player_CoopLobbyCycleAnim,      &Player::CoopLobbyCycleAnim           },
     {&EV_Player_CoopLobbyHoldPose,       &Player::CoopLobbyHoldPose            },
     {&EV_Player_CoopLobbyInput,          &Player::CoopLobbyInput               },
+    {&EV_Player_CoopLobbyCursor,         &Player::CoopLobbyCursor              },
     {&EV_Player_SafeZoom,                 &Player::SafeZoomed                   },
     {&EV_Player_ZoomOff,                  &Player::ZoomOffEvent                 },
     {&EV_Player_StartUseObject,           &Player::StartUseObject               },
@@ -2286,6 +2299,13 @@ Player::Player()
     m_bCoopLobbyInputOn   = false; // HZM coop - lobby usercmd input bridge stays off until the lobby enables it
     m_iCoopLobbyRightPrev = 0;
     m_bCoopLobbyUsePrev   = false;
+    m_bCoopLobbyCursorOn  = false; // HZM coop - lobby mouse-cursor bridge (clickable lobby UI) stays off until enabled
+    m_bCoopLobbyCurInit   = false;
+    m_iCoopLobbyYawPrev   = 0;
+    m_iCoopLobbyPitchPrev = 0;
+    m_fCoopLobbyCurX      = 320.0f;
+    m_fCoopLobbyCurY      = 240.0f;
+    m_bCoopLobbyAtkPrev   = false;
     m_vCoopCoverBaseOrg = vec_zero; // HZM coop - cover pose anchor position [216]
     m_fCoopPeekFrac    = 0.0f;     // HZM coop - eased peek step-out fraction [216]
     m_bCoopGearLoop  = false; // HZM coop - gear rattle off
@@ -4747,6 +4767,7 @@ void Player::ClientThink(void)
 
     TickCoopCover(); // HZM coop - take cover [214]: validate the pose with this frame's traces
     TickCoopLobbyInput(); // HZM coop - lobby A/D/F input (no binds) -> self.coop_lobbyInput
+    TickCoopLobbyCursor(); // HZM coop - lobby mouse cursor (no binds) -> self.coop_lobbyCurX/Y + coop_lobbyClick
     // HZM coop [221] - bug-309 GUNNERPROBE: once/sec truth table of every candidate manning
     // signal while any is live (or the player is entity-attached, e.g. script-seated gunner).
     if (level.time - m_fCoopProbeTime > 1.0f
@@ -12551,6 +12572,11 @@ void Player::TickCoopCover()
         // ANCHORED (m_vCoopCoverNormal) so the SUSTAIN check is view-independent: the mouse can
         // orbit (free-look) and the RMB peek can aim anywhere without breaking the pose - only
         // physically leaving the wall (or moving) drops it.
+        // HZM coop: WALL (standing back-to-wall) cover REMOVED - it was buggy and could crash
+        // (the entry view-snap + the peek step-out that setOrigin()'s the body toward a corner
+        // could shove the player into geometry). Crouch/LOW cover is kept. This guard disables the
+        // whole wall-detection block so wallValid stays false and m_bCoopCoverWall can never engage.
+        if (false)
         {
             Vector vStart = origin + Vector(0, 0, 48);
 
@@ -12797,6 +12823,66 @@ void Player::TickCoopLobbyInput(void)
         Vars()->SetVariable("coop_lobbyInput", 33);
     }
     m_bCoopLobbyUsePrev = bUse;
+}
+
+// HZM coop - enable/disable the lobby MOUSE-CURSOR bridge (clickable lobby UI foundation).
+void Player::CoopLobbyCursor(Event *ev)
+{
+    m_bCoopLobbyCursorOn = ev->GetInteger(1) ? true : false;
+    m_bCoopLobbyCurInit  = false; // re-seed prev-angles on the next tick so the cursor doesn't jump
+}
+
+// HZM coop - per-frame while a clickable lobby UI is up: turn the mouse (usercmd view-angle deltas) into a
+// screen cursor + read the left mouse button, publishing self.coop_lobbyCurX/Y (virtual 640x480) and
+// self.coop_lobbyClick (1 on a press edge; the script consumes + zeroes it). Server-side only, mirrors the
+// A/D bridge - the ucmd is live during the lobby even though the view is a locked camera.
+void Player::TickCoopLobbyCursor(void)
+{
+    int    iYaw, iPitch, dYaw, dPitch;
+    float  fSens;
+    bool   bAtk;
+    cvar_t *pSens;
+
+    if (!m_bCoopLobbyCursorOn) {
+        return;
+    }
+
+    iYaw   = last_ucmd.angles[YAW];
+    iPitch = last_ucmd.angles[PITCH];
+
+    if (!m_bCoopLobbyCurInit) {
+        m_iCoopLobbyYawPrev   = iYaw;
+        m_iCoopLobbyPitchPrev = iPitch;
+        m_bCoopLobbyCurInit   = true;
+    }
+
+    // short-angle wrap-safe deltas (a small mouse move stays small even across the 360 wrap)
+    dYaw   = (short)(iYaw - m_iCoopLobbyYawPrev);
+    dPitch = (short)(iPitch - m_iCoopLobbyPitchPrev);
+    m_iCoopLobbyYawPrev   = iYaw;
+    m_iCoopLobbyPitchPrev = iPitch;
+
+    pSens = gi.Cvar_Get("coop_lobbyCursorSens", "0.03", 0);
+    fSens = (pSens && pSens->value > 0.0f) ? pSens->value : 0.03f;
+
+    // mouse RIGHT turns yaw NEGATIVE (yaw increases counter-clockwise), so negate for a natural cursor:
+    // mouse right -> cursor right (+X). Pitch increases looking down -> cursor down (+Y).
+    m_fCoopLobbyCurX -= (float)dYaw * fSens;
+    m_fCoopLobbyCurY += (float)dPitch * fSens;
+
+    if (m_fCoopLobbyCurX < 0.0f)   { m_fCoopLobbyCurX = 0.0f; }
+    if (m_fCoopLobbyCurX > 640.0f) { m_fCoopLobbyCurX = 640.0f; }
+    if (m_fCoopLobbyCurY < 0.0f)   { m_fCoopLobbyCurY = 0.0f; }
+    if (m_fCoopLobbyCurY > 480.0f) { m_fCoopLobbyCurY = 480.0f; }
+
+    Vars()->SetVariable("coop_lobbyCurX", (int)m_fCoopLobbyCurX);
+    Vars()->SetVariable("coop_lobbyCurY", (int)m_fCoopLobbyCurY);
+
+    bAtk = (last_ucmd.buttons & BUTTON_ATTACKLEFT) ? true : false;
+    if (bAtk && !m_bCoopLobbyAtkPrev) {
+        Vars()->SetVariable("coop_lobbyClick", 1);
+    }
+    m_bCoopLobbyAtkPrev = bAtk;
 }
 //====
 

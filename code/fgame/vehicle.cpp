@@ -7134,6 +7134,16 @@ void DrivableVehicle::Killed(Event *ev)
 
     attacker = ev->GetEntity(1);
 
+    // HZM coop: a PLAYER destroyed a drivable vehicle (tank / halftrack / armored car). Bump a
+    // per-map level counter; coop_mod/main.scr::coop_vehKill_monitor consumes the increments for
+    // the "destroy vehicles" campaign challenge + XP (team-wide; per-killer attribution isn't
+    // needed for these). level.vars resets each map, so the monitor's seen-count stays in sync.
+    if (attacker && attacker->IsSubclassOfPlayer()) {
+        ScriptVariable *pv = level.vars->GetVariable("coop_vehKills");
+        int             n  = pv ? pv->intValue() : 0;
+        level.vars->SetVariable("coop_vehKills", n + 1);
+    }
+
     //
     // kill the driver.ent
     //

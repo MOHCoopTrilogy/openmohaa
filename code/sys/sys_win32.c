@@ -918,3 +918,45 @@ Check if filename should be allowed to be loaded as a DLL.
 qboolean Sys_DllExtension( const char *name ) {
 	return COM_CompareExtension( name, DLL_EXT );
 }
+
+/*
+=================
+Sys_SendReport
+
+HZM coop - POST an in-game bug report to the mod team's Discord webhook. This build has no libcurl, so we
+spawn a no-window PowerShell process to do the HTTPS POST. The user's report text lives in payloadFilePath
+(raw) and PowerShell reads it and JSON-encodes it with ConvertTo-Json, so arbitrary text (quotes/newlines)
+is handled safely and never touches the command line. Only trusted values (the webhook URL and the file
+path, both mod/engine-controlled) are interpolated into the command line. Fire-and-forget (best effort).
+=================
+*/
+void Sys_SendReport( const char *webhook, const char *payloadFilePath )
+{
+	char                cmdline[3072];
+	STARTUPINFOA        si;
+	PROCESS_INFORMATION pi;
+
+	if ( !webhook || !webhook[0] || !payloadFilePath || !payloadFilePath[0] ) {
+		return;
+	}
+
+	// NOTE: read the payload with [IO.File]::ReadAllText, NOT `Get-Content -Raw` - Get-Content decorates its
+	// string output with ETS note-properties (PSPath/PSDrive/...) that ConvertTo-Json then serializes, turning
+	// "content" into an object and making Discord reject the body with 400. ReadAllText returns a clean string.
+	Com_sprintf( cmdline, sizeof( cmdline ),
+		"powershell -NoProfile -ExecutionPolicy Bypass -Command "
+		"\"try{$b=@{content=[IO.File]::ReadAllText('%s')}|ConvertTo-Json -Compress;"
+		"Invoke-RestMethod -Uri '%s' -Method Post -ContentType 'application/json' -Body $b -TimeoutSec 20}catch{}\"",
+		payloadFilePath, webhook );
+
+	memset( &si, 0, sizeof( si ) );
+	si.cb = sizeof( si );
+	memset( &pi, 0, sizeof( pi ) );
+
+	if ( CreateProcessA( NULL, cmdline, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi ) ) {
+		CloseHandle( pi.hThread );
+		CloseHandle( pi.hProcess );
+	} else {
+		Com_Printf( "Sys_SendReport: CreateProcess failed (err %lu)\n", (unsigned long)GetLastError() );
+	}
+}

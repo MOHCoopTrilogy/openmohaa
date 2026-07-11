@@ -121,6 +121,8 @@ protected:
 
     virtual void EventTake(Event *ev);
     virtual void EventGiveAmmo(Event *ev);
+    void         EventGetAmmo(Event *ev);	// HZM coop - script ammo getter (exact-ammo respawn)
+    void         EventSetAmmo(Event *ev);	// HZM coop - script ammo setter, exact (exact-ammo respawn)
     virtual void EventGiveItem(Event *ev);
     void         EventGiveDynItem(Event *ev);
     void         SetBloodModel(Event *ev);

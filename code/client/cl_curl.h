@@ -99,4 +99,5 @@ void CL_cURL_Shutdown( void );
 void CL_cURL_BeginDownload( const char *localName, const char *remoteURL );
 void CL_cURL_PerformDownload( void );
 void CL_cURL_Cleanup( void );
+void CL_SendReport_f( void );	// HZM coop - in-game Report a Bug -> Discord webhook
 #endif	// __QCURL_H__

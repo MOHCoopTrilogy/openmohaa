@@ -151,6 +151,24 @@ Event EV_Sentient_GiveAmmo
     "Gives the sentient some ammo.",
     EV_NORMAL
 );
+Event EV_Sentient_GetAmmo
+(
+    "getammo",
+    EV_DEFAULT,
+    "s",
+    "type",
+    "Returns the current reserve ammo count of the named type (HZM coop - for exact-ammo respawn).",
+    EV_RETURN
+);
+Event EV_Sentient_SetAmmo
+(
+    "setammo",
+    EV_DEFAULT,
+    "si",
+    "type amount",
+    "Sets the reserve ammo of the named type to an exact amount (HZM coop - for exact-ammo respawn).",
+    EV_NORMAL
+);
 Event EV_Sentient_GiveArmor
 (
     "armor",
@@ -621,6 +639,8 @@ CLASS_DECLARATION(Animate, Sentient, NULL) {
     {&EV_Sentient_Charge,                 &Sentient::ChargeWeapon                 },
     {&EV_Sentient_ReleaseAttack,          &Sentient::ReleaseFireWeapon            },
     {&EV_Sentient_GiveAmmo,               &Sentient::EventGiveAmmo                },
+    {&EV_Sentient_GetAmmo,                &Sentient::EventGetAmmo                 },
+    {&EV_Sentient_SetAmmo,                &Sentient::EventSetAmmo                 },
     {&EV_Sentient_GiveWeapon,             &Sentient::EventGiveItem                },
     {&EV_Sentient_GiveArmor,              &Sentient::EventGiveItem                },
     {&EV_Sentient_GiveItem,               &Sentient::EventGiveItem                },

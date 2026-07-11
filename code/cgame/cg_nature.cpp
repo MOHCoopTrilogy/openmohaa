@@ -310,14 +310,19 @@ void CG_RainGlobal(void)
             continue;
         }
 
-        // SKY GATE: trace straight up this column; only rain where the sky is genuinely open above (so it
-        // stops dead under roofs/awnings and never falls into interiors). Mirrors coop_hasOpenSky.
+        // SKY GATE: trace straight up this column from the DROP's own height; only rain where the sky is
+        // genuinely open above it (so it stops dead under roofs/awnings and never falls into interiors).
+        // HZM fix: was tracing from cg.refdef.vieworg[2] (the CAMERA height). In 3rd person the camera sits
+        // above/behind the player, so when it rose above a building's roof the gate saw open sky and rained
+        // even though the drops (spawned around the player, camera-256..+640) were UNDER the roof - the
+        // "rain sometimes still goes through interiors" leak. Tracing from vStart[2] checks each drop's
+        // actual exposure, camera position irrelevant.
         vSkyStart[0] = vStart[0];
         vSkyStart[1] = vStart[1];
-        vSkyStart[2] = cg.refdef.vieworg[2];
+        vSkyStart[2] = vStart[2];
         vSkyEnd[0]   = vStart[0];
         vSkyEnd[1]   = vStart[1];
-        vSkyEnd[2]   = cg.refdef.vieworg[2] + 4096.0f;
+        vSkyEnd[2]   = vStart[2] + 4096.0f;
         cgi.CM_BoxTrace(&skyTr, vSkyStart, vSkyEnd, vZero, vZero, 0, MASK_SOLID, qfalse);
         if (!(skyTr.surfaceFlags & SURF_SKY) && skyTr.fraction < 0.999f) {
             continue; // solid ceiling above -> dry

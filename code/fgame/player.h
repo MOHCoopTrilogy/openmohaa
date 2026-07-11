@@ -387,6 +387,15 @@ public:
     bool   m_bCoopLobbyInputOn;   // enabled by the coop_lobbyinput script event for the duration of the lobby
     int    m_iCoopLobbyRightPrev; // sign of last frame's rightmove (0/-1/1) for one-action-per-tap edge detect
     bool   m_bCoopLobbyUsePrev;   // BUTTON_USE state last frame (F press edge)
+    // HZM coop - LOBBY CURSOR bridge: derive a screen cursor from usercmd view-angle deltas + read the left
+    // mouse button, so the lobby (and future loadout / skill-tree UIs) can have CLICKABLE buttons.
+    bool   m_bCoopLobbyCursorOn;  // enabled by the coop_lobbycursor script event
+    bool   m_bCoopLobbyCurInit;   // seed prev-angles on the first frame so the cursor doesn't jump
+    int    m_iCoopLobbyYawPrev;   // last frame's ucmd yaw (short) for the delta
+    int    m_iCoopLobbyPitchPrev; // last frame's ucmd pitch (short) for the delta
+    float  m_fCoopLobbyCurX;      // cursor position, virtual 640x480
+    float  m_fCoopLobbyCurY;
+    bool   m_bCoopLobbyAtkPrev;   // BUTTON_ATTACKLEFT last frame (left-click press edge)
     Vector m_vCoopCoverBaseOrg;  // pose position at cover entry (peek slides away from it and back) [216]
     float  m_fCoopPeekFrac;      // 0..1 eased peek step-out fraction [216]
     float m_fCoopCoverBadTime;   // level.time the pose first went invalid (grace before drop)
@@ -817,6 +826,8 @@ public:
     void CoopLobbyHoldPose(Event *ev);  // HZM coop lobby: per-frame re-assert of the hands-on-hips pose
     void CoopLobbyInput(Event *ev);     // HZM coop lobby: enable/disable reading A/D/F from the usercmd
     void TickCoopLobbyInput(void);      // HZM coop lobby: per-frame A/D/F -> self.coop_lobbyInput (no binds)
+    void CoopLobbyCursor(Event *ev);    // HZM coop lobby: enable/disable the mouse-cursor bridge
+    void TickCoopLobbyCursor(void);     // HZM coop lobby: per-frame mouse -> self.coop_lobbyCurX/Y + coop_lobbyClick
 
     void            RemoveFromVehiclesAndTurretsInternal(void); // Added in 2.30
     void            RemoveFromVehiclesAndTurrets(void);

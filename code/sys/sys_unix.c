@@ -1041,3 +1041,16 @@ qboolean Sys_DllExtension( const char *name ) {
 
 	return qfalse;
 }
+
+/*
+=================
+Sys_SendReport
+
+HZM coop - in-game bug reporting is client-side and Windows-only in this build (no libcurl to POST with on
+POSIX here). Stub so the tree links; clients are Windows.
+=================
+*/
+void Sys_SendReport( const char *webhook, const char *payloadFilePath )
+{
+	Com_Printf( "Sys_SendReport: bug reporting is only implemented on Windows in this build\n" );
+}

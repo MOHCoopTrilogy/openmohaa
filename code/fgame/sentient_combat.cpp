@@ -78,6 +78,37 @@ void Sentient::EventGiveAmmo(Event *ev)
     GiveAmmo(type, amount, maxamount);
 }
 
+// HZM coop [user 07-09]: script getter to READ the current reserve ammo of a type (the engine only
+// exposed "ammo" as a setter). Lets the coop mod snapshot exact ammo before death + restore it on
+// respawn. Script usage:  local.n = self getammo "rifle"
+void Sentient::EventGetAmmo(Event *ev)
+{
+    ev->AddInteger(AmmoCount(ev->GetString(1)));
+}
+
+// HZM coop [user 07-09]: SET the reserve ammo of a type to an EXACT value (the engine "ammo" event
+// only ADDs). Needed so exact-ammo respawn overwrites whatever default ammo the respawn weapons
+// hand out, rather than stacking on top of it. Script usage:  self setammo "rifle" 42
+void Sentient::EventSetAmmo(Event *ev)
+{
+    str  type;
+    int  amount;
+    Ammo *ammo;
+
+    type   = ev->GetString(1);
+    amount = ev->GetInteger(2);
+
+    ammo = FindAmmoByName(type);
+    if (ammo) {
+        ammo->setAmount(amount);
+    } else {
+        ammo = new Ammo;
+        ammo->setAmount(amount);
+        ammo->setName(type);
+        ammo_inventory.AddObject(ammo);
+    }
+}
+
 int Sentient::AmmoIndex(str type)
 {
     Ammo *ammo;

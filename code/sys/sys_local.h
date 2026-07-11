@@ -69,6 +69,10 @@ void Sys_AnsiColorPrint( const char *msg );
 int Sys_PID( void );
 qboolean Sys_PIDIsRunning( int pid );
 
+// HZM coop - POST an in-game bug report (raw text in payloadFilePath) to a Discord webhook. This build has
+// no libcurl, so the platform layer does the HTTPS POST (Windows: a no-window PowerShell process).
+void Sys_SendReport( const char *webhook, const char *payloadFilePath );
+
 #ifdef PROTOCOL_HANDLER
 char *Sys_ParseProtocolUri( const char *uri );
 #endif

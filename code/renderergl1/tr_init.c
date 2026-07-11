@@ -1649,6 +1649,9 @@ void R_Register( void )
 
 	r_ext_multisample = ri.Cvar_Get("r_ext_multisample", "0", CVAR_ARCHIVE | CVAR_LATCH);
 	r_noborder = ri.Cvar_Get("r_noborder", "0", CVAR_ARCHIVE | CVAR_LATCH);
+	// HZM: when r_fullscreen is 1, this picks Borderless Window (1, SDL_WINDOW_FULLSCREEN_DESKTOP) vs
+	// Exclusive Fullscreen (0, SDL_WINDOW_FULLSCREEN). Read by name in sdl_glimp.c. Default 0 = old behaviour.
+	ri.Cvar_Get("r_desktopfullscreen", "0", CVAR_ARCHIVE | CVAR_LATCH);
 	r_ext_texture_filter_anisotropic = ri.Cvar_Get("r_ext_texture_filter_anisotropic",
 		"0", CVAR_ARCHIVE | CVAR_LATCH);
 	r_stereoEnabled = ri.Cvar_Get("r_stereoEnabled", "0", CVAR_ARCHIVE | CVAR_LATCH);
