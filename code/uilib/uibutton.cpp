@@ -89,6 +89,12 @@ void UIButtonBase::Released(Event *ev)
 {
     if (m_mouseState != M_DRAGGING) {
         m_mouseState = M_NONE;
+        // HZM coop: still release a stale mouse capture. If a press was captured but the
+        // matching release never reached us (widget disabled mid-press etc.), the leaked
+        // firstResponder would silently eat the next click anywhere in the menu.
+        if (uWinMan.getFirstResponder() == this) {
+            uWinMan.setFirstResponder(NULL);
+        }
         return;
     }
 

@@ -52,6 +52,7 @@ protected:
     int                       m_inventoryrendermodelindex;
     str                       m_sDrawModelName;
     qboolean                  m_rendermodel;
+    qboolean                  m_rendermodelfit; // HZM coop: frame the model's REAL bounds, not the standing-player box
     statbar_orientation_t     m_statbar_or;
     float                     m_statbar_min;
     float                     m_statbar_max;
@@ -89,6 +90,7 @@ public:
     void LayoutStatbarRotatorSize(Event *ev);
     void LayoutStatbarTileShader_Flash(Event *ev);
     void LayoutRenderModel(Event *ev);
+    void LayoutRenderModelFit(Event *ev); // HZM coop
     void LayoutRenderModelOffset(Event *ev);
     void LayoutRenderModelRotateOffset(Event *ev);
     void LayoutRenderModelAngles(Event *ev);

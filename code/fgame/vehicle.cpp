@@ -7130,7 +7130,19 @@ void DrivableVehicle::Killed(Event *ev)
 
     takedamage = DAMAGE_NO;
     setSolidType(SOLID_NOT);
-    hideModel();
+
+    // [user 07-11] coop_vehicleWrecks: leave the destroyed hull as a WRECK instead of vanishing. When on
+    // (and the vehicle isn't flagged to gib into pieces), the killed tank / pak stays visible + non-solid +
+    // dead - we skip hideModel + the turret/wheel removal + the final EV_Remove below. The explosion still
+    // plays, so it reads as knocked out. coop_vehicleWrecks 0 = vanilla remove-on-death. Fixes tanks/paks
+    // disappearing when blown up (m5l3, m5l1b, etc.).
+    static cvar_t *pVehWreck = NULL;
+    if (!pVehWreck) { pVehWreck = gi.Cvar_Get("coop_vehicleWrecks", "1", CVAR_ARCHIVE); }
+    qboolean bLeaveWreck = (pVehWreck && pVehWreck->integer && !(flags & FL_DIE_GIBS)) ? qtrue : qfalse;
+
+    if (!bLeaveWreck) {
+        hideModel();
+    }
 
     attacker = ev->GetEntity(1);
 
@@ -7187,9 +7199,11 @@ void DrivableVehicle::Killed(Event *ev)
     //
     // remove all turrets
     //
-    for (i = 0; i < MAX_TURRETS; i++) {
-        if (Turrets[i].ent) {
-            Turrets[i].ent->PostEvent(EV_Remove, EV_VEHICLE);
+    if (!bLeaveWreck) {
+        for (i = 0; i < MAX_TURRETS; i++) {
+            if (Turrets[i].ent) {
+                Turrets[i].ent->PostEvent(EV_Remove, EV_VEHICLE);
+            }
         }
     }
 
@@ -7206,10 +7220,12 @@ void DrivableVehicle::Killed(Event *ev)
     //
     // kill all my wheels
     //
-    last = this;
-    while (last->vlink) {
-        last->vlink->PostEvent(EV_Remove, EV_VEHICLE);
-        last = last->vlink;
+    if (!bLeaveWreck) {
+        last = this;
+        while (last->vlink) {
+            last->vlink->PostEvent(EV_Remove, EV_VEHICLE);
+            last = last->vlink;
+        }
     }
 
     //
@@ -7234,6 +7250,8 @@ void DrivableVehicle::Killed(Event *ev)
         }
     }
 
-    PostEvent(EV_Remove, EV_VEHICLE);
+    if (!bLeaveWreck) {
+        PostEvent(EV_Remove, EV_VEHICLE);
+    }
     Unregister(STRING_DEATH);
 }

@@ -10358,7 +10358,12 @@ bool Actor::GrenadeWillHurtTeamAt(const Vector& vTo)
 {
     Sentient *pSquadMate;
     for (pSquadMate = m_pNextSquadMate; pSquadMate != this; pSquadMate = pSquadMate->m_pNextSquadMate) {
-        if ((pSquadMate->origin - vTo).length() < 65536) {
+        // HZM coop [user 07-12]: was length() < 65536 - i.e. "any squadmate within 65,536 UNITS (the whole
+        // map) makes this grenade unsafe". Since actors auto-merge into squads at the first shots, that
+        // vetoed effectively EVERY offensive grenade throw AND the grenade kick/return chain (this same
+        // check gates actor_grenade.cpp before the kick/return branches). The intended test is clearly a
+        // 256-unit blast-safety radius: 256^2 = 65536 -> lengthSquared().
+        if ((pSquadMate->origin - vTo).lengthSquared() < 65536) {
             return true;
         }
     }

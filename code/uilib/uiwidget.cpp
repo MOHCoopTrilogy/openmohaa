@@ -1715,7 +1715,19 @@ UIWidget *UIWidget::FindResponder(const UIPoint2D& pos)
     UIWidget *responder;
     int       i;
 
-    if (!m_visible || !m_clippedframe.contains(pos)) {
+    // HZM coop: cvar-gated widgets must hit-test EXACTLY like they draw. Display() skips
+    // the m_visible check for widgets with an enabledcvar (line ~1974) and draws purely by
+    // the cvar - but Menu::ShowMenu only setShow(true)'s widgets whose cvar is enabled AT
+    // MENU-OPEN, so a widget gated off at open kept m_visible=false forever: it DREW once
+    // its cvar flipped on, yet never received a click (armory class pages), while a gated-
+    // OFF widget still ate clicks for the visible one stacked beneath it. Rule: enabledcvar
+    // widgets are clickable iff their gate is on, and click-transparent iff it is off -
+    // m_visible only governs ungated widgets (which keep vanilla behavior).
+    if (m_enabledCvar.length()) {
+        if (!isEnabled() || !m_clippedframe.contains(pos)) {
+            return NULL;
+        }
+    } else if (!m_visible || !m_clippedframe.contains(pos)) {
         return NULL;
     }
 

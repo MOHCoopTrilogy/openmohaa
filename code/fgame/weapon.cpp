@@ -1802,6 +1802,15 @@ void Weapon::Shoot(Event *ev)
     firemode_t mode = FIRE_PRIMARY;
     qboolean   mc;
 
+    // HZM coop [user 07-12] fire diagnostics counterpart: confirms a shot actually reached Shoot
+    {
+        static cvar_t *pFireDbg = NULL;
+        if (!pFireDbg) { pFireDbg = gi.Cvar_Get("coop_fireDebug", "0", 0); }
+        if (pFireDbg->integer) {
+            gi.Printf("^~^~^ FIREDBG SHOOT %s args=%d\n", item_name.c_str(), ev->NumArgs());
+        }
+    }
+
     if (ev->NumArgs() > 0) {
         mode = WeaponModeNameToNum(ev->GetString(1));
 
@@ -2384,6 +2393,25 @@ qboolean Weapon::HasAmmoInClip(firemode_t mode)
 //======================
 qboolean Weapon::ReadyToFire(firemode_t mode, qboolean playsound)
 {
+    // HZM coop [user 07-12] FIRE DIAGNOSTICS: `set coop_fireDebug 1` prints (rate-limited) every value
+    // this function decides on, into the console/qconsole.log - no `developer` needed. Added to hunt
+    // the "imported guns only fire in ADS" bug; zero cost when off.
+    {
+        static cvar_t *pFireDbg = NULL;
+        static float   fNextDbg = 0;
+        if (!pFireDbg) { pFireDbg = gi.Cvar_Get("coop_fireDebug", "0", 0); }
+        if (pFireDbg->integer && level.time > fNextDbg) {
+            fNextDbg = level.time + 0.4f;
+            gi.Printf(
+                "^~^~^ FIREDBG %s mode=%d lastMode=%d time=%.2f lastFire=%.2f delay=%.2f clip=%d zoom=%d "
+                "maxFireMove=%.2f moveSpd=%.2f velXY=%.1f runspd=%.0f\n",
+                item_name.c_str(), (int)mode, (int)m_eLastFireMode, level.time, m_fLastFireTime,
+                FireDelay(mode), (int)HasAmmoInClip(mode), m_iZoom, m_fMaxFireMovement, m_fMovementSpeed,
+                owner ? owner->velocity.lengthXY() : -1.0f, sv_runspeed->value
+            );
+        }
+    }
+
     if (owner && owner->IsSubclassOfSentient()) {
         // Clear the cook flag
         owner->m_bOvercookDied = false;
@@ -2892,7 +2920,13 @@ void Weapon::AttachGun(weaponhand_t hand, qboolean holstering)
         NoLerpThisFrame();
         if (tag_num >= 0) {
             attached = true;
-            attach(owner->entnum, tag_num);
+            if (holstering) {
+                // HZM coop - the TIKs author per-gun holsteroffset but it was stored and never
+                // passed to attach(), so holstered weapons sat half-inside the torso.
+                attach(owner->entnum, tag_num, qtrue, holsterOffset);
+            } else {
+                attach(owner->entnum, tag_num);
+            }
             showModel();
             setOrigin();
         } else {

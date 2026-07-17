@@ -1034,12 +1034,31 @@ qboolean S_OPENAL_Init()
         numResamplers      = qalGetInteger(AL_NUM_RESAMPLERS_SOFT);
         alDieIfError();
 
-        for (i = 0; i < numResamplers; i++) {
-            const ALchar *resamplerName = qalGetStringiSOFT(AL_RESAMPLER_NAME_SOFT, i);
-            if (Q_stristr(resamplerName, "spline")) {
-                Com_Printf("OpenAL: Using %s as the resampler.\n", resamplerName);
-                al_resampler_index = i;
-                break;
+        // HZM coop: prefer the band-limited sinc resamplers over spline - nearly all game audio
+        // is 22kHz and gets upsampled on every voice; bsinc24 > bsinc12 > spline in quality.
+        {
+            ALsizei best     = -1;
+            int     bestRank = 0;
+
+            for (i = 0; i < numResamplers; i++) {
+                const ALchar *resamplerName = qalGetStringiSOFT(AL_RESAMPLER_NAME_SOFT, i);
+                int           rank          = 0;
+
+                if (Q_stristr(resamplerName, "bsinc24") || Q_stristr(resamplerName, "48 point")) {
+                    rank = 3;
+                } else if (Q_stristr(resamplerName, "bsinc")) {
+                    rank = 2;
+                } else if (Q_stristr(resamplerName, "spline")) {
+                    rank = 1;
+                }
+                if (rank > bestRank) {
+                    bestRank = rank;
+                    best     = (ALsizei)i;
+                }
+            }
+            if (best >= 0) {
+                Com_Printf("OpenAL: Using %s as the resampler.\n", qalGetStringiSOFT(AL_RESAMPLER_NAME_SOFT, (ALsizei)best));
+                al_resampler_index = best;
             }
         }
     }

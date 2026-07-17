@@ -5706,6 +5706,19 @@ void Player::EvaluateState(State *forceTorso, State *forceLegs)
             } else {
                 currentState_Torso = currentState_Torso->Evaluate(*this, &torso_conditionals);
             }
+
+            // HZM coop [user 07-12] fire diagnostics: trace every torso state hop (coop_fireDebug 1)
+            {
+                static cvar_t *pFireDbg = NULL;
+                if (!pFireDbg) { pFireDbg = gi.Cvar_Get("coop_fireDebug", "0", 0); }
+                if (pFireDbg->integer && currentState_Torso != laststate_Torso) {
+                    gi.Printf(
+                        "^~^~^ FIREDBG TORSO %s -> %s\n",
+                        laststate_Torso ? laststate_Torso->getName() : "(none)",
+                        currentState_Torso ? currentState_Torso->getName() : "(none)"
+                    );
+                }
+            }
         } else {
             // Added in 2.0
             //  Switch to the default torso state if it's NULL

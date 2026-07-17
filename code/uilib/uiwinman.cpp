@@ -171,6 +171,11 @@ void UIWindowManager::ViewEvent(UIWidget *view, Event& event, UIPoint2D& pos, in
     }
 
     if (!view->isEnabled()) {
+        // HZM coop: part of the ui_clickdebug tracer - a dropped event on a disabled
+        // widget is exactly the failure mode stacked cvar-gated buttons produce.
+        if (UI_GetCvarInt("ui_clickdebug", 0)) {
+            uii.Sys_Printf("^~^~^ UICLICK DROPPED (disabled) view '%s'\n", view->getName());
+        }
         return;
     }
 
@@ -314,6 +319,22 @@ void UIWindowManager::ServiceEvents(void)
         if (!buttons) {
             ViewEvent(view, W_MouseMoved, pos, 0);
         }
+    }
+
+    // HZM coop: click routing tracer (set ui_clickdebug 1) - logs where every left
+    // down/up lands, its enabled/activatable state, and any live responder capture.
+    if (((buttons & 1) != (m_lastbuttons & 1)) && UI_GetCvarInt("ui_clickdebug", 0)) {
+        UIWidget *cap = (m_firstResponder && m_firstResponder != this) ? (UIWidget *)m_firstResponder : NULL;
+        uii.Sys_Printf(
+            "^~^~^ UICLICK %s pos %d,%d view '%s' en=%d act=%d cap='%s'\n",
+            (buttons & 1) ? "DOWN" : "UP",
+            (int)pos.x,
+            (int)pos.y,
+            view ? view->getName() : "NULL",
+            view ? (int)view->isEnabled() : -1,
+            view ? (int)view->CanActivate() : -1,
+            cap ? cap->getName() : "-"
+        );
     }
 
     if ((buttons & 1) != (m_lastbuttons & 1)) {

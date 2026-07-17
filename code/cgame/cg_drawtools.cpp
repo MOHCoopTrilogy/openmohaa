@@ -1461,6 +1461,19 @@ void CG_DrawCrosshair()
 
         width  = cgi.R_GetShaderWidth(shader);
         height = cgi.R_GetShaderHeight(shader);
+
+        // [user 07-11] CROSSHAIR SIZE slider (Options -> Advanced): scale the crosshair art. 1 = native
+        // size. Applied here (before centring + the 3P true-aim projection + the draw) so every downstream
+        // placement uses the scaled dimensions and the crosshair stays centred on the true aim point.
+        {
+            static cvar_t *pChSize = NULL;
+            if (!pChSize) { pChSize = cgi.Cvar_Get("cg_crosshairSize", "1", CVAR_ARCHIVE); }
+            if (pChSize->value > 0.05f) {
+                width  *= pChSize->value;
+                height *= pChSize->value;
+            }
+        }
+
         x      = (cgs.glconfig.vidWidth - width) * 0.5f;
         y      = (cgs.glconfig.vidHeight - height) * 0.5f;
 
@@ -1970,6 +1983,28 @@ static void CG_UpdateHudFade(void)
         CG_HudFadeDebug(va("buttons 0x%x", ucmd.buttons));
     }
 
+    // HZM coop [user 07-10]: viewing the objectives (scoreboard held) keeps the HUD awake so the
+    // player can read their health/ammo alongside the objectives.
+    if (cg.showScores) {
+        s_hudTouchTime = cg.time;
+    }
+
+    // HZM coop [user 07-10]: script-driven wake. The server bumps the coop_hudPoke cvar (via a
+    // stuffed seta - allowed by the coop_* servercmd whitelist) at moments the cgame can't see on
+    // its own, e.g. the INSTANT a medkit heal starts (before health actually ticks up). Any change
+    // to the cvar's value is treated as activity.
+    {
+        static char sLastPoke[32] = "";
+        cvar_t    *pPoke = cgi.Cvar_Get("coop_hudPoke", "0", 0);
+        if (pPoke && Q_stricmp(pPoke->string, sLastPoke)) {
+            if (sLastPoke[0]) {
+                s_hudTouchTime = cg.time;
+                CG_HudFadeDebug("script poke (coop_hudPoke)");
+            }
+            Q_strncpyz(sLastPoke, pPoke->string, sizeof(sLastPoke));
+        }
+    }
+
     // state deltas: health, ammo+clip, active weapon, owned-weapons mask (pickups)
     h       = cg.snap->ps.stats[STAT_HEALTH];
     weap    = cg.snap->ps.activeItems[1];
@@ -1994,6 +2029,38 @@ static void CG_UpdateHudFade(void)
     if (h <= 0 || (maxh > 0 && h * 4 <= maxh)) {
         s_hudTouchTime = cg.time;
         CG_HudFadeDebug(va("low health %d/%d", h, maxh));
+    }
+
+    // [user 07-11] IN COVER or DOWN (DBNO): keep the HUD up the WHOLE time. Posted in cover you're holding a
+    // position and watching; downed you need to read your state while bleeding out - neither should let the
+    // health/ammo panels fade. coop_dbnoView is the per-client DBNO signal (also forces the bleed-out view).
+    {
+        static cvar_t *pHudDbno = NULL;
+        if (!pHudDbno) { pHudDbno = cgi.Cvar_Get("coop_dbnoView", "0", CVAR_ARCHIVE); }
+        if ((cg.predicted_player_state.pm_flags & PMF_COOP_COVER) || (pHudDbno && pHudDbno->integer)) {
+            s_hudTouchTime = cg.time;
+        }
+    }
+
+    // [user 07-12] BOMB TIMER: while the engine stopwatch is counting down (a charge was planted / a fuse
+    // is burning), keep the HUD up - planting UNFADES it instantly and it stays readable for the whole
+    // countdown; once the timer expires (or is cleared via 'stopwatch 0') normal fading resumes.
+    // Running-test mirrors CG_DrawStopwatch exactly (same clock: cg.time).
+    if (cgi.stopWatch->iStartTime && cgi.stopWatch->iStartTime < cgi.stopWatch->iEndTime
+        && cgi.stopWatch->iEndTime > cg.time) {
+        s_hudTouchTime = cg.time;
+        CG_HudFadeDebug("stopwatch running (bomb timer)");
+    }
+
+    // [user 07-12] OBJECTIVES MENU OPEN (the O toggle): unfade instantly and stay up for as long as the
+    // menu is open - the player is READING; fading the health/ammo away next to it made no sense. The
+    // client-side flag is set 1/0 by ui/coop_objectives/obj_add|rem.cfg (and reset on spawn by obj_reset.cfg).
+    {
+        static cvar_t *pObjOpen = NULL;
+        if (!pObjOpen) { pObjOpen = cgi.Cvar_Get("coop_objOpen", "0", 0); }
+        if (pObjOpen && pObjOpen->integer) {
+            s_hudTouchTime = cg.time;
+        }
     }
 
     if (pOn->integer) {

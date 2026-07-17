@@ -339,6 +339,18 @@ qboolean Player::CondWeaponClassReadyToFire(Conditional& condition)
     // Name check
     if (condition.numParms() > 1) {
         if (!(G_WeaponClassNameToNum(weaponClass) & weapon->GetWeaponClass())) {
+            // HZM coop [user 07-12] fire diagnostics: reveal class-bit mismatches (coop_fireDebug 1)
+            static cvar_t *pFireDbg = NULL;
+            static float   fNextDbg = 0;
+            if (!pFireDbg) { pFireDbg = gi.Cvar_Get("coop_fireDebug", "0", 0); }
+            if (pFireDbg->integer && level.time > fNextDbg) {
+                fNextDbg = level.time + 0.4f;
+                gi.Printf(
+                    "^~^~^ FIREDBG CLASSFAIL %s: has=0x%x want %s=0x%x\n",
+                    weapon->item_name.c_str(), weapon->GetWeaponClass(), weaponClass.c_str(),
+                    G_WeaponClassNameToNum(weaponClass)
+                );
+            }
             return qfalse;
         }
 
@@ -1104,7 +1116,27 @@ qboolean Player::CondMovementType(Conditional& condition)
 
 qboolean Player::CondRun(Conditional& condition)
 {
-    return (last_ucmd.buttons & BUTTON_RUN) != 0;
+    if ((last_ucmd.buttons & BUTTON_RUN) != 0) {
+        return qtrue;
+    }
+
+    // HZM coop [user 07-11] - Shift is the SPRINT key, so it arrives with BUTTON_RUN CLEAR. ClientMove
+    // re-asserts BUTTON_RUN for this case, but the legs statemap can be evaluated BEFORE that re-assert on
+    // some frames - catching the cleared bit and flipping RUN_FORWARD -> WALK_FORWARD ("WALK_FORWARD : !RUN
+    // FORWARD"), i.e. run speed + the old slow-walk anim = skating, seen randomly right after stamina runs
+    // out mid-sprint. Compute the same run intent here so the RUN conditional is timing-independent: with
+    // the sprint system on, holding the sprint key while moving (and NOT the dedicated Alt walk key) always
+    // animates as RUN - whether stamina is left (SPRINT_FORWARD wins via COOP_SPRINTING) or spent (RUN).
+    {
+        static cvar_t *pSprint = NULL;
+        if (!pSprint) { pSprint = gi.Cvar_Get("coop_sprint", "1", CVAR_ARCHIVE); }
+        if (pSprint && pSprint->integer && !(last_ucmd.buttons & BUTTON_COOPWALK)
+            && (last_ucmd.forwardmove != 0 || last_ucmd.rightmove != 0)) {
+            return qtrue;
+        }
+    }
+
+    return qfalse;
 }
 
 qboolean Player::CondUse(Conditional& condition)

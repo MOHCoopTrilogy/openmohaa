@@ -466,7 +466,18 @@ void QDECL Com_Error( int code, const char *fmt, ... ) {
 	// Debug builds should stop on this
 	assert(code != ERR_FATAL);
 
-	Cvar_Set( "com_errorCode", va( "%i", code ) );
+	// HZM coop: guard the error-code write against re-entry (bug-598). If the cvar table is
+	// FULL and com_errorCode was never created, this Cvar_Set needs a NEW cvar -> Cvar_Get
+	// fails -> "Too many cvars" -> Com_Error -> this Cvar_Set again... mutual recursion to
+	// a stack overflow (com_errorEntered is set too late in this function to break it).
+	{
+		static qboolean bInErrorCvarSet = qfalse;
+		if ( !bInErrorCvarSet ) {
+			bInErrorCvarSet = qtrue;
+			Cvar_Set( "com_errorCode", va( "%i", code ) );
+			bInErrorCvarSet = qfalse;
+		}
+	}
 
 	// when we are running automated scripts, make sure we
 	// know if anything failed

@@ -299,6 +299,33 @@ qboolean CG_IsStatementAllowed(char *cmd)
             if (!CG_IsSetVariableAllowed(com_token, type)) {
                 return qfalse;
             }
+        } else if (!Q_stricmp(com_token, "exec")) {
+            // HZM coop - allow server-driven exec of MOD-NAMESPACED cfg paths only. The coop
+            // framework drives clients through tiny cfgs (coop_mod/cfg/detect.cfg = the mod
+            // handshake, ui/coop_objectives/*, ui/loadout/* = the armory). A blanket "exec"
+            // whitelist would let hostile servers run arbitrary local cfgs - path-scoping keeps
+            // the protection while unblocking the mod (bug-597: this filter silently ate the
+            // handshake, the FOV re-apply, the armory pick resend AND the lobby LOADOUT button).
+            Q_strncpyz(com_token, COM_ParseExt(&parsed, qfalse), sizeof(com_token));
+            bNextStatement |= RemoveEndToken(com_token);
+            if (Q_stricmpn(com_token, "ui/loadout/", 11) && Q_stricmpn(com_token, "ui/coop_", 8)
+                && Q_stricmpn(com_token, "coop_mod/", 9)) {
+                return qfalse;
+            }
+        } else if (!Q_stricmp(com_token, "vstr")) {
+            // HZM coop - allow vstr of coop-namespaced or user-created cvars: the armory resend
+            // asks the client to fire its own archived coop_loA1..4; the FOV/auth re-applies use
+            // user-created cvars (g_m2l1 style). Engine-owned cvars stay off-limits.
+            cvar_t *var;
+
+            Q_strncpyz(com_token, COM_ParseExt(&parsed, qfalse), sizeof(com_token));
+            bNextStatement |= RemoveEndToken(com_token);
+            if (Q_stricmpn(com_token, "coop_", 5)) {
+                var = cgi.Cvar_Find(com_token);
+                if (!var || !(var->flags & CVAR_USER_CREATED)) {
+                    return qfalse;
+                }
+            }
         } else {
             //
             // normal command

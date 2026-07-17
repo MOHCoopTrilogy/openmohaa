@@ -267,6 +267,27 @@ void CG_RainGlobal(void)
         return;
     }
 
+    // [user 07-11] HARD interior / vehicle cull. The per-drop sky-gate below uses cgi.CM_BoxTrace, which
+    // only sees the WORLD (BSP) - so a VEHICLE roof (the truck is an ENTITY) or an entity/script-model roof
+    // is invisible to it, and rain leaks into the truck and some interiors. Trace UP from the PLAYER (NOT
+    // the camera - in 3rd person the camera sits above the roof and would see open sky) with an
+    // entity-INCLUSIVE CG_Trace: if anything solid that isn't sky is above the player, kill the rain
+    // entirely. The per-drop world gate still handles partial exposure when the player is genuinely outside.
+    {
+        trace_t roofTr;
+        vec3_t  vpStart, vpEnd;
+        vpStart[0] = cg.predicted_player_state.origin[0];
+        vpStart[1] = cg.predicted_player_state.origin[1];
+        vpStart[2] = cg.predicted_player_state.origin[2] + 40.0f; // ~chest height, off the floor
+        vpEnd[0]   = vpStart[0];
+        vpEnd[1]   = vpStart[1];
+        vpEnd[2]   = vpStart[2] + 4096.0f;
+        CG_Trace(&roofTr, vpStart, vZero, vZero, vpEnd, cg.snap->ps.clientNum, MASK_SOLID, qfalse, qtrue, "CG_RainRoof");
+        if (roofTr.fraction < 0.999f && !(roofTr.surfaceFlags & SURF_SKY)) {
+            return; // roof or vehicle above the player -> dry
+        }
+    }
+
     fcolor[0] = fcolor[1] = fcolor[2] = fcolor[3] = 1.0f;
 
     // player-centred volume (no map brush needed)

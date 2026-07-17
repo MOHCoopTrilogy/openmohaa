@@ -325,7 +325,11 @@ void UIGMBox::Create(const UIRect2D& rect, const UColor& fore, const UColor& bac
     InitFrame(NULL, rect, 0, "facfont-20");
 
     if (!m_fontbold) {
-        m_fontbold = new UIFont("facfont-20");
+        // HZM coop [user 07-12]: the bold center game messages (iprintlnbold - "Medkit applied",
+        // DBNO revive prompts, etc.) rendered in facfont-20 and read TOO BIG. Cvar-driven so it can
+        // be tuned without a rebuild; verdana-14 is the shipped mid-size RitualFont.
+        cvar_t *pBoldFont = Cvar_Get("coop_gmboxBoldFont", "verdana-14", CVAR_ARCHIVE);
+        m_fontbold = new UIFont(pBoldFont && pBoldFont->string[0] ? pBoldFont->string : "facfont-20");
     }
 
     m_fontbold->setColor(URed);

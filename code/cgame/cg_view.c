@@ -752,6 +752,30 @@ void CG_OffsetFirstPersonView(refEntity_t *pREnt, qboolean bUseWorldPosition)
             }
 
             cg.fCurrentViewBobAmp *= (1.0 - fabs(cg.refdefViewAngles[0]) * (1.0 / 90.0) * 0.5) * 0.5;
+
+            // HZM coop - HEAD BOB shaping (user request: present in moderation, stronger while
+            // sprinting). Scales the stock bob amplitude: cg_headbobScale is the overall feel,
+            // speed beyond the base run speed (sprint) swells it further, and aiming down
+            // sights / native scopes damp it hard so the sight picture stays usable.
+            // cg_headbob 0 restores the untouched vanilla bob.
+            if (cgi.Cvar_Get("cg_headbob", "1", CVAR_ARCHIVE)->integer) {
+                float fBobScale = cgi.Cvar_Get("cg_headbobScale", "1.35", CVAR_ARCHIVE)->value;
+
+                if (fVel > 300.0f) {
+                    // base run tops out ~287 (sv_runspeed); anything past this is sprint
+                    float fSprintFrac = (fVel - 300.0f) / 80.0f;
+                    if (fSprintFrac > 1.0f) {
+                        fSprintFrac = 1.0f;
+                    }
+                    fBobScale *= 1.0f + 0.85f * fSprintFrac;
+                }
+
+                if (CG_AimingDownSights() || cg.snap->ps.stats[STAT_INZOOM]) {
+                    fBobScale *= 0.25f;
+                }
+
+                cg.fCurrentViewBobAmp *= fBobScale;
+            }
         } else if (cg.fCurrentViewBobAmp > 0.0) {
             cg.fCurrentViewBobAmp -=
                 (cg.frametime / 1000.0 * cg.fCurrentViewBobAmp) + (cg.frametime / 1000.0 * cg.fCurrentViewBobAmp);

@@ -161,6 +161,17 @@ Event EV_Layout_RenderModel
     "bool",
     "Render the model specified by the cvar."
 );
+// HZM coop: weapon previews (armory) - guns are authored with wildly different origins
+// and poses, so the hardcoded standing-player box crops/mislocates most of them. This
+// flag frames the model's REAL bounds instead (the same auto-fit the inventory HUD uses).
+Event EV_Layout_RenderModelFit
+(
+    "rendermodelfit",
+    EV_DEFAULT,
+    "b",
+    "bool",
+    "Frame the rendered model by its real bounds instead of the standing-player box."
+);
 Event EV_Layout_RenderModelOffset
 (
     "modeloffset",
@@ -228,6 +239,7 @@ CLASS_DECLARATION(UILabel, UIFakkLabel, NULL) {
     {&EV_Layout_Statbar_RotatorSize,       &UIFakkLabel::LayoutStatbarRotatorSize     },
     {&EV_Layout_DrawModelName,             &UIFakkLabel::LayoutModelName              },
     {&EV_Layout_RenderModel,               &UIFakkLabel::LayoutRenderModel            },
+    {&EV_Layout_RenderModelFit,            &UIFakkLabel::LayoutRenderModelFit         },
     {&EV_Layout_RenderModelOffset,         &UIFakkLabel::LayoutRenderModelOffset      },
     {&EV_Layout_RenderModelRotateOffset,   &UIFakkLabel::LayoutRenderModelRotateOffset},
     {&EV_Layout_RenderModelAngles,         &UIFakkLabel::LayoutRenderModelAngles      },
@@ -247,6 +259,7 @@ UIFakkLabel::UIFakkLabel()
     m_itemindex                   = -1;
     m_inventoryrendermodelindex   = -1;
     m_rendermodel                 = false;
+    m_rendermodelfit              = false;
     m_statbar_or                  = L_STATBAR_NONE;
     m_statbar_material            = NULL;
     m_statbar_material_flash      = NULL;
@@ -407,6 +420,11 @@ void UIFakkLabel::LayoutStatbarTileShader_Flash(Event *ev)
 void UIFakkLabel::LayoutRenderModel(Event *ev)
 {
     m_rendermodel = ev->GetBoolean(1);
+}
+
+void UIFakkLabel::LayoutRenderModelFit(Event *ev)
+{
+    m_rendermodelfit = ev->GetBoolean(1);
 }
 
 void UIFakkLabel::LayoutRenderModelOffset(Event *ev)
@@ -1600,7 +1618,14 @@ void UIFakkLabel::Draw(void)
             return;
         }
 
-        handle = re.RegisterModel(Cvar_VariableString(m_cvarname));
+        const char *szPreviewModel = Cvar_VariableString(m_cvarname);
+        if (!szPreviewModel[0]) {
+            // HZM coop: linked cvar exists but is empty (armory preview before any pick) -
+            // registering "" spams "RE_RegisterModel: NULL name" every frame
+            return;
+        }
+
+        handle = re.RegisterModel(szPreviewModel);
         if (!handle) {
             return;
         }
@@ -1660,10 +1685,12 @@ void UIFakkLabel::Draw(void)
         }
     }
 
-    if (m_rendermodel) {
+    if (m_rendermodel && !m_rendermodelfit) {
         VectorSet(mins, -16, -16, 0);
         VectorSet(maxs, 16, 16, 96);
     } else {
+        // inventory items - and rendermodelfit previews (armory guns) - frame the model's
+        // REAL bounds, so authoring differences in origin/pose can't crop or shrink it
         re.ModelBounds(handle, mins, maxs);
     }
 

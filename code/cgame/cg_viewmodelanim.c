@@ -213,6 +213,35 @@ int CG_GetVMAnimPrefixIndex()
             return WPREFIX_DELISLE;
         }
 
+        //
+        // HZM coop [user 07-12]: imported (xw) rifles share their vanilla base gun's 1P anim set
+        // (reload/bolt/charge/fire viewmodels + their client sounds) instead of the garand fallback.
+        //
+        if (!Q_stricmp(szWeaponName, "G43 Sniper")) {
+            return WPREFIX_G43;
+        }
+        if (!Q_stricmp(szWeaponName, "StG44 Scoped")) {
+            return WPREFIX_MP44;
+        }
+        if (!Q_stricmp(szWeaponName, "Arisaka Type 99") || !Q_stricmp(szWeaponName, "Arisaka Sniper")) {
+            return WPREFIX_KAR98;
+        }
+        if (!Q_stricmp(szWeaponName, "Silenced Kar98 Sniper")) {
+            return WPREFIX_KAR98SNIPER;
+        }
+        if (!Q_stricmp(szWeaponName, "Mosin-Nagant Sniper") || !Q_stricmp(szWeaponName, "Silenced Mosin Sniper")) {
+            return WPREFIX_MOSIN;
+        }
+        if (!Q_stricmp(szWeaponName, "Carcano Sniper")) {
+            return WPREFIX_CARCANO;
+        }
+        if (!Q_stricmp(szWeaponName, "Lee-Enfield Sniper")) {
+            return WPREFIX_ENFIELD;
+        }
+        if (!Q_stricmp(szWeaponName, "Springfield M1903")) {
+            return WPREFIX_SPRINGFIELD;
+        }
+
         return WPREFIX_GARAND;
     } else if (iWeaponClass & WEAPON_CLASS_SMG) {
         if (!Q_stricmp(szWeaponName, "Thompson")) {
@@ -231,6 +260,22 @@ int CG_GetVMAnimPrefixIndex()
             return WPREFIX_PPSH;
         }
         if (!Q_stricmp(szWeaponName, "Moschetto")) {
+            return WPREFIX_MOSCHETTO;
+        }
+
+        //
+        // HZM coop [user 07-12]: imported (xw) SMGs share their vanilla base gun's 1P anim set:
+        // Type 100 -> Sten (user spec), Grease Guns / Silenced MP40 / Silenced PPS-43 -> MP40
+        // (user spec), Beretta M38 (moschetto) -> Moschetto.
+        //
+        if (!Q_stricmp(szWeaponName, "Type 100 SMG")) {
+            return WPREFIX_STEN;
+        }
+        if (!Q_stricmp(szWeaponName, "M3 Grease Gun") || !Q_stricmp(szWeaponName, "Silenced Grease Gun")
+            || !Q_stricmp(szWeaponName, "Silenced MP40") || !Q_stricmp(szWeaponName, "Silenced PPS-43")) {
+            return WPREFIX_MP40;
+        }
+        if (!Q_stricmp(szWeaponName, "Beretta M38")) {
             return WPREFIX_MOSCHETTO;
         }
 

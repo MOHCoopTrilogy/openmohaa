@@ -681,6 +681,27 @@ void CL_MouseMove( usercmd_t *cmd ) {
 			} else if ( aimPitch + camera_offset[PITCH] < -85.0f ) {
 				camera_offset[PITCH] = -85.0f - aimPitch;
 			}
+
+			// HZM coop [user 07-12] - FREE-AIM PITCH TRACKING: the orbit used to hold ALL of the pitch,
+			// so the character never aimed up/down in free cam ("the gun should still move as well
+			// unless im looking behind me"). While the camera is within 100 deg of the body facing,
+			// MIGRATE the orbit pitch into the real viewangles each frame: the camera's TOTAL pitch
+			// (aimPitch + offset) is unchanged - no visual jump - but the server now sees it, so the
+			// character raises/lowers the gun with the camera. Orbited BEHIND, pitch stays in the
+			// orbit and the aim simply holds; swinging back forward folds it in smoothly. The total
+			// was already clamped to +/-85 above, so the migrated aim stays inside the server clamp.
+			{
+				static cvar_t *cl_freecamAimPitch = NULL;
+				if ( !cl_freecamAimPitch ) {
+					cl_freecamAimPitch = Cvar_Get( "cl_freecamAimPitch", "1", CVAR_ARCHIVE );
+				}
+				if ( cl_freecamAimPitch->integer && !cl_freecamFold->integer
+					&& fabs( camera_offset[YAW] ) < 100.0f && camera_offset[PITCH] != 0.0f ) {
+					cl.viewangles[PITCH] += camera_offset[PITCH];
+					camera_offset[PITCH]  = 0;
+				}
+			}
+
 			camera_active = qtrue;
 			return; // the player's viewangles stay frozen while the free cam owns the mouse
 		}
@@ -889,7 +910,7 @@ usercmd_t CL_CreateCmd( void ) {
 	{
 		static cvar_t *fcCap = NULL, *fcAuto = NULL, *fcRate = NULL;
 		if ( !fcCap )  { fcCap  = Cvar_Get( "cg_freecamCapture", "0", 0 ); }
-		if ( !fcAuto ) { fcAuto = Cvar_Get( "cl_freecamAutoFace", "0", CVAR_ARCHIVE ); } // [237] default OFF - camera rotation is mouse-only (user); WASD moves without turning the view
+		if ( !fcAuto ) { fcAuto = Cvar_Get( "cl_freecamAutoFace", "1", CVAR_ARCHIVE ); } // [user 07-11] default ON - free cam IS the modern-TPS scheme: idle = free orbit, moving = body turns to face the camera and runs that way (steer the character with the camera). Set 0 for the old orbit-only (WASD relative to frozen facing).
 		if ( !fcRate ) { fcRate = Cvar_Get( "cl_freecamTurnRate", "480", CVAR_ARCHIVE ); }
 		if ( fcCap->integer && fcAuto->integer && ( cmd.forwardmove || cmd.rightmove ) ) {
 			float fm      = (float)cmd.forwardmove;

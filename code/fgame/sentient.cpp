@@ -3005,7 +3005,9 @@ void Sentient::EventPopHelmet(Event *ev)
     obj->setModel(m_sHelmetTiki);
 
     fRandom = crandom() * 30;
-    VectorScale(obj->velocity, fRandom, oWorldTag.axis[0]);
+    // HZM coop: was VectorScale(obj->velocity, fRandom, oWorldTag.axis[0]) - scaled the zero
+    // velocity INTO the axis, losing this lateral component entirely. Mirror the axis[1] line.
+    VectorMA(obj->velocity, fRandom, oWorldTag.axis[0], obj->velocity);
 
     fRandom = crandom() * 30;
     VectorMA(obj->velocity, fRandom, oWorldTag.axis[1], obj->velocity);

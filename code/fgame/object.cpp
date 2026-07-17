@@ -404,11 +404,17 @@ void ThrowObject::Archive(Archiver& arc)
 }
 
 CLASS_DECLARATION(Entity, HelmetObject, "helmetobject") {
-    {NULL, NULL}
+    // HZM coop: G_Physics_Toss delivers EV_Stop (not EV_Touch) when a SOLID_NOT toss entity
+    // lands (g_phys.cpp ~1162), so this settle handler was unreachable dead code.
+    {&EV_Stop, &HelmetObject::HelmetTouch},
+    {NULL,     NULL                      }
 };
 
 HelmetObject::HelmetObject()
 {
+    // HZM coop: popped helmets vanished after 5s, easy to miss mid-firefight
+    static cvar_t *g_helmetlife = NULL;
+
     if (LoadingSavegame) {
         return;
     }
@@ -418,8 +424,11 @@ HelmetObject::HelmetObject()
     setSize(Vector(-2, -2, -2), Vector(2, 2, 2));
     edict->clipmask = MASK_VIEWSOLID;
 
-    // Remove the object automatically after 5 seconds
-    PostEvent(EV_Remove, 5);
+    if (!g_helmetlife) {
+        g_helmetlife = gi.Cvar_Get("g_helmetlife", "30", 0);
+    }
+
+    PostEvent(EV_Remove, g_helmetlife->value > 0 ? g_helmetlife->value : 5);
 }
 
 void HelmetObject::HelmetTouch(Event *ev)
@@ -431,4 +440,7 @@ void HelmetObject::HelmetTouch(Event *ev)
     setAngles(angles);
     // Stop moving
     setMoveType(MOVETYPE_NONE);
+
+    // HZM coop: landing clatter (alias exists in all three games' ubersounds, takes 1-3)
+    Sound("grenade_bounce_metal", CHAN_BODY);
 }

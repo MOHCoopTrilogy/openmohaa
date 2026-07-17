@@ -28,7 +28,10 @@ cvar_t		*cvar_vars = NULL;
 cvar_t		*cvar_cheats;
 int			cvar_modifiedFlags;
 
-#define	MAX_CVARS	2048
+// HZM coop: 2048 was exceeded in live play (engine registrations + a large archived user
+// config + the challenges export ~360 + armory/objectives cvar bridges) - and the overflow
+// itself crashed via the Com_Error<->Cvar_Get recursion (bug-598, now also guarded).
+#define	MAX_CVARS	4096
 cvar_t		cvar_indexes[MAX_CVARS];
 int			cvar_numIndexes;
 
