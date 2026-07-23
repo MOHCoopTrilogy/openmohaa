@@ -1475,7 +1475,12 @@ bool Projectile::CheckTeams(void)
             return false;
         }
     } else if (pOwner->IsSubclassOfSentient()) {
-        if (m_iTeam != pOwner->m_Team) {
+        // HZM coop - SetOwner never assigns m_iTeam for AI owners (Player-only, :1378), so this
+        // compared 0 against the actor's real team and every AI-thrown grenade in MP was silently
+        // REMOVED instead of exploding (retail never saw it: the check is skipped in SP, and our
+        // GrenadeWillHurtTeamAt fix is what first let AI throw at all). Mirror the Player branch's
+        // TEAM_NONE exemption - the check exists to stop player team-switch griefing, not AI.
+        if (m_iTeam != TEAM_NONE && m_iTeam != pOwner->m_Team) {
             return false;
         }
     }
@@ -2725,7 +2730,7 @@ float BulletAttack(
     // fire are not logged. coop_allyFireDebug 0 = off.
     if (owner && !owner->IsSubclassOfPlayer() && owner->IsSubclassOfSentient()
         && static_cast<Sentient *>(owner)->m_Team == TEAM_AMERICAN) {
-        static cvar_t *pAllyDbg = gi.Cvar_Get("coop_allyFireDebug", "1", 0);
+        static cvar_t *pAllyDbg = gi.Cvar_Get("coop_allyFireDebug", "0", 0);
         if (pAllyDbg->integer) {
             gi.Printf(
                 "^~^~^ ALLYFIRE owner=%d '%s' hits=%d dmg=%.0f t=%.1f\n",
@@ -3187,6 +3192,50 @@ void RadiusDamage(
 
         Com_Printf("hurtOwnerOnly: %d\n", hurtOwnerOnly);
         Com_Printf("}\n");
+    }
+
+    // HZM coop - TINNITUS BLAST-PROXIMITY PING. Every explosion (grenade / rocket / barrel / landmine / script
+    // radiusdamage / vehicle wreck) funnels through RadiusDamage, so flag every nearby PLAYER right here -
+    // REGARDLESS of whether they actually take damage. Behind cover, outside the blast's damage radius, or with
+    // the big coop HP pool soaking it up, the ears still ring. We publish a per-player script var
+    // coop_blastPing = closeness (0..1, 1 = point-blank); coop_mod/tinnitus.scr reads it each frame and rings +
+    // muffles scaled by it, then clears it. Distance ONLY, no sight trace - concussion/sound wraps around cover.
+    // coop_tinnitusBlast 0 disables; coop_tinnitusBlastRange = the audible radius (default 500). Keep the
+    // STRONGEST ping if several blasts land in the same frame.
+    {
+        cvar_t *pTB = gi.Cvar_Get("coop_tinnitusBlast", "1", CVAR_ARCHIVE);
+        if (pTB && pTB->integer) {
+            cvar_t *pTBR    = gi.Cvar_Get("coop_tinnitusBlastRange", "500", CVAR_ARCHIVE);
+            float   fRange  = (pTBR && pTBR->value > 0.0f) ? pTBR->value : 500.0f;
+            int     pi;
+            for (pi = 0; pi < game.maxclients; pi++) {
+                gentity_t *ped = &g_entities[pi];
+                if (!ped->inuse || !ped->client || !ped->entity) {
+                    continue;
+                }
+                Entity *plent = ped->entity;
+                if (!plent->IsSubclassOfPlayer() || plent->health <= 0) {
+                    continue;
+                }
+                float fDist = (plent->centroid - origin).length();
+                if (fDist >= fRange) {
+                    continue;
+                }
+                float           fClose = 1.0f - (fDist / fRange); // 0..1, nearer = louder / longer
+                ScriptVariable *pv     = plent->Vars()->GetVariable("coop_blastPing");
+                // bug-948: NEVER floatValue() an untyped slot. A script read of an unset field
+                // leaves the variable existing as VARIABLE_NONE; casting that throws a
+                // ScriptException OUT OF RadiusDamage, killing the whole calling chain
+                // (crater fires, ThrobbingBox BlowUp -> e1l2 artillery objective stuck).
+                float fPrev = -1.0f;
+                if (pv && (pv->GetType() == VARIABLE_FLOAT || pv->GetType() == VARIABLE_INTEGER)) {
+                    fPrev = pv->floatValue();
+                }
+                if (fClose > fPrev) {
+                    plent->Vars()->SetVariable("coop_blastPing", fClose);
+                }
+            }
+        }
     }
 
     ent = findradius(NULL, origin, radius);

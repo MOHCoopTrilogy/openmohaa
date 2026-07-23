@@ -2867,6 +2867,18 @@ Actor::Actor()
 {
     entflags |= ECF_ACTOR;
 
+    // HZM coop - bug-790 (4th "blood pool not visible" report, FIRST with coop_goreDebug evidence):
+    // qconsole 07-18 shows 58/58 GOREPOOL lines "BLOCKED no blood_model" (and every AI GORESKIN too) -
+    // zero pools stamped, zero client receives. Root cause: MOHAA human/dog TIKs never issue the
+    // FAKK-era blood_model command, so GetBloodSplatName() returned empty for EVERY Actor and all
+    // sentient-side gore (pool, tier skins, drips, wound props, blood trail) silently no-opped behind
+    // the "non-flesh doesn't bleed" gates. Players only pass because Player::Postthink lazily defaults
+    // the same field. Every Actor in this game IS flesh (humans + dogs), so default red blood here; a
+    // TIK/script blood_model command still overrides (green/blue bleeders stay possible). The vanilla
+    // ShouldBleed/AddBloodSpurt damage-path calls are commented out upstream, so this ONLY opens the
+    // coop gore gates - no retail behavior changes.
+    blood_model = "fx_bspurt.tik";
+
     m_pszDebugState = "";
     m_pFallPath     = NULL;
     m_iOriginTime   = -1;
@@ -5147,7 +5159,7 @@ void Actor::EventGiveWeaponInternal(Event *ev)
         // HZM coop - WEAPDBG: a FAILED give leaves the actor holstered + weaponless (Holster/RemoveWeapons
         // above already ran) while its anims keep posing "armed" - a prime suspect for the persistent
         // "friendly's gun absent from his hands" bug. Log it loudly. coop_weapDebug 0 = off.
-        static cvar_t *pWeapDbg3 = gi.Cvar_Get("coop_weapDebug", "1", 0);
+        static cvar_t *pWeapDbg3 = gi.Cvar_Get("coop_weapDebug", "0", 0);
         if (pWeapDbg3->integer) {
             gi.Printf(
                 "^~^~^ WEAPDBG GIVE-FAILED actor=%d '%s' weapName='%s' -> actor left UNARMED+holstered t=%.1f\n",
@@ -5315,6 +5327,13 @@ void Actor::HandleKilled(Event *ev, bool bPlayDeathAnim)
 {
     deadflag = DEAD_DEAD;
     health   = 0.0;
+
+    // HZM coop - gore tier 4 (bug-780): mark dead ACTORS with EF_DEAD like players and
+    // the body queue. cgame keys the killing-blow corpse blood splashes (EF_DEAD rising
+    // edge) and the respawn wound-reset (falling edge, actor slot reuse) off this flag.
+    // Server-side nothing reads it; the cgame forceModel branch it feeds is inert in
+    // coop (cg_forceModelAllowed requires server-forced player models).
+    edict->s.eFlags |= EF_DEAD;
 
     // HZM coop - DEATH IMPULSE: explosive kills shove the dying body along the blast
     // direction so deaths read physical (bodies fall *with* the blow, can get thrown off
@@ -7687,6 +7706,16 @@ void Actor::Think(void)
     m_bAnimating = false;
 
     TryDropBloodTrail(); // HZM coop - wounded AI leave ground blood trails as they move
+
+    // HZM coop bug-949: inside a coop_clipStripZones box, actors ignore MONSTERCLIP so
+    // AI (paratroopers, reinforcements) stop grinding on the same invisible SP-boundary
+    // clip webs the players were freed from (common/clip carries PLAYERCLIP|MONSTERCLIP).
+    // Re-derived every think so leaving a zone restores stock clipping.
+    if (CoopClipStripZoneContains(origin)) {
+        edict->clipmask = MASK_MONSTERSOLID & ~CONTENTS_MONSTERCLIP;
+    } else {
+        edict->clipmask = MASK_MONSTERSOLID;
+    }
 
     Director.Pause();
 

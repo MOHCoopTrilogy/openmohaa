@@ -2829,7 +2829,7 @@ void Weapon::DetachGun(void)
         // HZM coop - WEAPDBG: trace AI weapon detach/hide (hunting the "friendly's gun absent from hands"
         // bug). AI owners only so player weapon churn doesn't spam. coop_weapDebug 0 = off.
         {
-            static cvar_t *pWeapDbg = gi.Cvar_Get("coop_weapDebug", "1", 0);
+            static cvar_t *pWeapDbg = gi.Cvar_Get("coop_weapDebug", "0", 0);
             if (pWeapDbg->integer && owner && !owner->IsSubclassOfPlayer()) {
                 gi.Printf(
                     "^~^~^ WEAPDBG DETACH+HIDE weap='%s' owner=%d '%s' t=%.1f\n",
@@ -2863,9 +2863,15 @@ void Weapon::AttachGun(weaponhand_t hand, qboolean holstering)
     if (holstering) {
         // Save off these values if we are holstering the weapon.  We will restore them when
         // the users raises the weapons again.
-        lastAngles = this->angles;
-        lastScale  = this->edict->s.scale;
-        lastValid  = qtrue;
+        // HZM coop (bug-623): NEVER overwrite a pending saved state. The weapons-on-back pass can
+        // re-holster a weapon that was detached WHILE holstered (its angles are already the holster
+        // rotation); re-saving here poisoned lastAngles with 0/185/-25 and the next raise put the
+        // gun in the player's hands BACKWARDS ("out of nowhere im holding my guns backwards").
+        if (!lastValid) {
+            lastAngles = this->angles;
+            lastScale  = this->edict->s.scale;
+            lastValid  = qtrue;
+        }
     } else if (lastValid) {
         // Restore the last
         setScale(lastScale);
@@ -2900,7 +2906,7 @@ void Weapon::AttachGun(weaponhand_t hand, qboolean holstering)
     // HZM coop - WEAPDBG (see DetachGun): log every AI attach outcome, incl. the two SILENT hidden-gun paths
     // (empty holster tag -> return with the model still hidden from DetachGun; tag lookup failure).
     {
-        static cvar_t *pWeapDbg2 = gi.Cvar_Get("coop_weapDebug", "1", 0);
+        static cvar_t *pWeapDbg2 = gi.Cvar_Get("coop_weapDebug", "0", 0);
         if (pWeapDbg2->integer && owner && !owner->IsSubclassOfPlayer()) {
             gi.Printf(
                 "^~^~^ WEAPDBG ATTACH weap='%s' owner=%d '%s' holster=%d tag='%s' t=%.1f\n",
@@ -4396,31 +4402,72 @@ void Weapon::FallingAngleAdjust(Event *ev)
         return;
     }
 
+    // HZM 07-20 (bug-923): ported upstream PR #796 (openmoh/openmohaa commit c2519c86, fixes
+    // upstream issue #323 "dropped weapon rotating in the air"). The old branches had no clamps
+    // at their convergence targets, so the settle-flat rotation overshot, anglemod-wrapped,
+    // flipped branch, and oscillated forever - the endless mid-air spin on weapons dropped by
+    // dying AI/players that never acquire a world groundentity (e.g. resting on solid landmine
+    // trigger boxes in the e1l2 minefield).
     angles[0] = anglemod(angles[0]);
-    //if( angles[ 0 ] > 180.0f )
-    //	angles[ 0 ] -= 180.0f;
+    if (angles[0] > 180) {
+        angles[0] -= 180;
+    }
 
-    if (angles[0] >= -90.0f && angles[0] <= 0.0f) {
-        angles[0] -= level.frametime * 160.0f;
-        if (angles[0] < -180.0f) {
-            angles[0] = -180.0f;
+    if (fabs(angles[0]) >= 90) {
+        if (angles[0] > 0) {
+            angles[0] += level.frametime * 160;
+            if (angles[0] > 180) {
+                angles[0] = 180;
+            }
+        } else {
+            angles[0] -= level.frametime * 160;
+            if (angles[0] < -180) {
+                angles[0] = 180;
+            }
         }
-    } else if (angles[0] > 0.0f) {
-        angles[0] -= level.frametime * 160.0f;
     } else {
-        angles[0] += level.frametime * 160.0f;
+        if (angles[0] > 0.0f) {
+            angles[0] -= level.frametime * 160;
+            if (angles[0] < 0) {
+                angles[0] = 0;
+            }
+        } else {
+            angles[0] += level.frametime * 160;
+            if (angles[0] > 0) {
+                angles[0] = 0;
+            }
+        }
     }
 
     angles[2] = anglemod(angles[2]);
-    //if( angles[ 2 ] > 180.0f )
-    //	angles[ 2 ] -= 180.0f;
+    if (angles[2] > 180) {
+        angles[2] -= 180;
+    }
 
-    if (angles[2] > -90.0f && angles[2] < 0.0f) {
-        angles[2] -= level.frametime * 160.0f;
-    } else if (angles[2] > 90.0f) {
-        angles[2] -= level.frametime * 160.0f;
+    if (angles[2] < 0) {
+        if (angles[2] > -90) {
+            angles[2] -= level.frametime * 160;
+            if (angles[2] < -90) {
+                angles[2] = -90;
+            }
+        } else {
+            angles[2] += level.frametime * 160;
+            if (angles[2] > -90) {
+                angles[2] = -90;
+            }
+        }
     } else {
-        angles[2] += level.frametime * 160.0f;
+        if (angles[2] > 90.0f) {
+            angles[2] -= level.frametime * 160;
+            if (angles[2] < 90) {
+                angles[2] = 90;
+            }
+        } else {
+            angles[2] += level.frametime * 160;
+            if (angles[2] > 90) {
+                angles[2] = 90;
+            }
+        }
     }
 
     angles[0] = anglemod(angles[0]);

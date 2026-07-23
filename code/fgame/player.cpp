@@ -1283,6 +1283,22 @@ Event EV_GetCoopAdsHeld // HZM coop
      "returns 1 if this player is holding the aim-down-sights button, or 0 if not",
      EV_GETTER
 );
+Event EV_Player_CoopKillWall // HZM coop - wall probe v5 (bug-953)
+(
+    "killwall",
+    EV_CONSOLE,
+    NULL,
+    NULL,
+    "HZM coop - kill the invisible wall brush the player is aiming at (live + persisted)"
+);
+Event EV_Player_CoopMarkWall // HZM coop - wall probe v5 (bug-953)
+(
+    "markwall",
+    EV_CONSOLE,
+    NULL,
+    NULL,
+    "HZM coop - forensic report of whatever the player is aiming at (brush id, shader, species)"
+);
 Event EV_Player_CoopSetCover // HZM coop - TAKE COVER [214]
 (
     "coop_setcover",
@@ -2011,6 +2027,8 @@ CLASS_DECLARATION(Sentient, Player, "player") {
     {&EV_GetPrimaryFireHeld,              &Player::EventGetPrimaryFireHeld      },
     {&EV_GetSecondaryFireHeld,            &Player::EventGetSecondaryFireHeld    },
     {&EV_GetCoopAdsHeld,                  &Player::EventGetCoopAdsHeld          },
+    {&EV_Player_CoopKillWall,             &Player::EventCoopKillWall            }, // HZM coop - wall probe v5
+    {&EV_Player_CoopMarkWall,             &Player::EventCoopMarkWall            }, // HZM coop - wall probe v5
     {&EV_Player_CoopSetCover,             &Player::EventCoopSetCover            }, // HZM coop - take cover [214]
     {&EV_Player_GetCoopCover,             &Player::EventGetCoopCover            }, // HZM coop - take cover [214]
     {&EV_Player_GetReady,                 &Player::EventGetReady                },
@@ -2584,6 +2602,10 @@ void Player::InitHealth(void)
     m_fHealRate = 0;
     m_fRecoilTarget  = 0; // HZM coop - clear view-recoil on (re)spawn (delta_angles is reset here too)
     m_fRecoilApplied = 0;
+    // HZM coop - gore tier 1: fresh spawn = clean uniform. InitModel already wipes the surface skin
+    // bits; the accumulated-damage counter + tier must follow or the first hit re-bloodies instantly.
+    m_fCoopGoreDamage   = 0;
+    m_iCoopGoreSkinTier = 0;
     edict->s.eFlags &= ~EF_DEAD;
 
     // Fixed in OPM
@@ -2861,6 +2883,27 @@ void Player::Respawn(Event *ev)
         }
 
         respawn_time = level.time;
+
+        // HZM coop - gore tier 2: fresh life = clean. Kill any corpse-drip FX still attached to this entity
+        // (the player entity respawns in place - without this the bleed-out drip would follow the LIVE body)
+        // and reset the accumulated-damage gore counter that drives the wounded-drip tier.
+        m_fCoopGoreDamage = 0;
+        // bug-754: also reset the TIER latch. InitModel wipes the surface bits but a stale
+        // m_iCoopGoreSkinTier=2 made CoopGoreUpdateSkinTier early-out if the next life jumped
+        // straight back to the same tier (big first hit) - the bits were never rewritten.
+        m_iCoopGoreSkinTier = 0;
+        if (m_pCoopDripEmitter) {
+            m_pCoopDripEmitter->PostEvent(EV_Remove, 0);
+            m_pCoopDripEmitter = NULL;
+        }
+        // HZM coop - gore tier 3: fresh life = no wound props either (the player entity respawns in
+        // place, so last life's attached wound patches must go with the corpse view, not the new body)
+        for (int i = 0; i < 4; i++) { // 4 = COOP_GORE_MAX_WOUNDPROPS (sentient.cpp)
+            if (m_pCoopWoundProp[i]) {
+                m_pCoopWoundProp[i]->PostEvent(EV_Remove, 0);
+                m_pCoopWoundProp[i] = NULL;
+            }
+        }
 
         // This is not present in MOHAA
         ProcessEvent(EV_Player_UnattachFromLadder);
@@ -3811,6 +3854,218 @@ void Player::SetMoveInfo(pmove_t *pm, usercmd_t *ucmd)
     }
 
     pm->tracemask     = MASK_PLAYERSOLID;
+    // HZM 07-20 (user approved): coop_noPlayerClip 1 = PLAYER movement ignores CONTENTS_PLAYERCLIP,
+    // the invisible designer fences painted over rocks/ledges to keep SP players on the intended
+    // path (e.g. the e1l2 gun-emplacement rocks). Real geometry (CONTENTS_SOLID) is untouched -
+    // players can only stand where actual surfaces exist, and floors/walls behave normally. AI
+    // keep their own masks (pathing unaffected). Trade-off: retail fences occasionally guard
+    // unfinished map edges - set 0 to restore stock fencing.
+    {
+        static cvar_t *coop_noplayerclip = NULL;
+        if (!coop_noplayerclip) {
+            coop_noplayerclip = gi.Cvar_Get("coop_noPlayerClip", "0", 0);
+        }
+        if (coop_noplayerclip->integer) {
+            pm->tracemask &= ~CONTENTS_PLAYERCLIP;
+        }
+    }
+    // HZM coop bug-946/949: REGIONAL invisible-wall strip (see CoopClipStripZoneContains,
+    // g_utils.cpp). Inside a zone the player ignores PLAYERCLIP and FENCE - both invisible
+    // blocker species (common/clip webs + nodraw/bspindleclip fence brushes); collision
+    // falls back to the real visible geometry. Zones are validated per-map against the
+    // BSP brush data so visible barbed-wire fences are never inside one.
+    if (CoopClipStripZoneContains(origin)) {
+        pm->tracemask &= ~(CONTENTS_PLAYERCLIP | CONTENTS_FENCE);
+    }
+    // HZM coop bug-947/952/953: invisible-wall self-reporting, v4.
+    // (a) STUCK DETECTOR: player pushing (ucmd move input) but not moving for ~0.5s
+    //     -> forensic trace in the push direction logging brush id + SHADER NAME +
+    //     surfaceflags + entity, EVEN for species the radial sweep would classify as
+    //     ordinary geometry (catches terrain/patch phantoms - the "silent walls").
+    // (b) RADIAL SWEEP: 1 Hz, 8 directions, 48u, three heights (shin/waist/head),
+    //     species-classified (clip/fence/solidnodraw/ent), exact brush id + shader.
+    // BRUSH -1 on a world hit = non-brush collision (patch/terrain) - special species.
+    // coop_wallProbe 0 disables. All output ^~^~^ WALLPROBE, qconsole.log parseable.
+    {
+        static cvar_t *coop_wallprobe = NULL;
+        static int     nextProbeMs[MAX_CLIENTS];
+        static float   lastOrg[MAX_CLIENTS][2];
+        static int     stuckFrames[MAX_CLIENTS];
+        static int     nextStuckMs[MAX_CLIENTS];
+
+        if (!coop_wallprobe) {
+            coop_wallprobe = gi.Cvar_Get("coop_wallProbe", "0", 0);
+        }
+        int cn = edict->s.number;
+        if (coop_wallprobe->integer && cn >= 0 && cn < MAX_CLIENTS && !IsDead() && !IsSpectator()) {
+            int baseMask = MASK_PLAYERSOLID & ~CONTENTS_BODY;
+            if (CoopClipStripZoneContains(origin)) {
+                baseMask &= ~(CONTENTS_PLAYERCLIP | CONTENTS_FENCE);
+            }
+
+            // ---- (a) stuck detector ----
+            {
+                float dx = origin.x - lastOrg[cn][0];
+                float dy = origin.y - lastOrg[cn][1];
+                if ((ucmd->forwardmove || ucmd->rightmove) && (dx * dx + dy * dy) < 0.25f) {
+                    stuckFrames[cn]++;
+                } else {
+                    stuckFrames[cn] = 0;
+                }
+                lastOrg[cn][0] = origin.x;
+                lastOrg[cn][1] = origin.y;
+                if (stuckFrames[cn] >= 10 && level.inttime >= nextStuckMs[cn]) {
+                    nextStuckMs[cn] = level.inttime + 1000;
+                    stuckFrames[cn] = 0;
+                    Vector fwd, right, wish;
+                    AngleVectors(v_angle, fwd, right, NULL);
+                    wish   = fwd * (float)ucmd->forwardmove + right * (float)ucmd->rightmove;
+                    wish.z = 0;
+                    if (wish.length() > 0.1f) {
+                        wish.normalize();
+                        // bug-959: probe BOTH shin and waist - step-edge lips live at shin height
+                        // and a waist-only trace sails over the very thing pinning the player.
+                        // Whichever height hits NEAREST is reported as the true BLOCKER.
+                        Vector  eyeW = origin + Vector(0, 0, 40);
+                        Vector  eyeS = origin + Vector(0, 0, 12);
+                        trace_t stW  = G_Trace(eyeW, vec_zero, vec_zero, eyeW + wish * 48, this, baseMask, qfalse, "coop_wallProbe_stuckW");
+                        trace_t stS  = G_Trace(eyeS, vec_zero, vec_zero, eyeS + wish * 48, this, baseMask, qfalse, "coop_wallProbe_stuckS");
+                        trace_t st   = (stS.fraction < stW.fraction) ? stS : stW;
+                        Vector  eye  = (stS.fraction < stW.fraction) ? eyeS : eyeW;
+                        Vector  to   = eye + wish * 48;
+                        if (st.fraction < 1.0f) {
+                            Vector        inside   = Vector(st.endpos) + wish * 2;
+                            int           brushNum = gi.PointBrushnum(inside, 0);
+                            baseshader_t *bs       = (st.shaderNum >= 0) ? gi.GetShader(st.shaderNum) : NULL;
+                            gi.Printf(
+                                "^~^~^ WALLPROBE STUCK-BLOCKER BRUSH %d shader '%s' sf 0x%x ent %d at %.0f %.0f %.0f h %.0f push %.0f %.0f\n",
+                                brushNum,
+                                bs ? bs->shader : "?",
+                                st.surfaceFlags,
+                                st.entityNum,
+                                st.endpos[0],
+                                st.endpos[1],
+                                st.endpos[2],
+                                eye.z - origin.z,
+                                wish.x * 10,
+                                wish.y * 10
+                            );
+                        } else {
+                            gi.Printf(
+                                "^~^~^ WALLPROBE STUCK-NOHIT at %.0f %.0f %.0f push %.0f %.0f\n",
+                                origin.x,
+                                origin.y,
+                                origin.z,
+                                wish.x * 10,
+                                wish.y * 10
+                            );
+                        }
+                    }
+                }
+            }
+
+            // ---- (b) radial sweep ----
+            if (level.inttime >= nextProbeMs[cn]) {
+                nextProbeMs[cn] = level.inttime + 1000;
+
+                // v5: CEILING probe - invisible overhead blockers (jump stoppers)
+                {
+                    Vector  up0 = origin + Vector(0, 0, 72);
+                    Vector  up1 = origin + Vector(0, 0, 168);
+                    trace_t tu  = G_Trace(up0, vec_zero, vec_zero, up1, this, baseMask, qfalse, "coop_wallProbe_up");
+                    if (tu.fraction < 1.0f && !tu.startsolid) {
+                        trace_t tu2 = G_Trace(up0, vec_zero, vec_zero, up1, this,
+                                              baseMask & ~(CONTENTS_PLAYERCLIP | CONTENTS_FENCE), qfalse, "coop_wallProbe_up2");
+                        qboolean invis = (tu2.fraction > tu.fraction + 0.001f)
+                                      || (tu.entityNum == ENTITYNUM_WORLD && (tu.surfaceFlags & SURF_NODRAW));
+                        if (invis) {
+                            Vector        insideU  = Vector(tu.endpos) + Vector(0, 0, 2);
+                            int           bnU      = gi.PointBrushnum(insideU, 0);
+                            baseshader_t *bsU      = (tu.shaderNum >= 0) ? gi.GetShader(tu.shaderNum) : NULL;
+                            gi.Printf("^~^~^ WALLPROBE CEIL BRUSH %d shader '%s' at %.0f %.0f %.0f\n",
+                                      bnU, bsU ? bsU->shader : "?", tu.endpos[0], tu.endpos[1], tu.endpos[2]);
+                        }
+                    }
+                }
+                // v5: FLOOR identity - standing on invisible clip (floating-platform feel)
+                {
+                    Vector  dn0 = origin + Vector(0, 0, 4);
+                    Vector  dn1 = origin - Vector(0, 0, 16);
+                    trace_t td  = G_Trace(dn0, vec_zero, vec_zero, dn1, this, baseMask, qfalse, "coop_wallProbe_dn");
+                    if (td.fraction < 1.0f && td.entityNum == ENTITYNUM_WORLD && td.shaderNum >= 0) {
+                        baseshader_t *bsD = gi.GetShader(td.shaderNum);
+                        if (bsD && (strstr(bsD->shader, "common/clip") || strstr(bsD->shader, "playerclip")
+                                    || strstr(bsD->shader, "nodraw"))) {
+                            Vector insideD = Vector(td.endpos) - Vector(0, 0, 2);
+                            gi.Printf("^~^~^ WALLPROBE FLOOR BRUSH %d shader '%s' at %.0f %.0f %.0f\n",
+                                      gi.PointBrushnum(insideD, 0), bsD->shader, td.endpos[0], td.endpos[1], td.endpos[2]);
+                        }
+                    }
+                }
+
+                static const float probeHeights[3] = {40, 14, 64};
+                for (int hi = 0; hi < 3; hi++) {
+                    Vector eye = origin + Vector(0, 0, probeHeights[hi]);
+                    for (int di = 0; di < 8; di++) {
+                        float  ang = di * (360.0f / 8.0f) * (M_PI / 180.0f);
+                        Vector dir(cos(ang), sin(ang), 0);
+                        Vector to = eye + dir * 48;
+                        trace_t trA = G_Trace(eye, vec_zero, vec_zero, to, this, baseMask, qfalse, "coop_wallProbe_A");
+                        if (trA.fraction >= 1.0f || trA.startsolid) {
+                            continue;
+                        }
+                        const char *kind = NULL;
+                        trace_t     trB =
+                            G_Trace(eye, vec_zero, vec_zero, to, this, baseMask & ~CONTENTS_PLAYERCLIP, qfalse, "coop_wallProbe_B");
+                        if (trB.fraction >= 1.0f) {
+                            kind = "clip";
+                        } else {
+                            trace_t trC =
+                                G_Trace(eye, vec_zero, vec_zero, to, this, baseMask & ~CONTENTS_FENCE, qfalse, "coop_wallProbe_C");
+                            if (trC.fraction >= 1.0f) {
+                                kind = "fence";
+                            } else if (trA.entityNum == ENTITYNUM_WORLD && (trA.surfaceFlags & SURF_NODRAW)) {
+                                kind = "solidnodraw";
+                            } else if (trA.ent && trA.entityNum != ENTITYNUM_WORLD && trA.ent->entity
+                                       && (trA.ent->s.modelindex == 0 || (trA.ent->s.renderfx & RF_DONTDRAW))) {
+                                gi.Printf(
+                                    "^~^~^ WALLPROBE ent %d %s at %.0f %.0f %.0f h %.0f\n",
+                                    trA.entityNum,
+                                    trA.ent->entity->getClassname(),
+                                    trA.endpos[0],
+                                    trA.endpos[1],
+                                    trA.endpos[2],
+                                    probeHeights[hi]
+                                );
+                                continue;
+                            }
+                        }
+                        if (kind) {
+                            Vector        inside   = Vector(trA.endpos) + dir * 2;
+                            int           brushNum = gi.PointBrushnum(inside, 0);
+                            baseshader_t *bs       = (trA.shaderNum >= 0) ? gi.GetShader(trA.shaderNum) : NULL;
+                            if (coop_wallprobe->integer >= 2) {
+                                gi.SendServerCommand(edict - g_entities,
+                                    va("print \"[wallprobe] %s brush %d logged\n\"", kind, brushNum));
+                            }
+                            gi.Printf(
+                                "^~^~^ WALLPROBE %s BRUSH %d shader '%s' at %.0f %.0f %.0f dir %.0f %.0f h %.0f\n",
+                                kind,
+                                brushNum,
+                                bs ? bs->shader : "?",
+                                trA.endpos[0],
+                                trA.endpos[1],
+                                trA.endpos[2],
+                                dir.x * 10,
+                                dir.y * 10,
+                                probeHeights[hi]
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
     pm->pointcontents = gi.pointcontents;
 
     pm->ps->origin[0] = origin.x;
@@ -7875,7 +8130,7 @@ void Player::UpdateStats(void)
         Weapon *weapon = (Weapon *)G_GetEntity(entnum);
         int     weapon_class;
 
-        if (weapon->IsSubclassOfWeapon()) {
+        if (weapon && weapon->IsSubclassOfWeapon()) { // HZM 07-19 (bug-920): stale slot guard (live dump: UpdateStats crash)
             if (weapon->IsSubclassOfInventoryItem()) {
                 if (iItem > 3) {
                     weapon->SetItemSlot(0);
@@ -10908,7 +11163,7 @@ void Player::Stats(Event *ev)
 
     for (i = 1; i <= inventory.NumObjects(); i++) {
         Entity *pEnt = G_GetEntity(inventory.ObjectAt(i));
-        if (pEnt->IsSubclassOfWeapon()) {
+        if (pEnt && pEnt->IsSubclassOfWeapon()) {
             Weapon *pWeap = static_cast<Weapon *>(pEnt);
 
             iNumHeadShots += pWeap->m_iNumHeadShots;
@@ -11983,6 +12238,131 @@ void Player::EventGetCoopAdsHeld(Event *ev) // HZM coop - aim-down-sights button
 // pose. Validate IMMEDIATELY so the script can read coop_incover right after coop_setcover 1 for
 // instant feedback; if nothing coverable is around on the initial engage, clear the request on the
 // spot (no grace) so the toggle stays in sync ("No cover here" instead of a latent request).
+/*
+===============
+Player::EventCoopMarkWall
+
+HZM coop bug-953 wall probe v5: "markwall" console command (bindable). Traces 512u
+along the view direction and prints the full identity of whatever it hits - species,
+brush id (for cmpatch surgery), shader name, surfaceflags, entity - to the console
+log AND the player's HUD. Lets the player report a suspect wall from range without
+touching it.
+===============
+*/
+/*
+===============
+Player::EventCoopKillWall
+
+HZM coop bug-953 wall probe v5: "killwall" console command (bindable). Traces the
+view direction; if it hits an INVISIBLE wall species (clip/fence/solidnodraw) on the
+world, dispatches cm_killbrush on that brush - the wall vanishes live and the id is
+persisted to the loose cmpatch file. Refuses visible geometry and entities so a
+stray keypress can never hole a real wall.
+===============
+*/
+void Player::EventCoopKillWall(Event *ev)
+{
+    Vector fwd;
+    Vector eye = origin + Vector(0, 0, viewheight);
+
+    AngleVectors(v_angle, fwd, NULL, NULL);
+    Vector  to   = eye + fwd * 512;
+    int     mask = MASK_PLAYERSOLID & ~CONTENTS_BODY;
+    trace_t tr   = G_Trace(eye, vec_zero, vec_zero, to, this, mask, qfalse, "coop_killwall");
+
+    if (tr.fraction >= 1.0f) {
+        gi.SendServerCommand(edict - g_entities, "print \"[killwall] nothing within 512u\n\"");
+        return;
+    }
+    if (tr.entityNum != ENTITYNUM_WORLD) {
+        gi.SendServerCommand(edict - g_entities, "print \"[killwall] that is an entity, not a map brush\n\"");
+        return;
+    }
+
+    qboolean invisible = qfalse;
+    trace_t  t2 = G_Trace(eye, vec_zero, vec_zero, to, this, mask & ~(CONTENTS_PLAYERCLIP | CONTENTS_FENCE), qfalse, "coop_killwall_B");
+    if (t2.fraction > tr.fraction + 0.001f) {
+        invisible = qtrue;
+    } else if (tr.surfaceFlags & SURF_NODRAW) {
+        invisible = qtrue;
+    }
+    if (!invisible) {
+        gi.SendServerCommand(edict - g_entities, "print \"[killwall] that wall is VISIBLE geometry - refusing (use markwall to report it)\n\"");
+        return;
+    }
+
+    Vector inside   = Vector(tr.endpos) + fwd * 2;
+    int    brushNum = gi.PointBrushnum(inside, 0);
+    if (brushNum < 0) {
+        gi.SendServerCommand(edict - g_entities, "print \"[killwall] non-brush collision (terrain/patch) - logged for engine fix\n\"");
+        baseshader_t *bs = (tr.shaderNum >= 0) ? gi.GetShader(tr.shaderNum) : NULL;
+        gi.Printf("^~^~^ WALLPROBE KILLWALL-NONBRUSH shader '%s' sf 0x%x at %.0f %.0f %.0f\n",
+                  bs ? bs->shader : "?", tr.surfaceFlags, tr.endpos[0], tr.endpos[1], tr.endpos[2]);
+        return;
+    }
+
+    baseshader_t *bs = (tr.shaderNum >= 0) ? gi.GetShader(tr.shaderNum) : NULL;
+    gi.Printf("^~^~^ WALLPROBE KILLWALL BRUSH %d shader '%s' at %.0f %.0f %.0f\n",
+              brushNum, bs ? bs->shader : "?", tr.endpos[0], tr.endpos[1], tr.endpos[2]);
+    gi.SendConsoleCommand(va("cm_killbrush %d\n", brushNum));
+    gi.SendServerCommand(edict - g_entities,
+        va("print \"[killwall] brush %d '%s' KILLED - if a visible wall went ghost, run: cm_restorebrush %d\n\"",
+           brushNum, bs ? bs->shader : "?", brushNum));
+}
+
+void Player::EventCoopMarkWall(Event *ev)
+{
+    Vector fwd;
+    Vector eye = origin + Vector(0, 0, viewheight);
+
+    AngleVectors(v_angle, fwd, NULL, NULL);
+    Vector  to = eye + fwd * 512;
+    int     mask = MASK_PLAYERSOLID & ~CONTENTS_BODY;
+    trace_t tr = G_Trace(eye, vec_zero, vec_zero, to, this, mask, qfalse, "coop_markwall");
+
+    if (tr.fraction >= 1.0f) {
+        gi.SendServerCommand(edict - g_entities, "print \"[markwall] nothing within 512u\n\"");
+        return;
+    }
+
+    const char *kind = "solid";
+    trace_t     t2 = G_Trace(eye, vec_zero, vec_zero, to, this, mask & ~CONTENTS_PLAYERCLIP, qfalse, "coop_markwall_B");
+    if (t2.fraction > tr.fraction + 0.001f) {
+        kind = "clip";
+    } else {
+        trace_t t3 = G_Trace(eye, vec_zero, vec_zero, to, this, mask & ~CONTENTS_FENCE, qfalse, "coop_markwall_C");
+        if (t3.fraction > tr.fraction + 0.001f) {
+            kind = "fence";
+        } else if (tr.entityNum == ENTITYNUM_WORLD && (tr.surfaceFlags & SURF_NODRAW)) {
+            kind = "solidnodraw";
+        } else if (tr.entityNum != ENTITYNUM_WORLD) {
+            kind = "entity";
+        }
+    }
+
+    Vector        inside   = Vector(tr.endpos) + fwd * 2;
+    int           brushNum = gi.PointBrushnum(inside, 0);
+    baseshader_t *bs       = (tr.shaderNum >= 0) ? gi.GetShader(tr.shaderNum) : NULL;
+
+    gi.Printf(
+        "^~^~^ WALLPROBE MARK %s BRUSH %d shader '%s' sf 0x%x ent %d at %.0f %.0f %.0f dist %.0f\n",
+        kind,
+        brushNum,
+        bs ? bs->shader : "?",
+        tr.surfaceFlags,
+        tr.entityNum,
+        tr.endpos[0],
+        tr.endpos[1],
+        tr.endpos[2],
+        tr.fraction * 512.0f
+    );
+    gi.SendServerCommand(
+        edict - g_entities,
+        va("print \"[markwall] %s brush %d '%s' dist %.0f - logged\n\"",
+           kind, brushNum, bs ? bs->shader : "?", tr.fraction * 512.0f)
+    );
+}
+
 void Player::EventCoopSetCover(Event *ev)
 {
     m_bCoopCoverRequested = ev->GetInteger(1) ? true : false;
@@ -12573,9 +12953,11 @@ void Player::TickCoopCover()
     {
         cvar_t *pWallD = gi.Cvar_Get("coop_coverWallDist", "40", CVAR_ARCHIVE);
         cvar_t *pLowD  = gi.Cvar_Get("coop_coverLowDist", "48", CVAR_ARCHIVE);
+        cvar_t *pLowH  = gi.Cvar_Get("coop_coverLowHeight", "72", CVAR_ARCHIVE); // HZM coop [user 07-19]: head-clear height, was hardcoded 58 - raised so slightly-taller crates/cover register as low cover (tunable)
         cvar_t *pGrace = gi.Cvar_Get("coop_coverGrace", "0.5", CVAR_ARCHIVE);
         float   fWallD = pWallD ? pWallD->value : 40.0f;
         float   fLowD  = pLowD ? pLowD->value : 48.0f;
+        float   fLowH  = pLowH ? pLowH->value : 72.0f;
         float   fGrace = pGrace ? pGrace->value : 0.5f;
         Vector  vFwd   = yaw_forward; // flat view yaw (same source CondSolidForward uses)
         trace_t trace;
@@ -12667,12 +13049,13 @@ void Player::TickCoopCover()
             }
         }
 
-        // LOW: crouch-chest height (36u) forward must HIT, head height (58u) forward must be CLEAR.
+        // LOW: crouch-chest height (36u) forward must HIT, head height (coop_coverLowHeight, default
+        // 72u - raised from 58 so slightly-taller crates/cover register) forward must be CLEAR.
         // The obstacle OUT normal is anchored on entry too, so peeking (RMB aim over the top)
         // does not break the tuck.
         {
             Vector vChest = origin + Vector(0, 0, 36);
-            Vector vHead  = origin + Vector(0, 0, 58);
+            Vector vHead  = origin + Vector(0, 0, fLowH);
             Vector vProbe = vFwd;
 
             if (m_bCoopCoverLow) {
