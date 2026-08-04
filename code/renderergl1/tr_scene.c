@@ -209,7 +209,21 @@ RE_GetRenderEntity
 refEntity_t* RE_GetRenderEntity(int entityNumber) {
     int i;
 
-    for (i = 0; i < r_numentities; i++) {
+    // HZM (bug-1217): scan only the CURRENT scene. r_numentities is zeroed ONCE PER FRAME in
+    // R_InitNextFrame - RE_ClearScene does NOT reset it, it only moves r_firstSceneEntity up to the
+    // current high-water mark - and "a single frame may have multiple scenes draw inside it" (see
+    // RE_RenderScene: the 3D game view, then 3D status-bar / menu / inventory renders, which go
+    // through cl_invrender.cpp's own re.ClearScene). Scanning from 0 could therefore match an
+    // entity left over from an EARLIER scene of the same frame and hand the caller a stale
+    // origin/axis/renderfx. Every caller is a cgame attached-model parent lookup done while
+    // building the current scene (cg_modelanim.c, cg_ents.c, cg_tempmodels.cpp,
+    // cg_volumetricsmoke.cpp), so a stale hit attaches a prop to last scene's copy of its parent.
+    // RE_AddRefEntityToScene's own parent lookup already starts at r_firstSceneEntity - this now
+    // agrees with it.
+    // Zeroing r_numentities in RE_ClearScene is NOT a valid alternative: the render commands for
+    // scenes already submitted this frame point into backEndData->entities[] and are not executed
+    // until the backend runs at RE_EndFrame, so reusing those slots would corrupt them.
+    for (i = r_firstSceneEntity; i < r_numentities; i++) {
         if (backEndData->entities[i].e.entityNumber == entityNumber) {
             return &backEndData->entities[i].e;
         }
@@ -229,7 +243,7 @@ void RE_AddRefEntityToScene( const refEntity_t *ent, int parentEntityNumber) {
 		return;
 	}
   // https://zerowing.idsoftware.com/bugzilla/show_bug.cgi?id=402
-	if ( r_numentities >= ENTITYNUM_WORLD ) {
+	if ( r_numentities >= MAX_ENTITIES ) { // HZM 07-20 (bug-935): was >= ENTITYNUM_WORLD, which the GENTITYNUM_BITS 11 op moved to 2046 while backEndData->entities[] still holds MAX_ENTITIES (1023, locked by drawsurf bit packing) - the old check would have allowed a heap overrun on a >1023-refentity frame; clamp against the ACTUAL array size (over-budget entities skip rendering gracefully)
 		return;
 	}
 	if ( ent->reType < 0 || ent->reType >= RT_MAX_REF_ENTITY_TYPE ) {
@@ -276,7 +290,21 @@ void RE_AddRefSpriteToScene(const refEntity_t* ent) {
 		return;
 	}
 
+	// HZM (engine-limits audit): this was a completely silent drop - sprites (muzzle flashes,
+	// tracers, most of the FX layer) just stopped appearing with no trace anywhere.
 	if (r_numsprites >= MAX_SPRITES) {
+		static qboolean overflowWarned = qfalse;
+
+		if (!overflowWarned) {
+			overflowWarned = qtrue;
+			ri.Printf(
+				PRINT_WARNING,
+				"RE_AddRefSpriteToScene: MAX_SPRITES (%d) exceeded - sprites dropped."
+				" Raise MAX_SPRITES in renderercommon/new/tr_types_new.h"
+				" (it sizes backEndData_t::sprites; MAX_SPRITESURFS must stay >= it).\n",
+				MAX_SPRITES
+			);
+		}
 		return;
 	}
 

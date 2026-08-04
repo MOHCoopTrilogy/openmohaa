@@ -388,6 +388,34 @@ void CG_Decal(centity_t *cent)
         // HZM coop - a "coop_bloodpool" decal (the death blood pool) is PERSISTENT: pass alphaFade=qfalse so
         // the mark system doesn't fade it out after ~10s (it lasts until recycled). All other decals fade.
         qboolean bPersist = (qboolean)(decalName && strstr(decalName, "bloodpool") != NULL);
+        // HZM coop (bug-776) - entityState.scale is *100-packed into 10 bits on the wire, so any radius
+        // above 10.23 arrives clamped to 10.23 (this is why the 31-58u blood pool always rendered as an
+        // ordinary splat-sized blob). The server (Decal::setRadius) side-channels the exact radius as whole
+        // units in surfaces[1] (8-bit netfield); prefer it when set. 0 = old server / tiny decal -> scale.
+        float fRadius = (s1->surfaces[1] > 0) ? (float)s1->surfaces[1] : s1->scale;
+
+        // HZM coop (bug-776) - client-side gore evidence, same cvar as the server GOREPOOL prints. Decal
+        // entities are rare (blood trails/pools only), so this is quiet in normal play even when enabled.
+        {
+            static cvar_t *pGoreDbg = NULL;
+            if (!pGoreDbg) {
+                pGoreDbg = cgi.Cvar_Get("coop_goreDebug", "0", 0);
+            }
+            if (pGoreDbg->integer) {
+                cgi.Printf(
+                    "^~^~^ GOREPOOL-CL decal '%s' shader=%d wireScale=%.2f surf1=%d r=%.0f persist=%d at (%.0f %.0f %.0f)\n",
+                    decalName ? decalName : "(null)",
+                    (int)cgi.R_RegisterShader(decalName),
+                    s1->scale,
+                    s1->surfaces[1],
+                    fRadius,
+                    bPersist,
+                    s1->origin[0],
+                    s1->origin[1],
+                    s1->origin[2]
+                );
+            }
+        }
 
         shader = cgi.R_RegisterShader(decalName);
         ByteToDir(s1->surfaces[0], dir);
@@ -396,8 +424,8 @@ void CG_Decal(centity_t *cent)
             s1->origin,
             dir,
             s1->angles[2],
-            s1->scale,
-            s1->scale,
+            fRadius,
+            fRadius,
             cent->color[0],
             cent->color[1],
             cent->color[2],
@@ -609,7 +637,7 @@ void CG_AddPacketEntities(void)
     int        num;
     centity_t *cent;
     int        child, parent;
-    qboolean   processed[MAX_ENTITIES];
+    qboolean   processed[MAX_GENTITIES]; // HZM 07-20 (bug-935): was MAX_ENTITIES (the RENDERER per-frame cap = 1023!) but indexed by GENTITY numbers up to 2047 - stack /GS overrun on any visible entity >= 1023 after the 2048-entity op
     int        i;
 
     // the auto-rotating items will all have the same axis
@@ -629,7 +657,7 @@ void CG_AddPacketEntities(void)
     AnglesToAxis(cg.autoAnglesSlow, cg.autoAxisSlow);
     AnglesToAxis(cg.autoAnglesFast, cg.autoAxisFast);
 
-    for (i = 0; i < MAX_ENTITIES; i++) {
+    for (i = 0; i < MAX_GENTITIES; i++) { // HZM bug-935: match the processed[] size
         processed[i] = qtrue;
     }
 

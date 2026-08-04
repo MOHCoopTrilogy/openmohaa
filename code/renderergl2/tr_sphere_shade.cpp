@@ -273,6 +273,29 @@ static void RB_OptimizeLights()
     }
 }
 
+/*
+===============
+RB_UnpackTessNormals
+
+HZM gl2 re-port (bug-gl2-modellight): gl2 packs tess.normal as int16
+(R_VaoPackNormal) where gl1 keeps float vec4s - unpack the batch once so the
+gl1-ported light loops below can walk float normals with the same 4-float
+stride the gl1 code was written for.
+===============
+*/
+static vec4_t unpackedTessNormals[SHADER_MAX_VERTEXES];
+static float *RB_UnpackTessNormals()
+{
+    int i;
+
+    for (i = 0; i < tess.numVertexes; i++) {
+        R_VaoUnpackNormal(unpackedTessNormals[i], tess.normal[i]);
+        unpackedTessNormals[i][3] = 0;
+    }
+
+    return (float *)unpackedTessNormals;
+}
+
 static void RB_Light_CubeMap(unsigned char *colors)
 {
     int              i, j;
@@ -283,7 +306,8 @@ static void RB_Light_CubeMap(unsigned char *colors)
     reallightinfo_t *pLight;
 
     color  = colors;
-    normal = (float *)tess.normal;
+    // HZM gl2 re-port (bug-gl2-modellight): int16-packed in gl2, unpack first
+    normal = RB_UnpackTessNormals();
     xyz    = (float *)tess.xyz;
 
     for (i = 0; i < tess.numVertexes; i++, xyz += 4, normal += 4, color += 4) {
@@ -417,7 +441,8 @@ void RB_Light_Real(unsigned char *colors)
     }
 
     if (backEnd.currentSphere->numRealLights != 1) {
-        normal = (float *)tess.normal;
+        // HZM gl2 re-port (bug-gl2-modellight): int16-packed in gl2, unpack first
+        normal = RB_UnpackTessNormals();
         xyz    = (float *)tess.xyz;
 
         for (i = 0; i < tess.numVertexes; i++, xyz += 4, normal += 4, color += 4) {
@@ -480,7 +505,8 @@ void RB_Light_Real(unsigned char *colors)
             color[3] = 0xff;
         }
     } else {
-        normal = (float *)tess.normal;
+        // HZM gl2 re-port (bug-gl2-modellight): int16-packed in gl2, unpack first
+        normal = RB_UnpackTessNormals();
         xyz    = (float *)tess.xyz;
 
         pLight = &backEnd.currentSphere->light[0];
@@ -739,7 +765,10 @@ static qboolean RB_Sphere_CalculateSphereOrigin()
     MatrixTransformVectorRight(axis, sphereOrigin, backEnd.currentSphere->origin);
 
     for (refent = backEnd.currentEntity;; refent = newref) {
-        if (refent->e.parentEntity == ENTITYNUM_NONE) {
+        // HZM gl2 (bug-1131): parentEntity is refdef-relative or ENTITYNUM_NONE; bounds-guard
+        // so an unexpected value can never chase uninitialized refdef slots.
+        if (refent->e.parentEntity == ENTITYNUM_NONE || refent->e.parentEntity < 0
+            || refent->e.parentEntity >= backEnd.refdef.num_entities) {
             break;
         }
 
@@ -775,7 +804,10 @@ static bool RB_Sphere_SetupGlobals()
     } else if (!RB_Sphere_CalculateSphereOrigin()) {
         backEnd.currentSphere->TessFunction = &RB_CalcLightGridColor;
 
-        if (!backEnd.currentEntity->lightingCalculated) {
+        // HZM gl2 re-port (bug-gl2-modellight): gl1 gates this on the grid
+        // cache flag (gl1 tr_sphere_shade.cpp:770), not ioq3's ambient-light
+        // lightingCalculated flag
+        if (!backEnd.currentEntity->bLightGridCalculated) {
             RB_SetupEntityGridLighting();
         }
 
@@ -797,9 +829,14 @@ static bool RB_Sphere_SetupGlobals()
 
 static bool RB_Sphere_ResetPointColors()
 {
-    vec3_t light_offset, amb_light_offset, amb;
+    // HZM gl2 re-port (bug-gl2-modellight): re-aligned with gl1
+    // RB_Sphere_ResetPointColors (gl1 tr_sphere_shade.cpp:790-815) - the
+    // sphere ambient level comes from gl1's SINGLE combined grid color, and
+    // it is that same offset vector (not the directed sample) that gets
+    // scaled into the ambient level.
+    vec3_t light_offset, amb;
 
-    R_GetLightingGridValue(tr.world, backEnd.currentSphere->worldOrigin, light_offset, amb_light_offset);
+    R_GetLightingGridValueSingle(tr.world, backEnd.currentSphere->worldOrigin, light_offset);
     light_offset[0] = ambientlight[0] + light_offset[0] * 0.18;
     light_offset[1] = ambientlight[1] + light_offset[1] * 0.18;
     light_offset[2] = ambientlight[2] + light_offset[2] * 0.18;
@@ -813,7 +850,7 @@ static bool RB_Sphere_ResetPointColors()
         }
     }
 
-    VectorScale(amb_light_offset, tr.overbrightMult * r_entlight_scale->value, amb);
+    VectorScale(light_offset, tr.overbrightMult * r_entlight_scale->value, amb);
     backEnd.currentSphere->ambient.level[0] = Q_min(amb[0], 0xff);
     backEnd.currentSphere->ambient.level[1] = Q_min(amb[1], 0xff);
     backEnd.currentSphere->ambient.level[2] = Q_min(amb[2], 0xff);
@@ -1148,7 +1185,10 @@ void RB_Grid_SetupEntity()
     trRefEntity_t *newref;
 
     for (refent = backEnd.currentEntity;; refent = newref) {
-        if (refent->e.parentEntity == ENTITYNUM_NONE) {
+        // HZM gl2 (bug-1131): parentEntity is refdef-relative or ENTITYNUM_NONE; bounds-guard
+        // so an unexpected value can never chase uninitialized refdef slots.
+        if (refent->e.parentEntity == ENTITYNUM_NONE || refent->e.parentEntity < 0
+            || refent->e.parentEntity >= backEnd.refdef.num_entities) {
             break;
         }
 

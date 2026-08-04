@@ -2873,19 +2873,27 @@ static void FixRenderCommandList( int newShader ) {
 				{
 				int i;
 				drawSurf_t	*drawSurf;
-				shader_t	*shader;
-				int			fogNum;
-				int			entityNum;
-				int			dlightMap;
 				int			sortedIndex;
 				const drawSurfsCommand_t *ds_cmd =  (const drawSurfsCommand_t *)curCmd;
 
+				// HZM (engine-limits audit): this repack was broken. It called gl1's
+				// R_DecomposeSort - whose signature is
+				// (sort, entityNum, shader, dlightMap, bStaticModel) - with
+				// (&entityNum, &shader, &fogNum, &dlightMap), so the decoded dlight landed in
+				// fogNum and the static-model flag in dlightMap; it then rebuilt the key with
+				// the DECODED entityNum (0..4095) un-shifted, destroying the entity field and
+				// the static-model bit, and masked the shader field with MAX_SHADERS-1 (14
+				// bits) when only QSORT_SHADERNUM_BITS (11) exist. gl1 never calls this
+				// function (gl1's SortNewShader has no FixRenderCommandList call, unlike gl2's)
+				// so none of it ever fired - it was a landmine for whoever wired it up next.
+				// Rewritten to gl2's corrected form: touch ONLY the shader-index field and
+				// preserve every bit below it verbatim.
 				for( i = 0, drawSurf = ds_cmd->drawSurfs; i < ds_cmd->numDrawSurfs; i++, drawSurf++ ) {
-					R_DecomposeSort( drawSurf->sort, &entityNum, &shader, &fogNum, &dlightMap );
-                    sortedIndex = (( drawSurf->sort >> QSORT_SHADERNUM_SHIFT ) & (MAX_SHADERS-1));
+                    sortedIndex = (( drawSurf->sort >> QSORT_SHADERNUM_SHIFT ) & (MAX_SORTED_SHADERS-1));
 					if( sortedIndex >= newShader ) {
 						sortedIndex++;
-						drawSurf->sort = (sortedIndex << QSORT_SHADERNUM_SHIFT) | entityNum | ( fogNum << QSORT_FOGNUM_SHIFT ) | (int)dlightMap;
+						drawSurf->sort = ( drawSurf->sort & ( ( 1u << QSORT_SHADERNUM_SHIFT ) - 1 ) )
+							| ( (unsigned)sortedIndex << QSORT_SHADERNUM_SHIFT );
 					}
 				}
 				curCmd = (const void *)(ds_cmd + 1);
@@ -2956,6 +2964,21 @@ static shader_t *GeneratePermanentShader( void ) {
 	if ( tr.numShaders == MAX_SHADERS ) {
 		ri.Printf( PRINT_WARNING, "WARNING: GeneratePermanentShader - MAX_SHADERS hit\n");
 		return tr.defaultShader;
+	}
+
+	// HZM (engine-limits audit): tr.shaders[] can hold MAX_SHADERS entries, but a drawsurf sort
+	// key only carries QSORT_SHADERNUM_BITS of sortedIndex (see tr_local.h). Past
+	// MAX_SORTED_SHADERS the index silently aliases in R_DecomposeSort and surfaces render with
+	// an unrelated shader. The shader is still created - refusing here would break maps that
+	// legitimately need this many - but the crossing must never again be invisible.
+	// "==" makes this fire exactly once, at the moment the ceiling is crossed.
+	if ( tr.numShaders == MAX_SORTED_SHADERS ) {
+		ri.Printf( PRINT_WARNING,
+			"^1WARNING: shader count has passed MAX_SORTED_SHADERS (%d).\n"
+			"^1  The drawsurf sort key only encodes %d bits of shader index at "
+			"QSORT_SHADERNUM_SHIFT %d, so every shader from here on will be drawn with the WRONG "
+			"shader (aliased onto sortedIndex %% %d). Repack the sort key or cut shader count.\n",
+			MAX_SORTED_SHADERS, QSORT_SHADERNUM_BITS, QSORT_SHADERNUM_SHIFT, MAX_SORTED_SHADERS );
 	}
 
 	newShader = ri.Hunk_Alloc( sizeof( shader_t ), h_dontcare);

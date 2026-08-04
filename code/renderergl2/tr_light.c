@@ -520,22 +520,198 @@ int R_CubemapForPoint( vec3_t point )
 
 /*
 ===============
+RB_GetEntityGridLighting
+
+HZM gl2 re-port (bug-gl2-modellight): gl1 tr_light.c RB_GetEntityGridLighting -
+flat grid sample at the entity's trace origin plus dlight falloff, packed to a
+byte color for RB_CalcLightGridColor.
+===============
+*/
+static int RB_GetEntityGridLighting()
+{
+    int       iColor;
+    int       i;
+    dlight_t *dl;
+    float     power;
+    vec3_t    vLight;
+    vec3_t    dir;
+    float     d;
+    float    *lightOrigin;
+
+    lightOrigin = backEnd.currentSphere->traceOrigin;
+    if (!(backEnd.refdef.rdflags & RDF_NOWORLDMODEL) && tr.world && tr.world->lightGridData) {
+        R_GetLightingGridValueSingle(tr.world, backEnd.currentSphere->traceOrigin, vLight);
+    } else {
+        vLight[0] = vLight[1] = vLight[2] = tr.identityLight * 150.0;
+    }
+
+    for (i = 0; i < backEnd.refdef.num_dlights; i++) {
+        dl = &backEnd.refdef.dlights[i];
+        VectorSubtract(dl->origin, lightOrigin, dir);
+        d = VectorLengthSquared(dir);
+
+        power = dl->radius * dl->radius;
+        if (power >= d) {
+            d = dl->radius * 7500.0 / d;
+            VectorMA(vLight, d, dl->color, vLight);
+        }
+    }
+
+    if (tr.overbrightShift) {
+        vLight[0] = tr.overbrightMult * vLight[0];
+        vLight[1] = tr.overbrightMult * vLight[1];
+        vLight[2] = tr.overbrightMult * vLight[2];
+    }
+
+    // normalize
+    if (vLight[0] > 255.0 || vLight[1] > 255.0 || vLight[2] > 255.0) {
+        float scale = 255.0 / Q_max(vLight[0], Q_max(vLight[1], vLight[2]));
+        VectorScale(vLight, scale, vLight);
+    }
+
+    // clamp ambient
+    for (i = 0; i < 3; i++) {
+        if (vLight[i] > tr.identityLightByte) {
+            vLight[i] = tr.identityLightByte;
+        }
+    }
+
+    // save out the byte packet version
+    ((byte *)&iColor)[0] = (byte)(int)vLight[0];
+    ((byte *)&iColor)[1] = (byte)(int)vLight[1];
+    ((byte *)&iColor)[2] = (byte)(int)vLight[2];
+    ((byte *)&iColor)[3] = 0xff;
+
+    return iColor;
+}
+
+/*
+===============
 RB_SetupEntityGridLighting
+
+HZM gl2 re-port (bug-gl2-modellight): gl1 tr_light.c:1315-1358 - computes the
+flat grid color once per entity per frame and propagates it up the
+parentEntity chain.
 ===============
 */
 void RB_SetupEntityGridLighting()
 {
-	// FIXME: unimplemented
+    trRefEntity_t *ent;
+    int            iColor;
+
+    if (backEnd.currentEntity->bLightGridCalculated) {
+        return;
+    }
+
+    // HZM gl2 (bug-1131): parentEntity is now a refdef-relative slot or ENTITYNUM_NONE
+    // (translated in RE_AddRefEntityToScene2). Belt-and-braces: any out-of-range index is
+    // treated as no-parent so we can never chase uninitialized refdef slots again.
+    iColor = -1;
+    for (ent = backEnd.currentEntity;
+         ent->e.parentEntity != ENTITYNUM_NONE && ent->e.parentEntity >= 0
+         && ent->e.parentEntity < backEnd.refdef.num_entities;
+         ent = &backEnd.refdef.entities[ent->e.parentEntity]) {
+        trRefEntity_t *newref = &backEnd.refdef.entities[ent->e.parentEntity];
+        if (newref == ent) {
+            // parentEntity refers to itself
+            iColor = newref->iGridLighting;
+            break;
+        }
+
+        if (newref->bLightGridCalculated) {
+            iColor = newref->iGridLighting;
+            break;
+        }
+    }
+
+    if (iColor == -1) {
+        // no valid pre-computed ancestor color -> compute from this entity (gl1-equivalent)
+        iColor = RB_GetEntityGridLighting();
+    }
+
+    ent = backEnd.currentEntity;
+    for (;;) {
+        ent->bLightGridCalculated = qtrue;
+        ent->iGridLighting        = iColor;
+        // HZM gl2 (bug-1131): same bounds guard as the read walk above
+        if (ent->e.parentEntity == ENTITYNUM_NONE || ent->e.parentEntity < 0
+            || ent->e.parentEntity >= backEnd.refdef.num_entities) {
+            break;
+        }
+
+        if (ent == &backEnd.refdef.entities[ent->e.parentEntity]) {
+            // parentEntity refers to itself
+            break;
+        }
+
+        ent = &backEnd.refdef.entities[ent->e.parentEntity];
+    }
 }
 
 /*
 ===============
 RB_SetupStaticModelGridLighting
+
+HZM gl2 re-port (bug-gl2-modellight): gl1 tr_light.c:1365-1422 - one-time flat
+grid sample (plus dlights) for a map-placed static model, cached on the model.
 ===============
 */
 void RB_SetupStaticModelGridLighting(trRefdef_t *refdef, cStaticModelUnpacked_t *ent, const vec3_t lightOrigin)
 {
-    // FIXME: unimplemented
+    int       i;
+    dlight_t *dl;
+    float     power;
+    vec3_t    vLight;
+    vec3_t    dir;
+    float     d;
+
+    if (ent->bLightGridCalculated) {
+        return;
+    }
+    ent->bLightGridCalculated = qtrue;
+
+    if (!(refdef->rdflags & RDF_NOWORLDMODEL) && tr.world && tr.world->lightGridData) {
+        R_GetLightingGridValueSingle(tr.world, lightOrigin, vLight);
+    } else {
+        vLight[0] = vLight[1] = vLight[2] = tr.identityLight * 150.0;
+    }
+
+    for (i = 0; i < refdef->num_dlights; i++) {
+        dl = &refdef->dlights[i];
+        VectorSubtract(dl->origin, lightOrigin, dir);
+        d = VectorLengthSquared(dir);
+
+        power = dl->radius * dl->radius;
+        if (power >= d) {
+            d = dl->radius * 7500.0 / d;
+            VectorMA(vLight, d, dl->color, vLight);
+        }
+    }
+
+    if (tr.overbrightShift) {
+        vLight[0] = tr.overbrightMult * vLight[0];
+        vLight[1] = tr.overbrightMult * vLight[1];
+        vLight[2] = tr.overbrightMult * vLight[2];
+    }
+
+    // normalize
+    if (vLight[0] > 255.0 || vLight[1] > 255.0 || vLight[2] > 255.0) {
+        float scale = 255.0 / Q_max(vLight[0], Q_max(vLight[1], vLight[2]));
+        VectorScale(vLight, scale, vLight);
+    }
+
+    // clamp ambient
+    for (i = 0; i < 3; i++) {
+        if (vLight[i] > tr.identityLightByte) {
+            vLight[i] = tr.identityLightByte;
+        }
+    }
+
+    // save out the byte packet version
+    ((byte *)&ent->iGridLighting)[0] = (byte)(int)vLight[0];
+    ((byte *)&ent->iGridLighting)[1] = (byte)(int)vLight[1];
+    ((byte *)&ent->iGridLighting)[2] = (byte)(int)vLight[2];
+    ((byte *)&ent->iGridLighting)[3] = 0xff;
 }
 
 /*
@@ -760,12 +936,216 @@ void R_GetLightingGridValue(world_t *world, const vec3_t vPos, vec3_t vAmbientLi
 
 /*
 ===============
+R_GetLightingGridValueSingle
+
+HZM gl2 re-port (bug-gl2-modellight): verbatim port of gl1's
+R_GetLightingGridValue (gl1 tr_light.c:747-918). Same RLE paletted-grid
+traversal as the split ambient/directed variant above, but both samples fold
+into ONE flat color with gl1's renormalization - this is the value gl1 feeds
+entity/static-model grid lighting and the sphere ambient level. Field renames
+only: lightGridMins->lightGridOrigin, lightGridOOSize->lightGridInverseSize.
+===============
+*/
+void R_GetLightingGridValueSingle(world_t *world, const vec3_t vPos, vec3_t vLight)
+{
+    byte  *pColor;
+    int    iBaseOffset;
+    int    i;
+    int    iOffset;
+    int    iRowPos;
+    int    iData;
+    int    iLen;
+    int    iGridPos[3];
+    int    iArrayXStep;
+    float  fV;
+    float  fFrac[3];
+    float  fOMFrac[3];
+    float  fWeight, fWeight2;
+    float  fTotalFactor;
+    int    iCurData;
+    vec3_t vLightOrigin;
+    byte  *pCurData;
+
+    if (!world || !world->lightGridData || !world->lightGridOffsets) {
+        vLight[0] = vLight[1] = vLight[2] = tr.identityLightByte;
+        return;
+    }
+
+    VectorSubtract(vPos, world->lightGridOrigin, vLightOrigin);
+
+    for (i = 0; i < 3; i++) {
+        fV          = vLightOrigin[i] * world->lightGridInverseSize[i];
+        iGridPos[i] = floor(fV);
+        fFrac[i]    = fV - iGridPos[i];
+        fOMFrac[i]  = 1.0 - fFrac[i];
+
+        if (iGridPos[i] < 0) {
+            iGridPos[i] = 0;
+        } else if (iGridPos[i] > world->lightGridBounds[i] - 2) {
+            iGridPos[i] = world->lightGridBounds[i] - 2;
+        }
+    }
+
+    fTotalFactor = 0;
+    iArrayXStep  = world->lightGridBounds[1];
+    iBaseOffset  = world->lightGridBounds[0] + iGridPos[1] + iArrayXStep * iGridPos[0];
+    VectorClear(vLight);
+
+    for (i = 0; i < 4; i++) {
+        qboolean bContinue = qfalse;
+
+        switch (i) {
+        case 0:
+            fWeight  = fOMFrac[0] * fOMFrac[1] * fOMFrac[2];
+            fWeight2 = fOMFrac[0] * fOMFrac[1] * fFrac[2];
+            iOffset  = world->lightGridOffsets[iBaseOffset] + (world->lightGridOffsets[iGridPos[0]] << 8);
+            break;
+        case 1:
+            fWeight  = fOMFrac[0] * fFrac[1] * fOMFrac[2];
+            fWeight2 = fOMFrac[0] * fFrac[1] * fFrac[2];
+            iOffset  = world->lightGridOffsets[iBaseOffset + 1] + (world->lightGridOffsets[iGridPos[0]] << 8);
+            break;
+        case 2:
+            fWeight  = fFrac[0] * fOMFrac[1] * fOMFrac[2];
+            fWeight2 = fFrac[0] * fOMFrac[1] * fFrac[2];
+            iOffset  = world->lightGridOffsets[iBaseOffset + iArrayXStep]
+                    + (world->lightGridOffsets[iGridPos[0] + 1] << 8);
+            break;
+        case 3:
+            fWeight  = fFrac[0] * fFrac[1] * fOMFrac[2];
+            fWeight2 = fFrac[0] * fFrac[1] * fFrac[2];
+            iOffset  = world->lightGridOffsets[iBaseOffset + iArrayXStep + 1]
+                    + (world->lightGridOffsets[iGridPos[0] + 1] << 8);
+            break;
+        }
+
+        iRowPos  = iGridPos[2];
+        pCurData = &world->lightGridData[iOffset];
+        iData    = 0;
+
+        while (1) {
+            while (1) {
+                iCurData = (char)pCurData[iData];
+                iData++;
+                if (iCurData >= 0) {
+                    break;
+                }
+
+                iLen = -iCurData;
+                if (iLen > iRowPos) {
+                    iData += iRowPos;
+
+                    if (pCurData[iData]) {
+                        pColor = R_GetLightGridPalettedColor(world, pCurData[iData]);
+                        VectorMA(vLight, fWeight, pColor, vLight);
+                        fTotalFactor += fWeight;
+                    }
+
+                    iData++;
+                    if (iLen - 1 == iRowPos) {
+                        iData++;
+                    }
+
+                    if (pCurData[iData]) {
+                        pColor = R_GetLightGridPalettedColor(world, pCurData[iData]);
+                        VectorMA(vLight, fWeight2, pColor, vLight);
+                        fTotalFactor += fWeight2;
+                    }
+
+                    bContinue = qtrue;
+                    break;
+                }
+
+                iRowPos -= iLen;
+                iData += iLen;
+            }
+
+            if (bContinue) {
+                break;
+            }
+
+            iLen = iCurData + 2;
+            if (iLen - 1 >= iRowPos) {
+                break;
+            }
+
+            iRowPos -= iLen;
+            iData++;
+        }
+
+        if (bContinue) {
+            continue;
+        }
+
+        if (iLen - 1 > iRowPos) {
+            if (!pCurData[iData]) {
+                continue;
+            }
+
+            pColor = R_GetLightGridPalettedColor(world, pCurData[iData]);
+            VectorMA(vLight, fWeight + fWeight2, pColor, vLight);
+            fTotalFactor += fWeight + fWeight2;
+        } else {
+            if (pCurData[iData]) {
+                pColor = R_GetLightGridPalettedColor(world, pCurData[iData]);
+                VectorMA(vLight, fWeight, pColor, vLight);
+                fTotalFactor += fWeight;
+            }
+
+            iData += 2;
+            if (pCurData[iData]) {
+                pColor = R_GetLightGridPalettedColor(world, pCurData[iData]);
+                VectorMA(vLight, fWeight2, pColor, vLight);
+                fTotalFactor += fWeight2;
+            }
+        }
+    }
+
+    if (fTotalFactor > 0.0 && fTotalFactor < 0.99) {
+        VectorScale(vLight, 1.0 / fTotalFactor, vLight);
+    }
+
+    if (fTotalFactor) {
+        if (vLight[0] > 255.0 || vLight[1] > 255.0 || vLight[2] > 255.0) {
+            float t;
+            // normalize color values
+            t = 255.0 / Q_max(vLight[0], Q_max(vLight[1], vLight[2]));
+            VectorScale(vLight, t, vLight);
+        }
+    } else {
+        vLight[0] = vLight[1] = vLight[2] = tr.identityLightByte;
+    }
+}
+
+/*
+===============
 R_GetLightingForDecal
 ===============
 */
 void R_GetLightingForDecal(vec3_t vLight, const vec3_t vFacing, const vec3_t vOrigin)
 {
-    // FIXME: unimplemented (GL2)
+    // HZM gl2 (bug-gl2-reddecals, #74): was an empty stub, so vLight was left as
+    // uninitialized stack garbage. cg_marks.c::CG_ImpactMark then built the impact
+    // mark's per-vertex modulate from red*vLight[0]/green*vLight[1]/blue*vLight[2],
+    // so every "dolighting" decal got a garbage vertex color. Decals whose shader
+    // uses "rgbGen vertex" faithfully render that garbage (perceived as RED); decals
+    // with "rgbGen identity" ignore the vertex color and looked correct - and forcing
+    // the .tga over the .dds changed nothing because the texture was never at fault.
+    // Port gl1's implementation verbatim (gl1 tr_light.c:1092): sample the light grid,
+    // apply the overbright multiply + renormalize. gl2's single-value grid lookup is
+    // R_GetLightingGridValueSingle (NULL/gridless world -> identityLightByte fallback).
+    R_GetLightingGridValueSingle(tr.world, vOrigin, vLight);
+
+    if (!tr.overbrightShift) {
+        return;
+    }
+
+    VectorScale(vLight, tr.overbrightMult, vLight);
+
+    if (vLight[0] > 255.0 || vLight[1] > 255.0 || vLight[2] > 255.0) {
+        float scale = 255.0 / Q_max(vLight[0], Q_max(vLight[1], vLight[2]));
+        VectorScale(vLight, scale, vLight);
+    }
 }
 
 /*
@@ -775,7 +1155,47 @@ R_GetLightingForSmoke
 */
 void R_GetLightingForSmoke(vec3_t vLight, const vec3_t vOrigin)
 {
-	// FIXME: unimplemented (GL2)
+    int       i;
+    dlight_t *dl;
+    float     power;
+    vec3_t    dir;
+    float     d;
+
+    // HZM gl2: was an empty stub -> vLight was uninitialized stack garbage -> smoke-grenade
+    // (and other smoke) lighting was garbage under gl2 (same class as R_GetLightingForDecal,
+    // #74). Port gl1's R_GetLightingForSmoke (gl1 tr_light.c:1115). gl2 has no 2-arg
+    // R_GetLightingGridValue/Fast, so use the single-value grid lookup like the decal fix
+    // (NULL/gridless world -> identityLightByte fallback). Unlike the decal path, smoke's
+    // consumer expects [0,1], so keep gl1's trailing /255 normalize.
+    R_GetLightingGridValueSingle(tr.world, vOrigin, vLight);
+
+    for (i = 0; i < backEnd.refdef.num_dlights; i++) {
+        dl = &backEnd.refdef.dlights[i];
+        VectorSubtract(dl->origin, vOrigin, dir);
+        d = VectorLengthSquared(dir);
+
+        power = dl->radius * dl->radius;
+        if (power >= d) {
+            d = dl->radius * 7500.0 / d;
+            VectorMA(vLight, d, dl->color, vLight);
+        }
+    }
+
+    if (tr.overbrightShift) {
+        vLight[0] = tr.overbrightMult * vLight[0];
+        vLight[1] = tr.overbrightMult * vLight[1];
+        vLight[2] = tr.overbrightMult * vLight[2];
+    }
+
+    // normalize
+    if (vLight[0] > 255.0 || vLight[1] > 255.0 || vLight[2] > 255.0) {
+        float scale = 255.0 / Q_max(vLight[0], Q_max(vLight[1], vLight[2]));
+        VectorScale(vLight, scale, vLight);
+    }
+
+    vLight[0] /= 255.0;
+    vLight[1] /= 255.0;
+    vLight[2] /= 255.0;
 }
 
 qboolean R_FindGridPointForSphere(world_t *world, const vec3_t sphereOrigin, const vec3_t point, vec3_t out) {

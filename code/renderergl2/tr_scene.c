@@ -1,4 +1,4 @@
-/*
+﻿/*
 ===========================================================================
 Copyright (C) 1999-2005 Id Software, Inc.
 
@@ -249,9 +249,41 @@ void RE_AddRefEntityToScene( const refEntity_t *ent ) {
 
 	backEndData->entities[r_numentities].e = *ent;
 	backEndData->entities[r_numentities].lightingCalculated = qfalse;
+	// HZM gl2 re-port (bug-gl2-modellight): reset the per-frame model lighting
+	// caches, mirrors gl1 tr_scene.c:240-241
+	backEndData->entities[r_numentities].bLightGridCalculated = qfalse;
+	backEndData->entities[r_numentities].sphereCalculated = qfalse;
+	// HZM gl2 (bug-gl2-sphereslot-alias): keep the slot's owning-list stamp paired with the
+	// flag that validates it. backEnd.sphereListId is free-running and only ever increases
+	// within a frame, so a stale stamp could not match anyway - this is hygiene, not load
+	// bearing, and it is inert while r_sphereCacheScope is 0.
+	backEndData->entities[r_numentities].sphereList = 0u;
+	// HZM gl2 (bug-1131, #67 invisible-actor coin flip): cgame memsets its refEntity_t, so
+	// e.parentEntity arrives as 0 - NOT ENTITYNUM_NONE. gl1 translates the parent via the
+	// two-arg API; gl2's port dropped that, so RB_SetupEntityGridLighting's parent walk chased
+	// refdef slot 0's NEVER-INITIALIZED iGridLighting (raw hunk bytes, re-stamped every frame =
+	// per-boot latched garbage vertex color -> black/invisible actors on unlucky boots).
+	// Sanitize here; RE_AddRefEntityToScene2 re-links real parents below.
+	backEndData->entities[r_numentities].e.parentEntity = ENTITYNUM_NONE;
 
 	CrossProduct(ent->axis[0], ent->axis[1], cross);
 	backEndData->entities[r_numentities].mirrored = (DotProduct(ent->axis[2], cross) < 0.f);
+
+	// ^~^~^ SKELTRACK (bug-1131): continuous low-rate tracker - proves whether CGAME keeps
+	// SUBMITTING the e2l2 briefing ally after a script teleport. Pair with the addskel probe:
+	// submit firing while addskel is silent = dropped between scene add and the skel add path.
+	// REMOVE with the rest of the SKEL* scaffolding.
+	if (0 && ent->tiki && ent->tiki->a && strstr(ent->tiki->a->name, "brit_cmd")) {   // HZM 07-28: SKELTRACK off (per-frame strstr on every refent)
+		static int trkSub = 0;
+		trkSub++;
+		if ((trkSub & 31) == 1) {
+			ri.Printf(PRINT_ALL,
+				"^~^~^ SKELTRACK submit n=%d ent=%d org=[%d %d %d] hModel=%d rfx=0x%x reType=%d\n",
+				trkSub, ent->entityNumber,
+				(int)ent->origin[0], (int)ent->origin[1], (int)ent->origin[2],
+				ent->hModel, ent->renderfx, (int)ent->reType);
+		}
+	}
 
 	r_numentities++;
 }
@@ -353,7 +385,13 @@ void RE_BeginScene(const refdef_t *fd)
 	tr.refdef.sunAmbCol[3] = 1.0f;
 
 	VectorCopy(tr.sunDirection, tr.refdef.sunDir);
-	if ( (tr.refdef.rdflags & RDF_NOWORLDMODEL) || !(r_depthPrepass->value) ){
+	// HZM gl2 real character shadows: this is the FIRST of three r_depthPrepass gates on the
+	// sun-shadow chain, and the one that actually removes the sun LIGHT TERM - with it taken,
+	// the cascades still render but there is nothing for a shadow to subtract.
+	// R_CharShadowsActive() returns qfalse whenever r_charShadows is 0, so the default path
+	// is unchanged.
+	if ( (tr.refdef.rdflags & RDF_NOWORLDMODEL)
+	     || !(r_depthPrepass->value || R_CharShadowsActive()) ){
 		VectorSet(tr.refdef.sunCol, 0, 0, 0);
 		VectorSet(tr.refdef.sunAmbCol, 0, 0, 0);
 	}
@@ -536,6 +574,46 @@ void RE_RenderScene( const refdef_t *fd ) {
 		ri.Error (ERR_DROP, "R_RenderScene: NULL worldmodel");
 	}
 
+	// ------------------------------------------------------------------------------------
+	// HZM gl2 -> cgame bridges. Both are gl1-SAFE BY CONSTRUCTION: renderergl1 never sets
+	// either cvar, so under gl1 they stay at the defaults cgame itself registers and gl1
+	// behaviour is bit-identical. This mirrors the existing renderergl1/tr_scene.c
+	// r_coopSunAz/El/Valid pattern, which gl2 has never had.
+	if ( tr.world ) {
+		// (a) r_coopSunPublish (default 0, INDEPENDENT of the shadow work): publish the map's
+		//     real sun so cgame's Phase-A directional decal (coop_shadowAuto) can follow it.
+		//     Without this the gl2 decal is stuck in MANUAL mode at the hardcoded
+		//     coop_shadowAz 45 / coop_shadowEl 45 on EVERY map, because r_coopSunValid never
+		//     leaves cgame's "0" default.
+		//     tr.sunDirection points TOWARD the sun; the cgame side already trails the decal
+		//     away from it - do NOT re-negate here.
+		if ( r_coopSunPublish && r_coopSunPublish->integer ) {
+			float sunSum = tr.sunLight[0] + tr.sunLight[1] + tr.sunLight[2];
+			float sz     = tr.sunDirection[2];
+			float azDeg  = (float)atan2( tr.sunDirection[1], tr.sunDirection[0] ) * ( 180.0f / (float)M_PI );
+			float elDeg;
+			if ( sz < -1.0f ) { sz = -1.0f; } else if ( sz > 1.0f ) { sz = 1.0f; }
+			elDeg = (float)asin( sz ) * ( 180.0f / (float)M_PI );
+			ri.Cvar_Set( "r_coopSunAz",    va( "%g", azDeg ) );
+			ri.Cvar_Set( "r_coopSunEl",    va( "%g", elDeg ) );
+			// keep gl1's intensity threshold: measured worldspawn suncolor spans ~400x across
+			// shipped maps, and tr.sunShadows has no intensity gate.
+			ri.Cvar_Set( "r_coopSunValid", ( sunSum > 0.05f ) ? "1" : "0" );
+		}
+
+		// (b) r_coopRealShadows: capability signal telling cgame that renderergl2 is ACTUALLY
+		//     casting characters into the sun cascade shadow maps right now, so CG_EntityShadow
+		//     should stop drawing its decal (otherwise the user sees a blob AND a cast shadow
+		//     and reasonably still reports "blobs"). Published every frame so toggling
+		//     r_charShadows off restores the decal immediately, with no restart.
+		//     NOT cg_shadows: that is the SAME cvar as the renderer's r_shadows, it gates the
+		//     pshadow pass and cgame's water splash marks, and its registration defaults
+		//     conflict.
+		ri.Cvar_Set( "r_coopRealShadows",
+			( R_CharShadowsActive() && !( r_charShadowBlob && r_charShadowBlob->integer ) ) ? "1" : "0" );
+	}
+	// ------------------------------------------------------------------------------------
+
 	RE_BeginScene(fd);
 
 	// SmileTheory: playing with shadow mapping
@@ -550,8 +628,44 @@ void RE_RenderScene( const refdef_t *fd ) {
 		R_RenderPshadowMaps(fd);
 	}
 
+	// HZM gl2 DYNAMIC-LIGHT CAST SHADOWS (r_hzmDlightShadows, default 0). Same projected-
+	// shadow chain as the r_shadows 4 block above, but the shadow list is built from the
+	// scene's DLIGHTS (muzzle flashes, explosions, fires, script lights) instead of the
+	// static lightgrid direction - see R_RenderDlightShadowMaps in tr_main.c.
+	//
+	// Placed AFTER the upstream dispatch on purpose: R_RenderDlightShadowMaps appends
+	// starting at tr.refdef.num_pshadows, so if a user ever does set cg_shadows 4 the two
+	// lists coexist instead of one silently overwriting the other.
+	//
+	// Both must run BEFORE the main R_RenderView below, because tr_world.c hands out this
+	// frame's pshadow bits (R_PshadowSurface) while walking the world for the main view.
+	// R_DlightShadowsActive() is qfalse whenever r_hzmDlightShadows is 0, which leaves
+	// tr.refdef.num_pshadows at the 0 that RE_BeginScene set - i.e. exactly today.
+	if( !( fd->rdflags & RDF_NOWORLDMODEL ) && R_DlightShadowsActive() )
+	{
+		R_RenderDlightShadowMaps(fd);
+	}
+
 	// playing with even more shadows
-	if(glRefConfig.framebufferObject && r_sunlightMode->integer && !( fd->rdflags & RDF_NOWORLDMODEL ) && (r_forceSun->integer || tr.sunShadows))
+	//
+	// HZM gl2 WASTED-WORK FIX (independent of r_charShadows): this dispatch did NOT check
+	// r_depthPrepass, but every consumer of what it produces DOES:
+	//   - the shadowmask resolve (tr_backend.c, gated on VPF_USESUNLIGHT)
+	//   - VPF_USESUNLIGHT itself (set below, gated on r_depthPrepass)
+	//   - the sun colour/ambient term (RE_BeginScene above, gated on r_depthPrepass)
+	// The live gl2 sandbox archives r_depthPrepass 0, so this build rendered THREE full
+	// cascade depth passes every frame and threw all three away. The extra term below makes
+	// the dispatch agree with its consumers:
+	//   r_depthPrepass 1                  -> renders, exactly as before (no behaviour change)
+	//   r_depthPrepass 0, r_charShadows 0 -> skipped; the maps were being discarded anyway
+	//   r_depthPrepass 0, r_charShadows 1 -> renders, because the feature consumes them
+	// r_shadowDebug is included so the cascade thumbnail blit still has live content to show
+	// while diagnosing, even in the otherwise-skipped state.
+	// The last cascade's sun-direction cache (tr.lastCascadeSunDirection, below) stays
+	// correct across a live toggle: skipping the dispatch leaves both the cached MVP and the
+	// depth image untouched, and turning the chain back on re-renders only if the sun moved.
+	if(glRefConfig.framebufferObject && r_sunlightMode->integer && !( fd->rdflags & RDF_NOWORLDMODEL ) && (r_forceSun->integer || tr.sunShadows)
+	   && (r_depthPrepass->value || R_CharShadowsActive() || (r_shadowDebug && r_shadowDebug->integer)))
 	{
 		if (r_shadowCascadeZFar->integer != 0)
 		{
@@ -619,7 +733,15 @@ void RE_RenderScene( const refdef_t *fd ) {
 
 	VectorCopy( fd->vieworg, parms.pvsOrigin );
 
-	if(!( fd->rdflags & RDF_NOWORLDMODEL ) && r_depthPrepass->value && ((r_forceSun->integer) || tr.sunShadows))
+	// HZM gl2 real character shadows: second r_depthPrepass gate. VPF_USESUNLIGHT is what
+	// enables the shadowmask resolve in RB_DrawSurfs and LIGHTDEF_USE_SHADOWMAP in
+	// tr_shade.c; without it the cascades are rendered and thrown away.
+	// KEEP IN SYNC with the cascade DISPATCH gate above: the dispatch must not render
+	// cascades this test is going to discard, and must not skip cascades this test is
+	// going to consume. Both now read (r_depthPrepass->value || R_CharShadowsActive()).
+	if(!( fd->rdflags & RDF_NOWORLDMODEL )
+	   && (r_depthPrepass->value || R_CharShadowsActive())
+	   && ((r_forceSun->integer) || tr.sunShadows))
 	{
 		parms.flags = VPF_USESUNLIGHT;
 	}
@@ -718,7 +840,23 @@ RE_AddRefEntityToScene2
 =====================
 */
 void RE_AddRefEntityToScene2( const refEntity_t *ent, int parentEntityNumber ) {
+	int before = r_numentities;
+
 	RE_AddRefEntityToScene(ent);
+
+	// HZM gl2 (bug-1131): mirror gl1 tr_scene.c:241-260 - translate the caller's WORLD entity
+	// number into this scene's refdef-relative slot index (refdef.entities starts at
+	// r_firstSceneEntity), or ENTITYNUM_NONE. The base add above already defaulted the field.
+	if ( r_numentities > before && parentEntityNumber != ENTITYNUM_NONE ) {
+		int i;
+
+		for ( i = r_firstSceneEntity; i < before; i++ ) {
+			if ( backEndData->entities[i].e.entityNumber == parentEntityNumber ) {
+				backEndData->entities[before].e.parentEntity = i - r_firstSceneEntity;
+				break;
+			}
+		}
+	}
 }
 
 void RE_AddRefSpriteToScene(const refEntity_t* ent) {
@@ -729,7 +867,21 @@ void RE_AddRefSpriteToScene(const refEntity_t* ent) {
 		return;
 	}
 
+	// HZM (engine-limits audit): this was a completely silent drop - sprites (muzzle flashes,
+	// tracers, most of the FX layer) just stopped appearing with no trace anywhere.
 	if (r_numsprites >= MAX_SPRITES) {
+		static qboolean overflowWarned = qfalse;
+
+		if (!overflowWarned) {
+			overflowWarned = qtrue;
+			ri.Printf(
+				PRINT_WARNING,
+				"RE_AddRefSpriteToScene: MAX_SPRITES (%d) exceeded - sprites dropped."
+				" Raise MAX_SPRITES in renderercommon/new/tr_types_new.h"
+				" (it sizes backEndData_t::sprites; MAX_SPRITESURFS must stay >= it).\n",
+				MAX_SPRITES
+			);
+		}
 		return;
 	}
 
@@ -839,7 +991,18 @@ RE_GetRenderEntity
 refEntity_t* RE_GetRenderEntity(int entityNumber) {
     int i;
 
-    for (i = 0; i < r_numentities; i++) {
+    // HZM (bug-1217, gl2 twin of the renderergl1 fix): scan only the CURRENT scene.
+    // r_numentities is zeroed ONCE PER FRAME in R_InitNextFrame - RE_ClearScene does NOT reset it,
+    // it only moves r_firstSceneEntity up to the current high-water mark - and a single frame draws
+    // several scenes (the 3D game view, then the HUD / menu / inventory renders, which go through
+    // cl_invrender.cpp's own re.ClearScene). Scanning from 0 could therefore match an entity from an
+    // EARLIER scene of the same frame and hand back a stale origin/axis/renderfx; every caller is a
+    // cgame attached-model parent lookup, so a stale hit attaches a prop to the previous scene's
+    // copy of its parent. RE_AddRefEntityToScene's own parent loop already starts here.
+    // NOT fixed by resetting the counter: render commands for already-submitted scenes point into
+    // backEndData->entities[] and do not execute until RE_EndFrame, so reusing those slots would
+    // corrupt them.
+    for (i = r_firstSceneEntity; i < r_numentities; i++) {
         if (backEndData->entities[i].e.entityNumber == entityNumber) {
             return &backEndData->entities[i].e;
         }

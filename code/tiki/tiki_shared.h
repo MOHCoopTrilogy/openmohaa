@@ -95,7 +95,13 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 
 #define MAX_SKELMODELS        12
 #define MAX_TIKI_SHADER       4
-#define MAX_TIKI_ALIASES      4095
+// HZM fix: raised 4095->8192 to match MAX_TIKI_LOAD_ANIMS (tiki.h), which was already raised for
+// the identical underlying problem (new_generic_human.tik-scale content exceeding 4095). This is
+// the session-wide SkeletorCache of distinct loaded .skc/.skd files - never resets except on a
+// full restart, so a long multi-map coop session accumulates against it exactly like the already-
+// fixed MAX_SFX/MAX_SOUNDS did. Non-fatal on overflow (logs "Cache full" and returns false rather
+// than crashing) but would show up as missing/frozen animations late in a long session.
+#define MAX_TIKI_ALIASES      8192	// raised 4095->8192 to match MAX_TIKI_LOAD_ANIMS (gl2 sandbox only - see bug-1172)
 #define MAX_GLOBAL_FROM_LOCAL 200
 
 #define MAX_LOD_CURVE_POINTS  5

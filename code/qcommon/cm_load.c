@@ -825,7 +825,130 @@ CM_LoadMap
 Loads in the map and all submodels
 ==================
 */
+
+/*
+================
+HZM coop bug-953 wall probe v5: live brush surgery console commands.
+
+cm_killbrush <n>    - zero brush n's contents NOW (server+client share this CM in
+                      process, so the wall vanishes instantly for the listen host)
+                      AND append n to the loose homepath cmpatch/<map>.txt so it
+                      stays dead on every future load. If no loose file exists yet,
+                      the current effective file (usually the mod pk3 copy) is
+                      copied first so earlier kills are never shadowed away.
+cm_restorebrush <n> - restore brush n's contents from its shader (the original
+                      value lives in cm.shaders[shaderNum].contentFlags) and log
+                      a #RESTORED marker for later reconciliation.
+================
+*/
+static void CM_PatchFileName( char *out, int outsize ) {
+	char        base[MAX_QPATH];
+	const char *slash;
+	int         blen;
+
+	slash = strrchr( cm.name, '/' );
+	Q_strncpyz( base, slash ? slash + 1 : cm.name, sizeof( base ) );
+	COM_StripExtension( base, base, sizeof( base ) );
+	blen = strlen( base );
+	if ( blen > 4 && !Q_stricmp( base + blen - 4, "_sml" ) ) {
+		base[blen - 4] = 0;
+	}
+	Com_sprintf( out, outsize, "cmpatch/%s.txt", base );
+}
+
+static void CM_AppendPatchLine( const char *line ) {
+	char         patchname[MAX_QPATH];
+	fileHandle_t fh;
+
+	CM_PatchFileName( patchname, sizeof( patchname ) );
+
+	// bug-960: kills persist to the _local OVERLAY file. Same-name loose files are
+	// shadowed by pk3 copies on this engine (verified: loose scripts never load over a
+	// pk3), so a same-name loose patch file would never be read back on map load. The
+	// overlay has a name no pk3 ships and is applied on top of the shipped list.
+	{
+		int plen = strlen( patchname );
+		if ( plen > 4 ) {
+			patchname[plen - 4] = 0;
+			Q_strcat( patchname, sizeof( patchname ), "_local.txt" );
+		}
+	}
+
+	fh = FS_FOpenFileAppend( patchname );
+	if ( fh ) {
+		FS_Write( line, strlen( line ), fh );
+		FS_FCloseFile( fh );
+	}
+}
+
+static void CM_KillBrush_f( void ) {
+	int  n;
+	char line[128];
+
+	if ( Cmd_Argc() != 2 ) {
+		Com_Printf( "usage: cm_killbrush <brushnum>\n" );
+		return;
+	}
+	n = atoi( Cmd_Argv( 1 ) );
+	if ( n < 0 || n >= cm.numBrushes ) {
+		Com_Printf( "cm_killbrush: %d out of range (0..%d)\n", n, cm.numBrushes - 1 );
+		return;
+	}
+	if ( !cm.brushes[n].contents ) {
+		Com_Printf( "cm_killbrush: brush %d already non-solid\n", n );
+		return;
+	}
+	// HZM bug-958: refuse FLOOR SHEETS - wide flat brushes with walkable tops are the
+	// ground itself (plateau dirtclip pads); killing one opens a hole to the void. The
+	// invisible-wall feel at such a brush is its STEP EDGE, which is legit collision.
+	// Override with: cm_killbrush <n> force
+	{
+		float fw = cm.brushes[n].bounds[1][0] - cm.brushes[n].bounds[0][0];
+		float fd = cm.brushes[n].bounds[1][1] - cm.brushes[n].bounds[0][1];
+		float fh = cm.brushes[n].bounds[1][2] - cm.brushes[n].bounds[0][2];
+		if ( fh <= 96 && fw > 160 && fd > 160 && ( Cmd_Argc() < 3 || Q_stricmp( Cmd_Argv( 2 ), "force" ) ) ) {
+			Com_Printf(
+				"cm_killbrush: brush %d looks like a FLOOR SHEET (%.0fx%.0fx%.0f) - killing it would open the ground. Use 'cm_killbrush %d force' if you are sure.\n",
+				n, fw, fd, fh, n );
+			return;
+		}
+	}
+	cm.brushes[n].contents = 0;
+	Com_sprintf( line, sizeof( line ), "%d # killwall in-game\n", n );
+	CM_AppendPatchLine( line );
+	Com_Printf( "^~^~^ CMPATCH killwall brush %d (live + persisted)\n", n );
+}
+
+static void CM_RestoreBrush_f( void ) {
+	int  n;
+	char line[128];
+
+	if ( Cmd_Argc() != 2 ) {
+		Com_Printf( "usage: cm_restorebrush <brushnum>\n" );
+		return;
+	}
+	n = atoi( Cmd_Argv( 1 ) );
+	if ( n < 0 || n >= cm.numBrushes ) {
+		Com_Printf( "cm_restorebrush: %d out of range\n", n );
+		return;
+	}
+	cm.brushes[n].contents = cm.shaders[cm.brushes[n].shaderNum].contentFlags;
+	Com_sprintf( line, sizeof( line ), "#RESTORED %d\n", n );
+	CM_AppendPatchLine( line );
+	Com_Printf( "^~^~^ CMPATCH restored brush %d (contents 0x%x) - reconcile the patch file\n",
+	            n, cm.brushes[n].contents );
+}
+
 void CM_LoadMap( const char *name, qboolean clientload, int *checksum ) {
+	{
+		static qboolean cmCmdsRegistered = qfalse;
+		if ( !cmCmdsRegistered ) {
+			cmCmdsRegistered = qtrue;
+			Cmd_AddCommand( "cm_killbrush", CM_KillBrush_f );
+			Cmd_AddCommand( "cm_restorebrush", CM_RestoreBrush_f );
+		}
+	}
+
 	gamelump_t		lump, lump2;
 	int				*shaderSubdivisions;
 	int				i;
@@ -1004,6 +1127,91 @@ void CM_LoadMap( const char *name, qboolean clientload, int *checksum ) {
 	_R( 49 );
 	CM_FloodAreaConnections();
 	_R( 50 );
+
+	// HZM coop bug-951: per-map collision surgery. If the filesystem (i.e. the mod pk3)
+	// contains cmpatch/<mapname>.txt, every whitespace-separated brush index listed in it
+	// has its contents zeroed - surgically removing specific invisible designer fencing
+	// (clip webs / nodraw fences / invisible solid sheets confirmed by player wall-probes)
+	// while leaving ALL other collision, including map-boundary clip, fully intact.
+	// Applies identically to client and server CM (same in-process load), and to any
+	// remote client running this engine with the mod pk3 mounted. '#' starts a comment.
+	{
+		char        patchname[MAX_QPATH];
+		char        base[MAX_QPATH];
+		const char *slash;
+		char       *buf;
+		int         len;
+
+		slash = strrchr( name, '/' );
+		Q_strncpyz( base, slash ? slash + 1 : name, sizeof( base ) );
+		COM_StripExtension( base, base, sizeof( base ) );
+		// the server loads maps/<name>_sml.bsp (sv_init.c) - both BSP variants share
+		// identical brush tables (verified), so both share one patch file
+		{
+			int blen = strlen( base );
+			if ( blen > 4 && !Q_stricmp( base + blen - 4, "_sml" ) ) {
+				base[blen - 4] = 0;
+			}
+		}
+		Com_sprintf( patchname, sizeof( patchname ), "cmpatch/%s.txt", base );
+
+		len = FS_ReadFile( patchname, (void **)&buf );
+		if ( len > 0 && buf ) {
+			int         applied = 0, skipped = 0;
+			const char *p = buf;
+			while ( *p ) {
+				while ( *p && ( *p == ' ' || *p == '\t' || *p == '\r' || *p == '\n' || *p == ',' ) ) p++;
+				if ( *p == '#' ) {
+					while ( *p && *p != '\n' ) p++;
+					continue;
+				}
+				if ( !*p ) break;
+				{
+					int idx = atoi( p );
+					if ( idx >= 0 && idx < cm.numBrushes ) {
+						cm.brushes[idx].contents = 0;
+						applied++;
+					} else {
+						skipped++;
+					}
+				}
+				while ( *p && *p != ' ' && *p != '\t' && *p != '\r' && *p != '\n' && *p != ',' && *p != '#' ) p++;
+			}
+			Com_Printf( "^~^~^ CMPATCH %s: %d brushes neutralized, %d out-of-range\n", patchname, applied, skipped );
+			FS_FreeFile( buf );
+		}
+
+		// bug-960: the LIVE overlay written by cm_killbrush. Same-name loose files are
+		// shadowed by pk3 copies on this engine, so in-game kills persist to a separate
+		// _local file no pk3 ships, applied ON TOP of the shipped list at load. Promote
+		// proven ids into the pk3 copy for distribution.
+		Com_sprintf( patchname, sizeof( patchname ), "cmpatch/%s_local.txt", base );
+		len = FS_ReadFile( patchname, (void **)&buf );
+		if ( len > 0 && buf ) {
+			int         applied = 0, skipped = 0;
+			const char *p = buf;
+			while ( *p ) {
+				while ( *p && ( *p == ' ' || *p == '\t' || *p == '\r' || *p == '\n' || *p == ',' ) ) p++;
+				if ( *p == '#' ) {
+					while ( *p && *p != '\n' ) p++;
+					continue;
+				}
+				if ( !*p ) break;
+				{
+					int idx = atoi( p );
+					if ( idx >= 0 && idx < cm.numBrushes ) {
+						cm.brushes[idx].contents = 0;
+						applied++;
+					} else {
+						skipped++;
+					}
+				}
+				while ( *p && *p != ' ' && *p != '\t' && *p != '\r' && *p != '\n' && *p != ',' && *p != '#' ) p++;
+			}
+			Com_Printf( "^~^~^ CMPATCH %s (local overlay): %d brushes neutralized, %d out-of-range\n", patchname, applied, skipped );
+			FS_FreeFile( buf );
+		}
+	}
 
 	// allow this to be cached if it is loaded by the server
 	if ( !clientload ) {

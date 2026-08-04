@@ -2,6 +2,16 @@ uniform sampler2D u_ScreenDepthMap;
 
 uniform vec4   u_ViewInfo; // zfar / znear, zfar, 1/width, 1/height
 
+// HZM gl2 (bug-1177): gl1-parity SSAO tunables, so the shipped coop_postfx.urc AO sliders drive gl2
+// too - radius and bias were hardcoded constants here and intensity did not exist at all.
+// Carried in the general-purpose spare vec4 (UNIFORM_HZMPARAMS / u_HzmParams) that already exists
+// from the post-FX port, so no new uniform had to be plumbed through tr_glsl.c / tr_local.h.
+// The defaults below reproduce the ORIGINAL hardcoded behaviour byte-for-byte (see the *64.0 and
+// *2.0 scalings), so a default install looks exactly as it did before this change.
+// NOTE: no double quotes anywhere in this file - the stringify build step emits it as a C string
+// literal without escaping, so a quote even inside a comment breaks the build.
+uniform vec4   u_HzmParams; // (radius, intensity, bias, unused)
+
 varying vec2   var_ScreenTex;
 
 #if 0
@@ -71,7 +81,8 @@ float ambientOcclusion(sampler2D depthMap, const vec2 tex, const float zFarDivZN
 	if (length(slope) * zFar > 5000.0)
 		return 1.0;
 
-	vec2 offsetScale = vec2(scale * 1024.0 / scaleZ);
+	// radius: default 16 * 64.0 = 1024.0, identical to the old hardcoded value. Menu 2..48 -> 128..3072.
+	vec2 offsetScale = vec2(scale * (u_HzmParams.x * 64.0) / scaleZ);
 
 	mat2 rmat = randomRotation(tex);
 
@@ -83,7 +94,8 @@ float ambientOcclusion(sampler2D depthMap, const vec2 tex, const float zFarDivZN
 		float sampleDiff = getLinearDepth(depthMap, tex + offset, zFarDivZNear) - sampleZ;
 
 		bool s1 = abs(sampleDiff) > zLimit;
-		bool s2 = sampleDiff + invZFar > dot(slope, offset);
+		// bias: default 0.5 * 2.0 = 1.0, so this reduces to the old (sampleDiff + invZFar). Menu 0.1..4 -> 0.2..8.
+		bool s2 = sampleDiff + (u_HzmParams.z * 2.0) * invZFar > dot(slope, offset);
 		result += float(s1 || s2);
 	}
 
@@ -95,6 +107,11 @@ float ambientOcclusion(sampler2D depthMap, const vec2 tex, const float zFarDivZN
 void main()
 {
 	float result = ambientOcclusion(u_ScreenDepthMap, var_ScreenTex, u_ViewInfo.x, u_ViewInfo.y, u_ViewInfo.wz);
+
+	// intensity: applied HERE, not inside ambientOcclusion(), because that function early-outs with
+	// 1.0 on steep slopes and that path must stay fully lit (1.0 maps to 1.0 through this too).
+	// Same algebraic form as gl1's grade. Default 1.0 = identity; 0 = no AO; 3 = 3x darkening.
+	result = clamp(1.0 - (1.0 - result) * u_HzmParams.y, 0.0, 1.0);
 
 	gl_FragColor = vec4(vec3(result), 1.0);
 }

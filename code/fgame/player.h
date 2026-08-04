@@ -355,6 +355,16 @@ public:
     // m_bCoopSprinting = the per-frame "is actually sprinting right now" flag (set in ClientMove).
     float m_fCoopStamina;
     bool  m_bCoopSprinting;
+    // HZM coop [user 2026-08-02] - LOW-HEALTH LIMP (bug-1291). m_bCoopLimping is the per-frame "is
+    // limping right now" flag, set in TickLimp and read by BOTH the COOP_LIMPING statemap conditional
+    // (3P body) and the ClientMove speed clamp. m_iCoopLimpSent is the last coop_limpView value
+    // stuffed to the OWNING client (-1 = never sent) so the camera limp is driven by the SERVER's
+    // decision rather than each client recomputing a threshold - same channel dbno.scr uses for
+    // coop_dbnoView, and the reason a server admin turning coop_limp off actually turns it off
+    // everywhere instead of only on the body.
+    bool  m_bCoopLimping;
+    bool  m_bCoopWounded; // HZM coop - bug-1324: health-fraction test WITHOUT the ground term; gates sprint
+    int   m_iCoopLimpSent;
     // HZM coop - client is in the 3P over-the-shoulder AIM stage (a pure client concept: cg_adsStage
     // cvar + camera envelopes), mirrored to the server via the u_shoulderaim userinfo key so the
     // aimed-walk slowdown applies ONLY to the shoulder stage (FP irons keep normal ADS speed).
@@ -370,6 +380,9 @@ public:
     // COOP_COVER / COOP_COVER_LOW / COOP_BLINDFIRE statemap conditions. The engine - not the
     // statemap or script - is the single authority for dropping out (movement, jump, death,
     // mount, geometry gone), so the .st "!" exits restore the default states cleanly.
+    // HZM coop [user 08-02]: DBNO state published to the engine so turret/vehicle mount can
+    // refuse a downed player. Mirrors the coop_setcover setter directly below.
+    bool  m_bCoopDbno;
     bool  m_bCoopCoverRequested; // player asked for cover (toggled by coop_setcover)
     bool  m_bCoopCoverWall;      // requested + standing back-to-wall pose valid this frame
     bool  m_bCoopCoverLow;       // requested + crouched low-cover pose valid this frame
@@ -396,6 +409,12 @@ public:
     float  m_fCoopLobbyCurX;      // cursor position, virtual 640x480
     float  m_fCoopLobbyCurY;
     bool   m_bCoopLobbyAtkPrev;   // BUTTON_ATTACKLEFT last frame (left-click press edge)
+    // HZM coop - BOT COMBAT DRIVE (dev/test only, coop_botInput): server-side usercmd injection so a
+    // connected client auto-aims + fires + advances on the nearest visible German. Lets the 4 test
+    // clients hold a real firefight UNATTENDED (the AI genuinely engages them - real bullets, LOS,
+    // retaliation - which the script damage-sim can't produce). Cvar default 0 = pure vanilla.
+    SafePtr<Sentient> m_pCoopBotTarget;   // cached target enemy (revalidated on the retarget tick)
+    int               m_iCoopBotRetarget; // level.inttime of the next allowed target rescan (ms)
     Vector m_vCoopCoverBaseOrg;  // pose position at cover entry (peek slides away from it and back) [216]
     float  m_fCoopPeekFrac;      // 0..1 eased peek step-out fraction [216]
     float m_fCoopCoverBadTime;   // level.time the pose first went invalid (grace before drop)
@@ -550,6 +569,7 @@ public:
     qboolean CondAttackButtonSecondary(Conditional& condition);
     qboolean CondCoopAds(Conditional& condition); // HZM coop - aim down sights (dedicated bind)
     qboolean CondCoopSprinting(Conditional& condition); // HZM coop - sprinting this frame (legs statemap)
+    qboolean CondCoopLimping(Conditional& condition);   // HZM coop - low-health limp this frame (legs statemap)
     qboolean CondCoopCover(Conditional& condition);     // HZM coop - standing back-to-wall cover pose valid (TickCoopCover)
     qboolean CondCoopCoverLow(Conditional& condition);  // HZM coop - crouched low-cover pose valid (TickCoopCover)
     qboolean CondCoopCoverPeek(Conditional& condition);      // HZM coop - RMB peek-aim from cover [215]
@@ -882,6 +902,9 @@ public:
     void       EventGetPrimaryFireHeld(Event *ev);
     void       EventGetSecondaryFireHeld(Event *ev);
     void       EventGetCoopAdsHeld(Event *ev); // HZM coop - aim-down-sights button held (for ads.scr move slowdown)
+    void       EventCoopKillWall(Event *ev);   // HZM coop - wall probe v5: live kill of aimed invisible brush (killwall)
+    void       EventCoopMarkWall(Event *ev);   // HZM coop - wall probe v5: forensic aim-trace report (markwall)
+    void       EventCoopSetDbno(Event *ev);    // HZM coop [user 08-02] - DBNO state on/off (coop_setdbno, from dbno.scr)
     void       EventCoopSetCover(Event *ev);   // HZM coop - take-cover request on/off (coop_setcover, from takecover.scr)
     void       EventGetCoopCover(Event *ev);   // HZM coop - cover state getter (coop_incover: 0/1/2/3)
     void       Score(Event *ev);
@@ -974,11 +997,22 @@ public:
     float GetRunSpeed() const;
     // HZM coop - is the player currently sprinting this frame (read by cgame-independent consumers if needed)
     bool  IsCoopSprinting() const { return m_bCoopSprinting; }
+    // HZM coop [user 2026-08-02] - LOW-HEALTH LIMP: decides m_bCoopLimping and stuffs coop_limpView
+    // to the owning client. Called from ClientMove immediately BEFORE TickSprint, because TickSprint
+    // reads m_bCoopLimping to suppress sprinting while wounded.
+    void  TickLimp();
+    void  EventCoopLimpTest(Event *ev);   // HZM coop DEV - set health to a fraction of max
+    bool  IsCoopLimping() const { return m_bCoopLimping; }
     // HZM coop - TAKE COVER: per-frame pose validation (called from ClientThink next to TickSprint)
     void  TickCoopCover();
+    // HZM coop - BOT COMBAT DRIVE (dev/test, coop_botInput): overwrite this frame's usercmd (aim +
+    // fire + advance on the nearest visible German) so a connected client fights unattended. No-op
+    // unless coop_botInput is set; never enabled in shipped cfgs.
+    void  CoopBotDrive(usercmd_t *ucmd);
     // HZM coop - read by Weapon::Shoot (blind-fire spread penalty) and Weapon::GetMuzzlePosition
     // (raise the fire origin over low cover while blind-firing)
     bool  IsCoopBlindfiring() const { return m_bCoopBlindfire; }
+    bool  IsCoopDbno() const { return m_bCoopDbno; }   // HZM coop [user 08-02]
     bool  IsCoopCoverLow() const { return m_bCoopCoverLow; }
     bool  IsCoopCoverWall() const { return m_bCoopCoverWall; }
     int   GetCoopCoverSide() const { return m_iCoopCoverSide; }

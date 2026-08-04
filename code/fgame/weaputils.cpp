@@ -2134,6 +2134,140 @@ void BulletAttack_Stat(Entity *owner, Entity *target, trace_t *trace, Weapon *we
     }
 }
 
+// HZM coop - DEV PROBE (coop_hstest N, default 0, not archived): self-driving headshot-kill
+// verification. Every 1.5s while the counter is positive, fire ONE engine-authentic bullet at the
+// nearest living enemy actor's head bone, owned by the host player - from a point 80u out on the
+// player's side of the head, so the trace hits the head LBD sphere no matter where the player
+// stands. Exercises the FULL chain a real trigger pull uses: BulletAttack -> Damage ->
+// pain-handler overkill -> confirmed-kill cue + CoopHeadshotKillFx -> CGM flesh/tracer messages ->
+// the cgame UV-wound funnel -> helmet pop. Counter decrements per shot; probe recipe pattern =
+// coop_helmtest / coop_maptest. Driven via rcon; logs ^~^~^ HSTEST per shot.
+void CoopHeadshotTestTick(void)
+{
+    static cvar_t *pHT = NULL;
+    static float   fNext;
+    Player        *player = NULL;
+    Entity        *e;
+    Actor         *best      = NULL;
+    float          fBestDist = 999999.0f;
+    int            i;
+    int            tagnum;
+    orientation_t  tagOr;
+
+    if (!pHT) {
+        pHT = gi.Cvar_Get("coop_hstest", "0", 0);
+    }
+    if (pHT->integer <= 0) {
+        return;
+    }
+    if (level.time < fNext) {
+        return;
+    }
+    fNext = level.time + 1.5f;
+
+    for (i = 0; i < game.maxclients; i++) {
+        if (g_entities[i].inuse && g_entities[i].client && g_entities[i].entity) {
+            player = (Player *)g_entities[i].entity;
+            break;
+        }
+    }
+    if (!player || player->IsDead()) {
+        gi.Printf("^~^~^ HSTEST armed but no live player yet (player=%d)\n", player ? 1 : 0);
+        return;
+    }
+
+    for (e = findradius(NULL, player->origin, 4096); e; e = findradius(e, player->origin, 4096)) {
+        if (!e->IsSubclassOfActor() || e->IsDead() || e->health <= 0) {
+            continue;
+        }
+        // dormant / not-yet-activated spawner actors sit non-solid with full health - bullets
+        // pass straight through them (observed live: 6 volleys through a static head, health
+        // untouched). Only target actors a real bullet can actually hit.
+        if (e->getSolidType() == SOLID_NOT || e->takedamage == DAMAGE_NO) {
+            continue;
+        }
+        if (static_cast<Sentient *>(e)->m_Team == static_cast<Sentient *>(player)->m_Team) {
+            continue;
+        }
+        float d = (e->origin - player->origin).length();
+        if (d < fBestDist) {
+            fBestDist = d;
+            best      = static_cast<Actor *>(e);
+        }
+    }
+    if (!best) {
+        gi.Printf("^~^~^ HSTEST no living enemy actor within 4096u - waiting\n");
+        return;
+    }
+
+    // aim at the head: prefer the animated head bone, but a far / never-rendered actor can
+    // return a STALE tag thousands of units from its real origin (observed live: a running
+    // enemy's tag stayed frozen at its spawn pose and 7 shots flew into dirt) - fall back to
+    // the origin-derived eye position whenever the tag diverges from the body.
+    Vector headPos;
+    tagnum = gi.Tag_NumForName(best->edict->tiki, "Bip01 Head");
+    if (tagnum >= 0) {
+        best->GetTagPositionAndOrientation(tagnum, &tagOr);
+        headPos = Vector(tagOr.origin);
+    }
+    if (tagnum < 0 || (headPos - best->origin).length() > 128.0f) {
+        headPos = best->EyePosition();
+    }
+    Vector toPlayer = player->centroid - headPos;
+    if (toPlayer.length() < 32.0f) {
+        toPlayer = Vector(64, 0, 8);
+    }
+    toPlayer.normalize();
+
+    // anchor-warp the host next to the victim FIRST, eyes on the head (aicombat driver
+    // pattern; run the harness host in noclip so placement never embeds/falls), so every
+    // feedback channel actually renders on the host's screen: UV stamps need the victim's
+    // surfaces SKINNED by the client, and the acceptance bar is VISIBLE feedback.
+    {
+        Vector anchor = headPos + toPlayer * 140.0f;
+        player->setOrigin(anchor);
+        player->velocity = vec_zero;
+        Vector vLook = headPos - anchor;
+        player->SetViewAngles(vLook.toAngles());
+    }
+
+    // bullet start = first CLEAR point within 80u of the head toward the (warped) player.
+    // The naive headPos + dir*80 can sit inside a dune/building when the victim hugs cover -
+    // observed as whole volleys swallowed by terrain with no flesh hit.
+    trace_t ct = G_Trace(
+        headPos, vec_zero, vec_zero, headPos + toPlayer * 80.0f, best, MASK_SHOT, false, "hstest-start"
+    );
+    Vector  start = Vector(ct.endpos) - toPlayer * 2.0f;
+    Vector  dir   = toPlayer * -1.0f;
+    Weapon *weap  = player->GetActiveWeapon(WEAPON_MAIN);
+
+    gi.Printf(
+        "^~^~^ HSTEST shot -> ent=%d model=%s org=(%.0f %.0f %.0f) head=(%.0f %.0f %.0f) start=(%.0f %.0f %.0f) "
+        "clear=%.2f dist=%.0f remaining=%d\n",
+        best->entnum, best->model.c_str(), best->origin.x, best->origin.y, best->origin.z, headPos.x, headPos.y,
+        headPos.z, start.x, start.y, start.z, ct.fraction, fBestDist, pHT->integer - 1
+    );
+    // damage 2000: one-shot lethal through BOTH kill paths - a worn helmet absorbs 90%
+    // (2000 -> 200 real HP damage = pain-handler overkill kill), a bare head multiplies
+    // (2000 x 4-5 >= the 5000 aihandler buffer = direct engine kill) - so the 10-kill run
+    // exercises the confirmed-kill hook on the script AND the engine path.
+    float fPrevHealth = best->health;
+    BulletAttack(
+        start, start, dir, vec_zero, vec_zero, 512.0f, 2000.0f, 1, 0.0f, DAMAGE_BULLET, MOD_BULLET, vec_zero, 1,
+        player, 0, NULL, 0.0f, 0.0f, 0.0f, weap, 1.0f
+    );
+    gi.Printf(
+        "^~^~^ HSTEST post ent=%d health=%.0f dead=%d\n", best->entnum, best->health, best->IsDead() ? 1 : 0
+    );
+
+    // consume a counter tick only when the bullet actually CONNECTED (kill, or health moved
+    // before the pain handler restores the 5000 buffer) - a swallowed volley retries instead
+    // of silently burning the run
+    if (best->IsDead() || best->health < fPrevHealth) {
+        gi.cvar_set("coop_hstest", va("%d", pHT->integer - 1));
+    }
+}
+
 float BulletAttack(
     Vector  start,
     Vector  vBarrel,
@@ -2445,14 +2579,12 @@ float BulletAttack(
 
                         damage_total += original_value - ent->health;
 
-                        // HZM coop: headshot KILL reward. If a player just killed an enemy AI with a
-                        // head-region hit (head/helmet/neck), play a local "headshot" cue to that player.
-                        if (owner && owner->IsSubclassOfPlayer() && ent->IsSubclassOfSentient()
-                            && !ent->IsSubclassOfPlayer() && original_value > 0 && ent->health <= 0
-                            && (trace.location == HITLOC_HEAD || trace.location == HITLOC_HELMET
-                                || trace.location == HITLOC_NECK)) {
-                            owner->Sound("coop_headshot", CHAN_LOCAL);
-                        }
+                        // HZM coop: the headshot-KILL confirm (cue + burst FX) moved to
+                        // Sentient::ArmorDamage. Checking ent->health here only ever saw
+                        // ENGINE-side kills - rank-and-file AI carry the aihandler 5000-health
+                        // buffer, so their real killing blow is the pain handler's scripted
+                        // overkill, which never passes through BulletAttack. ArmorDamage sees
+                        // both paths (the overkill preserves attacker/MOD/location).
                     }
 
                     if (ent->edict->solid == SOLID_BBOX && !(trace.contents & CONTENTS_CLAYPIDGEON)) {

@@ -92,6 +92,7 @@ public:
     Menu *CurrentMenu(void);
     bool  ClearMenus(bool force);
     void  ListMenus(void);
+    void  DumpVisibleMenus(const char *pszPrefix); // HZM coop (bug-767): one-line ^~^~^ dump of every visible menu
     void  UpdateAllMenus(void);
     void  Lock(Event *ev);
     void  Unlock(Event *ev);

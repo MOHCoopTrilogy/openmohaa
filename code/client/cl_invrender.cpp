@@ -57,6 +57,67 @@ CLASS_DECLARATION(UIWidget, FakkItemList, NULL) {
     {NULL,              NULL                           }
 };
 
+// HZM coop: composite an attached model onto a bone TAG of an already-set-up base entity, in the SAME
+// scene, tracking the base's current anim frame. Used for the armory operator to WEAR the chosen helmet
+// (tag "Bip01 Head") and HOLD the inspected weapon (tag "tag_weapon_right") - the placement is pulled
+// straight from the skeleton, so no per-item tuning is needed. World math mirrors the engine's own
+// GetTagPositionAndOrientation (cg_commands.cpp). An optional 7-float cvar (offX offY offZ scale pitch
+// yaw roll, tag-local) nudges the seat for the fit-tuner. Caller decides the gate + which tag/cvar.
+static void CL_CompositeAttachOnTag(refEntity_t &base, qhandle_t attachModel, const char *attachTag, const char *xformCvar)
+{
+    if (!attachModel || !attachTag || !attachTag[0] || !base.tiki) {
+        return;
+    }
+    int tagnum = TIKI_Tag_NameToNum(base.tiki, attachTag);
+    if (tagnum < 0) {
+        return;
+    }
+    re.ForceUpdatePose(&base);                                 // pose the base so the tag is valid this frame
+    orientation_t tor = re.TIKI_Orientation(&base, tagnum);    // tag orientation in base-model-local space
+
+    refEntity_t att {};
+    att.hModel       = attachModel;
+    att.tiki         = re.R_Model_GetHandle(attachModel);
+    att.entityNumber = ENTITYNUM_NONE;                         // own tiki -> own singleton skeletor, no cache clash
+    att.scale        = base.scale;
+    att.frameInfo[0].index  = 0;                              // pose at first frame (rigid props ignore this)
+    att.frameInfo[0].weight = 1.0f;
+    att.actionWeight        = 1.0f;
+    att.shaderRGBA[0] = att.shaderRGBA[1] = att.shaderRGBA[2] = att.shaderRGBA[3] = 255;
+    if (!att.tiki) {
+        return;
+    }
+
+    // optional tag-local nudge from the fit cvar
+    vec3_t loff = {0, 0, 0}, lang = {0, 0, 0};
+    float  lscale = 1.0f;
+    const char *xs = xformCvar ? Cvar_VariableString(xformCvar) : NULL;
+    if (xs && xs[0]) {
+        float xf[7];
+        if (sscanf(xs, "%f %f %f %f %f %f %f", &xf[0], &xf[1], &xf[2], &xf[3], &xf[4], &xf[5], &xf[6]) == 7) {
+            loff[0] = xf[0]; loff[1] = xf[1]; loff[2] = xf[2];
+            lscale  = xf[3];
+            lang[0] = xf[4]; lang[1] = xf[5]; lang[2] = xf[6];
+        }
+    }
+    vec3_t lax[3];
+    AnglesToAxis(lang, lax);
+    vec3_t tagax[3], worldax[3];
+    MatrixMultiply(lax, tor.axis, tagax);            // tag axis composed with the local nudge...
+    MatrixMultiply(tagax, base.axis, worldax);       // ...then into the base's world axis
+    AxisCopy(worldax, att.axis);
+    att.scale = base.scale * lscale;
+
+    // att world origin = base origin + base_axis * (tag origin + tag_axis * local offset)
+    vec3_t lworld, tworld, tagorg;
+    MatrixTransformVector(loff, tor.axis, lworld);
+    VectorAdd(tor.origin, lworld, tagorg);
+    MatrixTransformVector(tagorg, base.axis, tworld);
+    VectorAdd(base.origin, tworld, att.origin);
+
+    re.AddRefEntityToScene(&att, ENTITYNUM_NONE);
+}
+
 void CL_Draw3DModel(
     float     x,
     float     y,
@@ -68,7 +129,11 @@ void CL_Draw3DModel(
     vec3_t    offset,
     vec3_t    angle,
     vec3_t    color,
-    str       anim
+    str       anim,
+    qhandle_t attachModel,      // HZM coop: optional model composited onto attachTag (helmet on operator)
+    const char *attachTag,
+    qhandle_t attachModel2,     // HZM coop: 2nd optional model composited onto attachTag2 (weapon in operator's hand)
+    const char *attachTag2
 )
 {
     refdef_t    inv_refdef {};
@@ -92,7 +157,14 @@ void CL_Draw3DModel(
 
     ent.scale        = 1.0;
     ent.hModel       = model;
-    ent.entityNumber = 1023;
+    // HZM fix (bug-1167): 1023 was ENTITYNUM_NONE under the old 10-bit entity protocol, so this
+    // used to be a safe "not a real entity" sentinel. GENTITYNUM_BITS 11 moved ENTITYNUM_NONE to
+    // 2047 and made 1023 an ordinary, frequently-live entity slot - this preview model's pose was
+    // aliasing tr.skel_index[1023]/the gore texture-override table with whatever real world
+    // entity happened to occupy that slot, corrupting its pose (upside-down actors, giant
+    // shadows) and bleeding gore textures onto unrelated props. Matches the sibling attach-model
+    // code 20 lines below, which already uses ENTITYNUM_NONE correctly.
+    ent.entityNumber = ENTITYNUM_NONE;
     VectorAdd(origin, offset, ent.origin);
     VectorAdd(ent.origin, unprojoffset, ent.origin);
 
@@ -208,7 +280,40 @@ void CL_Draw3DModel(
         AxisClear(inv_refdef.viewaxis);
     }
 
+    // HZM coop: which composites are active this frame? Helmet rides "Bip01 Head", weapon rides
+    // "tag_weapon_right" - each opts in via its own attach model + gate cvar (coop_loHelmOnChar / coop_loWpnOnChar).
+    const bool doHelm =
+        (attachModel && attachTag && attachTag[0] && ent.tiki && Cvar_Get("coop_loHelmOnChar", "1", 0)->integer);
+    const bool doWpn =
+        (attachModel2 && attachTag2 && attachTag2[0] && ent.tiki && Cvar_Get("coop_loWpnOnChar", "1", 0)->integer);
+
+    // When wearing the swapped helmet, hide the operator model's OWN baked helmet surfaces (same set
+    // helmet.scr nodraws in-world) so the two don't stack. Must run BEFORE the entity is copied into the
+    // scene. Missing surfaces on a given skin are simply skipped.
+    if (doHelm && ent.tiki->num_surfaces > 0) {
+        static const char *baseHelmSurfs[] = {"us_helmet", "us_helmet_inside", "bob_helmet_camo"};
+        for (int s = 0; s < ent.tiki->num_surfaces && s < MAX_MODEL_SURFACES; s++) {
+            const char *sname = ent.tiki->surfaces[s].name;
+            for (int b = 0; b < (int)ARRAY_LEN(baseHelmSurfs); b++) {
+                if (!Q_stricmp(sname, baseHelmSurfs[b])) {
+                    ent.surfaces[s] |= TIKI_SURF_NODRAW;
+                    break;
+                }
+            }
+        }
+    }
+
     re.AddRefEntityToScene(&ent, ENTITYNUM_NONE);
+
+    // Drop the attached models onto their tags (after the base is in the scene). ForceUpdatePose inside the
+    // helper poses the operator at the current idle frame, so both helmet and weapon track the animation.
+    if (doHelm) {
+        CL_CompositeAttachOnTag(ent, attachModel, attachTag, "coop_loXfmCH");
+    }
+    if (doWpn) {
+        CL_CompositeAttachOnTag(ent, attachModel2, attachTag2, "coop_loXfmWH");
+    }
+
     re.RenderScene(&inv_refdef);
 }
 

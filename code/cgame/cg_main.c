@@ -796,6 +796,30 @@ void CG_Init(clientGameImport_t *imported, int serverMessageNum, int serverComma
     cgs.processedSnapshotNum  = serverMessageNum;
     cgs.serverCommandSequence = serverCommandSequence;
 
+    // HZM (bug-1202): clear every screen-effect signal cgame PUBLISHES to the renderer.
+    // These are one-way per-frame values - cgame writes them, renderergl2's post-process chain
+    // reads them, and nothing else ever resets them. They are published from CG_CalcFov(), which
+    // is skipped entirely on snapshot loss (cg_view.c), during cinematics, and at the main menu -
+    // so whatever value was live when the connection dropped stays live forever, and the effect
+    // never goes away. Zeroing them here means a map change, reconnect or fresh connect always
+    // starts from a clean screen. coop_dbnoView is included because it forces the downed
+    // bleed-out view; it was also CVAR_ARCHIVE until now, so crashing while downed persisted a
+    // forced max-injury effect to disk.
+    {
+        static const char *const hzmClearFx[] = {
+            "r_ppHeat", "r_ppSuppress", "r_ppHit", "r_ppRainWet", "coop_dbnoView",
+            // bug-1307: the scripted-suppression floor and one-shot bump. Without these a
+            // disconnect mid-set-piece leaves a permanently forced blur - bug-1202 again.
+            "coop_suppHold", "coop_suppBump"
+        };
+        int i;
+        for (i = 0; i < (int)(sizeof(hzmClearFx) / sizeof(hzmClearFx[0])); i++) {
+            cgi.Cvar_Set(hzmClearFx[i], "0");
+        }
+        // health fraction is inverted: 1.0 = full health = no effect
+        cgi.Cvar_Set("r_ppHealthFrac", "1");
+    }
+
     CG_RegisterCvars();
 
     L_InitEvents();

@@ -518,6 +518,11 @@ void RE_EndFrame( int *frontEndMsec, int *backEndMsec ) {
 
 	R_IssueRenderCommands( qtrue );
 
+	// HZM coop - gore tier 4 (UV wounds): every skel surface of the frame has
+	// been CPU-skinned and ray-tested by now, so the globally best triangle
+	// hit per pending impact is known - composite + upload the wound stamps.
+	R_GoreCommitPending();
+
 	R_InitNextFrame();
 
 	if ( frontEndMsec ) {

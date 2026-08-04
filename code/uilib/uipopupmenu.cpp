@@ -177,9 +177,21 @@ void UIPopupMenu::Create(
     setFont("verdana-12");
 
     if (bVirtualSize) {
-        m_bVirtual         = qtrue;
-        m_vVirtualScale[0] = (float)uid.vidWidth / SCREEN_WIDTH;
-        m_vVirtualScale[1] = (float)uid.vidHeight / SCREEN_HEIGHT;
+        // HZM ultrawide (bug-1127): matching UIWidget::SetVirtualScale's factor choice -
+        // uniform when ui_menuCenter 1, stock per-axis stretch otherwise (user default).
+        extern bool UI_MenuCenterEnabled(void);
+        m_bVirtual = qtrue;
+        if (UI_MenuCenterEnabled()) {
+            const float sx = (float)uid.vidWidth / SCREEN_WIDTH;
+            const float sy = (float)uid.vidHeight / SCREEN_HEIGHT;
+            const float s  = (sx < sy) ? sx : sy;
+
+            m_vVirtualScale[0] = s;
+            m_vVirtualScale[1] = s;
+        } else {
+            m_vVirtualScale[0] = (float)uid.vidWidth / SCREEN_WIDTH;
+            m_vVirtualScale[1] = (float)uid.vidHeight / SCREEN_HEIGHT;
+        }
     }
 
     if (!(m_describe && m_listener)) {

@@ -86,7 +86,22 @@ void Decal::setRadius
    )
 
    {
+   int iRad;
+
    edict->s.scale = rad;
+
+   // HZM coop (bug-776) - entityState.scale is packed *100 into 10 bits on the wire (MSG_PackScale,
+   // entityStateFields_ver_15), so any decal radius above 10.23 arrives at the client CLAMPED to 10.23.
+   // That silently shrank the death blood pool (radius 31-58) to an ordinary splat-sized 10u blob - the
+   // "blood pooling never visible" reports (bug-735/754). Side-channel the EXACT radius as whole units in
+   // surfaces[1] (an 8-bit netfield, 1-255); CG_Decal prefers it when non-zero. surfaces[1] was unused for
+   // ET_DECAL (only surfaces[0] = direction byte), and old clients simply ignore it.
+   iRad = (int)rad;
+   if ( iRad > 255 )
+      iRad = 255;
+   else if ( iRad < 0 )
+      iRad = 0;
+   edict->s.surfaces[1] = iRad;
    }
 
 // HZM coop - tint the decal. The client (CG_EntityEffects) unpacks s.constantLight as r=byte0, g=byte1,

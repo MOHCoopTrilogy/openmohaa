@@ -643,6 +643,9 @@ public:
     int m_State;
     /* current state change time */
     int m_iStateTime;
+    /* [HZM coop ET3] dedicated jink timer - decoupled from m_iStateTime (which the un-pin's retarget keeps
+       resetting), so the dueled-enemy sidestep-while-firing fires on its own coop_aiJinkMs cadence */
+    int m_iCoopJinkTime;
     /* should lock think state ? */
     bool m_bLockThinkState;
     /* think state changed */

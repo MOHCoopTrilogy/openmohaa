@@ -98,8 +98,9 @@ BarrelObject::BarrelObject()
         m_bLeaksActive[i] = 0;
     }
 
-    m_fDamageSoundTime = 0;
-    mass               = 500;
+    m_fDamageSoundTime  = 0;
+    m_fLastDamagerTime  = -1000.0f; // HZM coop (bug-719): far in the past so an unset damager never counts
+    mass                = 500;
     max_health         = 75;
     health             = 75;
     deadflag           = DEAD_NO;
@@ -356,6 +357,14 @@ void BarrelObject::BarrelDamaged(Event *ev)
 
     iDamage       = ev->GetInteger(2);
     iMeansOfDeath = ev->GetInteger(9);
+
+    // HZM coop: remember the last player (client) that damaged the barrel, so the
+    // subsequent explosion kill is attributed to them instead of the barrel itself.
+    if (ev->GetEntity(1) && ev->GetEntity(1)->IsSubclassOfPlayer()) {
+        m_lastDamager      = ev->GetEntity(1);
+        m_fLastDamagerTime = level.time; // bug-719: timestamp so stale credit expires (see BarrelKilled)
+    }
+
     vHitPos       = ev->GetVector(4);
     vHitDirection = ev->GetVector(5);
     vHitNormal    = ev->GetVector(6);
@@ -449,6 +458,18 @@ void BarrelObject::BarrelKilled(Event *ev)
     Vector vPos;
     str    sModel;
 
+    // HZM coop: attribute the explosion kill to the player that shot the barrel
+    // (if any), so barrel kills count toward their stats/challenges. The barrel
+    // itself stays the inflictor.
+    // bug-719: only credit the last player hit if it was RECENT (<= 3s). A durable/gas barrel a player
+    // merely tickled minutes ago, then detonated by a chain blast / AI / fire, is attributed to the barrel
+    // (this), not that stale player. The killing shot's own BarrelDamaged fires in the same tick as the
+    // kill, so a legitimate "player shot it and it blew" always falls well inside the window.
+    Entity *pAttacker = this;
+    if (m_lastDamager && (level.time - m_fLastDamagerTime) <= 3.0f) {
+        pAttacker = m_lastDamager;
+    }
+
     setSolidType(SOLID_NOT);
     PostEvent(EV_Remove, 0.05f);
 
@@ -456,7 +477,7 @@ void BarrelObject::BarrelKilled(Event *ev)
     fFluidTop = m_fFluidAmount / m_fHeightFluid + vPos[2];
 
     if (m_iBarrelType == BARREL_GAS) {
-        RadiusDamage(centroid, this, this, 200, this, MOD_EXPLOSION, 350, 24);
+        RadiusDamage(centroid, this, pAttacker, 200, this, MOD_EXPLOSION, 350, 24);
 
         sModel = "models/fx/barrel_gas_destroyed.tik";
     } else if (m_iBarrelType == BARREL_WATER) {
@@ -469,7 +490,7 @@ void BarrelObject::BarrelKilled(Event *ev)
         if (vPos[2] + 0.25f * maxs[2] > fFluidTop) {
             sModel = "models/fx/barrel_empty_destroyed.tik";
         } else {
-            RadiusDamage(centroid, this, this, 200, this, MOD_EXPLOSION, 350, 24);
+            RadiusDamage(centroid, this, pAttacker, 200, this, MOD_EXPLOSION, 350, 24);
 
             sModel = "models/fx/barrel_oil_destroyed.tik";
         }

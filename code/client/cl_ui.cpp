@@ -1952,7 +1952,10 @@ void UI_Update(void)
 
     if (currentMenu == menuManager.FindMenu("main")) {
         UI_MainMenuWidgetsUpdate();
-    } else if (currentMenu == menuManager.FindMenu("dm_main")) {
+    } else if (currentMenu
+               && !str::cmp(currentMenu->m_name, "dm_main")) {
+        // HZM coop (bug-720): match by NAME (not FindMenu pointer - duplicate-named menus made the pointer
+        // compare fail) and also drive the coop ESC menu's vote row.
         UI_MultiplayerMainMenuWidgetsUpdate();
     }
 
@@ -2463,6 +2466,46 @@ void UI_Update(void)
         }
     }
 
+    // HZM coop (bug-767): PER-FRAME exclusivity for the two in-game ESC boards. The stock
+    // "dm_main" and the coop "coop_dm_main" menus are exclusive by design (UI_MenuEscape
+    // pushes exactly one of them), but an off-stack board can still be re-shown later:
+    // MenuManager::PopMenu/PushMenu post DELAYED "showmenu" events (uimenu.cpp) that can
+    // land after the one-shot ForceHide in UI_MenuEscape (bug-745 race), and a stale
+    // hudList entry used to ForceShow() a random menu every frame (fixed in CL_ShutdownUI,
+    // same bug id). An off-stack visible board draws garbled double text over the real
+    // menu and eats mouse clicks for anything under it (uWinMan input hits widgets, not
+    // the menu stack). Enforce the invariant here, after every show/hide pump and right
+    // before the draw: an ESC board that is not the CURRENT menu must not be visible.
+    // Converges one frame after any zombie appears, no matter what resurrected it.
+    {
+        static const char *const cszEscBoards[1] = {"dm_main"};
+        Menu                    *pTopMenu        = menuManager.CurrentMenu();
+        int                      iBoard;
+
+        for (iBoard = 0; iBoard < 1; iBoard++) {
+            Menu *pBoard = menuManager.FindMenu(cszEscBoards[iBoard]);
+
+            if (pBoard && pBoard != pTopMenu && pBoard->isVisible()) {
+                // HZM coop (bug-767, 5th report): rate-limited breadcrumb - if this line
+                // spams a session log while the doubled ESC text persists, something is
+                // re-showing the board between this hide and the draw and the MENUDBG
+                // draw-suppress guard in UIWidget::Display will name the frame.
+                static int iNextHidePrint = 0;
+
+                if (cls.realtime >= iNextHidePrint) {
+                    iNextHidePrint = cls.realtime + 1000;
+                    Com_Printf(
+                        "^~^~^ MENUDBG zombie-hide '%s' (current='%s')\n",
+                        cszEscBoards[iBoard],
+                        pTopMenu ? pTopMenu->m_name.c_str() : "<none>"
+                    );
+                }
+
+                pBoard->ForceHide();
+            }
+        }
+    }
+
     uWinMan.UpdateViews();
 }
 
@@ -2572,6 +2615,11 @@ void UI_MultiplayerMainMenuWidgetsUpdate(void)
         menuManager.PassEventToWidget("alreadyvoted", new Event(EV_Widget_Disable));
         menuManager.PassEventToWidget("cantvote", new Event(EV_Widget_Enable));
     }
+
+    // HZM coop (bug-720): the old per-frame Enable/Disable of the two dm_main button stacks was removed -
+    // the coop ESC menu now lives under its OWN menu name ("coop_dm_main", pushed by UI_MenuEscape when
+    // coop_active is set), so the stock dm_main stays fully vanilla and no stack juggling is needed. This
+    // updater still runs for BOTH menus (name-matched at the dispatch sites) purely for the vote row above.
 
     UI_UpdateContinueGame();
 }
@@ -3080,7 +3128,31 @@ void UI_MenuEscape(const char *name)
         menuManager.PopMenu(qtrue);
     } else if (!Q_stricmp(name, "main") && clc.state > CA_PRIMED && cg_gametype->integer > 0) {
         // multiplayer
-        UI_PushMenu("dm_main");
+        // HZM coop (bug-720): coop sessions get their OWN ESC menu under a UNIQUE name. Overriding the
+        // stock "dm_main" with a same-named mod URC never worked: CreateMenus builds a separate Menu per
+        // URC container with no name dedup, PassEventToWidget reaches only the current menu's first name
+        // match, and all dm_main handling is name-keyed - so the stock menu drew beneath the override
+        // (the overlapping-text ESC menu). coop_active is set 1 by coop_mod/cfg/detect.cfg on coop join.
+        // Falls back to the stock menu if the coop mod isn't installed.
+        {
+            // HZM coop: REVERTED to the stock ESC menu for all sessions (2026-07-18). The coop
+            // "coop_dm_main" override caused an unresolved doubled/garbled ESC-menu bug across 6
+            // rounds; user chose to return to stock ESC. Loadout access stays on the main-menu
+            // ARMORY button + the lobby LOADOUT button (unchanged). The genuine engine bug fixes
+            // found during that hunt are KEPT: the hudList 1-based-clear fix (FreeObjectList in
+            // CL_ShutdownUI, bug-767), the CreateMenus duplicate-container dedup (uiwinman.cpp),
+            // and this off-stack zombie-hide + MENUDBG forensics - now guarding the stock dm_main
+            // only, which is always wrong to draw while it is not the current menu.
+            Menu *pStockEsc = menuManager.FindMenu("dm_main");
+
+            menuManager.DumpVisibleMenus("^~^~^ MENUDBG esc-open");
+
+            if (pStockEsc) {
+                pStockEsc->ForceHide();
+            }
+
+            UI_PushMenu("dm_main");
+        }
     } else {
         // single-player
         UI_PushMenu(name);
@@ -5222,9 +5294,20 @@ void CL_ShutdownUI(void)
     Cmd_RemoveCommand("+statistics");
     Cmd_RemoveCommand("-statistics");
 
-    for (int i = 0; i < hudList.NumObjects(); i++) {
-        hudList.RemoveObjectAt(i);
-    }
+    // HZM coop (bug-767): clear the ENTIRE hud list. The old forward loop
+    // ("for (i = 0; i < NumObjects(); i++) RemoveObjectAt(i)") was broken twice over:
+    // Container is 1-based (RemoveObjectAt(0) is a no-op) and removing while walking
+    // forward shrinks the list under the index, so with 2+ entries all but the first
+    // SURVIVED this "clear". Those survivors are raw Menu* and every Menu is freed a
+    // few lines below (menuManager.DeleteAllMenus()), so each map change left 1-2
+    // DANGLING pointers in hudList. The next map's CreateMenus reallocates ~100 Menus
+    // into the just-freed blocks, so a stale entry lands on a random LIVE menu - and
+    // UI_ShowHudList()/UI_DisplayHudList() then ForceShow() that random menu EVERY
+    // FRAME. That is the un-killable "zombie menu": the stock dm_main board drawn over
+    // the coop ESC menu (4th overlapping-text report), or an invisible board over the
+    // team-select screen eating spawn clicks. One-shot ForceHide fixes (bug-745) could
+    // never win because the per-frame ForceShow re-showed it on the next frame.
+    hudList.FreeObjectList();
 
     // Removed in 2.0
     //  Crosshair is now handled by the cgame module
@@ -5305,6 +5388,54 @@ void CL_ShutdownUI(void)
     menuManager.DeleteAllMenus();
 
     cls.uiStarted = false;
+}
+
+// HZM coop ARMORY FIT-TUNE: nudge one field of the CURRENT target transform cvar (name held in
+// coop_loFitCur), so bindable keys and on-screen buttons can position any preview model live.
+// The cvar holds 7 floats "offX offY offZ scale pitch yaw roll" - the same format the model widget
+// reads via `modelxformcvar` (cl_uistd.cpp). Configs cannot do arithmetic; this command does.
+static void UI_FitNudge_f(void)
+{
+    if (Cmd_Argc() < 3) {
+        Com_Printf("usage: uifit <field 0-6: offX offY offZ scale pitch yaw roll> <delta>\n");
+        return;
+    }
+    const char *target = Cvar_VariableString("coop_loFitCur");
+    if (!target || !target[0]) {
+        Com_Printf("^~^~^ uifit: no target - set coop_loFitCur to the transform cvar name\n");
+        return;
+    }
+    int   field = atoi(Cmd_Argv(1));
+    float delta = atof(Cmd_Argv(2));
+    if (field < 0 || field > 6) {
+        Com_Printf("uifit: field must be 0-6\n");
+        return;
+    }
+    float       xf[7] = {0, 0, 0, 1, 0, 0, 0};
+    const char *cur   = Cvar_VariableString(target);
+    if (cur && cur[0]) {
+        sscanf(cur, "%f %f %f %f %f %f %f", &xf[0], &xf[1], &xf[2], &xf[3], &xf[4], &xf[5], &xf[6]);
+    }
+    xf[field] += delta;
+    char buf[128];
+    Com_sprintf(buf, sizeof(buf), "%.2f %.2f %.2f %.3f %.1f %.1f %.1f", xf[0], xf[1], xf[2], xf[3], xf[4], xf[5], xf[6]);
+    Cvar_Set(target, buf);
+    Com_Printf("^~^~^ FIT %s = %s\n", target, buf);
+}
+
+// HZM coop: print every armory fit cvar (for baking the tuned values back into the generator).
+static void UI_FitDump_f(void)
+{
+    static const char *names[] = {
+        "coop_loFitCur", "coop_loPrevId", "coop_loXfmW",  "coop_loXfmT1", "coop_loXfmT2",
+        "coop_loXfmT3",  "coop_loXfmT4",  "coop_loXfmH",  "coop_loXfmC",  "coop_loXfmCH", "coop_loXfmWH"
+    };
+    int i;
+    Com_Printf("^~^~^ FITDUMP BEGIN\n");
+    for (i = 0; i < (int)(sizeof(names) / sizeof(names[0])); i++) {
+        Com_Printf("^~^~^ %s = %s\n", names[i], Cvar_VariableString(names[i]));
+    }
+    Com_Printf("^~^~^ FITDUMP END\n");
 }
 
 /*
@@ -5402,6 +5533,8 @@ void CL_InitializeUI(void)
     Cmd_AddCommand("listmenus", UI_ListMenus_f);
     Cmd_AddCommand("togglemenu", UI_ToggleMenu_f);
     Cmd_AddCommand("loadmenu", UI_LoadMenu_f);
+    Cmd_AddCommand("uifit", UI_FitNudge_f);      // HZM coop armory fit-tune: nudge a transform cvar field
+    Cmd_AddCommand("uifitdump", UI_FitDump_f);   // HZM coop: print armory fit cvars for baking
     Cmd_AddCommand("maplist", UI_MapList_f);
     Cmd_AddCommand("dmmapselect", UI_DMMapSelect_f);
     Cmd_AddCommand("ui_startdmmap", UI_StartDMMap_f);

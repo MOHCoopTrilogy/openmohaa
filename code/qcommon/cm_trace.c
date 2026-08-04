@@ -1,3 +1,9 @@
+
+// HZM coop bug-952: index of the brush recorded by the most recent trace hit
+// (-1 = none / non-brush). Read via CM_LastTraceBrushNum() so the wall probe can
+// name the exact brush a player is blocked by (cmpatch surgery workflow).
+int cm_lastTraceBrushNum = -1;
+
 /*
 ===========================================================================
 Copyright (C) 1999-2005 Id Software, Inc.
@@ -654,6 +660,7 @@ void CM_TraceThroughBrush( traceWork_t *tw, cbrush_t *brush ) {
 		//
 		if( !startout ) {	// original point was inside brush
 			tw->trace.startsolid = qtrue;
+			cm_lastTraceBrushNum = (int)( brush - cm.brushes );
 			if( !getout ) {
 				tw->trace.fraction = 0;
 				tw->trace.allsolid = qtrue;
@@ -671,6 +678,7 @@ void CM_TraceThroughBrush( traceWork_t *tw, cbrush_t *brush ) {
 				tw->trace.surfaceFlags = leadside->surfaceFlags;
 				tw->trace.shaderNum = leadside->shaderNum;
 				tw->trace.contents = brush->contents;
+				cm_lastTraceBrushNum = (int)( brush - cm.brushes );
 			}
 		}
 	} else {
@@ -750,6 +758,7 @@ void CM_TraceThroughBrush( traceWork_t *tw, cbrush_t *brush ) {
 					tw->trace.surfaceFlags = leadside->surfaceFlags;
 					tw->trace.shaderNum = leadside->shaderNum;
 					tw->trace.contents = brush->contents;
+					cm_lastTraceBrushNum = (int)( brush - cm.brushes );
 					return;
 				}
 			}
@@ -762,6 +771,7 @@ void CM_TraceThroughBrush( traceWork_t *tw, cbrush_t *brush ) {
 						tw->trace.surfaceFlags = leadside2->surfaceFlags;
 						tw->trace.shaderNum = leadside2->shaderNum;
 						tw->trace.contents = brush->contents;
+						cm_lastTraceBrushNum = (int)( brush - cm.brushes );
 						return;
 					}
 				}
@@ -1270,6 +1280,8 @@ void CM_BoxTrace( trace_t *results, const vec3_t start, const vec3_t end,
 	cm.checkcount++;		// for multi-check avoidance
 
 	c_traces++;				// for statistics, may be zeroed
+
+	cm_lastTraceBrushNum = -1;	// HZM bug-952: reset per trace
 
 	// fill in a default trace
 	Com_Memset( &tw, 0, sizeof( tw ) );
@@ -2166,4 +2178,18 @@ qboolean CM_TransformedBoxSightTrace( const vec3_t start, const vec3_t end, cons
 
 	// sweep the box through the model
 	return CM_BoxSightTrace( start_l, end_l, symetricSize[ 0 ], symetricSize[ 1 ], model, brushmask, cylinder );
+}
+
+
+/*
+================
+CM_LastTraceBrushNum
+
+HZM coop bug-952: index of the brush hit by the most recent CM_BoxTrace
+(-1 if the last hit was not a world/inline brush). Used by the coop wall
+probe to name the exact brush for cmpatch surgery.
+================
+*/
+int CM_LastTraceBrushNum( void ) {
+	return cm_lastTraceBrushNum;
 }

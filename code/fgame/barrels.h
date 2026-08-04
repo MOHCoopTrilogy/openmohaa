@@ -49,6 +49,15 @@ class BarrelObject : public Entity
     float    m_fJitterScale;
     float    m_fLastEffectTime;
     float    m_fDamageSoundTime;
+    // HZM coop: remember the last client (player) that damaged this barrel so a
+    // barrel explosion kill can be attributed to the player who shot it (drives
+    // the "Scripted Havoc" challenge). Transient - not archived.
+    SafePtr<Entity> m_lastDamager;
+    // HZM coop (bug-719): time of that last player hit. BarrelKilled only honors
+    // m_lastDamager if the hit was RECENT, so a player who merely tickled a durable/
+    // gas barrel minutes ago is NOT credited when a chain blast / AI / fire finally
+    // detonates it. Defaults far in the past so an unset damager never counts.
+    float           m_fLastDamagerTime;
 
 public:
     CLASS_PROTOTYPE(BarrelObject);

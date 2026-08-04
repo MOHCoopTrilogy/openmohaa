@@ -1833,6 +1833,13 @@ void Com_Init( char *commandLine ) {
 
 	configExists = Com_ConfigExists(configname);
 
+	// HZM coop - exec the curated coop option DEFAULTS *before* the saved config, so the player's saved
+	// config (loaded next) OVERRIDES any option they changed in the menus -> option changes persist across
+	// restart. Previously these seta defaults lived in autoexec.cfg (exec'd AFTER the config, below), which
+	// re-forced the default every launch and wiped the player's choice. Missing file (non-coop launch) is a
+	// harmless no-op. Menu-controlled options only; forced/session cvars stay in autoexec.cfg.
+	Cbuf_AddText( "exec coop_defaults.cfg\n" );
+
 	if ( !configExists ) {
 		Com_Printf( "The config file '%s' doesn't exist, using unnamedsoldier.cfg as a template\n", configname );
 		Cbuf_AddText( "exec configs/unnamedsoldier.cfg\n" );

@@ -55,6 +55,13 @@ void R_ShutdownFont() {
         header_sgl = &s_loadedFonts_sgl[i];
         memset(header_sgl, 0, sizeof(*header_sgl));
     }
+
+    // HZM (engine-limits audit): the counters were never reset here, so every vid_restart
+    // leaked the whole font table - the slots were wiped but still counted, and the next
+    // R_LoadFont/R_LoadFont_sgl appended *after* them. After a few restarts the tables hit
+    // MAX_LOADED_FONTS and fonts silently stopped loading. Matches renderergl2's fix.
+    s_numLoadedFonts = 0;
+    s_numLoadedFonts_sgl = 0;
 }
 
 void R_SetFontHeightScale(float scale)
@@ -135,24 +142,43 @@ fontheader_sgl_t* R_LoadFont_sgl(const char* name)
     char* ref;
     const char* token;
     qboolean error;
+    char hiresName[64];
 
     error = qfalse;
+
+    // HZM hi-DPI fonts: a mod may ship "fonts/<name>@3x.RitualFont" + "gfx/fonts/<name>@3x.tga",
+    // a high-resolution variant of the bitmap font. The @3x metrics file keeps the ORIGINAL
+    // 256-wide design-space numbers (UVs are normalized fractions, screen metrics come from
+    // height/size[0]*256), so layout is pixel-identical; only the glyph sheet texel density
+    // changes. When present we load the variant instead, which makes menu/HUD text render
+    // downsampled (crisp) instead of upscaled (blocky) at high resolutions.
+    Com_sprintf(hiresName, sizeof(hiresName), "%s@3x", name);
 
     for (i = 0; i < s_numLoadedFonts_sgl; i++)
     {
         header = &s_loadedFonts_sgl[i];
-        if (!Q_stricmp(name, header->name)) {
+        if (!Q_stricmp(name, header->name) || !Q_stricmp(hiresName, header->name)) {
             return header;
         }
     }
 
-    if (s_numLoadedFonts >= MAX_LOADED_FONTS)
+    // HZM (engine-limits audit): this guarded the WRONG counter - s_numLoadedFonts belongs to
+    // s_loadedFonts[], while the write below indexes s_loadedFonts_sgl[s_numLoadedFonts_sgl].
+    // A .RitualFontList font registers several sgl faces per list entry, so the sgl table runs
+    // ahead of the other one and could be written past MAX_LOADED_FONTS with no guard at all.
+    if (s_numLoadedFonts_sgl >= MAX_LOADED_FONTS)
     {
         ri.Printf(PRINT_WARNING, "LoadFont: Too many fonts loaded!  Couldn't load %s\n", name);
         return NULL;
     }
 
-    if (ri.FS_ReadFile(va("fonts/%s.RitualFont", name), (void**)&theFile) == -1)
+    if (ri.FS_ReadFile(va("fonts/%s.RitualFont", hiresName), (void**)&theFile) != -1)
+    {
+        // hi-res variant found; adopt its name so the cache entry and the font shader
+        // (gfx/fonts/<name>@3x, resolved in R_LoadFontShader from header->name) use it.
+        name = hiresName;
+    }
+    else if (ri.FS_ReadFile(va("fonts/%s.RitualFont", name), (void**)&theFile) == -1)
     {
         ri.Printf(PRINT_WARNING, "LoadFont: Couldn't load font %s\n", name);
         return NULL;

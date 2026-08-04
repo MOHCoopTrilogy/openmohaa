@@ -48,7 +48,30 @@ void Actor::IdleThink(void)
     }
 
     if (m_bAutoAvoidPlayer && !PathExists()) {
-        SetPathToNotBlockSentient(static_cast<Sentient *>(G_GetEntity(0)));
+        // HZM coop [user 07-16]: retail hardcoded entity 0 (the SP player / listen HOST), so remote
+        // coop clients could never nudge an ally out of a doorway ("paratroopers stuck standing in
+        // doorways blocking you"). Yield to the NEAREST living player instead - the callee already
+        // requires them to be a teammate, within 48u, and pushing toward us.
+        Sentient *pNearest    = NULL;
+        float     fBestDistSq = 1e30f;
+        int       i;
+
+        for (i = 0; i < game.maxclients; i++) {
+            gentity_t *ed = &g_entities[i];
+            if (!ed->inuse || !ed->entity || !ed->client) {
+                continue;
+            }
+            Sentient *pl = static_cast<Sentient *>(ed->entity);
+            if (pl->IsDead()) {
+                continue;
+            }
+            float fDistSq = (pl->origin - origin).lengthSquared();
+            if (fDistSq < fBestDistSq) {
+                fBestDistSq = fDistSq;
+                pNearest    = pl;
+            }
+        }
+        SetPathToNotBlockSentient(pNearest);
     }
 
     if (PathExists()) {

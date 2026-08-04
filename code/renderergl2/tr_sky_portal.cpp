@@ -77,6 +77,16 @@ void R_Sky_AddSurf(msurface_t *surf)
         return;
     }
 
+    // HZM [user 08-02]: REVERTED an SF_FACE-only filter that briefly lived here.
+    // It was added as belt-and-braces while chasing the t3l1/t3l2 crash, on the theory that a
+    // wrongly-typed surface was reaching SurfIsOffscreen2. That theory was WRONG - the real cause
+    // was a 16-vs-32-bit index type mismatch in SurfIsOffscreen2 itself (renderergl2 typedefs
+    // glIndex_t as unsigned short; the loop read it through an `unsigned*`). That is fixed at the
+    // source in tr_main.c, and the bounds guard there remains as the safety net.
+    // The filter was not merely redundant, it was HARMFUL: SF_GRID and SF_TRIANGLES are perfectly
+    // valid sky surfaces (a curved or mesh sky brush), and dropping them left holes in the 3D
+    // skybox - reported as the sky looking pixelated/broken. gl1, which renders this correctly,
+    // does no type filtering here at all. Collect everything, exactly like gl1.
     if (tr.portalsky.numSurfs < 32) {
         tr.portalsky.skySurfs[tr.portalsky.numSurfs++] = surf;
     }
@@ -180,8 +190,15 @@ void R_Sky_Render()
     tr.portalsky.numSurfs = 0;
     tr.skyRendered        = qtrue;
 
+    // HZM gl2 re-port (bug-gl2-portalsky): re-derive the outer view's rotation,
+    // projection and frustum after the nested portal-sky R_RenderView trashed
+    // them, the way gl2's own R_RenderView establishes them. gl1 calls its
+    // no-arg R_SetupFrustum() here, but gl2's real R_SetupFrustum takes
+    // parameters - the stale no-arg call this replaced would have linked
+    // against it via C linkage and passed garbage arguments once this code
+    // became reachable.
     R_RotateForViewer();
-    R_SetupFrustum();
+    R_SetupProjection(&tr.viewParms, r_zproj->value, tr.viewParms.zFar, qtrue);
 }
 
 /*

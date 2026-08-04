@@ -860,6 +860,24 @@ static void SV_SendClientGameState( client_t *client ) {
 	// write the server frametime to the client (only on TA/TT)
 	MSG_WriteServerFrameTime(&msg, sv.frameTime);
 
+	// HZM (bug-1180): the ENTIRE gamestate - every configstring's text plus every entity baseline -
+	// has to fit in this one msgBuffer[MAX_MSGLEN] (131072). Unlike SV_SendSnapshot (sv_snapshot.c)
+	// this path had NO overflow check at all, so exceeding it would silently emit a truncated,
+	// corrupt gamestate and the client would fail somewhere far away and unexplainably. Since the
+	// configstring COUNT and the MAX_GAMESTATE_CHARS text pool are both things this project raises
+	// as content grows, make the failure loud and name the actual culprit.
+	if ( msg.overflowed ) {
+		Com_Error( ERR_DROP, "SV_SendClientGameState: gamestate overflowed MAX_MSGLEN (%d) for client %s"
+			" - too many configstrings/baselines. Raise MAX_MSGLEN, or lower MAX_SOUNDS/MAX_MODELS.",
+			MAX_MSGLEN, client->name );
+	}
+	// Report how close we are BEFORE it becomes fatal, so the next capacity raise is measured rather
+	// than guessed (this is the number needed to decide whether MAX_GAMESTATE_CHARS can go up).
+	if ( msg.cursize > (MAX_MSGLEN * 3) / 4 ) {
+		Com_Printf( "WARNING: gamestate is %d of %d bytes (%d%%) - approaching MAX_MSGLEN\n",
+			msg.cursize, MAX_MSGLEN, (msg.cursize * 100) / MAX_MSGLEN );
+	}
+
 	// deliver this to the client
 	SV_SendMessageToClient( &msg, client );
 }
@@ -1322,8 +1340,13 @@ This routine would be a bit simpler with a goto but i abstained
 */
 static void SV_VerifyPaks_f( client_t *cl ) {
 	int nChkSum1, nChkSum2, nClientPaks, nServerPaks, i, j, nCurArg;
-	int nClientChkSum[1024];
-	int nServerChkSum[1024];
+	// HZM (engine-limits audit): these were sized with the bare literal 1024, and the clamp
+	// below used the same literal. Both are really "however many tokens Cmd_TokenizeString can
+	// produce" - nClientPaks/nServerPaks are Cmd_Argc(). They match only because
+	// MAX_STRING_TOKENS happens to be 1024; raising that macro would have turned this into a
+	// stack buffer overrun on a client-supplied string. Bind them to the macro instead.
+	int nClientChkSum[MAX_STRING_TOKENS];
+	int nServerChkSum[MAX_STRING_TOKENS];
 	const char *pPaks, *pArg;
 	qboolean bGood = qtrue;
 
@@ -1395,7 +1418,11 @@ static void SV_VerifyPaks_f( client_t *cl ) {
 			}
 			*/
 			// store checksums since tokenization is not re-entrant
-			for (i = 0; nCurArg < nClientPaks; i++) {
+			// HZM (engine-limits audit): the write index had no bound of its own - it was safe
+			// only because nClientPaks is Cmd_Argc() and cmd_argc can never exceed
+			// MAX_STRING_TOKENS, which happened to equal the array size. Bound it explicitly so
+			// the array size and the loop can never drift apart on client-supplied input.
+			for (i = 0; nCurArg < nClientPaks && i < MAX_STRING_TOKENS; i++) {
 				nClientChkSum[i] = atoi(Cmd_Argv(nCurArg++));
 			}
 
@@ -1423,8 +1450,8 @@ static void SV_VerifyPaks_f( client_t *cl ) {
 			pPaks = FS_LoadedPakPureChecksums();
 			Cmd_TokenizeString( pPaks );
 			nServerPaks = Cmd_Argc();
-			if (nServerPaks > 1024)
-				nServerPaks = 1024;
+			if (nServerPaks > MAX_STRING_TOKENS)
+				nServerPaks = MAX_STRING_TOKENS;
 
 			for (i = 0; i < nServerPaks; i++) {
 				nServerChkSum[i] = atoi(Cmd_Argv(i));

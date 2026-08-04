@@ -316,6 +316,30 @@ void UIFont::Print(float x, float y, const char *text, size_t maxlen, const floa
     uii.Rend_DrawString(m_font, text, (int)x, (int)y, maxlen, virtualScreen);
 }
 
+// HZM ultrawide (user verdict 2026-07-27): full-width STRETCHED layout + UNDISTORTED text.
+// When the incoming widget scale is non-uniform (stretch mode), justified text is measured
+// and drawn with the VERTICAL factor on both axes, centered inside the (stretched) screen
+// rect - buttons/labels keep their full width, glyphs keep native proportions.
+// ui_textUniform 0 restores the stock fully-stretched glyphs. Identity when the incoming
+// scale is already uniform (ui_menuCenter 1 mode).
+static const float *UI_UniformTextScale(const float *vs, float *tmp)
+{
+    const char *v;
+
+    if (!vs || vs[0] == vs[1]) {
+        return vs;
+    }
+
+    v = uii.Cvar_GetString("ui_textUniform", "1");
+    if (!v || !atoi(v)) {
+        return vs;
+    }
+
+    tmp[0] = vs[1];
+    tmp[1] = vs[1];
+    return tmp;
+}
+
 void UIFont::PrintJustified(
     const UIRect2D& rect, fonthorzjustify_t horz, fontvertjustify_t vert, const char *text, const float *vVirtualScale
 )
@@ -326,6 +350,9 @@ void UIFont::PrintJustified(
     const char *source;
     char       *dest;
     char        string[2048];
+    float       uniTmp[2];
+
+    vVirtualScale = UI_UniformTextScale(vVirtualScale, uniTmp);
 
     if (vVirtualScale) {
         sizedRect.pos.x       = rect.pos.x / vVirtualScale[0];
@@ -420,6 +447,9 @@ void UIFont::PrintOutlinedJustified(
     char        string[2048];
     UColor      originalColor;
     bool        bVirtual;
+    float       uniTmp[2];
+
+    vVirtualScale = UI_UniformTextScale(vVirtualScale, uniTmp);
 
     textwidth = 0;
 
@@ -614,7 +644,10 @@ int UIFont::getHeight(const float *virtualScale)
 
     if (virtualScale) {
         if (m_font) {
-            return (m_font->sgl[0]->height * virtualScale[0]);
+            // HZM: was virtualScale[0] (the X factor) - a stock-port bug hidden while both
+            // factors were equal; under stretched layout it inflated every text HEIGHT by
+            // the horizontal stretch (1.8x at 3440x1440) breaking line spacing/centering.
+            return (m_font->sgl[0]->height * virtualScale[1]);
         } else {
             return (16.0 * virtualScale[1]);
         }

@@ -266,10 +266,26 @@ Build a client snapshot structure
 =============================================================================
 */
 
-#define	MAX_SNAPSHOT_ENTITIES	1024
+// HZM 07-28 (bug-1186): was 1024 - the last unraised member of the bug-934 snapshot-capacity
+// family. bug-934 raised the client parse ring (MAX_PARSE_ENTITIES 2048->8192, client/client.h),
+// cgame's receive array (MAX_ENTITIES_IN_SNAPSHOT 1024->2048, cgame/cg_public.h) and the server
+// snapshot ring (x4, sv_init.c), but NOT this per-snapshot server cap - so the server could never
+// actually fill the 2048 the client was now sized for, and entity 1025+ in a single snapshot was
+// dropped SILENTLY by SV_AddEntToSnapshot (busy maps: officer waves, count-scaled enemies,
+// minefield with the detector revealing mines). Old value = an arbitrary 1024 literal; new value
+// is bound by MAX_GENTITIES (GENTITYNUM_BITS 11 = 2048, q_shared.h:1667), which is the real
+// ceiling: SV_AddEntToSnapshot dedupes per svEntity, so at most MAX_GENTITIES distinct entity
+// numbers can ever land in one snapshot and this cap is now structurally unreachable.
+// Cost: this struct is instantiated exactly once - the `entityNumbers` stack local in
+// SV_BuildClientSnapshot - so 4KB -> 8KB of stack in that one (non-recursive) frame. Nothing else
+// is sized off this define (svs.numSnapshotEntities is the separate heap ring from sv_init.c).
+// The qsort in SV_BuildClientSnapshot is O(n log n) per client per snapshot and roughly doubles
+// in the worst case. Server-side only: this define appears nowhere in cgame/ or fgame/, so only
+// the engine exe needs rebuilding.
+#define	MAX_SNAPSHOT_ENTITIES	2048
 typedef struct {
 	int		numSnapshotEntities;
-	int		snapshotEntities[MAX_SNAPSHOT_ENTITIES];	
+	int		snapshotEntities[MAX_SNAPSHOT_ENTITIES];
 } snapshotEntityNumbers_t;
 
 /*
@@ -518,8 +534,24 @@ static void SV_AddEntToSnapshot( svEntity_t *svEnt, gentity_t *gEnt, snapshotEnt
 	}
 	svEnt->snapshotCounter = sv.snapshotCounter;
 
-	// if we are full, silently discard entities
+	// if we are full, discard entities
 	if ( eNums->numSnapshotEntities == MAX_SNAPSHOT_ENTITIES ) {
+		// HZM 07-28 (bug-1186): this used to be a SILENT discard - entities past the cap simply
+		// never rendered and there was no console trace of it at all (that is what hid the
+		// 1024 cap behind bug-934's client-side raise). One-shot so it can never spam a frame,
+		// Com_Printf not Com_DPrintf because with the cap now at MAX_GENTITIES this branch
+		// should be unreachable - if it ever fires it is a real bug worth seeing without
+		// `developer 1`.
+		static qboolean warned = qfalse;
+
+		if ( !warned ) {
+			warned = qtrue;
+			Com_Printf( "WARNING: SV_AddEntToSnapshot hit MAX_SNAPSHOT_ENTITIES (%d) - "
+				"entities beyond this are being discarded and will not render for this client. "
+				"Raise MAX_SNAPSHOT_ENTITIES in sv_snapshot.c (and check MAX_ENTITIES_IN_SNAPSHOT "
+				"in cgame/cg_public.h + MAX_PARSE_ENTITIES in client/client.h to match).\n",
+				MAX_SNAPSHOT_ENTITIES );
+		}
 		return;
 	}
 

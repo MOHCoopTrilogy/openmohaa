@@ -53,8 +53,20 @@ void load_sfx_info()
                 if (tiki.TokenAvailable(qtrue)) {
                     token = tiki.GetToken(qtrue);
 
-                    if (number_of_sfx_infos == 1000) {
-                        Com_DPrintf("Too many sound infos specified\n");
+                    // HZM (engine-limits audit): this was hard-coded to the literal 1000 and
+                    // tested for exact equality, so (a) raising MAX_SFX_INFOS in
+                    // snd_local_new.h silently did nothing and (b) any path that got the
+                    // counter past the literal would have walked straight off the end of
+                    // sfx_infos[]. Test against the macro, and use >= so the guard can never
+                    // be stepped over. Com_Printf, not Com_DPrintf: this drops sound
+                    // definitions on the floor and must be visible without `developer 1`.
+                    if (number_of_sfx_infos >= MAX_SFX_INFOS) {
+                        Com_Printf(
+                            "^3WARNING: MAX_SFX_INFOS (%d) exceeded in %s - remaining sound infos"
+                            " ignored (loop points / maxnumber will fall back to defaults)\n",
+                            MAX_SFX_INFOS,
+                            file_name
+                        );
                         break;
                     }
 
@@ -66,24 +78,44 @@ void load_sfx_info()
                     number_of_sfx_infos++;
                 }
             } else if (!Q_stricmp(token, "loopstart")) {
-                if (!tiki.TokenAvailable(qtrue)) {
+                // HZM (engine-limits audit): this guard was INVERTED - "!TokenAvailable"
+                // means "no token left", so the body only ran at EOF and this property was
+                // NEVER parsed out of global/sound*.txt. The "sound" branch above shows the
+                // correct form. Also guard number_of_sfx_infos == 0: a property appearing
+                // before any "sound" line indexed sfx_infos[-1].
+                if (tiki.TokenAvailable(qtrue) && number_of_sfx_infos > 0) {
                     token                                         = tiki.GetToken(qtrue);
                     sfx_infos[number_of_sfx_infos - 1].loop_start = atoi(token);
                 }
             } else if (!Q_stricmp(token, "loopend")) {
-                if (!tiki.TokenAvailable(qtrue)) {
+                // HZM (engine-limits audit): this guard was INVERTED - "!TokenAvailable"
+                // means "no token left", so the body only ran at EOF and this property was
+                // NEVER parsed out of global/sound*.txt. The "sound" branch above shows the
+                // correct form. Also guard number_of_sfx_infos == 0: a property appearing
+                // before any "sound" line indexed sfx_infos[-1].
+                if (tiki.TokenAvailable(qtrue) && number_of_sfx_infos > 0) {
                     token                                       = tiki.GetToken(qtrue);
                     sfx_infos[number_of_sfx_infos - 1].loop_end = atoi(token);
                 }
             } else if (!Q_stricmp(token, "maxnumber")) {
-                if (!tiki.TokenAvailable(qtrue)) {
+                // HZM (engine-limits audit): this guard was INVERTED - "!TokenAvailable"
+                // means "no token left", so the body only ran at EOF and this property was
+                // NEVER parsed out of global/sound*.txt. The "sound" branch above shows the
+                // correct form. Also guard number_of_sfx_infos == 0: a property appearing
+                // before any "sound" line indexed sfx_infos[-1].
+                if (tiki.TokenAvailable(qtrue) && number_of_sfx_infos > 0) {
                     token                                                 = tiki.GetToken(qtrue);
                     sfx_infos[number_of_sfx_infos - 1].max_number_playing = atoi(token);
                 }
             } else if (!Q_stricmp(token, "maxfactor")) {
-                if (!tiki.TokenAvailable(qtrue)) {
+                // HZM (engine-limits audit): this guard was INVERTED - "!TokenAvailable"
+                // means "no token left", so the body only ran at EOF and this property was
+                // NEVER parsed out of global/sound*.txt. The "sound" branch above shows the
+                // correct form. Also guard number_of_sfx_infos == 0: a property appearing
+                // before any "sound" line indexed sfx_infos[-1].
+                if (tiki.TokenAvailable(qtrue) && number_of_sfx_infos > 0) {
                     token                                         = tiki.GetToken(qtrue);
-                    sfx_infos[number_of_sfx_infos - 1].max_factor = atoi(token);
+                    sfx_infos[number_of_sfx_infos - 1].max_factor = (float)atof(token);
                 }
             }
         }

@@ -35,3 +35,9 @@ INSTALL(TARGETS cgame DESTINATION ${CMAKE_INSTALL_LIBDIR}/${LIB_INSTALL_SUBDIR})
 if(MSVC)
 	INSTALL(FILES $<TARGET_PDB_FILE:cgame> DESTINATION ${CMAKE_INSTALL_LIBDIR}/${LIB_INSTALL_SUBDIR} OPTIONAL)
 endif()
+# HZM 07-20 (bug-932 follow-up): cgame was the ONLY binary building without debug info, making
+# every client-side crash frame unresolvable in WinDbg. Emit a PDB in Release like the others.
+if(MSVC)
+	target_compile_options(cgame PRIVATE "$<$<CONFIG:Release>:/Zi>")
+	target_link_options(cgame PRIVATE "$<$<CONFIG:Release>:/DEBUG>" "$<$<CONFIG:Release>:/OPT:REF>" "$<$<CONFIG:Release>:/OPT:ICF>")
+endif()

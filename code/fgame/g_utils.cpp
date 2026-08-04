@@ -2464,3 +2464,55 @@ unsigned int G_GetWeaponCommand(unsigned int buttons)
         buttons, g_protocol >= PROTOCOL_MOHTA_MIN ? WEAPON_COMMAND_MAX_VER17 : WEAPON_COMMAND_MAX_VER6
     );
 }
+
+/*
+=============
+CoopClipStripZoneContains
+
+HZM coop bug-946/949: per-map invisible-wall strip regions. coop_clipStripZones holds up
+to 16 semicolon-separated "x0 y0 x1 y1 z0 z1" boxes (set by map scripts, cleared by
+coop_mod/server.scr every map init). Zone membership is used by:
+  - Player pmove (player.cpp): drops CONTENTS_PLAYERCLIP | CONTENTS_FENCE
+  - Actor think (actor.cpp):   drops CONTENTS_MONSTERCLIP
+so retail SP-boundary clip webs stop blocking coop free-roam while visible geometry
+stays solid. Parse is cached on the cvar's modificationCount.
+=============
+*/
+qboolean CoopClipStripZoneContains(const Vector& pos)
+{
+    static cvar_t *coop_clipzones = NULL;
+    static int     zoneParse      = -1;
+    static int     zoneCount      = 0;
+    static float   zones[16][6];
+
+    if (!coop_clipzones) {
+        coop_clipzones = gi.Cvar_Get("coop_clipStripZones", "", 0);
+    }
+    if (coop_clipzones->modificationCount != zoneParse) {
+        zoneParse = coop_clipzones->modificationCount;
+        zoneCount = 0;
+        const char *s = coop_clipzones->string;
+        while (s && *s && zoneCount < 16) {
+            float b[6];
+            int   n = sscanf(s, "%f %f %f %f %f %f", &b[0], &b[1], &b[2], &b[3], &b[4], &b[5]);
+            if (n != 6) {
+                break;
+            }
+            for (int k = 0; k < 6; k++) {
+                zones[zoneCount][k] = b[k];
+            }
+            zoneCount++;
+            s = strchr(s, ';');
+            if (s) {
+                s++;
+            }
+        }
+    }
+    for (int zi = 0; zi < zoneCount; zi++) {
+        const float *b = zones[zi];
+        if (pos.x >= b[0] && pos.y >= b[1] && pos.x <= b[2] && pos.y <= b[3] && pos.z >= b[4] && pos.z <= b[5]) {
+            return qtrue;
+        }
+    }
+    return qfalse;
+}

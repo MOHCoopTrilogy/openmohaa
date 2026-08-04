@@ -82,6 +82,7 @@ protected:
     // HZM coop: MG overheat (player-mounted turrets only)
     float             m_fHeat;                 // seconds of continuous fire accumulated
     bool              m_bOverheated;           // true while locked out / cooling down
+    bool              m_bFiringBeforeOverheat; // HZM coop - AI was firing when it cooked; resume when cool
     float             m_fOverheatRecoverTime;  // level.time at which the gun becomes usable again
     int               m_iIdleHitCount;
     CameraPtr         m_pUserCamera;

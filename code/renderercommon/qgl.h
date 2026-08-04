@@ -112,6 +112,7 @@ extern void (APIENTRYP qglUnlockArraysEXT) (void);
 	GLE(void, ClearDepth, GLclampd depth) \
 	GLE(void, DepthRange, GLclampd near_val, GLclampd far_val) \
 	GLE(void, DrawBuffer, GLenum mode) \
+	GLE(void, GetTexImage, GLenum target, GLint level, GLenum format, GLenum type, GLvoid *pixels) /* HZM coop - gore tier 4 (UV wounds): base-texture readback */ \
 	GLE(void, PolygonMode, GLenum face, GLenum mode) \
 
 // OpenGL 1.0/1.1 but not OpenGL 3.2 core profile or OpenGL ES 1.x

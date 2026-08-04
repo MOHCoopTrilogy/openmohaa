@@ -107,22 +107,65 @@ void Actor::Turret_SelectState(void)
     VectorSub2D(origin, m_Enemy->origin, vDelta);
     fDistSquared = VectorLength2DSquared(vDelta);
 
-    if (m_State == ACTOR_STATE_TURRET_RUN_AWAY && fDistSquared < m_fMinDistanceSquared * 2.25) {
+    // [HZM coop 2026-07-24 ET1] coop-virtual plant-band squeeze: on the dynamic path (coop_aiRetargetMs
+    // < 5000) shift the RUN_AWAY / CHARGE thresholds so more engaged enemies back-pedal-fire when close
+    // or advance when far, instead of planting across the whole 128-1024u band. Computed LOCALLY here -
+    // NEVER mutate m_fMin/MaxDistanceSquared (StrafeToAttack / SetLeash / RunAway also read them). Defaults
+    // 1.0/1.0 = byte-identical vanilla. A +128u floor between the two prevents CHARGE<->RUN_AWAY jitter.
+    float fCoopMinSq = m_fMinDistanceSquared;
+    float fCoopMaxSq = m_fMaxDistanceSquared;
+    {
+        static cvar_t *pRt = NULL;
+        if (!pRt) {
+            pRt = gi.Cvar_Get("coop_aiRetargetMs", "5000", 0);
+        }
+        if (pRt->integer < 5000) {
+            static cvar_t *pRun = NULL;
+            static cvar_t *pChg = NULL;
+            if (!pRun) {
+                pRun = gi.Cvar_Get("coop_aiRunawayRange", "1.0", 0);
+            }
+            if (!pChg) {
+                pChg = gi.Cvar_Get("coop_aiChargeRange", "1.0", 0);
+            }
+            float coopMin = m_fMinDistance * pRun->value;
+            float coopMax = m_fMaxDistance * pChg->value;
+            if (coopMax < coopMin + 128.0f) {
+                coopMax = coopMin + 128.0f;
+            }
+            fCoopMinSq = Square(coopMin);
+            fCoopMaxSq = Square(coopMax);
+        }
+    }
+
+    if (m_State == ACTOR_STATE_TURRET_RUN_AWAY && fDistSquared < fCoopMinSq * 2.25) {
         return;
     }
 
-    if (fDistSquared < m_fMinDistanceSquared) {
+    if (fDistSquared < fCoopMinSq) {
+        // feel-test: only log when the COOP threshold caused this (vanilla would have kept planting)
+        if (fDistSquared >= m_fMinDistanceSquared) {
+            static cvar_t *pB = NULL;
+            if (!pB) { pB = gi.Cvar_Get("coop_aiBehav", "0", 0); }
+            if (pB->integer) { gi.Printf("^~^~^ BAND ent=%d type=runaway\n", entnum); }
+        }
         ClearPath();
         TransitionState(ACTOR_STATE_TURRET_RUN_AWAY, 0);
         return;
     }
 
-    if (fDistSquared > m_fMaxDistanceSquared) {
+    if (fDistSquared > fCoopMaxSq) {
         if (m_Team == TEAM_GERMAN && (m_Enemy->origin - m_vHome).lengthSquared() >= Square(m_fLeash + m_fMaxDistance)
             && !CanSeeEnemy(200)) {
             ClearPath();
             TransitionState(ACTOR_STATE_TURRET_WAIT, 0);
         } else if (m_State != ACTOR_STATE_TURRET_CHARGE) {
+            // feel-test: only log when the COOP threshold caused this charge (vanilla would have planted)
+            if (fDistSquared <= m_fMaxDistanceSquared) {
+                static cvar_t *pB = NULL;
+                if (!pB) { pB = gi.Cvar_Get("coop_aiBehav", "0", 0); }
+                if (pB->integer) { gi.Printf("^~^~^ BAND ent=%d type=charge\n", entnum); }
+            }
             ClearPath();
             TransitionState(ACTOR_STATE_TURRET_CHARGE, 0);
         }
@@ -148,7 +191,24 @@ void Actor::Turret_SelectState(void)
 
 bool Actor::Turret_CheckRetarget(void)
 {
-    if (level.inttime < m_iStateTime + 5000 || level.inttime < m_iLastHitTime + 5000) {
+    // [HZM coop 2026-07-23] the turret's reposition/sidestep is gated to once per 5s AND for 5s after
+    // every hit, so an enemy being shot stands frozen the whole time you fire at it. coop_aiRetargetMs
+    // makes that window tunable; default 5000 = vanilla (no change unless the coop dynamic-AI path lowers it).
+    static cvar_t *coop_aiRetargetMs = NULL;
+    if (!coop_aiRetargetMs) {
+        coop_aiRetargetMs = gi.Cvar_Get("coop_aiRetargetMs", "5000", 0);
+    }
+    int rt = coop_aiRetargetMs->integer;
+    if (rt < 250) {
+        rt = 250;
+    }
+    // [HZM coop 2026-07-23] THE key un-pin: on the dynamic path (coop_aiRetargetMs lowered below the 5000
+    // vanilla default) also drop the m_iLastHitTime freeze. Every landed bullet writes m_iLastHitTime, so
+    // the ONE enemy you are actively dueling keeps refreshing that stamp and stays pinned in place for the
+    // whole firefight - the literal "the guy I'm shooting just stands there" mechanism. Vanilla (rt==5000)
+    // keeps both gates, so default behavior is unchanged.
+    bool coopIgnoreHit = (rt < 5000);
+    if (level.inttime < m_iStateTime + rt || (!coopIgnoreHit && level.inttime < m_iLastHitTime + rt)) {
         return false;
     }
 
@@ -195,6 +255,44 @@ void Actor::State_Turret_Combat(void)
         ClearPath();
         Anim_Attack();
         AimAtTargetPos();
+        // [HZM coop 2026-07-24 ET3] JINK: the actively-dueled enemy periodically does a short lateral
+        // STEP-SIDE bob to spoil the player's aim WHILE it keeps firing - the one repositioning a script
+        // mover can't do (scripts need enableEnemy 0, which stops the gun). Only the recently-hit enemy,
+        // throttled by coop_aiJinkMs (0 = off default; floored to 1200ms so it bobs, never "moonwalks").
+        // Turret_SideStep/StrafeToAttack self-validate (in-band + sight-traced + squad-avoiding) and
+        // re-plant if there's no valid lateral spot, so this is self-limiting + crash-safe.
+        {
+            static cvar_t *coop_aiJinkMs = NULL;
+            if (!coop_aiJinkMs) {
+                coop_aiJinkMs = gi.Cvar_Get("coop_aiJinkMs", "0", 0);
+            }
+            int jm = coop_aiJinkMs->integer;
+            if (jm > 0 && m_Enemy) {
+                if (jm < 1200) {
+                    jm = 1200;
+                }
+                // only the DUELED enemy (hit within the last ~3s), on its OWN coop_aiJinkMs cadence (the
+                // dedicated m_iCoopJinkTime timer - NOT m_iStateTime, which the un-pin's retarget resets).
+                if (level.inttime < m_iLastHitTime + 3000 && level.inttime >= m_iCoopJinkTime + jm) {
+                    m_iCoopJinkTime = level.inttime;
+                    SetEnemyPos(m_Enemy->origin);
+                    AimAtEnemyBehavior();
+                    int step = ACTOR_STATE_TURRET_RETARGET_STEP_SIDE_SMALL;
+                    if (rand() & 1) {
+                        step = ACTOR_STATE_TURRET_RETARGET_STEP_SIDE_MEDIUM;
+                    }
+                    // feel-test instrumentation: ent+time so the harness can compute the per-enemy jink
+                    // RATE (too fast = "moonwalk" = un-hittable/unfair). gated on coop_aiBehav (dev only).
+                    {
+                        static cvar_t *pB = NULL;
+                        if (!pB) { pB = gi.Cvar_Get("coop_aiBehav", "0", 0); }
+                        if (pB->integer) { gi.Printf("^~^~^ JINK ent=%d t=%d\n", entnum, level.inttime); }
+                    }
+                    TransitionState(step, 0);
+                    return;
+                }
+            }
+        }
         Turret_CheckRetarget();
         return;
     }
@@ -332,7 +430,21 @@ void Actor::State_Turret_Retarget_Suppress(void)
 
     assert(g_target_game > target_game_e::TG_MOH);
 
-    if (rand() % 100 >= m_iSuppressChance) {
+    // [HZM coop 2026-07-23] on the dynamic path, suppress far less often so a retarget actually advances to
+    // a REPOSITION state instead of ~half of them (m_iSuppressChance default 50) short-circuiting straight
+    // to SHOOT with zero movement - the ceiling that kept lowering coop_aiRetargetMs 3x at only 0.1->1.2.
+    // coop_aiRetargetMs<5000 gates the dynamic path; coop_aiSuppressChance (default 15) is the dynamic rate.
+    int coopSuppress = m_iSuppressChance;
+    {
+        static cvar_t *pRt = NULL;
+        if (!pRt) { pRt = gi.Cvar_Get("coop_aiRetargetMs", "5000", 0); }
+        if (pRt->integer < 5000) {
+            static cvar_t *pSc = NULL;
+            if (!pSc) { pSc = gi.Cvar_Get("coop_aiSuppressChance", "15", 0); }
+            coopSuppress = pSc->integer;
+        }
+    }
+    if (rand() % 100 >= coopSuppress) {
         AimAtEnemyBehavior();
         Turret_NextRetarget();
         return;

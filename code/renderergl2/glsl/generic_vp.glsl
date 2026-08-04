@@ -12,9 +12,9 @@ attribute vec4 attr_BoneWeights;
 attribute vec4 attr_Color;
 attribute vec4 attr_TexCoord0;
 
-#if defined(USE_TCGEN)
+// HZM gl2 re-port (bug-gl2-nextbundle2): always declared - the second texture
+// bundle can source lightmap coords in any generic permutation
 attribute vec4 attr_TexCoord1;
-#endif
 
 #if defined(USE_TCMOD)
 uniform vec4   u_DiffuseTexMatrix0;
@@ -54,9 +54,23 @@ uniform mat4   u_ModelViewProjectionMatrix;
 uniform vec4   u_BaseColor;
 uniform vec4   u_VertColor;
 
+// HZM gl2 re-port (bug-gl2-nextbundle2): second texture bundle (MOHAA
+// 'nextbundle'). Unconditional so no new permutations are needed; when the
+// fragment side has u_Texture1Env == 0 the varying is simply unused.
+uniform int    u_Texture1TCGen;
+uniform vec4   u_Texture1Matrix0;
+uniform vec4   u_Texture1Matrix1;
+uniform vec4   u_Texture1Matrix2;
+uniform vec4   u_Texture1Matrix3;
+uniform vec4   u_Texture1Matrix4;
+uniform vec4   u_Texture1Matrix5;
+uniform vec4   u_Texture1Matrix6;
+uniform vec4   u_Texture1Matrix7;
+
 #if defined(USE_RGBAGEN)
 uniform int    u_ColorGen;
 uniform int    u_AlphaGen;
+uniform vec4   u_AlphaGenParams;   // HZM: (alphaMin, alphaMax, loClamp, hiClamp)
 uniform vec3   u_AmbientLight;
 uniform vec3   u_DirectedLight;
 uniform vec3   u_ModelLightDir;
@@ -70,6 +84,7 @@ uniform mat4 u_BoneMatrix[MAX_GLSL_BONES];
 #endif
 
 varying vec2   var_DiffuseTex;
+varying vec2   var_Tex2; // HZM gl2 re-port (bug-gl2-nextbundle2)
 varying vec4   var_Color;
 
 #if defined(USE_DEFORM_VERTEXES)
@@ -138,6 +153,16 @@ vec2 GenTexCoords(int TCGen, vec3 position, vec3 normal, vec3 TCGenVector0, vec3
 		tex.s = ref.x * -0.5 + 0.5;
 		tex.t = ref.y *  0.5 + 0.5;
 	}
+	else if (TCGen == TCGEN_ENVIRONMENT_MAPPED2)
+	{
+		// HZM gl2 re-port: MOHAA 'texgen environmentmodel' (gl1 RB_CalcEnvironmentTexCoords2):
+		// front-facing verts (d>0) use the viewer direction, back-facing reflect it.
+		vec3 viewer = normalize(u_LocalViewOrigin - position);
+		float d = dot(normal, viewer);
+		vec3 reflected = (d > 0.0) ? viewer : (viewer - 2.0 * d * normal);
+		tex.s = 0.5 + reflected.y * 0.5;
+		tex.t = 0.5 - reflected.z * 0.5;
+	}
 	else if (TCGen == TCGEN_VECTOR)
 	{
 		tex = vec2(dot(position, TCGenVector0), dot(position, TCGenVector1));
@@ -147,7 +172,9 @@ vec2 GenTexCoords(int TCGen, vec3 position, vec3 normal, vec3 TCGenVector0, vec3
 }
 #endif
 
-#if defined(USE_TCMOD)
+// HZM gl2 re-port (bug-gl2-nextbundle2): ModTexCoords is now defined
+// unconditionally (was #if defined(USE_TCMOD)) so the second-bundle path can
+// use it in every permutation.
 vec2 ModTexCoords(vec2 st, vec3 position, vec4 texMatrix[8])
 {
 	vec2 st2 = st;
@@ -171,7 +198,6 @@ vec2 ModTexCoords(vec2 st, vec3 position, vec4 texMatrix[8])
 
 	return st2;
 }
-#endif
 
 #if defined(USE_RGBAGEN)
 vec4 CalcColor(vec3 position, vec3 normal)
@@ -199,6 +225,16 @@ vec4 CalcColor(vec3 position, vec3 normal)
 	else if (u_AlphaGen == AGEN_PORTAL)
 	{
 		color.a = clamp(length(viewer) / u_PortalRange, 0.0, 1.0);
+	}
+	else if (u_AlphaGen == AGEN_SCOORD || u_AlphaGen == AGEN_TCOORD)
+	{
+		// HZM gl2 parity: MOHAA fades a stage across the surface by ramping alpha along one texture
+		// axis. Port of RB_CalcAlphaFromTexCoords in renderergl1 tr_shade_calc.c - same order of
+		// operations, done per-vertex here instead of per-vertex on the CPU. Note gl1 reads the RAW
+		// attr_TexCoord0, before any tcMod, so this must too.
+		float coord = (u_AlphaGen == AGEN_SCOORD) ? attr_TexCoord0.s : attr_TexCoord0.t;
+		float f = (u_AlphaGenParams.y - u_AlphaGenParams.x) * coord + u_AlphaGenParams.x;
+		color.a = clamp(f, u_AlphaGenParams.z, u_AlphaGenParams.w);
 	}
 	
 	return color;
@@ -266,6 +302,26 @@ void main()
 #else
     var_DiffuseTex = tex;
 #endif
+
+	// HZM gl2 re-port (bug-gl2-nextbundle2): second texture bundle texcoords.
+	// TCGEN_LIGHTMAP sources the lightmap channel (attr_TexCoord1); everything
+	// else uses the base channel (env-mapped 2nd bundles fall back to base
+	// coords - documented residual, no retail user found). tcMods of bundle[1]
+	// were composed into u_Texture1Matrix* on the CPU (same slot layout as the
+	// diffuse matrix set).
+	{
+		vec2 tex2 = (u_Texture1TCGen == TCGEN_LIGHTMAP) ? attr_TexCoord1.st : attr_TexCoord0.st;
+		vec4 tex1Matrix[8];
+		tex1Matrix[0] = u_Texture1Matrix0;
+		tex1Matrix[1] = u_Texture1Matrix1;
+		tex1Matrix[2] = u_Texture1Matrix2;
+		tex1Matrix[3] = u_Texture1Matrix3;
+		tex1Matrix[4] = u_Texture1Matrix4;
+		tex1Matrix[5] = u_Texture1Matrix5;
+		tex1Matrix[6] = u_Texture1Matrix6;
+		tex1Matrix[7] = u_Texture1Matrix7;
+		var_Tex2 = ModTexCoords(tex2, position, tex1Matrix);
+	}
 
 #if defined(USE_RGBAGEN)
 	var_Color = CalcColor(position, normal);

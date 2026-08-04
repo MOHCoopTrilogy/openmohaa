@@ -1328,6 +1328,14 @@ void CopyFromLittleField(void* value, const void* fromF, size_t size, size_t tar
 // using the stringizing operator to save typing...
 #define	NETF(x) #x,(size_t)&((entityState_t*)0)->x,sizeof(entityState_t::x)
 
+// HZM 07-28 (bug-1187): frameInfo[].index widened 12 -> 13 bits in THIS TABLE ONLY.
+// 12 bits caps the animation index at 4095, but MAX_TIKI_LOAD_ANIMS is 8192 and tiki.h notes
+// new_generic_human.tik ALREADY exceeds 4095 - so any anim past that index was transmitted with
+// its high bit cut off and remote clients played a DIFFERENT animation, which renders as
+// contorted/disfigured characters (msg.cpp only counts an `overflows` stat, it never warns).
+// 13 bits = 8192, exactly matching MAX_TIKI_LOAD_ANIMS. ver_6/ver_8 (AA/SH protocols) are left
+// at 12 deliberately - this fork runs com_target_game 2 (ver_15) and those paths are unused,
+// so there is no reason to perturb them.
 netField_t	entityStateFields_ver_15[] =
 {
 { NETF(netorigin[0]), 0, netFieldType_t::coord },
@@ -1344,13 +1352,13 @@ netField_t	entityStateFields_ver_15[] =
 { NETF(frameInfo[1].weight), 8, netFieldType_t::animWeight },
 { NETF(frameInfo[2].time), 15, netFieldType_t::animTime },
 { NETF(frameInfo[3].time), 15, netFieldType_t::animTime },
-{ NETF(frameInfo[0].index), 12, netFieldType_t::regular },
-{ NETF(frameInfo[1].index), 12, netFieldType_t::regular },
+{ NETF(frameInfo[0].index), 13, netFieldType_t::regular },
+{ NETF(frameInfo[1].index), 13, netFieldType_t::regular },
 { NETF(actionWeight), 8, netFieldType_t::animWeight },
 { NETF(frameInfo[2].weight), 8, netFieldType_t::animWeight },
 { NETF(frameInfo[3].weight), 8, netFieldType_t::animWeight },
-{ NETF(frameInfo[2].index), 12, netFieldType_t::regular },
-{ NETF(frameInfo[3].index), 12, netFieldType_t::regular },
+{ NETF(frameInfo[2].index), 13, netFieldType_t::regular },
+{ NETF(frameInfo[3].index), 13, netFieldType_t::regular },
 { NETF(eType), 8, netFieldType_t::regular },
 { NETF(modelindex), 16, netFieldType_t::regular },
 { NETF(parent), 16, netFieldType_t::regular },
@@ -1400,18 +1408,18 @@ netField_t	entityStateFields_ver_15[] =
 { NETF(beam_entnum), 16, netFieldType_t::regular },
 { NETF(skinNum), 16, netFieldType_t::regular },
 { NETF(wasframe), 10, netFieldType_t::regular },
-{ NETF(frameInfo[4].index), 12, netFieldType_t::regular },
-{ NETF(frameInfo[5].index), 12, netFieldType_t::regular },
-{ NETF(frameInfo[6].index), 12, netFieldType_t::regular },
-{ NETF(frameInfo[7].index), 12, netFieldType_t::regular },
-{ NETF(frameInfo[8].index), 12, netFieldType_t::regular },
-{ NETF(frameInfo[9].index), 12, netFieldType_t::regular },
-{ NETF(frameInfo[10].index), 12, netFieldType_t::regular },
-{ NETF(frameInfo[11].index), 12, netFieldType_t::regular },
-{ NETF(frameInfo[12].index), 12, netFieldType_t::regular },
-{ NETF(frameInfo[13].index), 12, netFieldType_t::regular },
-{ NETF(frameInfo[14].index), 12, netFieldType_t::regular },
-{ NETF(frameInfo[15].index), 12, netFieldType_t::regular },
+{ NETF(frameInfo[4].index), 13, netFieldType_t::regular },
+{ NETF(frameInfo[5].index), 13, netFieldType_t::regular },
+{ NETF(frameInfo[6].index), 13, netFieldType_t::regular },
+{ NETF(frameInfo[7].index), 13, netFieldType_t::regular },
+{ NETF(frameInfo[8].index), 13, netFieldType_t::regular },
+{ NETF(frameInfo[9].index), 13, netFieldType_t::regular },
+{ NETF(frameInfo[10].index), 13, netFieldType_t::regular },
+{ NETF(frameInfo[11].index), 13, netFieldType_t::regular },
+{ NETF(frameInfo[12].index), 13, netFieldType_t::regular },
+{ NETF(frameInfo[13].index), 13, netFieldType_t::regular },
+{ NETF(frameInfo[14].index), 13, netFieldType_t::regular },
+{ NETF(frameInfo[15].index), 13, netFieldType_t::regular },
 { NETF(frameInfo[4].time), 15, netFieldType_t::animTime },
 { NETF(frameInfo[5].time), 15, netFieldType_t::animTime },
 { NETF(frameInfo[6].time), 15, netFieldType_t::animTime },
@@ -3217,7 +3225,10 @@ void MSG_ReadSounds(msg_t* msg, server_sound_t* sounds, int* snapshot_number_of_
 					}
 					sounds[i].entity_number = MSG_ReadBits(msg, 11);
 					sounds[i].channel = MSG_ReadBits(msg, 7);
-					sounds[i].sound_index = MSG_ReadBits(msg, 11); // HZM COOP: 9->10->11 bits (MAX_SOUNDS 512->1024->1280); must match MSG_WriteSounds
+					// HZM COOP: 9->10->11 bits (MAX_SOUNDS 512->1024->1280->1600); must match
+					// MSG_WriteSounds. Now driven by SOUND_INDEX_BITS in q_shared.h, which carries
+					// a #error tying it to MAX_SOUNDS - the literal could drift silently.
+					sounds[i].sound_index = MSG_ReadBits(msg, SOUND_INDEX_BITS);
 
 					if (MSG_ReadBits(msg, 1) == 1) {
 						sounds[i].volume = MSG_ReadFloat(msg);
@@ -3282,7 +3293,10 @@ void MSG_WriteSounds(msg_t* msg, server_sound_t* sounds, int snapshot_number_of_
 				}
 				MSG_WriteBits(msg, sounds[i].entity_number, 11);
 				MSG_WriteBits(msg, sounds[i].channel, 7);
-				MSG_WriteBits(msg, sounds[i].sound_index, 11); // HZM COOP: 9->10->11 bits (MAX_SOUNDS 512->1024->1280); must match MSG_ReadSounds
+				// HZM COOP: 9->10->11 bits (MAX_SOUNDS 512->1024->1280->1600); must match
+				// MSG_ReadSounds. Now driven by SOUND_INDEX_BITS in q_shared.h, which carries
+				// a #error tying it to MAX_SOUNDS - the literal could drift silently.
+				MSG_WriteBits(msg, sounds[i].sound_index, SOUND_INDEX_BITS);
 
 				if (sounds[i].volume != -1.0f) {
 					MSG_WriteBits(msg, 1, 1);

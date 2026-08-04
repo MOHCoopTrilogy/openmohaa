@@ -229,6 +229,7 @@ public:
     float      gravity;
     float      orientation[3][3];
     gentity_t *groundentity;
+    int        m_iTossStuckFrames; // HZM bug-923: consecutive allsolid frames for a tossed item (unstick failsafe in G_Physics_Toss)
     cplane_t   groundplane;
     int        groundcontents;
 

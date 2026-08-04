@@ -1,4 +1,4 @@
-/*
+﻿/*
 ===========================================================================
 Copyright (C) 1999-2005 Id Software, Inc.
 
@@ -50,11 +50,37 @@ void Draw_SetColor(const vec4_t rgba) {
 Draw_StretchPic
 ================
 */
+// HZM gl2 (bug #73 viewmodel-ghost-over-menus): in menu-only frames (fullscreen ESC board,
+// main menu after disconnect) the client submits NO scene, but tr.renderFbo still holds the
+// LAST GAMEPLAY FRAME - the stale image (weapon silhouette) showed through translucent menu
+// regions as a dark "ghost gun". gl1 has no persistent offscreen target so it never haunts.
+// Track whether a scene was drawn since the last swap; the FIRST immediate 2D draw of a
+// sceneless frame clears the render target before painting the UI.
+int g_sceneThisFrame = 0;
+
+// bug #73 secondary fix: C shim so C++ TUs (tr_font.cpp) can bind the render FBO without
+// fighting FBO_Bind's unguarded header linkage.
+void R_BindRenderFbo(void)
+{
+    if (glRefConfig.framebufferObject) {
+        FBO_Bind(tr.renderFbo);
+    }
+}
+
+void R_Ensure2DClear(void)
+{
+    // SUPERSEDED (bug #73 final fix): RB_SwapBuffers now clears tr.renderFbo after every
+    // present, which covers all frame shapes with no sceneless detection - the detection
+    // here was silently defeated by UI 3D-model preview scenes (RDF_HUD) setting
+    // g_sceneThisFrame. Kept as a no-op until the diagnostic scaffolding strip.
+}
+
 void Draw_StretchPic(float x, float y, float w, float h, float s1, float t1, float s2, float t2, qhandle_t hShader) {
 #if 1
     shader_t* shader;
 
     R_IssuePendingRenderCommands();
+    R_Ensure2DClear();
 
     if (glRefConfig.framebufferObject)
         FBO_Bind(tr.renderFbo);
@@ -74,7 +100,17 @@ void Draw_StretchPic(float x, float y, float w, float h, float s1, float t1, flo
     // draw the pic
     RB_BeginSurface(shader, 0, 0);
 
-    RB_Color4bv(backEnd.color2D);
+    // HZM gl2 (bug-gl2-compass / bug-gl2-hudsegments): feed the 2D stream vertex color EXACTLY as
+    // renderergl1 does. gl1's Draw_* helpers pass the 0..255 backEnd.color2D BYTES straight into
+    // RB_Color4f(), whose `a * 255.0` (and rgb * identityLightByte) overflows the byte store into a
+    // one's-complement of the input (255 -> 1). The HZM "Airborne" HUD shaders
+    // (scripts/hud_airborne_coop.shader: hud_compass_*, hud_health_*) are authored with
+    // `alphaGen oneMinusVertex`, which inverts a SECOND time, so the two inversions cancel and the
+    // element gets its intended opacity. Using RB_Color4bv() here (no inversion) made oneMinusVertex
+    // singly-invert opaque HUD elements to alpha 0 -> the compass (all parts) and the health segment
+    // overlay (hud_health_out) rendered fully transparent. Default LIGHTMAP_2D pics (menus, the cyan
+    // health fill) use CGEN_GLOBAL_COLOR/AGEN_GLOBAL_ALPHA and ignore vertex color, so are unaffected.
+    RB_Color4f(backEnd.color2D[0], backEnd.color2D[1], backEnd.color2D[2], backEnd.color2D[3]);
 
     RB_Texcoord2f(s1, t1);
     RB_Vertex2f(x, y);
@@ -106,6 +142,7 @@ void Draw_StretchPic2(float x, float y, float w, float h, float s1, float t1, fl
     float scaledWidth2, scaledHeight2;
 
     R_IssuePendingRenderCommands();
+    R_Ensure2DClear();
 
     if (glRefConfig.framebufferObject)
         FBO_Bind(tr.renderFbo);
@@ -130,7 +167,8 @@ void Draw_StretchPic2(float x, float y, float w, float h, float s1, float t1, fl
     scaledHeight2 = halfHeight * sy;
 
     // draw the pic
-    RB_Color4bv(backEnd.color2D);
+    // HZM gl2 (bug-gl2-compass): match gl1 vertex-color feed so alphaGen oneMinusVertex cancels. See Draw_StretchPic.
+    RB_Color4f(backEnd.color2D[0], backEnd.color2D[1], backEnd.color2D[2], backEnd.color2D[3]);
     RB_BeginSurface(shader, 0, 0);
 
     RB_Texcoord2f(s1, t1);
@@ -155,6 +193,7 @@ Draw_TilePic
 ================
 */
 void Draw_TilePic(float x, float y, float w, float h, qhandle_t hShader) {
+    R_Ensure2DClear();
     shader_t* shader;
     float        picw, pich;
 
@@ -179,7 +218,8 @@ void Draw_TilePic(float x, float y, float w, float h, qhandle_t hShader) {
     pich = shader->stages[0]->bundle[0].image[0]->uploadHeight;
 
     // draw the pic
-    RB_Color4bv(backEnd.color2D);
+    // HZM gl2 (bug-gl2-hudsegments): match gl1 vertex-color feed so alphaGen oneMinusVertex cancels. See Draw_StretchPic.
+    RB_Color4f(backEnd.color2D[0], backEnd.color2D[1], backEnd.color2D[2], backEnd.color2D[3]);
 
     RB_StreamBegin(shader);
 
@@ -204,6 +244,7 @@ Draw_TilePicOffset
 ================
 */
 void Draw_TilePicOffset(float x, float y, float w, float h, qhandle_t hShader, int offsetX, int offsetY) {
+    R_Ensure2DClear();
     shader_t* shader;
     float        picw, pich;
 
@@ -228,7 +269,8 @@ void Draw_TilePicOffset(float x, float y, float w, float h, qhandle_t hShader, i
     pich = shader->stages[0]->bundle[0].image[0]->uploadHeight;
 
     // draw the pic
-    RB_Color4bv(backEnd.color2D);
+    // HZM gl2 (bug-gl2-hudsegments): match gl1 vertex-color feed so alphaGen oneMinusVertex cancels. See Draw_StretchPic.
+    RB_Color4f(backEnd.color2D[0], backEnd.color2D[1], backEnd.color2D[2], backEnd.color2D[3]);
 
     RB_StreamBegin(shader);
 
@@ -253,6 +295,7 @@ Draw_TrianglePic
 ================
 */
 void Draw_TrianglePic(const vec2_t vPoints[3], const vec2_t vTexCoords[3], qhandle_t hShader) {
+    R_Ensure2DClear();
     int            i;
     shader_t* shader;
 
@@ -269,7 +312,9 @@ void Draw_TrianglePic(const vec2_t vPoints[3], const vec2_t vTexCoords[3], qhand
     }
 
     // draw the pic
-    RB_Color4bv(backEnd.color2D);
+    // HZM gl2 (bug-gl2-compass): the compass rose (cl_uistd.cpp DrawStatCompass) draws hud_compass_in,
+    // an alphaGen oneMinusVertex shader. Match gl1's inverted vertex-color feed so it cancels. See Draw_StretchPic.
+    RB_Color4f(backEnd.color2D[0], backEnd.color2D[1], backEnd.color2D[2], backEnd.color2D[3]);
 
     RB_BeginSurface(shader, 0, 0);
 
@@ -376,6 +421,7 @@ AddBox
 ================
 */
 void AddBox(float x, float y, float w, float h) {
+    R_Ensure2DClear();
     vec4_t quadVerts[4];
     vec2_t texCoords[4];
     vec4_t color;
@@ -419,9 +465,68 @@ DrawBox
 ================
 */
 void DrawBox(float x, float y, float w, float h) {
-    vec4_t quadVerts[4];
-    vec2_t texCoords[4];
+    R_Ensure2DClear();
+    // HZM gl2 re-port (bug-gl2-introfade): the scripted fadein/fadeout screen fade
+    // (View3D::DrawFades -> re.DrawBox, driven by ps.blend) and other solid-fill 2D
+    // boxes were not visible under gl2 during the mission-intro card, while every
+    // stream-pipeline 2D element (Draw_StretchPic text/pics) in the very same frames
+    // rendered fine. The old implementation drew an "instant quad" through
+    // tr.textureColorShader and depended on ambient front-end state caches
+    // (glState.modelviewProjection / GL_State bits / GL_Cull / TMU cache) being valid
+    // at call time. Route the box through the exact same immediate stream/material
+    // pipeline Draw_StretchPic uses instead: a default 2D (LIGHTMAP_2D) shader over
+    // tr.whiteImage, which after Fix 2 carries CGEN_GLOBAL_COLOR / AGEN_GLOBAL_ALPHA
+    // (= backEnd.color2D, identical color semantics to the old path) and
+    // GLS_DEPTHTEST_DISABLE | GLS_SRCBLEND_SRC_ALPHA | GLS_DSTBLEND_ONE_MINUS_SRC_ALPHA
+    // (identical blend). This is the proven-working recipe; no state-cache dependency.
+    shader_t *shader;
+
+    R_IssuePendingRenderCommands();
+
+    if (glRefConfig.framebufferObject)
+    {
+        FBO_Bind(tr.renderFbo);
+    }
+
+    // "*white" resolves via the image hash (tr.whiteImage) - no disk access; the
+    // per-call lookup keeps the handle valid across level loads / shader resets.
+    shader = R_FindShader("*white", LIGHTMAP_2D, qfalse);
+
+    RB_BeginSurface(shader, 0, 0);
+
+    RB_Color4bv(backEnd.color2D);
+
+    RB_Texcoord2f(0.0f, 0.0f);
+    RB_Vertex2f(x, y);
+
+    RB_Texcoord2f(1.0f, 0.0f);
+    RB_Vertex2f(x + w, y);
+
+    RB_Texcoord2f(0.0f, 1.0f);
+    RB_Vertex2f(x, y + h);
+
+    RB_Texcoord2f(1.0f, 1.0f);
+    RB_Vertex2f(x + w, y + h);
+
+    RB_StreamEnd();
+}
+
+/*
+================
+DrawLineLoop
+================
+*/
+void DrawLineLoop(const vec2_t* points, int count, int stipple_factor, int stipple_mask) {
+    // HZM gl2 re-port: was a FIXME stub - UI/HUD outline rectangles (borders) drawn via
+    // line loops were simply invisible under gl2. Core-profile-safe implementation: draw
+    // each segment as a 1px-wide quad through the same textureColorShader path as DrawBox.
+    // Stipple patterns render solid (acceptable vs not rendering at all).
+    int i;
     vec4_t color;
+
+    if (count < 2) {
+        return;
+    }
 
     R_IssuePendingRenderCommands();
 
@@ -437,32 +542,42 @@ void DrawBox(float x, float y, float w, float h) {
     color[1] = backEnd.color2D[1] / 255.0;
     color[2] = backEnd.color2D[2] / 255.0;
     color[3] = backEnd.color2D[3] / 255.0;
-    
-    VectorSet4(quadVerts[0], x,     y,     0.0f, 1.0f);
-    VectorSet4(quadVerts[1], x + w, y,     0.0f, 1.0f);
-    VectorSet4(quadVerts[2], x + w, y + h, 0.0f, 1.0f);
-    VectorSet4(quadVerts[3], x,     y + h, 0.0f, 1.0f);
-
-    VectorSet2(texCoords[0], 0.0f, 0.0f);
-    VectorSet2(texCoords[1], 1.0f, 0.0f);
-    VectorSet2(texCoords[2], 1.0f, 1.0f);
-    VectorSet2(texCoords[3], 0.0f, 1.0f);
 
     GLSL_BindProgram(&tr.textureColorShader);
-    
     GLSL_SetUniformMat4(&tr.textureColorShader, UNIFORM_MODELVIEWPROJECTIONMATRIX, glState.modelviewProjection);
     GLSL_SetUniformVec4(&tr.textureColorShader, UNIFORM_COLOR, color);
 
-    RB_InstantQuad2(quadVerts, texCoords);
-}
+    for (i = 0; i < count; i++) {
+        const float *a = points[i];
+        const float *b = points[(i + 1) % count];
+        float dx = b[0] - a[0];
+        float dy = b[1] - a[1];
+        float len = (float)sqrt(dx * dx + dy * dy);
+        float nx, ny;
+        vec4_t quadVerts[4];
+        vec2_t texCoords[4];
 
-/*
-================
-DrawLineLoop
-================
-*/
-void DrawLineLoop(const vec2_t* points, int count, int stipple_factor, int stipple_mask) {
-    // FIXME: unimplemented (GL2)
+        if (len < 0.001f) {
+            continue;
+        }
+        // unit normal, half-pixel each side => 1px line
+        nx = -(dy / len) * 0.5f;
+        ny =  (dx / len) * 0.5f;
+
+        VectorSet4(quadVerts[0], a[0] + nx, a[1] + ny, 0.0f, 1.0f);
+        VectorSet4(quadVerts[1], b[0] + nx, b[1] + ny, 0.0f, 1.0f);
+        VectorSet4(quadVerts[2], b[0] - nx, b[1] - ny, 0.0f, 1.0f);
+        VectorSet4(quadVerts[3], a[0] - nx, a[1] - ny, 0.0f, 1.0f);
+
+        VectorSet2(texCoords[0], 0.0f, 0.0f);
+        VectorSet2(texCoords[1], 1.0f, 0.0f);
+        VectorSet2(texCoords[2], 1.0f, 1.0f);
+        VectorSet2(texCoords[3], 0.0f, 1.0f);
+
+        RB_InstantQuad2(quadVerts, texCoords);
+    }
+
+    (void)stipple_factor; (void)stipple_mask;
 #if 0
     int        i;
 
@@ -498,9 +613,18 @@ Set2DWindow
 */
 void Set2DWindow(int x, int y, int w, int h, float left, float right, float bottom, float top, float n, float f) {
     mat4_t matrix;
+    // HZM gl2 (bug-1147): remember whether we were ALREADY in 2D before the flag is raised below.
+    // The stock gl2 port set backEnd.projection2D = qtrue here and then tested
+    // `if (!backEnd.projection2D)` at the bottom - a dead branch, so backEnd.refdef.time /
+    // floatTime were never refreshed on this path. renderergl1 gets it right because it only sets
+    // backEnd.in2D INSIDE that guard. The immediate 2D draws the UI uses (Draw_StretchPic etc.)
+    // reach RB_BeginSurface without going through RB_SetGL2D, so tess.shaderTime kept whatever
+    // floatTime the last 3D scene left behind => animated menu/HUD shaders were frozen in gl2.
+    qboolean wasIn2D;
 
     R_IssuePendingRenderCommands();
 
+    wasIn2D = backEnd.projection2D;
     backEnd.projection2D = qtrue;
     backEnd.last2DFBO = glState.currentFBO;
 
@@ -516,10 +640,9 @@ void Set2DWindow(int x, int y, int w, int h, float left, float right, float bott
 
     GL_Cull(CT_TWO_SIDED);
 
-    if (!backEnd.projection2D)
+    if (!wasIn2D)
     {
         backEnd.refdef.time = ri.Milliseconds();
-        backEnd.projection2D = qtrue;
         backEnd.refdef.floatTime = backEnd.refdef.time / 1000.0;
     }
 }

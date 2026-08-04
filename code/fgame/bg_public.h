@@ -116,7 +116,15 @@ static const unsigned int DEAD_VIEWHEIGHT       = 8;
 
 #define CS_TEAMINFO        1
 
-#define CS_MAX             (CS_PARTICLES + MAX_LOCATIONS)
+// HZM fix (bug-1179): this guard was SILENTLY DEAD. CS_PARTICLES is not defined anywhere in the
+// tree, and an undefined identifier evaluates to 0 inside #if - so CS_MAX was 0 + MAX_LOCATIONS
+// (64), always trivially under MAX_CONFIGSTRINGS, and the #error could never fire no matter how
+// far the layout actually overflowed. That is exactly how a MAX_SOUNDS 1280 -> 2000 raise compiled
+// clean and then killed the server at map load with "SV_FindIndex: bad start index 4260"
+// (CS_WEAPONS had been pushed past the 4096 ceiling). CS_AXIS is the genuine highest index in the
+// layout above, so anchor the guard to it and it will now actually catch the next overflow AT
+// COMPILE TIME - which is the whole point of having it.
+#define CS_MAX             (CS_AXIS + 1)
 #if (CS_MAX) > MAX_CONFIGSTRINGS
 #    error overflow: (CS_MAX) > MAX_CONFIGSTRINGS
 #endif

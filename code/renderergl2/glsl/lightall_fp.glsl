@@ -68,6 +68,56 @@ varying vec4      var_LightDir;
 varying vec4      var_PrimaryLightDir;
 #endif
 
+// HZM gl2 FORWARD GLOBAL FOG (r_globalFogForward, bug-1306). MOHAA global farplane distance
+// fog, mixed here in the surface shader instead of in a screen-space depth pass, which is the
+// order gl1 uses: gl1 bakes fixed-function fog during rasterisation and only THEN runs its
+// grade, so a fogged pixel reaches the screen as GRADE(mix(scene, fogColor)). gl2 tone stage
+// IS that grade (glsl/tonemap_hzm_fp.glsl is a port of renderergl1 TONEMAP_FS), so mixing
+// toward the RAW farplane colour here lands on the identical byte. Do not pre-invert the
+// constant - an inverse grade is exposure-dependent and would make the horizon pump.
+//
+// Distance comes from gl_FragCoord.z, reconstructed with the same terms the screen pass uses:
+//   z_ndc = 2*zw - 1,   d = P14 / (P10 + z_ndc)      both terms negative, so d is positive
+// gl_FragCoord is a built-in, so this costs no varying, no vertex-shader change and no new
+// permutation. Unlike the screen pass this reads the PRIMITIVE BEING RASTERISED, never the
+// depth buffer, so a blendfunc surface that writes no depth (an explosion sprite, the glider
+// windscreen) fogs by its own distance instead of being scored at the sky and erased/skipped.
+//
+// u_GlobalFogColor  = (fogTarget.rgb, fracScale)   fracScale 0 = fog off for this draw
+// u_GlobalFogParams = (projMat[10], projMat[14], fogStart, 1/(fogEnd-fogStart))
+// The colour is per-STAGE, classified from the stage blendFunc on the CPU
+// (RB_SetGlobalFogUniforms): additive stages fog toward BLACK, modulate toward WHITE,
+// everything else toward the fog colour - fogging an additive stage toward grey would
+// BRIGHTEN it with distance. Alpha is deliberately untouched (GL spec: fog does not modify
+// alpha), so coverage, silhouettes and the alpha test are identical fogged or not.
+uniform vec4      u_GlobalFogColor;
+uniform vec4      u_GlobalFogParams;
+
+vec3 ApplyGlobalFog(vec3 color)
+{
+	if (u_GlobalFogColor.a <= 0.0)
+	{
+		return color;
+	}
+
+	float denom = u_GlobalFogParams.x + (2.0 * gl_FragCoord.z - 1.0);
+	float dist  = u_GlobalFogParams.y / min(denom, -1e-6);
+	float frac  = clamp((dist - u_GlobalFogParams.z) * u_GlobalFogParams.w, 0.0, 1.0);
+
+	frac = clamp(frac * u_GlobalFogColor.a, 0.0, 1.0);
+
+	// bug-1299 CLAMP, carried into the forward mix. gl1 blends into a fixed-point backbuffer
+	// so its operand is inherently at most 1.0; here the operand sits in the float HDR FBO
+	// scaled by tr.overbrightMult, and mixing unclamped SKIPS fog on every bright surface -
+	// mix(2.0, 0.6, 0.5) = 1.3, still white. That is the distant-trees-render-white defect,
+	// relocated. STEP, not ramp: any fogged fragment (frac above 0) gets the clamped operand,
+	// which is byte-exact against gl1 at every fraction; an unfogged fragment (frac == 0)
+	// keeps full HDR so near-field highlights and bloom are untouched. A frac-proportional
+	// ramp was measured +8..+13/255 too bright at frac 0.125-0.2 and rejected.
+	vec3 operand = (frac > 0.0) ? clamp(color, 0.0, 1.0) : color;
+
+	return mix(operand, u_GlobalFogColor.rgb, frac);
+}
 
 #define EPSILON 0.00000001
 
@@ -516,6 +566,8 @@ void main()
 	gl_FragColor.rgb = diffuse.rgb * lightColor;
 
 #endif
+
+	gl_FragColor.rgb = ApplyGlobalFog(gl_FragColor.rgb);
 
 	gl_FragColor.a = alpha;
 }

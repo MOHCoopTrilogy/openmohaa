@@ -1564,7 +1564,12 @@ void R_LevelMarksFree()
 {
     int i;
 
-    if (!dcl_editmode->integer) {
+    // HZM gl2 (bug-1146): dcl_editmode is registered by R_LevelMarksInit, which runs from R_Init -
+    // and gl2 calls R_Init from RE_BeginRegistration, i.e. AFTER this function's caller. On the very
+    // first registration of a DLL image (including every reload, since vid_restart unloads and
+    // reloads the renderer) the pointer is still NULL and this deref crashed. Check the pointer,
+    // not just its value, so callers do not need a fragile "have we initialised yet" guard.
+    if (!dcl_editmode || !dcl_editmode->integer) {
         return;
     }
 

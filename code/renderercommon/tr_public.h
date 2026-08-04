@@ -178,6 +178,13 @@ typedef struct {
 
     qboolean (*LoadRawImage)(const char *name, byte **pic, int *width, int *height);
     void (*FreeRawImage)(byte *pic);
+
+    // HZM coop - gore tier 4 (UV wounds): cgame feeds server-authoritative
+    // bullet segments to the renderer, which paints per-entity UV wounds on
+    // CPU-skinned characters (gl1 only; NULL on renderers without support).
+    void (*GoreImpact)(const vec3_t vStart, const vec3_t vEnd);
+    void (*GoreReset)(int entityNumber);
+    void (*GoreKillSplash)(int entityNumber); // bug-780: killing blow -> corpse blood splashes
 } refexport_t;
 
 //

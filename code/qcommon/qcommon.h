@@ -200,7 +200,19 @@ NET
 
 #define	PORT_ANY			-1
 
-#define	MAX_RELIABLE_COMMANDS	512			// max string commands buffered for restransmit
+// [HZM 07-28] 512 -> 1024 (bug-1186). This is the ring of unacked reliable commands per client;
+// sv_main.c drops the client with "Server command overflow" the instant
+// reliableSequence - reliableAcknowledge exceeds it. Every configstring set AFTER the gamestate
+// costs one slot (`cs <idx> "<text>"`), so SOUND REGISTRATIONS spend this budget directly - which
+// is why MAX_SOUNDS is gated on it (bug-1183: raising sounds 1280->1600 alone pushed the queue to
+// 514 and disconnected the player mid-spawn). Measured: a m1l1 spawn at MAX_SOUNDS 1600 peaks
+// around 514 (roughly 194 baseline - including ~140 loadout-registry stufftexts - plus one per
+// extra sound), so 1024 leaves ~2x headroom at the new sound cap.
+// MUST STAY A POWER OF TWO: the ring is indexed with & (MAX_RELIABLE_COMMANDS-1) in sv_main.c
+// and cl_parse.cpp. Cost is MAX_RELIABLE_COMMANDS * MAX_STRING_CHARS (2048) per buffer = 2MB per
+// client_t on the server plus 2 buffers client-side; ~6MB total at sv_maxclients 4.
+// Server and client index the SAME ring, so exe + game.dll + cgame.dll must ship together.
+#define	MAX_RELIABLE_COMMANDS	1024		// max string commands buffered for restransmit
 
 typedef enum {
 	NA_BAD,					// an address lookup failed

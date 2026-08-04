@@ -119,6 +119,10 @@ void Health::PickupHealth(Event *ev)
         }
     }
 
+    // HZM coop - gore tier 1: patching up washes some blood off (credit the healed amount
+    // against the accumulated-damage gore counter; skin tier re-evaluates and can drop)
+    player->CoopGoreHeal(amount / 100.0 * player->max_health);
+
     gi.SendServerCommand(
         player->edict - g_entities,
         "print \"" HUD_MESSAGE_YELLOW "%s\n\"",

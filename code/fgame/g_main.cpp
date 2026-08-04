@@ -511,6 +511,12 @@ void G_RunFrame(int levelTime, int frameTime)
         Director.Pause();
         Director.SetTime(level.inttime);
 
+        // HZM coop - dev headshot-feedback probe (coop_hstest N via rcon; no-op at 0)
+        {
+            extern void CoopHeadshotTestTick(void);
+            CoopHeadshotTestTick();
+        }
+
         //
         // treat each object in turn
         //
@@ -978,13 +984,30 @@ qboolean G_LevelArchiveValid(const char *filename)
 
 void G_SoundCallback(int entNum, soundChannel_t channelNumber, const char *name)
 {
-    gentity_t *ent    = &g_entities[entNum];
-    Entity    *entity = ent->entity;
+    gentity_t *ent;
+    Entity    *entity;
+
+    // HZM 07-20 (bug-931): this callback is invoked by the CLIENT sound system across the DLL
+    // boundary - there is NO script-VM exception handler above it, so the old ScriptError here
+    // THREW straight into std::terminate -> abort (0xC0000409, 'unknown non-std exception' in
+    // hzm_fatal.log) whenever a callback-flagged sound's entity died before the sound finished
+    // (live: repeated aborts at e1l2 map load right after the spawn FadeSound). A vanished
+    // entity is an ignorable no-op, never a process kill. Also bounds-guard entNum.
+    if (entNum < 0 || entNum >= globals.max_entities) {
+        return;
+    }
+
+    ent    = &g_entities[entNum];
+    entity = ent->entity;
 
     if (!entity) {
-        ScriptError(
-            "ERROR:  wait on playsound only works on entities that still exist when the sound is done playing."
-        );
+        // HZM fix: this is routine (a sound-emitting entity - a footstep, a death gasp - going
+        // away before its own sound finishes is normal in any busy combat scene), not a bug, but
+        // it was DPrintf'd unconditionally and developer 1 is required for other diagnostics this
+        // session, so it flooded the console/log ("tons of warnings about sounds"). Dropped the
+        // print entirely rather than gating it - nothing about the entity number or sound name is
+        // actionable here, only the CRASH this callback used to cause (bug-931) mattered.
+        return;
     }
 
     entity->CancelEventsOfType(EV_SoundDone);

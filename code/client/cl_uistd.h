@@ -63,6 +63,16 @@ protected:
     vec3_t                    m_angles;
     float                     m_scale;
     str                       m_anim;
+    str                       m_xformcvar; // HZM coop: live FIT-TUNE - read offset(3)+scale(1)+angles(3) from a 7-float cvar
+    str                       m_attachcvar; // HZM coop: cvar naming a model path to composite onto m_attachtag (helmet on operator)
+    str                       m_attachtag;  // HZM coop: bone tag the attach model rides (e.g. "Bip01 Head")
+    str                       m_attachcvar2; // HZM coop: 2nd attach - cvar naming a model path (weapon in operator's hand)
+    str                       m_attachtag2;  // HZM coop: 2nd attach - bone tag (e.g. "tag_weapon_right")
+    str                       m_animcvar;    // HZM coop: live anim override - read the model anim name from this cvar (per-weapon operator stance)
+    str                       m_spincvar;    // HZM coop: click-drag rotate - horizontal drag adds degrees to this cvar (model yaw)
+    float                     m_spinStartVal; // HZM coop: yaw cvar value captured at drag start
+    int                       m_spinStartX;   // HZM coop: mouse X captured at drag start
+    bool                      m_spinning;      // HZM coop: mid drag-rotate
     UIReggedMaterial         *m_statbar_material;
     UIReggedMaterial         *m_statbar_material_flash;
     UIReggedMaterial         *m_statbar_material_marker;
@@ -96,6 +106,16 @@ public:
     void LayoutRenderModelAngles(Event *ev);
     void LayoutRenderModelScale(Event *ev);
     void LayoutRenderModelAnim(Event *ev);
+    void LayoutRenderModelXformCvar(Event *ev); // HZM coop fit-tune
+    void LayoutRenderModelAttachCvar(Event *ev); // HZM coop: helmet-on-operator composite
+    void LayoutRenderModelAttachTag(Event *ev);  // HZM coop: helmet-on-operator composite
+    void LayoutRenderModelAttachCvar2(Event *ev); // HZM coop: weapon-in-hand composite
+    void LayoutRenderModelAttachTag2(Event *ev);  // HZM coop: weapon-in-hand composite
+    void LayoutRenderModelAnimCvar(Event *ev);    // HZM coop: live per-weapon operator stance
+    void LayoutRenderModelSpinCvar(Event *ev);    // HZM coop: click-drag rotate
+    void OnSpinPressed(Event *ev);                // HZM coop: click-drag rotate (W_LeftMouseDown)
+    void OnSpinDragged(Event *ev);                // HZM coop: click-drag rotate (W_LeftMouseDragged)
+    void OnSpinReleased(Event *ev);               // HZM coop: click-drag rotate (W_LeftMouseUp)
 
     void DrawStatbar(float frac);
     void DrawStatCircle(float frac);

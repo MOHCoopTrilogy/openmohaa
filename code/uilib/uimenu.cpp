@@ -741,6 +741,36 @@ void MenuManager::ListMenus(void)
     }
 }
 
+// HZM coop (bug-767, 5th overlapping-ESC report): forensic dump - print every menu whose
+// container widget is currently VISIBLE, plus the stack head, on one machine-parseable
+// ^~^~^ line. Called from UI_MenuEscape when an in-game ESC board is pushed, so one user
+// session names exactly which stale menu was still showing at ESC time.
+void MenuManager::DumpVisibleMenus(const char *pszPrefix)
+{
+    str   sLine;
+    int   i;
+    int   num;
+    Menu *pCur = CurrentMenu();
+
+    sLine = pszPrefix;
+    sLine += " current='";
+    sLine += pCur ? pCur->m_name.c_str() : "<none>";
+    sLine += "' visible=[";
+
+    num = m_menulist.NumObjects();
+    for (i = 1; i <= num; i++) {
+        Menu *menu = m_menulist.ObjectAt(i);
+
+        if (menu->isVisible()) {
+            sLine += " ";
+            sLine += menu->m_name;
+        }
+    }
+
+    sLine += " ]\n";
+    uii.Sys_Printf("%s", sLine.c_str());
+}
+
 void MenuManager::UpdateAllMenus(void)
 {
     int i;

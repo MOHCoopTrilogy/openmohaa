@@ -739,6 +739,7 @@ static void ParseFace( dsurface_t *ds, drawVert_t *verts, float *hdrVertColors, 
 	glIndex_t  *tri;
 	int			numVerts, numIndexes, badTriangles;
 	int realLightmapNum;
+	static surfaceType_t	skipData = SF_SKIP;
 
 	realLightmapNum = LittleLong( ds->lightmapNum );
 
@@ -749,6 +750,17 @@ static void ParseFace( dsurface_t *ds, drawVert_t *verts, float *hdrVertColors, 
 	surf->shader = ShaderForShaderNum( ds->shaderNum, realLightmapNum );
 	if ( r_singleShader->integer && !surf->shader->isSky ) {
 		surf->shader = tr.defaultShader;
+	}
+
+	// HZM gl2 re-port (bug-gl2-nodraw): skip faces whose (runtime-parsed) shader
+	// carries surfaceparm nodraw, like gl1 ParseFace (gl1 tr_bsp.c:626-630).
+	// Without this, treeshadows.shader helper quads render as dark silhouettes
+	// on the ground. ParseMesh already has the BSP-baked-flags variant of this
+	// check; gl1 uses the shader-flags variant for faces - mirrored exactly.
+	if (surf->shader->surfaceFlags & SURF_NODRAW) {
+		// Nodraw surface doesn't need any processing
+		surf->data = &skipData;
+		return;
 	}
 
 	numVerts = LittleLong(ds->numVerts);
@@ -2593,6 +2605,160 @@ void R_LoadEnvironmentJson(const char *baseName)
 	ri.FS_FreeFile(buffer.v);
 }
 
+/*
+=================
+R_PlaceCubemapsAuto
+
+HZM (bug-1237) - AUTOMATIC cubemap probe placement for MOHAA maps.
+
+Upstream rend2 has three placement sources and NONE of them work on a MOHAA campaign map:
+an authored cubemaps/<map>/env.json, "misc_cubemap" entities, and "info_player_deathmatch"
+entities. A sweep of all 54 dumped campaign entity lumps found ZERO misc_cubemap and ZERO
+info_player_deathmatch - those are Quake3/MP conventions the MOHAA campaign never uses. So
+without this, enabling r_cubeMapping on a single-player-derived coop map places zero probes
+and renders nothing, silently.
+
+What MOHAA does have is info_pathnode: the AI navigation graph, 52,607 of them across those
+54 maps, present on every one. They are an almost ideal probe source, and not by luck - the
+map author placed them wherever an AI can stand, so by construction they sit in open, walkable
+space and never inside brushwork. That is exactly the validity test a probe position needs,
+and it is why this needs no "is it inside a wall" check of its own.
+
+Selection is FARTHEST-POINT SAMPLING rather than "take the first N" or a distance threshold:
+seed at the first node, then repeatedly take the node with the greatest distance to its nearest
+already-chosen probe. That spreads a small budget over the whole playable volume instead of
+clustering it where the compiler happened to emit nodes densely - chokepoints and doorways
+carry far more pathnodes than open ground, so any density-following method buries every probe
+in a corridor. Cost is O(nodes * budget), roughly 800k float compares at the default budget,
+i.e. nothing beside the six world renders each probe then costs.
+
+r_cubemapAuto is the probe budget and is deliberately NOT CVAR_LATCH: it is read here at map
+load, so a new value takes effect on the next map with no vid_restart - which matters, because
+vid_restart from an open menu is a known crash in this renderer (bug-1181).
+=================
+*/
+static void R_PlaceCubemapsAuto(void)
+{
+	char      spawnVarChars[2048];
+	int       numSpawnVars;
+	char     *spawnVars[MAX_SPAWN_VARS][2];
+	vec3_t   *nodes;
+	float    *mindist;
+	int       numNodes = 0, maxNodes, budget, i, chosen;
+	float     zlift, radius;
+
+	budget = r_cubemapAuto->integer;
+	if (budget <= 0) {
+		return;
+	}
+	if (budget > MAX_AUTO_CUBEMAPS) {
+		budget = MAX_AUTO_CUBEMAPS;
+	}
+
+	maxNodes = 65536;
+	nodes    = ri.Hunk_AllocateTempMemory(maxNodes * sizeof(*nodes));
+	if (!nodes) {
+		return;
+	}
+
+	// PASS 1 - collect every info_pathnode origin.
+	while (R_ParseSpawnVars(spawnVarChars, sizeof(spawnVarChars), &numSpawnVars, spawnVars))
+	{
+		qboolean isNode    = qfalse;
+		qboolean originSet = qfalse;
+		vec3_t   origin;
+
+		VectorClear(origin);
+		for (i = 0; i < numSpawnVars; i++)
+		{
+			if (!Q_stricmp(spawnVars[i][0], "classname") && !Q_stricmp(spawnVars[i][1], "info_pathnode")) {
+				isNode = qtrue;
+			} else if (!Q_stricmp(spawnVars[i][0], "origin")) {
+				if (sscanf(spawnVars[i][1], "%f %f %f", &origin[0], &origin[1], &origin[2]) == 3) {
+					originSet = qtrue;
+				}
+			}
+		}
+
+		if (isNode && originSet && numNodes < maxNodes) {
+			VectorCopy(origin, nodes[numNodes]);
+			numNodes++;
+		}
+	}
+
+	if (numNodes < 2) {
+		ri.Hunk_FreeTempMemory(nodes);
+		ri.Printf(PRINT_ALL, "cubemap auto: no info_pathnode found, no probes placed\n");
+		return;
+	}
+
+	if (budget > numNodes) {
+		budget = numNodes;
+	}
+
+	// PASS 2 - farthest-point sampling. mindist[i] = squared distance from node i to the
+	// nearest probe chosen so far, seeded huge so the first pick is simply node 0.
+	mindist = ri.Hunk_AllocateTempMemory(numNodes * sizeof(*mindist));
+	if (!mindist) {
+		ri.Hunk_FreeTempMemory(nodes);
+		return;
+	}
+	for (i = 0; i < numNodes; i++) {
+		mindist[i] = 1.0e30f;
+	}
+
+	tr.numCubemaps = budget;
+	tr.cubemaps    = ri.Hunk_Alloc(tr.numCubemaps * sizeof(*tr.cubemaps), h_low);
+	memset(tr.cubemaps, 0, tr.numCubemaps * sizeof(*tr.cubemaps));
+
+	// Pathnodes sit at floor level, and a probe baked on the floor sees mostly floor. Lift to
+	// roughly standing eye height so the captured view resembles what the player sees
+	// reflected. Kept modest so it does not punch through a low ceiling into the void.
+	zlift  = 48.0f;
+	radius = r_cubemapAutoRadius->value;
+	if (radius < 1.0f) {
+		radius = 1000.0f;
+	}
+
+	chosen = 0;
+	for (i = 0; i < budget; i++)
+	{
+		cubemap_t *cm = &tr.cubemaps[i];
+		int        j;
+		float      best;
+
+		VectorCopy(nodes[chosen], cm->origin);
+		cm->origin[2] += zlift;
+		cm->parallaxRadius = radius;
+		Com_sprintf(cm->name, MAX_QPATH, "auto%i", i);
+
+		// fold the just-chosen probe into every node's nearest-probe distance, then take the
+		// current farthest node as the next pick
+		best = -1.0f;
+		for (j = 0; j < numNodes; j++)
+		{
+			vec3_t d;
+			float  dist;
+
+			VectorSubtract(nodes[j], nodes[chosen], d);
+			dist = DotProduct(d, d);
+			if (dist < mindist[j]) {
+				mindist[j] = dist;
+			}
+			if (mindist[j] > best) {
+				best   = mindist[j];
+				chosen = j;
+			}
+		}
+	}
+
+	ri.Hunk_FreeTempMemory(mindist);
+	ri.Hunk_FreeTempMemory(nodes);
+
+	ri.Printf(PRINT_ALL, "cubemap auto: %i probes from %i pathnodes (radius %.0f)\n",
+	          tr.numCubemaps, numNodes, radius);
+}
+
 void R_LoadCubemapEntities(char *cubemapEntityName)
 {
 	char spawnVarChars[2048];
@@ -3249,6 +3415,26 @@ void R_LoadStaticModelDefs(lump_t* lump) {
     }
 
     s_worldData.numStaticModels = lump->filelen / sizeof(cStaticModel_t);
+
+    // HZM (engine-limits audit): R_AddStaticModelSurfaces packs the static model index into the
+    // drawsurf sort key's refentity field (tr.shiftedEntityNum = i << QSORT_REFENTITYNUM_SHIFT)
+    // and the backend recovers it with REFENTITYNUM_MASK. Past that ceiling the index both
+    // aliases onto another model AND spills upward into the static-model flag and the shader
+    // index - i.e. wrong transform plus wrong shader, with nothing logged. There is no clean
+    // place to clamp it (the models are legitimately in the BSP), so at least say so loudly.
+    if (s_worldData.numStaticModels > REFENTITYNUM_MASK + 1) {
+        ri.Printf(
+            PRINT_WARNING,
+            "^1WARNING: map has %d static models but the drawsurf sort key can only encode %d"
+            " (REFENTITYNUM_BITS=%d). Models at index %d and above will render with the wrong"
+            " transform and may corrupt the shader field.\n",
+            s_worldData.numStaticModels,
+            REFENTITYNUM_MASK + 1,
+            REFENTITYNUM_BITS,
+            REFENTITYNUM_MASK + 1
+        );
+    }
+
     s_worldData.staticModels = ri.Hunk_Alloc(s_worldData.numStaticModels * sizeof(cStaticModelUnpacked_t), h_dontcare);
 
     in = (cStaticModel_t*)(fileBase + lump->fileofs);
@@ -3306,7 +3492,6 @@ void RE_LoadWorldMap( const char *name ) {
 		byte *b;
 		void *v;
 	} buffer;
-	byte		*startMarker;
 
 	if ( tr.worldMapLoaded ) {
 		ri.Error( ERR_DROP, "ERROR: attempted to redundantly load world map" );
@@ -3353,7 +3538,11 @@ void RE_LoadWorldMap( const char *name ) {
 	Q_strncpyz( s_worldData.baseName, COM_SkipPath( s_worldData.name ), sizeof( s_worldData.name ) );
 	COM_StripExtension(s_worldData.baseName, s_worldData.baseName, sizeof(s_worldData.baseName));
 
-	startMarker = ri.Hunk_Alloc(0, h_low);
+	// HZM gl2 re-port (bug-gl2-ztagmalloc): the ioq3 hunk start/end marker trick
+	// (Hunk_Alloc(0) pointer diff for dataSize stats) cannot work here -
+	// ri.Hunk_Alloc routes to Z_TagMalloc, which rejects zero-size allocs
+	// ("Negative or zero size 0 tag 12") and returns NULL. gl1 never tracks
+	// dataSize; leave it 0.
 	c_gridVerts = 0;
 
 	header = (dheader_t *)buffer.b;
@@ -3495,6 +3684,84 @@ void RE_LoadWorldMap( const char *name ) {
 
     ri.UI_LoadResource("*111");
     R_Sphere_InitLights();
+
+    // HZM gl2 SUN BRIDGE (bug-1154). rend2 only ever learns about the sun from a q3map_sun /
+    // q3gl2_sun shader directive - and a scan of all 513 shader files in main+mainta+maintt finds
+    // ZERO of either. So tr.sunDirection kept the hardcoded (0.45,0.3,0.9) fallback set above on
+    // every map, tr.sunLight stayed black, and everything downstream of them was dead:
+    // r_drawSunRays pointed at a fixed wrong sky point, and tr.sunShadows could never turn on.
+    // (Same story on gl1: its god rays gate on tr.sunLight, which only q3map_sun sets, so
+    // r_ppSunShafts has never actually fired on a MOHAA map either.)
+    //
+    // MOHAA carries its sun in WORLDSPAWN instead, and R_Sphere_InitLights above has just parsed
+    // it into s_sun (tr_sphere_shade.cpp:1270-1295). Measured over the 134 shipped BSPs:
+    // sundirection 117, suncolor 113, sundiffuse 62, ambientlight 98, sunlight only 5.
+    // Bridge it across so the rend2 sun paths finally have real per-map data.
+    //
+    // OVERBRIGHT: s_sun.color is in 0-255 units and has ALREADY been multiplied by
+    // tr.overbrightMult (tr_sphere_shade.cpp:1277-1279), while RE_BeginScene multiplies
+    // tr.sunLight by (1 << r_mapOverBrightBits) / 255 (tr_scene.c). Divide the mult back out here
+    // so it is applied exactly once.
+    //
+    // RESET MATTERS: tr.sunLight / tr.sunShadows are NOT cleared by RE_LoadWorldMap (only
+    // sunShadowScale and sunDirection are), and Com_Memset(&tr,0,...) happens only in R_Init - so
+    // without the else branch a sunless map would inherit the previous map's sun.
+    // HZM (bug-1237) ENTITY STRING BRIDGE. R_LoadEntities - the ONLY writer of
+    // s_worldData.entityString/entityParsePoint (tr_bsp.c ~2375) - sits inside the `#if 0` block
+    // of Quake3 loaders that the MOHAA loader replaced. So entityParsePoint stayed NULL from the
+    // memset of s_worldData, R_GetEntityToken returned qfalse on its first token, and every
+    // consumer that walks entities via R_ParseSpawnVars silently saw an EMPTY world: that is why
+    // both upstream cubemap entity sources are dead here, and it would equally have killed the
+    // pathnode placement below. It reads as "this map has no such entities" rather than as a
+    // failure, which is what made it survive this long.
+    //
+    // The data was never actually missing - the collision model already holds it, and
+    // R_Sphere_InitLights just above consumed it through ri.CM_EntityString() to find the sun.
+    // Copy it onto the hunk (CM owns its buffer and we must not alias it) and point the parser
+    // at it, restoring the invariant R_LoadEntities used to provide.
+    {
+        const char *cmEnts = ri.CM_EntityString();
+
+        if (cmEnts && cmEnts[0] && !s_worldData.entityString) {
+            int len = strlen(cmEnts);
+
+            s_worldData.entityString = ri.Hunk_Alloc(len + 1, h_low);
+            strcpy(s_worldData.entityString, cmEnts);
+            s_worldData.entityParsePoint = s_worldData.entityString;
+        }
+    }
+
+    {
+        extern suninfo_t s_sun;
+
+        if (s_sun.exists) {
+            VectorCopy(s_sun.direction, tr.sunDirection);
+            VectorNormalize(tr.sunDirection);
+
+            if (tr.overbrightMult > 0.0f) {
+                VectorScale(s_sun.color, 1.0f / tr.overbrightMult, tr.sunLight);
+            } else {
+                VectorCopy(s_sun.color, tr.sunLight);
+            }
+
+            // CASCADE SUN SHADOWS (bug-1156). tr.sunShadows is the gate the cascade dispatch in
+            // tr_scene.c reads (with r_forceSun, which is CVAR_CHEAT and therefore unusable on a
+            // listen server). Its only other setter is the q3gl2_sun shader directive, which no
+            // MOHAA shader has - so this is what actually turns real-time sun shadows on.
+            // r_sunShadows is the user-facing master switch (ARCHIVE|LATCH, default 1).
+            // NOTE the prerequisite: MAX_SKELBONES had to go 20000 -> 131072, because the cascades
+            // add 4 more views that all consume the once-per-scene skeletal bone pool.
+            tr.sunShadows = (qboolean)(r_sunShadows && r_sunShadows->integer != 0);
+
+            ri.Printf(PRINT_ALL, "sun bridge: dir %.3f %.3f %.3f  light %.1f %.1f %.1f  shadows %d\n",
+                tr.sunDirection[0], tr.sunDirection[1], tr.sunDirection[2],
+                tr.sunLight[0], tr.sunLight[1], tr.sunLight[2], (int)tr.sunShadows);
+        } else {
+            // no sun on this map - make sure the previous map's does not leak through
+            VectorClear(tr.sunLight);
+            tr.sunShadows = qfalse;
+        }
+    }
 	//=========================
 
 	// determine vertex light directions
@@ -3704,26 +3971,29 @@ void RE_LoadWorldMap( const char *name ) {
 			R_LoadCubemapEntities("info_player_deathmatch");
 		}
 
+		if (!tr.numCubemaps)
+		{
+			// HZM (bug-1237): last resort, and on a MOHAA campaign map it is the ONLY source
+			// that ever fires - see R_PlaceCubemapsAuto for why the three upstream ones cannot.
+			R_PlaceCubemapsAuto();
+		}
+
 		if (tr.numCubemaps)
 		{
 			R_AssignCubemapsToWorldSurfaces();
 		}
 	}
 
-	s_worldData.dataSize = (byte *)ri.Hunk_Alloc(0, h_low) - startMarker;
+	// HZM gl2 re-port (bug-gl2-ztagmalloc): see the removed startMarker above -
+	// zero-size Hunk_Alloc is rejected by Z_TagMalloc, and this diff was always
+	// NULL - NULL == 0 anyway. dataSize is stats-only.
+	s_worldData.dataSize = 0;
 
 	// only set tr.world now that we know the entire level has loaded properly
 	tr.world = &s_worldData;
 
 	// make sure the VAO glState entry is safe
 	R_BindNullVao();
-
-	// Render or load all cubemaps
-	if (r_cubeMapping->integer && tr.numCubemaps && glRefConfig.framebufferObject)
-	{
-		R_LoadCubemaps();
-		R_RenderMissingCubemaps();
-	}
 
     ri.FS_FreeFile( buffer.v );
 
@@ -3735,6 +4005,32 @@ void RE_LoadWorldMap( const char *name ) {
     ri.UI_LoadResource("*113");
     R_InitStaticModels();
     ri.UI_LoadResource("*114");
+
+    // HZM (bug-1237) BAKE ORDER. This block used to sit ~15 lines earlier, before R_InitTerrain
+    // and R_InitStaticModels. R_RenderMissingCubemaps renders the world six times per probe, so
+    // running it there captured a world with NO TERRAIN AND NO STATIC MODELS in it - every probe
+    // reflected sky plus bare BSP brushwork, which outdoors is very nearly an empty scene. The
+    // reflections were "working" and looked like nothing, the hardest kind of failure to attribute.
+    // Moved after both initialisers so probes capture the finished world.
+    //
+    // STATE, and why it is re-established here rather than relied upon: the R_BindNullVao() ~15
+    // lines up was placed there specifically to make the bake safe, and moving the bake past
+    // R_InitTerrain / R_InitStaticModels - both of which create VAOs - stranded it. Re-bind
+    // immediately before, so the guarantee holds wherever the bake sits.
+    //
+    // R_RenderMissingCubemaps renders into tr.renderCubeFbo and does not restore the default
+    // framebuffer on the way out, so anything drawing afterwards - notably the loading-screen
+    // progress bar driven by the UI_LoadResource calls around this block - lands in the cubemap
+    // FBO instead of the window and is simply never seen. Bind the default target back.
+    if (r_cubeMapping->integer && tr.numCubemaps && glRefConfig.framebufferObject)
+    {
+        R_BindNullVao();
+        R_LoadCubemaps();
+        R_RenderMissingCubemaps();
+        FBO_Bind(NULL);
+        R_BindNullVao();
+    }
+
     R_LevelMarksLoad(name);
     ri.UI_LoadResource("*115");
     R_VisDebugLoad(name);

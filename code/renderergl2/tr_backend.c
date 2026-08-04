@@ -375,9 +375,26 @@ void RB_BeginDrawingView (void) {
 	{
 		clearBits |= GL_STENCIL_BUFFER_BIT;
 	}
-	if ( r_fastsky->integer && !( backEnd.refdef.rdflags & RDF_NOWORLDMODEL ) )
+
+	//
+	// HZM gl2 fog parity: gl1 clears the colour buffer to the FOG COLOUR whenever the
+	// global farplane fog is active and no sky/portal covers the view (renderergl1/
+	// tr_backend.c:636). Without this, anything the farplane frustum plane culls away
+	// (which is everything past farplane_distance - i.e. exactly the region gl1 renders
+	// as solid haze) is left showing the black clear instead of the fog colour.
+	//
+	if ( !( backEnd.refdef.rdflags & RDF_NOWORLDMODEL ) )
 	{
-		clearBits |= GL_COLOR_BUFFER_BIT;	// FIXME: only if sky shaders have been used
+		if ( rb_globalFog.active && ( ( !tr.skyRendered && !tr.portalRendered ) || tr.farclip ) )
+		{
+			clearBits |= GL_COLOR_BUFFER_BIT;
+			qglClearColor( rb_globalFog.color[0], rb_globalFog.color[1], rb_globalFog.color[2], 1.0f );
+		}
+		else if ( r_fastsky->integer )
+		{
+			clearBits |= GL_COLOR_BUFFER_BIT;	// FIXME: only if sky shaders have been used
+			qglClearColor( 0.5f, 0.5f, 1.0f, 1.0f );
+		}
 	}
 
 	// clear to black for cube maps
@@ -422,6 +439,272 @@ void RB_BeginDrawingView (void) {
 }
 
 
+// FIX (bug-gl2-invisible-live-char-depthprepass): is this refentity a bIsCharacter skeletal actor?
+// Character (animated) skeletal models are EXCLUDED from the gl2 depth prepass (see below) because the
+// prepass skins/writes depth from the pose current when the prepass runs, while the force-posed main
+// color pass skins from the fresh main-view pose; for a live-animating actor those two poses differ,
+// so the color-pass fragments land BEHIND the prepass depth and fail LEQUAL (samplesPassed=0 =>
+// invisible). Excluding them (they draw only in the main opaque pass, LEQUAL vs the world/other-opaque
+// depth) removes any prepass/color depth mismatch. Non-character skeletal props stay in the prepass.
+static qboolean RB_IsCharacterSkelEntity(int entityNum)
+{
+	trRefEntity_t *ce;
+	if (entityNum < 0 || entityNum >= MAX_REFENTITIES) {
+		return qfalse; // world / out-of-range -> not a character
+	}
+	ce = &backEnd.refdef.entities[entityNum];
+	return (qboolean)(ce->e.tiki && ce->e.tiki->a && ce->e.tiki->a->bIsCharacter);
+}
+
+// HZM gl2 REAL CHARACTER SHADOWS (r_charShadows).
+//
+// backEnd.depthFill is set for TWO structurally different passes by one shared block in
+// RB_DrawSurfs:
+//   (a) the MAIN-VIEW z-prepass - a pure optimisation; anything skipped here still draws
+//       normally in the colour pass that follows.
+//   (b) every VPF_DEPTHSHADOW sun-cascade view - which has NO other geometry pass at all
+//       (the colour RB_RenderDrawSurfList is guarded by `if (!isShadowView)`).
+//       Anything skipped in (b) casts NO SHADOW, permanently.
+//
+// The two historical exclusions below (bug-gl2-foliage-white for alpha-tested cutouts,
+// bug-gl2-invisible-live-char-depthprepass for bIsCharacter skeletal actors) were both
+// written for (a). Silently applying them to (b) is why every AI in the game casts nothing
+// into tr.sunShadowDepthImage[0..3] and the player only ever sees the cgame blob decal.
+//
+// THE SAFETY PROPERTY, and the thing to review hardest: allowChars / allowCutout are
+// computed ONCE per RB_RenderDrawSurfList from backEnd.viewParms.flags & VPF_DEPTHSHADOW.
+// They can NEVER be true for the main-view prepass. If that ever loosens, live AI go
+// INVISIBLE again - strictly worse than blob shadows. Never key this on backEnd.depthFill
+// alone. With r_charShadows 0 both are qfalse and this predicate is byte-equivalent to the
+// two hand-written conditions it replaces.
+//
+// Extracted into one helper deliberately: the two former call sites (the same-sort fast
+// path and the slow path) were ~50 lines apart, and changing only one of them yields
+// shadows that appear and vanish with draw-surf batching order - an intermittent bug that
+// is close to impossible to attribute later. Now they cannot diverge.
+static qboolean RB_DepthFillSkip(const shader_t *shader, int entityNum,
+                                 qboolean allowChars, qboolean allowCutout)
+{
+	if (!shader || shader->sort == SS_PORTAL) {
+		return qfalse;
+	}
+	if (shader->sort != SS_OPAQUE) {
+		return qtrue;                       // genuinely translucent: never a depth writer
+	}
+	if (shader->hasAlphaTest && !allowCutout) {
+		return qtrue;                       // bug-gl2-foliage-white (main prepass only)
+	}
+	if (RB_IsCharacterSkelEntity(entityNum) && !allowChars) {
+		return qtrue;                       // bug-gl2-invisible-live-char-depthprepass
+	}
+	return qfalse;
+}
+
+// r_shadowDebug 3 accounting: how many character surfaces actually reached the cascade
+// depth maps. Prediction before this feature is enabled: chars = 0 on every cascade.
+static int rb_shadowCharsDrawn;
+static int rb_shadowCharsSkipped;
+
+/*
+================================================================================
+HZM gl2 CHARACTER LIGHTING (r_charLighting) - backend half.
+
+RB_CharLightingWanted  - may THIS surface take the character-lighting path at all?
+RB_SetupCharLighting   - restate backEnd.currentSphere as (flat colour, ambient /
+                         directed split, one world-space direction) for the GPU.
+
+Both are no-ops with r_charLighting 0: Wanted() returns qfalse on its first line and
+SetupCharLighting is never called, leaving backEnd.charLight.active clear, which is
+the single flag every consumer in tr_shade.c tests.
+================================================================================
+*/
+static qboolean RB_CharLightingWanted(const shader_t *shader)
+{
+	if (!r_charLighting || !r_charLighting->integer) {
+		return qfalse;
+	}
+	// Depth-only passes (main z-prepass and every sun cascade) do no shading.
+	if (backEnd.depthFill) {
+		return qfalse;
+	}
+	// No world = no lightgrid and no light spheres: the armory/menu model preview
+	// (RDF_HUD) and every RDF_NOWORLDMODEL scene keep their existing fullbright path.
+	if (backEnd.refdef.rdflags & (RDF_NOWORLDMODEL | RDF_HUD)) {
+		return qfalse;
+	}
+	if (!backEnd.currentEntity || backEnd.currentEntity == &tr.worldEntity) {
+		return qfalse;
+	}
+	// The view model is drawn into the near depth slice with its own projection; it is
+	// not a character anyway, but exclude it explicitly so a future model change cannot
+	// quietly drag it onto a path whose light direction assumes world depth.
+	if (backEnd.currentEntity->e.renderfx & RF_DEPTHHACK) {
+		return qfalse;
+	}
+	if (!backEnd.currentEntity->e.tiki || !backEnd.currentEntity->e.tiki->a
+	    || !backEnd.currentEntity->e.tiki->a->bIsCharacter) {
+		return qfalse;
+	}
+	// Only the spherical-lit stages. rgbGen lightingGrid resolves to ONE flat colour with
+	// no direction anywhere in the data, so there is nothing to hand a light vector; those
+	// stages keep the existing CPU path untouched.
+	if (!shader || !shader->needsLSpherical || shader->needsLGrid) {
+		return qfalse;
+	}
+	// The sphere builder itself is gated on this (it is CVAR_CHEAT with default 1, so a
+	// listen server clamps it back to 1, but respect it anyway).
+	if (!r_drawspherelights->integer) {
+		return qfalse;
+	}
+	return qtrue;
+}
+
+static void RB_SetupCharLighting(void)
+{
+	sphereor_t *sph = backEnd.currentSphere;
+	vec3_t      sumDir, dirColor, dirLocal, total;
+	float       wrap, len;
+	int         i;
+
+	backEnd.charLight.active = qfalse;
+
+	// RB_Sphere_SetupEntity has three outcomes; only one of them leaves real light data
+	// behind. r_light_nolight -> RB_Light_Fullbright, a non-TIKI/failed sphere ->
+	// RB_CalcLightGridColor (flat, no direction), success -> RB_Light_Real. In either of the
+	// first two the CPU path below in RB_FillModelLightingColors still runs unchanged.
+	// bUsesCubeMap is currently unreachable - RB_OptimizeLights has the whole cube-map
+	// spill-over block behind `#if 0` ("re-enable when cubemap light is fixed"), so
+	// nCubeMapLights is always 0 and every collected light stays direct - but the guard is
+	// here because if it is ever re-enabled the surplus lights get folded into a 26-entry
+	// cube with no single direction, which this restatement cannot represent.
+	if (!sph || sph->TessFunction != RB_Light_Real || sph->bUsesCubeMap) {
+		return;
+	}
+
+	VectorClear(sumDir);
+	VectorClear(dirColor);
+
+	// Fold every light the sphere collected into ONE directional light. Colours here are
+	// in the same 0..255 space as sph->ambient.level, and each light's contribution is
+	// reduced to the coefficient that RB_Light_Real multiplies its cosine term by, so the
+	// sum below is exactly the colour a surface facing the lights would receive.
+	for (i = 0; i < sph->numRealLights && i < MAX_REAL_LIGHTS; i++) {
+		const reallightinfo_t *pl = &sph->light[i];
+		vec3_t                 eff, v;
+		float                  d, lum;
+
+		switch (pl->eType) {
+		case LIGHT_DIRECTIONAL:
+			// The sun, and only when RB_Sphere_Light_Sun's trace actually reached sky -
+			// this is what makes an actor under a roof stop being sun-lit.
+			VectorCopy(pl->vDirection, dirLocal);
+			VectorCopy(pl->color, eff);
+			break;
+
+		case LIGHT_SPOT:
+		case LIGHT_SPOT_FAST:
+			// RB_Light_Real: colour * dot(vDirection,N) / distSquared. The cone factor is
+			// ~1 inside the cone and is dropped.
+			VectorCopy(pl->vDirection, dirLocal);
+			d = pl->fDist * pl->fDist;
+			if (d < 1.0f) {
+				d = 1.0f;
+			}
+			VectorScale(pl->color, 1.0f / d, eff);
+			break;
+
+		case LIGHT_POINT:
+		default:
+			// RB_Light_Real: colour * dot(v,N) / |v|^2, and v is NOT normalised, so the
+			// cosine coefficient is colour / |v|.
+			VectorSubtract(pl->vOrigin, sph->origin, v);
+			d = pl->fDist;
+			if (d < 1.0f) {
+				d = 1.0f;
+			}
+			if (VectorNormalize2(v, dirLocal) == 0.0f) {
+				continue;
+			}
+			VectorScale(pl->color, 1.0f / d, eff);
+			break;
+		}
+
+		lum = eff[0] * 0.299f + eff[1] * 0.587f + eff[2] * 0.114f;
+		VectorMA(sumDir, lum, dirLocal, sumDir);
+		VectorAdd(dirColor, eff, dirColor);
+	}
+
+	len = VectorLength(sumDir);
+	if (len < 0.0001f) {
+		// Ambient only (indoors with no reachable light). There is no direction to give,
+		// and forcing one would invent shading the map does not have.
+		return;
+	}
+	VectorScale(sumDir, 1.0f / len, dirLocal);
+
+	// The sphere works in ENTITY-LOCAL space (RB_Sphere_AddLight runs every light origin
+	// through MatrixTransformVectorRight with the entity axis). lightall_vp puts the vertex
+	// and its normal in WORLD space via u_ModelMatrix, so undo that rotation here.
+	// MatrixTransformVector is the transpose of MatrixTransformVectorRight; a scaled entity
+	// axis denormalises the result, which is harmless because lightall_fp normalises L.
+	MatrixTransformVector(dirLocal, backEnd.currentEntity->e.axis, backEnd.charLight.lightDirWorld);
+
+	// flat = ambient + directed = the "fully lit" colour, which is what tess.color now
+	// carries. The fractions below re-derive the two halves from it on the GPU.
+	total[0] = (float)sph->ambient.level[0] + dirColor[0];
+	total[1] = (float)sph->ambient.level[1] + dirColor[1];
+	total[2] = (float)sph->ambient.level[2] + dirColor[2];
+
+	wrap = r_charLightWrap ? r_charLightWrap->value : 0.0f;
+	if (wrap < 0.0f) {
+		wrap = 0.0f;
+	} else if (wrap > 1.0f) {
+		wrap = 1.0f;
+	}
+
+	for (i = 0; i < 3; i++) {
+		float a, d;
+
+		if (total[i] < 0.0001f) {
+			backEnd.charLight.ambientFrac[i]  = 1.0f;
+			backEnd.charLight.directedFrac[i] = 0.0f;
+			backEnd.charLight.flatColor[i]    = 0;
+			continue;
+		}
+
+		a = (float)sph->ambient.level[i] / total[i];
+		d = dirColor[i] / total[i];
+
+		// Wrap: hand `wrap` of the directed share to the unconditional half. Sum at
+		// N.L == 1 is still a + d, so the lit side is untouched and only the dark side
+		// lifts - it can never brighten a character past what MOHAA already gave him.
+		a += d * wrap;
+		d -= d * wrap;
+
+		backEnd.charLight.ambientFrac[i]  = a;
+		backEnd.charLight.directedFrac[i] = d;
+		backEnd.charLight.flatColor[i]    = (byte)(total[i] > 255.0f ? 255 : (int)total[i]);
+	}
+	backEnd.charLight.flatColor[3] = 0xff;   // RB_Light_Real always writes opaque
+
+	backEnd.charLight.active = qtrue;
+
+	if (r_charLightDebug && r_charLightDebug->integer) {
+		static int lastPrint;
+		if (backEnd.refdef.time - lastPrint > 1000 || backEnd.refdef.time < lastPrint) {
+			lastPrint = backEnd.refdef.time;
+			ri.Printf(PRINT_ALL,
+				"^~^~^ CHARLIGHT lights=%d dir=%.2f %.2f %.2f flat=%d %d %d amb=%.2f dir=%.2f\n",
+				sph->numRealLights,
+				backEnd.charLight.lightDirWorld[0], backEnd.charLight.lightDirWorld[1],
+				backEnd.charLight.lightDirWorld[2],
+				backEnd.charLight.flatColor[0], backEnd.charLight.flatColor[1],
+				backEnd.charLight.flatColor[2],
+				backEnd.charLight.ambientFrac[1], backEnd.charLight.directedFrac[1]);
+		}
+	}
+}
+
 /*
 ==================
 RB_RenderDrawSurfList
@@ -441,6 +724,9 @@ void RB_RenderDrawSurfList( drawSurf_t *drawSurfs, int numDrawSurfs ) {
 	double			originalTime;
 	FBO_t*			fbo = NULL;
 	qboolean		bStaticModel, oldbStaticModel;
+	qboolean		isShadowView;
+	qboolean		allowChars;
+	qboolean		allowCutout;
 
 	// save original time for entity shader offsets
 	originalTime = backEnd.refdef.floatTime;
@@ -463,12 +749,59 @@ void RB_RenderDrawSurfList( drawSurf_t *drawSurfs, int numDrawSurfs ) {
     oldbStaticModel = -1;
     //=========================
 
+	// HZM gl2 real character shadows: decide ONCE, from the view flags, whether this
+	// depth-fill pass is a sun cascade (which is a caster's only chance) or the main-view
+	// z-prepass (whose exclusions must stay exactly as they are). r_charShadows 0 -> both
+	// qfalse -> RB_DepthFillSkip reproduces the previous behaviour byte for byte.
+	isShadowView = (qboolean)((backEnd.viewParms.flags & VPF_DEPTHSHADOW) != 0);
+	// HZM gl2 dynamic-light cast shadows: a VPF_PSHADOW view is the second kind of
+	// "caster's only chance" depth pass (case (b) above) - it renders one entity group into
+	// a 512x512 map and has no colour pass at all, so a character skipped here casts
+	// nothing, permanently. VPF_PSHADOW is set ONLY by R_RenderDlightShadowMaps, i.e. only
+	// while r_hzmDlightShadows is 1, so with the feature off this term is identically
+	// false and allowChars is byte-for-byte the r_charShadows expression it was.
+	// The main-view z-prepass can still never set it - that view carries no VPF_ flags at
+	// all - which is the invariant the comment above demands.
+	allowChars   = (qboolean)(isShadowView
+	                          && (( r_charShadows->integer && backEnd.viewParms.shadowCascade > 0 )
+	                              || (( backEnd.viewParms.flags & VPF_PSHADOW )
+	                                  && r_hzmDlightShadowChars && r_hzmDlightShadowChars->integer )));
+	allowCutout  = (qboolean)(isShadowView && r_charShadows->integer
+	                          && r_shadowCastFoliage->integer);
+
+	if (backEnd.depthFill && isShadowView) {
+		rb_shadowCharsDrawn = 0;
+		rb_shadowCharsSkipped = 0;
+	}
+
 	backEnd.pc.c_surfaces += numDrawSurfs;
+	// HZM gl2 re-port (bug-gl2-modellight): mirrors gl1 tr_backend.c:723
+	backEnd.numSpheresUsed = 0;
+	// HZM gl2 (bug-gl2-sphereslot-alias): the line above restarts slot numbering, but
+	// trRefEntity_t::sphereCalculated - which says "my slot index is still valid" - is only
+	// cleared once per FRAME (tr_scene.c). In gl1 that is consistent because gl1 runs one
+	// list per frame; gl2 runs up to five, so every list after the first re-issues indices
+	// that earlier-list entities still believe they own. Bump a list id alongside the reset
+	// so the reuse test below can tell "same list" from "same frame".
+	backEnd.sphereListId++;
+	// HZM gl2 character lighting: never let a previous view's (or a previous frame's)
+	// character batch leak into this list. It is cleared again per draw surf below; this is
+	// the entry guard so nothing between two lists - 2D, sky, post - can observe a stale flag.
+	backEnd.charLight.active = qfalse;
 
 	for (i = 0, drawSurf = drawSurfs ; i < numDrawSurfs ; i++, drawSurf++) {
 		if ( drawSurf->sort == oldSort && drawSurf->cubemapIndex == oldCubemapIndex) {
-			if (backEnd.depthFill && shader && (shader->sort != SS_OPAQUE && shader->sort != SS_PORTAL))
+			// see RB_DepthFillSkip: bug-gl2-foliage-white + bug-gl2-invisible-live-char-depthprepass
+			// stay in force for the MAIN-view prepass; a VPF_DEPTHSHADOW cascade lets casters through.
+			if (backEnd.depthFill && RB_DepthFillSkip(shader, entityNum, allowChars, allowCutout)) {
+				if (isShadowView && RB_IsCharacterSkelEntity(entityNum)) {
+					rb_shadowCharsSkipped++;
+				}
 				continue;
+			}
+			if (backEnd.depthFill && isShadowView && RB_IsCharacterSkelEntity(entityNum)) {
+				rb_shadowCharsDrawn++;
+			}
 
 			// fast path, same as previous sort
 			rb_surfaceTable[ *drawSurf->surface ]( drawSurf->surface );
@@ -510,8 +843,26 @@ void RB_RenderDrawSurfList( drawSurf_t *drawSurfs, int numDrawSurfs ) {
 			oldCubemapIndex = cubemapIndex;
 		}
 
-		if (backEnd.depthFill && shader && (shader->sort != SS_OPAQUE && shader->sort != SS_PORTAL))
+		// IDENTICAL predicate to the fast path above - see RB_DepthFillSkip. These two sites
+		// must never diverge; that is the entire reason the test lives in one function.
+		if (backEnd.depthFill && RB_DepthFillSkip(shader, entityNum, allowChars, allowCutout)) {
+			if (isShadowView && RB_IsCharacterSkelEntity(entityNum)) {
+				rb_shadowCharsSkipped++;
+			}
 			continue;
+		}
+		if (backEnd.depthFill && isShadowView && RB_IsCharacterSkelEntity(entityNum)) {
+			rb_shadowCharsDrawn++;
+		}
+
+		// HZM gl2 re-port (bug-gl2-modellight): mirrors gl1 tr_backend.c:756
+		backEnd.currentSphere = &backEnd.spareSphere;
+		// HZM gl2 character lighting: cleared here, next to the sphere it is derived from,
+		// so it can only ever be set by the block below and can never survive into a batch
+		// that is not a character skin. The same-sort fast path above deliberately does not
+		// reach either reset: it is by definition the same entity and shader, so both the
+		// sphere and this stay valid for it.
+		backEnd.charLight.active = qfalse;
 
 		//
 		// change the modelview matrix if needed
@@ -600,6 +951,23 @@ void RB_RenderDrawSurfList( drawSurf_t *drawSurfs, int numDrawSurfs ) {
 							GL_SetProjectionMatrix( temp.projectionMatrix );
 						}
 					}
+					// HZM gl2 re-port Fix 3: mono path - depth-hacked view weapon renders with its
+					// own un-zoomed projection so ADS zoom doesn't magnify the gun off screen.
+					// Crosshair surfaces stay on the world projection.
+					else if (backEnd.viewParms.weaponFovActive)
+					{
+						if (isCrosshair)
+						{
+							if (oldDepthRange)
+							{
+								GL_SetProjectionMatrix( backEnd.viewParms.projectionMatrix );
+							}
+						}
+						else
+						{
+							GL_SetProjectionMatrix( backEnd.viewParms.weaponProjectionMatrix );
+						}
+					}
 
 					if(!oldDepthRange)
 						qglDepthRange (0, 0.3);
@@ -607,6 +975,11 @@ void RB_RenderDrawSurfList( drawSurf_t *drawSurfs, int numDrawSurfs ) {
 				else
 				{
 					if(!wasCrosshair && backEnd.viewParms.stereoFrame != STEREO_CENTER)
+					{
+						GL_SetProjectionMatrix( backEnd.viewParms.projectionMatrix );
+					}
+					// HZM gl2 re-port Fix 3: mono restore
+					else if (!wasCrosshair && backEnd.viewParms.weaponFovActive)
 					{
 						GL_SetProjectionMatrix( backEnd.viewParms.projectionMatrix );
 					}
@@ -626,6 +999,92 @@ void RB_RenderDrawSurfList( drawSurf_t *drawSurfs, int numDrawSurfs ) {
             //=========================
 		}
 
+		//
+		// HZM gl2 re-port (bug-gl2-modellight): per-surface model lighting
+		// setup, mirrors gl1 tr_backend.c:833-882. Selects and primes the
+		// lighting source (grid color or spherical light set) that the CPU
+		// color path reads when filling tess.color for rgbGen
+		// lightingGrid / lightingSpherical / static stages.
+		//
+		if (bStaticModel)
+		{
+			if (r_drawspherelights->integer) {
+				RB_Static_BuildDLights();
+			}
+
+			if (!backEnd.currentStaticModel->bLightGridCalculated) {
+				RB_Grid_SetupStaticModel();
+			}
+		}
+		else if (backEnd.currentEntity && backEnd.currentEntity->e.tiki && shader)
+		{
+			// HZM gl2 character lighting: a character skin has to take the SPHERE branch,
+			// because the sphere is the only thing in the engine that knows which way the
+			// light is coming from (RB_Sphere_Light_Sun's sky trace + the real map lights in
+			// the leaf). r_fastentlight - which is 1 by default - would otherwise route it to
+			// the flat one-colour grid path, which is precisely the "lit as if in full sun"
+			// look this feature exists to remove. Characters only; every other TIKI entity
+			// still obeys r_fastentlight exactly as before.
+			qboolean charLit = RB_CharLightingWanted(shader);
+
+			if (!charLit
+				&& (shader->needsLGrid
+				|| (shader->needsLSpherical && r_fastentlight->integer)
+				|| !r_drawspherelights->integer))
+			{
+				backEnd.currentSphere->TessFunction = RB_CalcLightGridColor;
+				RB_Grid_SetupEntity();
+			}
+			else if (shader->needsLSpherical)
+			{
+				if (tr.refdef.rdflags & RDF_HUD)
+				{
+					backEnd.currentSphere = &backEnd.hudSphere;
+					backEnd.hudSphere.TessFunction = 0;
+					RB_Sphere_SetupEntity();
+				}
+				// HZM gl2 (bug-gl2-sphereslot-alias): the cached index is only meaningful
+				// inside the draw-surf list that issued it - see the sphereListId bump at the
+				// top of this function. With r_sphereCacheScope 0 this is the original
+				// frame-scoped test, byte for byte.
+				else if (backEnd.currentEntity->sphereCalculated
+					&& (!r_sphereCacheScope || !r_sphereCacheScope->integer
+						|| backEnd.currentEntity->sphereList == backEnd.sphereListId))
+				{
+					backEnd.currentSphere = &backEnd.spheres[backEnd.currentEntity->lightingSphere];
+				}
+				else
+				{
+					if (backEnd.numSpheresUsed == MAX_SPHERE_LIGHTS)
+					{
+						ri.Printf(PRINT_DEVELOPER, "Spherical lighting: Ran out of space in the sphere array!\n");
+						backEnd.currentSphere = &backEnd.spareSphere;
+					}
+					else
+					{
+						backEnd.currentSphere = &backEnd.spheres[backEnd.numSpheresUsed];
+						backEnd.currentEntity->lightingSphere = backEnd.numSpheresUsed++;
+						backEnd.currentEntity->sphereCalculated = qtrue;
+						// HZM gl2 (bug-gl2-sphereslot-alias): record WHICH list issued the
+						// index, so a later list in the same frame cannot inherit it.
+						backEnd.currentEntity->sphereList = backEnd.sphereListId;
+					}
+
+					backEnd.currentSphere->TessFunction = NULL;
+					RB_Sphere_SetupEntity();
+				}
+
+				// HZM gl2 character lighting: the sphere for this entity is now built (or
+				// was reused from an earlier batch this frame, which is why this sits
+				// outside the three branches above). Restate it for lightall. Inert unless
+				// r_charLighting is on AND the sphere really produced light data.
+				if (charLit)
+				{
+					RB_SetupCharLighting();
+				}
+			}
+		}
+
         if (*drawSurf->surface == SF_SPRITE) {
             backEnd.shaderStartTime = ((refSprite_t*)drawSurf->surface)->shaderTime;
         }
@@ -634,12 +1093,28 @@ void RB_RenderDrawSurfList( drawSurf_t *drawSurfs, int numDrawSurfs ) {
 		rb_surfaceTable[ *drawSurf->surface ]( drawSurf->surface );
 	}
 
+	// HZM gl2 real character shadows: r_shadowDebug 3 accounting. Also prints the cumulative
+	// drawsurf count, because R_AddDrawSurf masks and WRAPS silently on overflow and - since
+	// shadow views run before the main view - an overflow makes the MAIN view sort zero
+	// surfaces and draw nothing.
+	if (backEnd.depthFill && isShadowView && r_shadowDebug->integer >= 3) {
+		ri.Printf(PRINT_ALL,
+			"^~^~^ SHADOWCAST cascade=%d surfs=%d chars=%d skipped=%d drawSurfTotal=%d\n",
+			backEnd.viewParms.shadowCascade - 1, numDrawSurfs,
+			rb_shadowCharsDrawn, rb_shadowCharsSkipped, backEnd.refdef.numDrawSurfs);
+	}
+
 	backEnd.refdef.floatTime = originalTime;
 
 	// draw the contents of the last shader batch
 	if (oldShader != NULL) {
 		RB_EndSurface();
 	}
+
+	// HZM gl2 character lighting: the flush above legitimately needs the last surface's
+	// charLight, so this comes AFTER it. Everything drawn from here on (2D/HUD, sky, the
+	// post chain) must see a clear flag.
+	backEnd.charLight.active = qfalse;
 
 	if (glRefConfig.framebufferObject)
 		FBO_Bind(fbo);
@@ -937,6 +1412,111 @@ const void *RB_StretchPic ( const void *data ) {
 
 /*
 =============
+RB_SetupGlobalFog
+
+HZM gl2 fog parity - the counterpart of gl1's RB_SetupFog (renderergl1/tr_backend.c), called
+from the same place (RB_DrawSurfs, right after backEnd.viewParms is taken from the command)
+for the same reason: this is the ONLY point where the fog parameters and the projection
+matrix that will actually rasterise the view are guaranteed to belong to the same view.
+
+gl1 can push the state straight into fixed-function GL here. gl2 has to defer to a
+screen-space pass in RB_PostProcess, and that pass runs off a SEPARATE RC_POSTPROCESS
+command carrying its own copy of tr.viewParms - which may have been left pointing at a
+portal / sky-portal / shadow sub-view, or carry a projection matrix that was rebuilt after
+the world was drawn. Latching here removes that entire class of divergence.
+=============
+*/
+globalFogState_t rb_globalFog;
+
+void RB_SetupGlobalFog( void ) {
+	const float	*m;
+	float		identityLight;
+
+	// a view with no world (HUD 3D icons, the menu) can never have global fog. These are
+	// drawn AFTER the world's RC_POSTPROCESS in the same frame, so clearing here cannot
+	// disarm the world pass, and it stops a stale latch leaking into a worldless frame.
+	if ( backEnd.refdef.rdflags & RDF_NOWORLDMODEL ) {
+		rb_globalFog.active = qfalse;
+		return;
+	}
+
+	// portal / sky-portal / shadow sub-views are rendered BEFORE the outer view's
+	// RC_DRAWSURFS is queued, so leaving the latch alone here means the main view always
+	// gets the last word
+	if ( backEnd.viewParms.isPortal || backEnd.viewParms.isPortalSky
+		|| ( backEnd.viewParms.flags & (VPF_SHADOWMAP | VPF_DEPTHSHADOW) ) ) {
+		return;
+	}
+
+	rb_globalFog.active = qfalse;
+
+	// gl1 RB_SetupFog: no farplane -> no fog; r_farplane_nofog -> no fog
+	if ( backEnd.viewParms.farplane_distance <= 0.0f ) {
+		return;
+	}
+	if ( r_farplane_nofog && r_farplane_nofog->integer ) {
+		return;
+	}
+	if ( r_globalFog && !r_globalFog->integer ) {
+		return;
+	}
+
+	m = backEnd.viewParms.projectionMatrix;
+
+	// a well-formed perspective projection has [10] < -1 and [14] < 0. Anything else
+	// (ortho, an oblique portal matrix, an uninitialised matrix) cannot be inverted the
+	// way the shader does, so bail rather than draw wrong fog.
+	if ( m[14] >= 0.0f || m[10] >= -1.0f ) {
+		return;
+	}
+
+	rb_globalFog.projMat10 = m[10];
+	rb_globalFog.projMat14 = m[14];
+	rb_globalFog.projMat0  = m[0];
+	rb_globalFog.projMat5  = m[5];
+	rb_globalFog.zNear     = m[14] / ( m[10] - 1.0f );
+	rb_globalFog.zFar      = m[14] / ( m[10] + 1.0f );
+
+	// gl1: GL_FOG_START = farplane_bias, GL_FOG_END = farplane_distance
+	rb_globalFog.start = backEnd.viewParms.farplane_bias;
+	rb_globalFog.end   = backEnd.viewParms.farplane_distance;
+
+	if ( r_globalFogStartScale ) {
+		rb_globalFog.start *= r_globalFogStartScale->value;
+	}
+	if ( r_globalFogEndScale ) {
+		rb_globalFog.end *= r_globalFogEndScale->value;
+	}
+
+	if ( rb_globalFog.end <= rb_globalFog.start ) {
+		return;
+	}
+
+	// gl1 multiplies by tr.identityLight, but gl1 defaults r_overBrightBits to 0 so its
+	// identityLight is 1.0 and the on-screen fog colour is the raw farplane_color.
+	//
+	// [2026-08-03, bug-1306] THE COMMENT THAT USED TO BE HERE WAS WRONG and is deleted. It
+	// claimed gl2 mixes fog in the same final DISPLAY space gl1 blends in, so the raw colour
+	// was correct only by accident of the post-tone ordering. gl2's tone stage IS gl1's grade -
+	// glsl/tonemap_hzm_fp.glsl is a port of renderergl1 TONEMAP_FS (tr_postprocess_gl1.c:280),
+	// reached unconditionally at tr_postprocess.c:111 because r_ppTonemap is 1 in the shipped
+	// config. gl1's on-screen answer for a fully fogged pixel is GRADE(farplane_color), NOT
+	// farplane_color, so a fog mixed BEFORE the tone stage (r_globalFogForward) must still mix
+	// toward the RAW value. Do not pre-invert this colour: an inverse grade is
+	// exposure-dependent and would make the horizon pump under auto-exposure.
+	// r_globalFogIdentityLight 1 restores the literal gl1 expression for A/B.
+	identityLight = ( r_globalFogIdentityLight && r_globalFogIdentityLight->integer )
+		? tr.identityLight : 1.0f;
+
+	rb_globalFog.color[0] = backEnd.viewParms.farplane_color[0] * identityLight;
+	rb_globalFog.color[1] = backEnd.viewParms.farplane_color[1] * identityLight;
+	rb_globalFog.color[2] = backEnd.viewParms.farplane_color[2] * identityLight;
+
+	rb_globalFog.active = qtrue;
+}
+
+/*
+=============
 RB_DrawSurfs
 
 =============
@@ -944,6 +1524,10 @@ RB_DrawSurfs
 const void	*RB_DrawSurfs( const void *data ) {
 	const drawSurfsCommand_t	*cmd;
 	qboolean isShadowView;
+
+	// HZM gl2 (bug #73): a real scene rendered this frame - the sceneless-frame
+	// stale-FBO clear (R_Ensure2DClear) must not fire.
+	g_sceneThisFrame = 1;
 
 	// finish any 2D drawing if needed
 	if ( tess.numIndexes ) {
@@ -957,6 +1541,20 @@ const void	*RB_DrawSurfs( const void *data ) {
 
 	isShadowView = !!(backEnd.viewParms.flags & VPF_DEPTHSHADOW);
 
+	// HZM gl2 SSAO black-screen fix: invalidate last frame's AO at the start of every real
+	// (non-shadow) view. Only the pass that actually writes tr.screenSsaoFbo may set this back
+	// to qtrue, so the multiply composite in RB_PostProcess can never run against an AO buffer
+	// that was not produced for this frame - including the virgin, zero-filled (BLACK) one that
+	// exists right after allocation. See backEndState_t::ssaoValid.
+	if (!isShadowView) {
+		backEnd.ssaoValid = qfalse;
+	}
+
+	// HZM gl2 fog parity: latch the global farplane fog for this view, mirroring gl1's
+	// RB_SetupFog call site. MUST run before RB_BeginDrawingView, which clears the colour
+	// buffer to the fog colour when the farplane fog is active (gl1 tr_backend.c:636).
+	RB_SetupGlobalFog();
+
 	// clear the z buffer, set the modelview, etc
 	RB_BeginDrawingView ();
 
@@ -965,7 +1563,11 @@ const void	*RB_DrawSurfs( const void *data ) {
 		qglEnable(GL_DEPTH_CLAMP);
 	}
 
-	if (glRefConfig.framebufferObject && !(backEnd.refdef.rdflags & RDF_NOWORLDMODEL) && (r_depthPrepass->integer || isShadowView))
+	// HZM gl2 real character shadows: third and last r_depthPrepass gate. This block owns both
+	// the depth-fill pass AND the shadowmask resolve below; with r_depthPrepass archived to 0
+	// the mask is never generated no matter how many cascades were rendered.
+	if (glRefConfig.framebufferObject && !(backEnd.refdef.rdflags & RDF_NOWORLDMODEL)
+	    && (r_depthPrepass->integer || isShadowView || R_CharShadowsActive()))
 	{
 		FBO_t *oldFbo = glState.currentFBO;
 		vec4_t viewInfo;
@@ -1112,74 +1714,13 @@ const void	*RB_DrawSurfs( const void *data ) {
 				}
 			}
 
-			if (r_ssao->integer)
-			{
-				vec4_t quadVerts[4];
-				vec2_t texCoords[4];
-
-				viewInfo[2] = 1.0f / ((float)(tr.quarterImage[0]->width)  * tan(backEnd.viewParms.fovX * M_PI / 360.0f) * 2.0f);
-				viewInfo[3] = 1.0f / ((float)(tr.quarterImage[0]->height) * tan(backEnd.viewParms.fovY * M_PI / 360.0f) * 2.0f);
-				viewInfo[3] *= (float)backEnd.viewParms.viewportHeight / (float)backEnd.viewParms.viewportWidth;
-
-				FBO_Bind(tr.quarterFbo[0]);
-
-				qglViewport(0, 0, tr.quarterFbo[0]->width, tr.quarterFbo[0]->height);
-				qglScissor(0, 0, tr.quarterFbo[0]->width, tr.quarterFbo[0]->height);
-
-				VectorSet4(quadVerts[0], -1,  1, 0, 1);
-				VectorSet4(quadVerts[1],  1,  1, 0, 1);
-				VectorSet4(quadVerts[2],  1, -1, 0, 1);
-				VectorSet4(quadVerts[3], -1, -1, 0, 1);
-
-				texCoords[0][0] = 0; texCoords[0][1] = 1;
-				texCoords[1][0] = 1; texCoords[1][1] = 1;
-				texCoords[2][0] = 1; texCoords[2][1] = 0;
-				texCoords[3][0] = 0; texCoords[3][1] = 0;
-
-				GL_State( GLS_DEPTHTEST_DISABLE );
-
-				GLSL_BindProgram(&tr.ssaoShader);
-
-				GL_BindToTMU(tr.hdrDepthImage, TB_COLORMAP);
-
-				GLSL_SetUniformVec4(&tr.ssaoShader, UNIFORM_VIEWINFO, viewInfo);
-
-				RB_InstantQuad2(quadVerts, texCoords); //, color, shaderProgram, invTexRes);
-
-
-				viewInfo[2] = 1.0f / (float)(tr.quarterImage[0]->width);
-				viewInfo[3] = 1.0f / (float)(tr.quarterImage[0]->height);
-
-				FBO_Bind(tr.quarterFbo[1]);
-
-				qglViewport(0, 0, tr.quarterFbo[1]->width, tr.quarterFbo[1]->height);
-				qglScissor(0, 0, tr.quarterFbo[1]->width, tr.quarterFbo[1]->height);
-
-				GLSL_BindProgram(&tr.depthBlurShader[0]);
-
-				GL_BindToTMU(tr.quarterImage[0],  TB_COLORMAP);
-				GL_BindToTMU(tr.hdrDepthImage, TB_LIGHTMAP);
-
-				GLSL_SetUniformVec4(&tr.depthBlurShader[0], UNIFORM_VIEWINFO, viewInfo);
-
-				RB_InstantQuad2(quadVerts, texCoords); //, color, shaderProgram, invTexRes);
-
-
-				FBO_Bind(tr.screenSsaoFbo);
-
-				qglViewport(0, 0, tr.screenSsaoFbo->width, tr.screenSsaoFbo->height);
-				qglScissor(0, 0, tr.screenSsaoFbo->width, tr.screenSsaoFbo->height);
-
-				GLSL_BindProgram(&tr.depthBlurShader[1]);
-
-				GL_BindToTMU(tr.quarterImage[1],  TB_COLORMAP);
-				GL_BindToTMU(tr.hdrDepthImage, TB_LIGHTMAP);
-
-				GLSL_SetUniformVec4(&tr.depthBlurShader[1], UNIFORM_VIEWINFO, viewInfo);
-
-
-				RB_InstantQuad2(quadVerts, texCoords); //, color, shaderProgram, invTexRes);
-			}
+			// HZM gl2 SSAO BLACK-SCREEN FIX (bug-1177 follow-up): the SSAO GENERATION pass used to
+			// live right here, nested inside this r_depthPrepass-gated block. The AO COMPOSITE in
+			// RB_PostProcess was NOT gated the same way, so with r_depthPrepass 0 (which the gl2
+			// sandbox archives) generation never ran, and the composite multiplied the frame by an
+			// all-zero (never-written) AO image -> total black screen. Generation now runs from
+			// RB_HZMSsao() in tr_postprocess.c, which takes its own depth snapshot exactly the way
+			// RB_HZMDof does and is therefore independent of r_depthPrepass.
 		}
 
 		// reset viewport and scissor
@@ -1271,6 +1812,28 @@ const void	*RB_DrawBuffer( const void *data ) {
 		FBO_Bind(NULL);
 
 	qglDrawBuffer( cmd->buffer );
+
+	// HZM gl2 (bug #73 ghost-gun): clear the persistent render FBO at the START of the frame.
+	// This was previously done at the END of RB_SwapBuffers, which zeroed the very buffer the
+	// screenshot path reads afterwards -> in-game screenshots came out PURE BLACK (user report
+	// 2026-07-28, shot0011/0012 max luma 0). Clearing here is equally effective against the
+	// ghost (nothing of the previous frame survives into this frame's 2D-only draws) and leaves
+	// the presented image intact for screenshots/video capture.
+	if ( glRefConfig.framebufferObject && tr.renderFbo ) {
+		static cvar_t *r_uiFrameClearBegin = NULL;
+
+		if (!r_uiFrameClearBegin) {
+			r_uiFrameClearBegin = ri.Cvar_Get("r_uiFrameClear", "1", CVAR_ARCHIVE);
+		}
+
+		if (r_uiFrameClearBegin->integer) {
+			FBO_Bind(tr.renderFbo);
+			qglDisable(GL_SCISSOR_TEST);
+			qglClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+			qglClear(GL_COLOR_BUFFER_BIT);
+			FBO_Bind(NULL);
+		}
+	}
 
 	// clear screen for debugging
 	if ( r_clear->integer ) {
@@ -1418,6 +1981,9 @@ RB_SwapBuffers
 const void	*RB_SwapBuffers( const void *data ) {
 	const swapBuffersCommand_t	*cmd;
 
+	// HZM gl2 (bug #73): new frame starts after this swap - re-arm the sceneless-frame clear
+	g_sceneThisFrame = 0;
+
 	// finish any 2D drawing if needed
 	if ( tess.numIndexes ) {
 		RB_EndSurface();
@@ -1460,6 +2026,12 @@ const void	*RB_SwapBuffers( const void *data ) {
 		{
 			FBO_FastBlit(tr.renderFbo, NULL, NULL, NULL, GL_COLOR_BUFFER_BIT, GL_NEAREST);
 		}
+
+		// HZM gl2 (bug #73 ghost-gun-over-menus): the ghost-clear used to live HERE, after the
+		// present. That zeroed the very buffer the screenshot path reads next, so in-game
+		// screenshots came out pure black (user report 2026-07-28). It now runs at the START
+		// of the frame in RB_DrawBuffer, which prevents the ghost just as well and leaves the
+		// presented image readable.
 	}
 
 	if ( !glState.finishCalled ) {
@@ -1556,7 +2128,28 @@ const void *RB_PostProcess(const void *data)
 	dstBox[2] = backEnd.viewParms.viewportWidth;
 	dstBox[3] = backEnd.viewParms.viewportHeight;
 
-	if (r_ssao->integer)
+	// HZM gl2 SSAO BLACK-SCREEN FIX (bug-1177 follow-up): GENERATE the AO here, at the head of the
+	// post chain - after the MSAA resolve above (so tr.renderDepthImage is resolved depth) and
+	// immediately before the composite below that consumes it. It used to be generated inside
+	// RB_DrawSurfs' r_depthPrepass-gated block while the composite below was not gated the same
+	// way; at r_depthPrepass 0 that multiplied every frame by an all-zero AO image = black screen.
+	// (srcBox is first assigned below, after the composite has used it for its own quarter-res
+	//  source rect - seed it here so nothing reads it uninitialised)
+	srcBox[0] = backEnd.viewParms.viewportX;
+	srcBox[1] = backEnd.viewParms.viewportY;
+	srcBox[2] = backEnd.viewParms.viewportWidth;
+	srcBox[3] = backEnd.viewParms.viewportHeight;
+
+	RB_HZMSsao(srcFbo, srcBox);
+
+	// HZM gl2 (bug-1177): the NULL tests are MANDATORY, not defensive dressing - the lines below
+	// dereference tr.screenSsaoImage->width/height with no check of their own, so this is the exact
+	// spot that would crash if the AO gate ever ran without the buffers having been allocated.
+	// backEnd.ssaoValid is the liveness half of the same guard: it is qfalse unless the pass above
+	// actually wrote tr.screenSsaoFbo this frame, which turns any future failure of the generation
+	// side into "AO silently does nothing" instead of "the screen is black".
+	if ((r_ssao->integer || (r_ppSSAO && r_ppSSAO->integer)) && backEnd.ssaoValid
+	    && tr.screenSsaoImage && tr.screenSsaoFbo)
 	{
 		srcBox[0] = backEnd.viewParms.viewportX      * tr.screenSsaoImage->width  / (float)glConfig.vidWidth;
 		srcBox[1] = backEnd.viewParms.viewportY      * tr.screenSsaoImage->height / (float)glConfig.vidHeight;
@@ -1571,27 +2164,87 @@ const void *RB_PostProcess(const void *data)
 	srcBox[2] = backEnd.viewParms.viewportWidth;
 	srcBox[3] = backEnd.viewParms.viewportHeight;
 
-	if (srcFbo)
+	// HZM gl2 fog parity (2026-07-28, workflow wf_053a935d-2dd): the fog must be applied
+	// BEFORE the tone stage, because gl1 is NOT untonemapped as the old comment here
+	// claimed. gl1 bakes fixed-function fog during rasterisation (renderergl1
+	// tr_backend.c RB_SetupFog) and THEN runs the HZM post-FX grade inline
+	// (RB_PostFxApply, renderergl1/tr_backend.c:1302, r_ppTonemap/r_ppExposure/
+	// r_ppContrast/r_ppSaturation - all live in the shipped config). So on gl1 a fogged
+	// pixel reaches the screen as GRADE(mix(scene, fogColor)), while gl2 was producing
+	// mix(TONE(scene), fogColor) - fog applied in the wrong colour space, which is what
+	// makes gl2's horizon fail to lift the way gl1's does (measured: t2l1 gl1 far-band
+	// 104.8 > near 92.8, gl2 far 82.9 < near 87.5).
+	// Applying fog first makes gl2 compute TONE(mix(scene, fogColor)) - structurally
+	// identical to gl1 - so the fog colour lands correctly with no per-map tuning.
+	// r_globalFogPreTone 0 restores the old post-tone order for A/B.
 	{
-		if (r_hdr->integer && (r_toneMap->integer || r_forceToneMap->integer))
-		{
-			autoExposure = r_autoExposure->integer || r_forceAutoExposure->integer;
+		static cvar_t *r_globalFogPreTone = NULL;
+		qboolean fogFirst;
 
-			// Use an intermediate FBO because it can't blit to the same FBO directly
-			// and can't read from an MSAA dstFbo later.
-			RB_ToneMap(srcFbo, srcBox, tr.screenScratchFbo, srcBox, autoExposure);
-			FBO_FastBlit(tr.screenScratchFbo, srcBox, srcFbo, srcBox, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+		if (!r_globalFogPreTone) {
+			r_globalFogPreTone = ri.Cvar_Get("r_globalFogPreTone", "0", CVAR_ARCHIVE);   // legacy A/B for the SCREEN-SPACE pass only; ignored when the forward path is active
 		}
-		else if (r_cameraExposure->value != 0.0f)
+		fogFirst = (qboolean)(r_globalFogPreTone->integer != 0);
+
+		if (fogFirst && !R_UseForwardGlobalFog() && srcFbo && rb_globalFog.active && tr.globalFogFbo)
 		{
-			vec4_t color;
+			RB_GlobalFog(srcFbo, srcBox, tr.globalFogFbo, srcBox);
+			FBO_FastBlit(tr.globalFogFbo, srcBox, srcFbo, srcBox, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+		}
 
-			color[0] =
-			color[1] =
-			color[2] = pow(2, r_cameraExposure->value); //exp2(r_cameraExposure->value);
-			color[3] = 1.0f;
+		// HZM gl2 POST-FX PORT (bug-1149): gl1 applies bloom BEFORE its tonemap/grade
+		// (renderergl1 tr_postprocess_gl1.c RB_PostFxApply: SSAO -> DoF -> bloom -> god rays ->
+		// grade -> FXAA -> sharpen), so it goes here - after the optional pre-tone fog, ahead of
+		// the tone stage. Driven by r_ppBloom / r_ppBloomThreshold / r_ppBloomIntensity, the same
+		// Advanced-Graphics levers gl1 reads, so one set of sliders controls both renderers.
+		if (srcFbo)
+		{
+			// gl1 order is SSAO -> DoF -> bloom -> god rays -> grade, so DoF leads
+			RB_HZMDof(srcFbo, srcBox);
+			RB_HZMBloom(srcFbo, srcBox);
+		}
 
-			FBO_BlitFromTexture(tr.whiteImage, NULL, NULL, srcFbo, srcBox, NULL, color, GLS_SRCBLEND_DST_COLOR | GLS_DSTBLEND_ZERO);
+		if (srcFbo)
+		{
+			if (r_hdr->integer && (r_toneMap->integer || r_forceToneMap->integer))
+			{
+				autoExposure = r_autoExposure->integer || r_forceAutoExposure->integer;
+
+				// Use an intermediate FBO because it can't blit to the same FBO directly
+				// and can't read from an MSAA dstFbo later.
+				RB_ToneMap(srcFbo, srcBox, tr.screenScratchFbo, srcBox, autoExposure);
+				FBO_FastBlit(tr.screenScratchFbo, srcBox, srcFbo, srcBox, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+			}
+			else if (r_cameraExposure->value != 0.0f)
+			{
+				vec4_t color;
+
+				color[0] =
+				color[1] =
+				color[2] = pow(2, r_cameraExposure->value); //exp2(r_cameraExposure->value);
+				color[3] = 1.0f;
+
+				FBO_BlitFromTexture(tr.whiteImage, NULL, NULL, srcFbo, srcBox, NULL, color, GLS_SRCBLEND_DST_COLOR | GLS_DSTBLEND_ZERO);
+			}
+		}
+
+		if (!fogFirst && !R_UseForwardGlobalFog() && srcFbo && rb_globalFog.active && tr.globalFogFbo)
+		{
+			RB_GlobalFog(srcFbo, srcBox, tr.globalFogFbo, srcBox);
+			FBO_FastBlit(tr.globalFogFbo, srcBox, srcFbo, srcBox, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+		}
+
+		// HZM gl2 POST-FX PORT (bug-1150): gl1 runs FXAA -> sharpen -> rain-on-lens AFTER its
+		// grade (renderergl1 tr_postprocess_gl1.c RB_PostFxApply), so they go here, once the tone
+		// stage has produced a display-referred image. Same r_pp* levers as gl1.
+		if (srcFbo)
+		{
+			RB_HZMScreenFx(srcFbo, srcBox);
+			// HZM gl2 NEW POST-FX (bug-1158): underwater/frost/chromatic-aberration/film-grain.
+			// No gl1 equivalent to stay parity-ordered against, so these simply run last - on top
+			// of everything, including the vignettes, matching how a real lens/sensor artifact or
+			// being submerged would sit over the whole image.
+			RB_HZMExtraFx(srcFbo, srcBox);
 		}
 	}
 
@@ -1671,7 +2324,11 @@ const void *RB_PostProcess(const void *data)
 	}
 #endif
 
-	if (0 && r_sunlightMode->integer)
+	// HZM gl2 real character shadows: was dead-coded `if (0 && ...)`. r_shadowDebug 1 blits the
+	// four cascade depth maps into the top-left corner - the single cheapest way to confirm what
+	// is (or is not) being written into them. Character silhouettes appearing in cascades 0/1 is
+	// the money shot for this whole feature.
+	if (r_shadowDebug->integer >= 1 && r_sunlightMode->integer)
 	{
 		ivec4_t dstBox;
 		VectorSet4(dstBox, 0, glConfig.vidHeight - 128, 128, 128);
@@ -1682,6 +2339,15 @@ const void *RB_PostProcess(const void *data)
 		FBO_BlitFromTexture(tr.sunShadowDepthImage[2], NULL, NULL, dstFbo, dstBox, NULL, NULL, 0);
 		VectorSet4(dstBox, 384, glConfig.vidHeight - 128, 128, 128);
 		FBO_BlitFromTexture(tr.sunShadowDepthImage[3], NULL, NULL, dstFbo, dstBox, NULL, NULL, 0);
+	}
+
+	// r_shadowDebug 2: the resolved screen-space shadowmask. If this is uniformly white the
+	// chain is dead upstream (VPF_USESUNLIGHT / the depth-fill gate), not at the casters.
+	if (r_shadowDebug->integer >= 2 && r_sunlightMode->integer && tr.screenShadowImage)
+	{
+		ivec4_t dstBox;
+		VectorSet4(dstBox, 0, glConfig.vidHeight - 256, 256, 128);
+		FBO_BlitFromTexture(tr.screenShadowImage, NULL, NULL, dstFbo, dstBox, NULL, NULL, 0);
 	}
 
 	if (0 && r_shadows->integer == 4)
@@ -1931,8 +2597,16 @@ void RB_RenderSpriteSurfList(drawSurf_t* drawSurfs, int numDrawSurfs) {
         if (oldDepthRange != depthRange)
         {
 			if (depthRange) {
+				// HZM gl2 re-port Fix 3: depth-hacked sprites (first-person muzzle flash)
+				// follow the weapon projection so the flash stays registered to the shifted gun
+				if (backEnd.viewParms.stereoFrame == STEREO_CENTER && backEnd.viewParms.weaponFovActive) {
+					GL_SetProjectionMatrix( backEnd.viewParms.weaponProjectionMatrix );
+				}
 				qglDepthRange(0.0, 0.3);
 			} else {
+				if (backEnd.viewParms.stereoFrame == STEREO_CENTER && backEnd.viewParms.weaponFovActive) {
+					GL_SetProjectionMatrix( backEnd.viewParms.projectionMatrix );
+				}
                 qglDepthRange(0.0, 1.0);
 			}
 
@@ -1953,6 +2627,10 @@ void RB_RenderSpriteSurfList(drawSurf_t* drawSurfs, int numDrawSurfs) {
 	GL_SetModelviewMatrix( backEnd.viewParms.world.modelMatrix );
 	// go back to the previous depth range
 	if (depthRange) {
+		// HZM gl2 re-port Fix 3: restore the world projection if the last sprite was depth-hacked
+		if (backEnd.viewParms.stereoFrame == STEREO_CENTER && backEnd.viewParms.weaponFovActive) {
+			GL_SetProjectionMatrix( backEnd.viewParms.projectionMatrix );
+		}
 		qglDepthRange(0.0, 1.0);
 	}
 }

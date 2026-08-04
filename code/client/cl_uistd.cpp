@@ -212,6 +212,76 @@ Event EV_Layout_RenderModelAnim
     "anim",
     "Render model anim"
 );
+// HZM coop FIT-TUNE: read this widget's transform LIVE from a cvar holding 7 floats
+// "offX offY offZ scale pitch yaw roll". Lets the armory position every preview model via
+// cvars (per-gun baked values, nudged live by the `uifit` console command). Empty/short = static.
+Event EV_Layout_RenderModelXformCvar
+(
+    "modelxformcvar",
+    EV_DEFAULT,
+    "s",
+    "cvar",
+    "HZM coop: read offset(3)+scale(1)+angles(3) live from a 7-float cvar (fit-tune)."
+);
+// HZM coop: composite a second model onto a bone tag of this widget's model (helmet on the operator).
+// modelattachcvar names a cvar holding the attach model's .tik path (e.g. coop_loHelm); modelattachtag
+// names the bone (e.g. "Bip01 Head"). The attach model tracks the idle anim and is nudged by coop_loXfmCH.
+Event EV_Layout_RenderModelAttachCvar
+(
+    "modelattachcvar",
+    EV_DEFAULT,
+    "s",
+    "cvar",
+    "HZM coop: cvar naming a model path to composite onto the attach tag (helmet on operator)."
+);
+Event EV_Layout_RenderModelAttachTag
+(
+    "modelattachtag",
+    EV_DEFAULT,
+    "s",
+    "tag",
+    "HZM coop: bone tag the attach model rides (e.g. \"Bip01 Head\")."
+);
+// HZM coop: SECOND attach slot - composite the inspected weapon into the operator's hand.
+Event EV_Layout_RenderModelAttachCvar2
+(
+    "modelattachcvar2",
+    EV_DEFAULT,
+    "s",
+    "cvar",
+    "HZM coop: cvar naming a 2nd model path to composite onto attach tag 2 (weapon in operator's hand)."
+);
+Event EV_Layout_RenderModelAttachTag2
+(
+    "modelattachtag2",
+    EV_DEFAULT,
+    "s",
+    "tag",
+    "HZM coop: bone tag the 2nd attach model rides (e.g. \"tag_weapon_right\")."
+);
+// HZM coop: read the model's anim name LIVE from a cvar (overrides the static modelanim). Lets the armory
+// swap the operator's STANCE per inspected weapon class (rifle hold vs pistol hold) by setting one cvar.
+// Empty/unset falls back to the static modelanim.
+Event EV_Layout_RenderModelAnimCvar
+(
+    "modelanimcvar",
+    EV_DEFAULT,
+    "s",
+    "cvar",
+    "HZM coop: read the model anim name live from a cvar (per-weapon operator stance)."
+);
+// HZM coop: click-and-drag to rotate the rendered model. Names a cvar whose value (degrees) is ADDED to
+// the model's yaw each frame; a horizontal left-drag over the widget adds to it (sensitivity = cvar
+// coop_loSpinSens). Setting it makes this label a mouse responder (AllowActivate). Used by the armory
+// operator so the player can spin the character to inspect the loadout from any angle.
+Event EV_Layout_RenderModelSpinCvar
+(
+    "modelspincvar",
+    EV_DEFAULT,
+    "s",
+    "cvar",
+    "HZM coop: click-drag rotate - horizontal mouse drag adds degrees to this cvar (model yaw)."
+);
 Event EV_ClearInvItemReference
 (
     "clearinvitemref",
@@ -245,6 +315,16 @@ CLASS_DECLARATION(UILabel, UIFakkLabel, NULL) {
     {&EV_Layout_RenderModelAngles,         &UIFakkLabel::LayoutRenderModelAngles      },
     {&EV_Layout_RenderModelScale,          &UIFakkLabel::LayoutRenderModelScale       },
     {&EV_Layout_RenderModelAnim,           &UIFakkLabel::LayoutRenderModelAnim        },
+    {&EV_Layout_RenderModelXformCvar,      &UIFakkLabel::LayoutRenderModelXformCvar   },
+    {&EV_Layout_RenderModelAttachCvar,     &UIFakkLabel::LayoutRenderModelAttachCvar  },
+    {&EV_Layout_RenderModelAttachTag,      &UIFakkLabel::LayoutRenderModelAttachTag   },
+    {&EV_Layout_RenderModelAttachCvar2,    &UIFakkLabel::LayoutRenderModelAttachCvar2 },
+    {&EV_Layout_RenderModelAttachTag2,     &UIFakkLabel::LayoutRenderModelAttachTag2  },
+    {&EV_Layout_RenderModelAnimCvar,       &UIFakkLabel::LayoutRenderModelAnimCvar    },
+    {&EV_Layout_RenderModelSpinCvar,       &UIFakkLabel::LayoutRenderModelSpinCvar    },
+    {&W_LeftMouseDown,                     &UIFakkLabel::OnSpinPressed                },
+    {&W_LeftMouseDragged,                  &UIFakkLabel::OnSpinDragged                },
+    {&W_LeftMouseUp,                       &UIFakkLabel::OnSpinReleased               },
     {&EV_ClearInvItemReference,            &UIFakkLabel::ClearInvItemReference        },
     {NULL,                                 NULL                                       }
 };
@@ -265,6 +345,9 @@ UIFakkLabel::UIFakkLabel()
     m_statbar_material_flash      = NULL;
     m_statbar_material_marker     = NULL;
     m_lastitemindex               = -1;
+    m_spinStartVal                = 0.0f;   // HZM coop: click-drag rotate state
+    m_spinStartX                  = 0;
+    m_spinning                    = false;
 }
 
 void UIFakkLabel::LayoutPlayerStat(Event *ev)
@@ -453,6 +536,78 @@ void UIFakkLabel::LayoutRenderModelScale(Event *ev)
 void UIFakkLabel::LayoutRenderModelAnim(Event *ev)
 {
     m_anim = ev->GetString(1);
+}
+
+void UIFakkLabel::LayoutRenderModelXformCvar(Event *ev)
+{
+    m_xformcvar = ev->GetString(1);
+}
+
+void UIFakkLabel::LayoutRenderModelAttachCvar(Event *ev)
+{
+    m_attachcvar = ev->GetString(1);
+}
+
+void UIFakkLabel::LayoutRenderModelAttachTag(Event *ev)
+{
+    m_attachtag = ev->GetString(1);
+}
+
+void UIFakkLabel::LayoutRenderModelAttachCvar2(Event *ev)
+{
+    m_attachcvar2 = ev->GetString(1);
+}
+
+void UIFakkLabel::LayoutRenderModelAttachTag2(Event *ev)
+{
+    m_attachtag2 = ev->GetString(1);
+}
+
+void UIFakkLabel::LayoutRenderModelAnimCvar(Event *ev)
+{
+    m_animcvar = ev->GetString(1);
+}
+
+void UIFakkLabel::LayoutRenderModelSpinCvar(Event *ev)
+{
+    m_spincvar = ev->GetString(1);
+    // become a mouse responder so left-drag events reach this label (labels are non-activatable by default)
+    AllowActivate(true);
+}
+
+void UIFakkLabel::OnSpinPressed(Event *ev)
+{
+    if (!m_spincvar.length()) {
+        return;
+    }
+    m_spinning     = true;
+    m_spinStartX   = uid.mouseX;
+    m_spinStartVal = atof(Cvar_VariableString(m_spincvar.c_str()));
+    uWinMan.setFirstResponder(this); // capture so the drag keeps coming even if the cursor leaves the panel
+}
+
+void UIFakkLabel::OnSpinDragged(Event *ev)
+{
+    if (!m_spincvar.length() || !m_spinning) {
+        return;
+    }
+    float sens = Cvar_Get("coop_loSpinSens", "0.6", CVAR_ARCHIVE)->value; // user-tunable, persists
+    if (sens <= 0.0f) {
+        sens = 0.6f;
+    }
+    float yaw = m_spinStartVal + (float)(uid.mouseX - m_spinStartX) * sens;
+    Cvar_Set(m_spincvar.c_str(), va("%f", yaw));
+}
+
+void UIFakkLabel::OnSpinReleased(Event *ev)
+{
+    if (!m_spincvar.length()) {
+        return;
+    }
+    m_spinning = false;
+    if (uWinMan.getFirstResponder() == this) {
+        uWinMan.setFirstResponder(NULL);
+    }
 }
 
 void UIFakkLabel::DrawStatbar(float frac)
@@ -1636,6 +1791,29 @@ void UIFakkLabel::Draw(void)
         scale     = m_scale;
         sAnimName = m_anim;
 
+        // HZM coop: if this widget has an anim cvar, use its value as the stance (per-weapon operator pose).
+        if (m_animcvar.length()) {
+            const char *an = Cvar_VariableString(m_animcvar.c_str());
+            if (an && an[0]) {
+                sAnimName = an;
+            }
+        }
+
+        // HZM coop FIT-TUNE: if this widget has a transform cvar, read the live 7-float value
+        // "offX offY offZ scale pitch yaw roll" and override. This is how the armory frames every
+        // preview model per-item via cvars (p<id>.cfg sets the baked value; `uifit` nudges it live).
+        if (m_xformcvar.length()) {
+            const char *xs = Cvar_VariableString(m_xformcvar.c_str());
+            if (xs && xs[0]) {
+                float xf[7];
+                if (sscanf(xs, "%f %f %f %f %f %f %f", &xf[0], &xf[1], &xf[2], &xf[3], &xf[4], &xf[5], &xf[6]) == 7) {
+                    offset[0] = xf[0]; offset[1] = xf[1]; offset[2] = xf[2];
+                    scale     = xf[3];
+                    angles[0] = xf[4]; angles[1] = xf[5]; angles[2] = xf[6];
+                }
+            }
+        }
+
         // Added in 2.11
         //  Tunak easter egg
         if (Cvar_Get("tunak", "0", 0)->integer) {
@@ -1685,6 +1863,12 @@ void UIFakkLabel::Draw(void)
         }
     }
 
+    // HZM coop: click-drag rotate - add the accumulated spin (degrees, set by OnSpinDragged) to the yaw
+    // so the player can turn the operator to inspect the loadout from any angle. Framing is unaffected.
+    if (m_spincvar.length()) {
+        angles[1] += atof(Cvar_VariableString(m_spincvar.c_str()));
+    }
+
     if (m_rendermodel && !m_rendermodelfit) {
         VectorSet(mins, -16, -16, 0);
         VectorSet(maxs, 16, 16, 96);
@@ -1709,6 +1893,33 @@ void UIFakkLabel::Draw(void)
 
     origin[0] = height * scale * 0.5 / 0.268f;
 
+    // HZM coop: resolve up to two optional attach models composited onto bone tags of this widget's model.
+    // Slot 1 = operator's helmet (m_attachcvar -> coop_loHelm, tag "Bip01 Head"); slot 2 = inspected weapon
+    // in the operator's hand (m_attachcvar2 -> coop_loPrev, tag "tag_weapon_right"). Register each cvar's
+    // model path and hand the handles + tags to the renderer, which seats them on the posed operator.
+    qhandle_t   attachHandle  = 0;
+    const char *attachTag     = NULL;
+    if (m_attachcvar.length() && m_attachtag.length()) {
+        const char *szAttach = Cvar_VariableString(m_attachcvar.c_str());
+        if (szAttach && szAttach[0]) {
+            attachHandle = re.RegisterModel(szAttach);
+            if (attachHandle) {
+                attachTag = m_attachtag.c_str();
+            }
+        }
+    }
+    qhandle_t   attachHandle2 = 0;
+    const char *attachTag2    = NULL;
+    if (m_attachcvar2.length() && m_attachtag2.length()) {
+        const char *szAttach2 = Cvar_VariableString(m_attachcvar2.c_str());
+        if (szAttach2 && szAttach2[0]) {
+            attachHandle2 = re.RegisterModel(szAttach2);
+            if (attachHandle2) {
+                attachTag2 = m_attachtag2.c_str();
+            }
+        }
+    }
+
     CL_Draw3DModel(
         m_screenframe.pos.x,
         m_screenframe.pos.y,
@@ -1720,7 +1931,11 @@ void UIFakkLabel::Draw(void)
         offset,
         angles,
         color,
-        sAnimName
+        sAnimName,
+        attachHandle,
+        attachTag,
+        attachHandle2,
+        attachTag2
     );
 
     set2D();

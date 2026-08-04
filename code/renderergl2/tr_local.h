@@ -1,4 +1,4 @@
-/*
+﻿/*
 ===========================================================================
 Copyright (C) 1999-2005 Id Software, Inc.
 
@@ -85,6 +85,15 @@ typedef unsigned int vaoCacheGlIndex_t;
 #define MAX_SPHERE_LIGHTS		512
 #define	MAX_SPRITESURFS			0x8000
 
+// HZM (engine-limits audit): one sprite surf is emitted per visible refSprite PER VIEW
+// (R_AddSpriteSurfaces), and tr.refdef.numSpriteSurfs accumulates across every view in the
+// frame (portal sky, mirrors, sun-cascade shadow views). MAX_SPRITESURFS is therefore the real
+// ceiling and must never be smaller than MAX_SPRITES; R_AddSpriteSurf indexes spriteSurfs[]
+// with it, not with MAX_SPRITES.
+#if MAX_SPRITESURFS < MAX_SPRITES
+	#error "MAX_SPRITESURFS must be >= MAX_SPRITES (one sprite surf per sprite, per view)"
+#endif
+
 #define MAX_SPRITE_DIST				16384.0f
 #define MAX_SPRITE_DIST_SQUARED		(MAX_SPRITE_DIST * MAX_SPRITE_DIST)
 
@@ -142,6 +151,20 @@ typedef struct {
 
     int			iGridLighting;
     float		lodpercentage[2];
+    // HZM gl2 re-port (bug-gl2-modellight): per-frame model lighting caches,
+    // mirrors gl1 trRefEntity_t (gl1 tr_local.h:187-191)
+    qboolean	bLightGridCalculated;
+    qboolean	sphereCalculated;
+    int			lightingSphere;
+    // HZM gl2 (bug-gl2-sphereslot-alias): which draw-surf LIST built lightingSphere.
+    // sphereCalculated is cleared once per FRAME (tr_scene.c), but the index it validates
+    // comes from backEnd.numSpheresUsed, which is cleared once per LIST (tr_backend.c).
+    // gl1 has exactly one list per frame so the two scopes agree there; gl2 runs up to five
+    // (3 sun cascades + main depth-fill + main colour), so an entity that allocated a slot in
+    // a cascade later "reuses" an index another entity has since been given. Stamped and
+    // tested only when r_sphereCacheScope is 1. Unsigned: it is compared for equality against
+    // a free-running counter, so wrap must be defined behaviour rather than signed UB.
+    unsigned int	sphereList;
 } trRefEntity_t;
 
 
@@ -194,6 +217,7 @@ typedef struct vao_s
 typedef enum {
 	SS_BAD,
 	SS_PORTAL,			// mirrors, portals, viewscreens
+	SS_PORTALSKY,		// HZM gl2 re-port (bug-gl2-portalsky): 3D skybox portal, matches gl1 ordering
 	SS_ENVIRONMENT,		// sky box
 	SS_OPAQUE,			// opaque
 
@@ -353,7 +377,8 @@ typedef enum {
 	TCGEN_TEXTURE,
 	TCGEN_ENVIRONMENT_MAPPED,
 	TCGEN_FOG,
-	TCGEN_VECTOR			// S and T from world coordinates
+	TCGEN_VECTOR,			// S and T from world coordinates
+	TCGEN_ENVIRONMENT_MAPPED2	// HZM gl2 re-port: MOHAA 'texgen environmentmodel' (model-space env map)
 } texCoordGen_t;
 
 typedef enum {
@@ -382,7 +407,14 @@ typedef enum {
 	TMOD_SCALE,
 	TMOD_STRETCH,
 	TMOD_ROTATE,
-	TMOD_ENTITY_TRANSLATE
+	TMOD_ENTITY_TRANSLATE,
+	// HZM gl2 parity (bug-1242): MOHAA-specific tcMods that gl1 has and gl2 never got. Appended at
+	// the END deliberately - inserting mid-enum would renumber every value above it and silently
+	// repoint any texMod already parsed. 36 live `tcMod wavetrant` lines drive the animated surf
+	// wash on the D-Day and both Africa shorelines (misc_outside.shader); under gl2 they hit the
+	// unknown-tcMod warning in ParseTexMod, the type stays TMOD_NONE, and the wash renders STATIC.
+	TMOD_WAVETRANS,
+	TMOD_WAVETRANT
 } texMod_t;
 
 #define	MAX_SHADER_DEFORMS	3
@@ -519,6 +551,18 @@ typedef struct {
     byte			colorConst[4];			// for CGEN_CONST and AGEN_CONST
 	byte			alphaConst;
 	byte			alphaConstMin;
+
+	// HZM gl2 re-port (bug-gl2-nextbundle2): MOHAA 'nextbundle [add]' combine mode
+	// (GL_MODULATE / GL_ADD, 0 = single bundle) - gl1 tr_shader.c:1675-1694
+	int				multitextureEnv;
+
+	// HZM gl2 (r_hzmGenNormals): this stage's TB_NORMALMAP is a map we SYNTHESISED from the
+	// diffuse, not authored art. Set in CollapseStagesToLightall, which is the first point at
+	// which the stage is known to have resolved to a real light type. Consumed by
+	// RB_IterateStagesGeneric to make the relief strength live and to confine r_hzmSpecular to
+	// exactly these stages - a global r_baseSpecular is the bug-801 "white sheen on everything"
+	// class of regression, which is why that cvar defaults to 0 in this fork.
+	qboolean		hzmGenNormal;
 } shaderStage_t;
 
 struct shaderCommands_s;
@@ -592,11 +636,17 @@ typedef struct shader_s {
 
 	float		portalRange;			// distance to fog out at
 	qboolean	isPortal;
+	qboolean	isPortalSky;			// HZM gl2 re-port (bug-gl2-portalsky): shader is textures/common/skyportal-style portal into the 3D sky room
 
 	cullType_t	cullType;				// CT_FRONT_SIDED, CT_BACK_SIDED, or CT_TWO_SIDED
-	qboolean	polygonOffset;			// set for decals and other items that must be offset 
+	qboolean	polygonOffset;			// set for decals and other items that must be offset
 	qboolean	noMipMaps;				// for console fonts, 2D elements, etc.
 	qboolean	noPicMip;				// for images that must always be full resolution
+	// HZM gl2 re-port (bug-gl2-foliage-white): shader has an alpha-tested (cutout)
+	// stage. gl1 has no depth prepass; gl2's prepass (r_depthPrepass 1) must NOT
+	// write full-quad depth for these or the discarded transparent texels occlude
+	// the background and reveal the light sky/fog (opaque-white foliage billboards).
+	qboolean	hasAlphaTest;
 
 	fogPass_t	fogPass;				// draw a blended pass, possibly with depth test equals
 
@@ -624,6 +674,20 @@ typedef struct shader_s {
     float fDistRange;
     float fDistNear;
     spriteParms_t sprite;
+    // HZM gl2 re-port (bug-gl2-modellight): set in FinishShader when a stage
+    // uses rgbGen lightingGrid / lightingSpherical / static, consumed by the
+    // backend model-lighting setup (mirrors gl1 tr_local.h:599-600)
+    int needsLGrid;
+    int needsLSpherical;
+    // HZM gl2 parity (bug-1300): set in FinishShader when a stage uses alphaGen
+    // distFade / oneMinusDistFade - the two PER-VERTEX distance-fade modes, whose
+    // alpha RB_FillDistFadeAlpha has to write into tess.color before the attribute
+    // upload. Deliberately NOT set for tikiDistFade / oneMinusTikiDistFade: those
+    // are constant per draw and are handled entirely in ComputeShaderColors.
+    int needsDistFade;
+    // Latch so the unimplemented-alphaGen warning in ComputeShaderColors prints
+    // once per shader instead of once per batch per frame.
+    qboolean alphaGenWarned;
 } shader_t;
 
 enum
@@ -826,6 +890,7 @@ typedef enum
 	UNIFORM_VIEWUP,
 
 	UNIFORM_INVTEXRES,
+	UNIFORM_HZMPARAMS,   // HZM gl2 post-FX: spare vec4 for the ported gl1 stages (bug-1151)
 	UNIFORM_AUTOEXPOSUREMINMAX,
 	UNIFORM_TONEMINAVGMAXLINEAR,
 
@@ -839,6 +904,35 @@ typedef enum
 	UNIFORM_ALPHATEST,
 
 	UNIFORM_BONEMATRIX,
+
+	//
+	// OPENMOHAA-specific stuff
+	//=========================
+	// HZM gl2 re-port (bug-gl2-nextbundle2): second texture bundle in the
+	// generic program (MOHAA 'nextbundle' single-pass multitexture)
+	UNIFORM_TEXTURE1ENV,     // 0 = off, 1 = GL_MODULATE, 2 = GL_ADD
+	UNIFORM_TEXTURE1TCGEN,   // tcGen of bundle[1] (TCGEN_LIGHTMAP -> attr_TexCoord1)
+	UNIFORM_TEXTURE1MATRIX0, // bundle[1] tcMod matrix slots (same layout as DIFFUSETEXMATRIX)
+	UNIFORM_TEXTURE1MATRIX1,
+	UNIFORM_TEXTURE1MATRIX2,
+	UNIFORM_TEXTURE1MATRIX3,
+	UNIFORM_TEXTURE1MATRIX4,
+	UNIFORM_TEXTURE1MATRIX5,
+	UNIFORM_TEXTURE1MATRIX6,
+	UNIFORM_TEXTURE1MATRIX7,
+	//=========================
+
+	// HZM gl2 parity (bug-1249): (alphaMin, alphaMax, loClamp, hiClamp) for the MOHAA per-vertex
+	// alphaGens sCoord/tCoord. Appended LAST on purpose - uniformsInfo[] is indexed by this enum and
+	// GLSL_InitUniforms walks i < UNIFORM_COUNT unguarded, so inserting mid-enum silently resolves
+	// every later uniform to the wrong name. Keep the matching uniformsInfo[] row last too.
+	UNIFORM_ALPHAGENPARAMS,
+
+	// HZM gl2 FORWARD GLOBAL FOG (r_globalFogForward). Appended last, per the rule above.
+	//   u_GlobalFogColor  = (fogTarget.rgb, fracScale)   fracScale 0 = no fog on this draw
+	//   u_GlobalFogParams = (projMat[10], projMat[14], fogStart, 1/(fogEnd-fogStart))
+	UNIFORM_GLOBALFOGCOLOR,
+	UNIFORM_GLOBALFOGPARAMS,
 
 	UNIFORM_COUNT
 } uniform_t;
@@ -993,7 +1087,14 @@ typedef enum {
 	VPF_ORTHOGRAPHIC    = 0x10,
 	VPF_USESUNLIGHT     = 0x20,
 	VPF_FARPLANEFRUSTUM = 0x40,
-	VPF_NOCUBEMAPS      = 0x80
+	VPF_NOCUBEMAPS      = 0x80,
+	// HZM gl2 DYNAMIC-LIGHT CAST SHADOWS (r_hzmDlightShadows): marks a projected-shadow
+	// (pshadow) depth view whose light is a scene DLIGHT rather than the lightgrid. Set
+	// ONLY by R_RenderDlightShadowMaps, i.e. only while that master cvar is 1, so with
+	// the feature off no view ever carries this bit and every test on it is dead.
+	// Needed because a pshadow view and a sun cascade are both VPF_DEPTHSHADOW with
+	// shadowCascade 0 vs >0, and the caster-admission rule differs between them.
+	VPF_PSHADOW         = 0x100
 } viewParmFlags_t;
 
 typedef struct {
@@ -1012,11 +1113,18 @@ typedef struct {
 	int         targetFboCubemapIndex;
 	float		fovX, fovY;
 	float		projectionMatrix[16];
+	float		weaponProjectionMatrix[16];	// HZM gl2 re-port Fix 3: un-zoomed ADS view-weapon projection
+	qboolean	weaponFovActive;
 	cplane_t	frustum[5];
 	vec3_t		visBounds[2];
 	float		zFar;
 	float       zNear;
 	stereoFrame_t	stereoFrame;
+
+	// HZM gl2 real character shadows (r_charShadows): which sun cascade this view is.
+	// 0 = not a sun-cascade shadow view, 1..4 = R_RenderSunShadowMaps level+1. Every
+	// other view setup does Com_Memset(&parms,0,...) so 0 is the reliable default.
+	int			shadowCascade;
 
 	//
 	// OPENMOHAA-specific stuff
@@ -1309,6 +1417,26 @@ typedef struct {
     int bUsesCubeMap;
     float cubemap[24][3][4];
 } sphereor_t;
+
+// HZM gl2 CHARACTER LIGHTING (r_charLighting). Per-DRAW-BATCH restatement of the
+// MOHAA entity light sphere as the two things tr.lightallShader's USE_LIGHT_VECTOR
+// permutation wants: one dominant light direction, and an ambient/directed split.
+//
+// RB_Light_Real computes, per vertex:   colour = ambient + SUM(light_j * max(dot(L_j,N),0))
+// This restates it as:                  colour = flat * (ambientFrac + directedFrac * dot(L,N))
+// with flat = ambient + SUM(light_j) and the fractions taken per channel, so the
+// GPU reproduces the same value per PIXEL instead of Gouraud-interpolating it, and
+// the fragment normal (not the vertex normal) drives the falloff.
+//
+// active is false for every batch that is not a character skin under r_charLighting;
+// when it is false nothing in tr_shade.c reads any other member.
+typedef struct {
+    qboolean active;          // this batch is a bIsCharacter skin, char lighting is live
+    vec3_t   lightDirWorld;   // unit vector towards the dominant light, WORLD space
+    vec3_t   ambientFrac;     // per-channel ambient share of flatColor   (0..1)
+    vec3_t   directedFrac;    // per-channel directed share of flatColor  (0..1)
+    byte     flatColor[4];    // ambient + directed, clamped: what tess.color is filled with
+} charLighting_t;
 
 typedef struct spherel_s {
     vec3_t origin;
@@ -1772,7 +1900,7 @@ typedef struct model_s {
 } model_t;
 
 
-#define	MAX_MOD_KNOWN	1024
+#define	MAX_MOD_KNOWN	2048
 
 void		R_ModelInit (void);
 model_t		*R_GetModelByHandle( qhandle_t hModel );
@@ -1830,6 +1958,25 @@ the bits are allocated as follows:
 	#error "Need to update sorting, too many bits."
 #endif
 #define QSORT_PSHADOW_SHIFT     1
+
+// HZM (engine-limits audit) - the real, usable shader ceiling for gl2.
+//
+// Unlike renderergl1 (shift 21, only 11 bits left => a hard 2048 ceiling under a MAX_SHADERS of
+// 16384) this layout does fit: shift 17 + SHADERNUM_BITS 14 = 31 bits of an unsigned 32-bit
+// key, so all 16384 shaders are encodable today. MAX_SORTED_SHADERS makes that relationship
+// explicit instead of coincidental, and GeneratePermanentShader warns loudly if a future
+// layout change ever makes tr.numShaders outrun what the key can carry.
+#define	QSORT_SHADERNUM_BITS	(32 - QSORT_SHADERNUM_SHIFT)
+#define	MAX_SORTED_SHADERS		(MAX_SHADERS < (1 << QSORT_SHADERNUM_BITS) ? MAX_SHADERS : (1 << QSORT_SHADERNUM_BITS))
+
+// The fields must not overlap. entityNum is decoded with REFENTITYNUM_MASK
+// (REFENTITYNUM_BITS wide) and dlight/pshadow occupy bits 0 and 1.
+#if QSORT_REFENTITYNUM_SHIFT < 2
+	#error "QSORT_REFENTITYNUM_SHIFT overlaps the dlight/pshadow flags at bits 0-1"
+#endif
+#if (QSORT_STATICMODEL_SHIFT + 1) > QSORT_SHADERNUM_SHIFT
+	#error "the staticmodel flag overlaps the shader field"
+#endif
 
 extern	int			gl_filter_min, gl_filter_max;
 
@@ -1984,14 +2131,32 @@ typedef struct {
 	qboolean    colorMask[4];
 	qboolean    depthFill;
 
+	// HZM gl2 SSAO BLACK-SCREEN FIX (bug-1177 follow-up): was tr.screenSsaoFbo actually PRODUCED
+	// for this view, this frame? The AO composite is a multiply (dst *= src), and the AO image is
+	// created with pic=NULL, i.e. driver zero-fill = pure BLACK. Compositing a never-written AO
+	// buffer therefore multiplies the whole frame by 0 and presents a black screen with no crash
+	// and no GL error. Cleared at the top of every non-shadow RB_DrawSurfs and set only by the
+	// pass that writes screenSsaoFbo, so the composite can never run against stale or virgin AO
+	// (covers the first frame after vid_restart and any RDF_NOWORLDMODEL scene too).
+	qboolean    ssaoValid;
+
 	//
 	// OPENMOHAA-specific stuff
 	//
     sphereor_t spheres[MAX_SPHERE_LIGHTS];
     unsigned short numSpheresUsed;
+    // HZM gl2 (bug-gl2-sphereslot-alias): monotonic id of the current draw-surf list,
+    // bumped wherever numSpheresUsed is reset. Never reset itself, so it cannot alias
+    // across frames either.
+    unsigned int sphereListId;
     sphereor_t* currentSphere;
     sphereor_t spareSphere;
     sphereor_t hudSphere;
+    // HZM gl2 character lighting (r_charLighting). Recomputed per draw batch in
+    // RB_RenderDrawSurfList, immediately after the light sphere it is derived from,
+    // and cleared for every non-character batch. .active is qfalse whenever
+    // r_charLighting is 0, so every consumer is inert by default.
+    charLighting_t charLight;
     cStaticModelUnpacked_t* currentStaticModel;
     float shaderStartTime;
     int dsStreamVert;
@@ -2062,6 +2227,12 @@ typedef struct {
 	FBO_t					*depthFbo;
 	FBO_t					*pshadowFbos[MAX_DRAWN_PSHADOWS];
 	FBO_t					*screenScratchFbo;
+	// HZM gl2 fog parity: a colour-only alias of screenScratchImage. screenScratchFbo has
+	// tr.renderDepthImage bound as its GL_DEPTH_ATTACHMENT (tr_fbo.c), so rendering into it
+	// while SAMPLING that same depth image (which is exactly what the global-fog pass does)
+	// is a rendering feedback loop. This FBO writes the same colour image with no depth
+	// attachment at all, so the depth fetch is always well defined.
+	FBO_t					*globalFogFbo;
 	FBO_t					*textureScratchFbo[2];
 	FBO_t                   *quarterFbo[2];
 	FBO_t					*calcLevelsFbo;
@@ -2110,6 +2281,23 @@ typedef struct {
 	shaderProgram_t down4xShader;
 	shaderProgram_t bokehShader;
 	shaderProgram_t tonemapShader;
+	shaderProgram_t tonemapHzmShader;   // HZM gl1-parity ACES grade (r_tonemapMode 1)
+	shaderProgram_t bloomBrightShader;  // HZM gl1-parity bloom bright-pass (r_ppBloom)
+	shaderProgram_t bloomBlurShader;    // HZM gl1-parity bloom separable Gaussian
+	shaderProgram_t fxaaShader;         // HZM gl1-parity FXAA (r_ppFXAA)
+	shaderProgram_t sharpenShader;      // HZM gl1-parity CAS sharpen (r_ppSharpen)
+	shaderProgram_t rainDropsShader;    // HZM gl1-parity rain-on-lens (r_ppRainDrops)
+	shaderProgram_t lowHealthShader;    // HZM gl1-parity low-health desat + red vignette + heartbeat
+	shaderProgram_t suppressionShader;  // HZM gl1-parity suppression tunnel-vignette
+	shaderProgram_t hitBloodShader;     // HZM coop [user 08-02] on-hit blood splatter
+	shaderProgram_t heatHazeShader;     // HZM gl1-parity heat haze + localized muzzle shimmer
+	shaderProgram_t dofShader;          // HZM gl1-parity depth of field (r_ppDoF)
+	shaderProgram_t underwaterShader;   // HZM NEW: underwater/slime/lava screen distortion (r_ppUnderwaterFx)
+	shaderProgram_t chromabShader;      // HZM NEW: chromatic aberration (r_ppChromaticAberration)
+	shaderProgram_t motionBlurShader;   // HZM NEW: camera motion blur (r_ppMotionBlur)
+	shaderProgram_t filmgrainShader;    // HZM NEW: film grain (r_ppFilmGrain)
+	shaderProgram_t frostShader;        // HZM NEW: frost/ice crystals while it snows (r_ppFrost)
+	shaderProgram_t globalFogShader;
 	shaderProgram_t calclevels4xShader[2];
 	shaderProgram_t shadowmaskShader;
 	shaderProgram_t ssaoShader;
@@ -2199,7 +2387,7 @@ typedef struct {
     int rendererhandle;
     qboolean shadersParsed;
     int frame_skel_index;
-    int skel_index[1024];
+    int skel_index[MAX_GENTITIES]; // HZM (bug-gl2-invisible-friendly-actor): ported gl1 bug-932 fix - was a bare [1024] indexed by model->entityNumber. Since the GENTITYNUM_BITS 11 op (2048-entity pool) any skeletal actor on entityNumber >= 1024 OOB-accessed adjacent globals here; in gl2 the OOB read in R_UpdatePoseInternal can spuriously equal frame_skel_index and skip TIKI_SetPoseInternal, so a high-entnum character (allied squadmates/escort NPCs) never gets posed = invisible (enemies on low entnums render fine). Sizing to MAX_GENTITIES matches gl1.
     fontheader_t* pFontDebugStrings;
     int farclip;
 } trGlobals_t;
@@ -2226,6 +2414,11 @@ extern cvar_t	*r_ignore;				// used for debugging anything
 extern cvar_t	*r_verbose;				// used for verbose debug spew
 
 extern cvar_t	*r_znear;				// near Z clip plane
+// HZM gl2 re-port Fix 3: ADS view-weapon projection (cgame sets these by name each frame)
+extern cvar_t	*r_weaponfovx;			// un-zoomed view-weapon fov_x (0 = disabled)
+extern cvar_t	*r_weaponznear;			// weapon near clip (lower = more of the gun's back end)
+extern cvar_t	*r_weaponshifty;		// ADS sight vertical screen shift (-up/+down)
+extern cvar_t	*r_weaponshiftx;		// ADS sight horizontal screen shift (+right/-left)
 extern cvar_t	*r_zproj;				// z distance of projection plane
 extern cvar_t	*r_stereoSeparation;			// separation of cameras for stereo rendering
 
@@ -2270,6 +2463,8 @@ extern	cvar_t	*r_finish;
 extern	cvar_t	*r_textureMode;
 extern	cvar_t	*r_offsetFactor;
 extern	cvar_t	*r_offsetUnits;
+extern	cvar_t	*r_shadowMapBiasFactor;
+extern	cvar_t	*r_shadowMapBiasUnits;
 
 extern	cvar_t	*r_fullbright;					// avoid lightmap pass
 extern	cvar_t	*r_lightmap;					// render lightmaps only
@@ -2327,6 +2522,14 @@ extern  cvar_t  *r_parallaxMapOffset;
 extern  cvar_t  *r_parallaxMapShadows;
 extern  cvar_t  *r_cubeMapping;
 extern  cvar_t  *r_cubemapSize;
+extern  cvar_t  *r_hzmAlphaGenCoord;   // HZM bug-1249: alphaGen sCoord/tCoord parity
+extern  cvar_t  *r_hzmFlapDeform;      // HZM diagnostic: kill switch for deformVertexes flap
+extern  cvar_t  *r_cubemapAuto;        // HZM bug-1237: auto probe budget (info_pathnode placement)
+extern  cvar_t  *r_cubemapAutoRadius;  // HZM bug-1237: parallax radius for auto-placed probes
+
+// HZM bug-1237: ceiling on auto-placed probes. Each costs SIX full world renders at map load
+// plus a cubemap texture, so this is a load-time and VRAM guard, not a quality knob.
+#define MAX_AUTO_CUBEMAPS 64
 extern  cvar_t  *r_deluxeSpecular;
 extern  cvar_t  *r_pbr;
 extern  cvar_t  *r_baseNormalX;
@@ -2342,6 +2545,21 @@ extern  cvar_t  *r_imageUpsample;
 extern  cvar_t  *r_imageUpsampleMaxSize;
 extern  cvar_t  *r_imageUpsampleType;
 extern  cvar_t  *r_genNormalMaps;
+
+// HZM gl2 - targeted generated normal maps + confined specular (tr_image.c header block).
+// All CVAR_ARCHIVE, none CVAR_LATCH (bug-1181: vid_restart crashes gl2) and none CVAR_CHEAT
+// (bug-1156: a listen server silently clamps cheat cvars).
+extern  cvar_t  *r_hzmGenNormals;			// MASTER 0=off 1=allow-list 2=broad
+extern  cvar_t  *r_hzmGenNormalStrength;	// live tangent-space XY scale
+extern  cvar_t  *r_hzmGenNormalMaxSize;		// cap on the generated map's long edge
+extern  cvar_t  *r_hzmGenNormalBlur;		// binomial blur passes on the height field
+extern  cvar_t  *r_hzmGenNormalBrighten;	// upstream's destructive albedo re-brighten
+extern  cvar_t  *r_hzmGenNormalInclude;		// substring allow-list (mode 1)
+extern  cvar_t  *r_hzmGenNormalExclude;		// extra substring deny-list
+extern  cvar_t  *r_hzmGenNormalDebug;
+extern  cvar_t  *r_hzmSpecular;				// F0 applied ONLY to generated-relief stages
+extern  cvar_t  *r_hzmSpecularGloss;
+
 extern  cvar_t  *r_forceSun;
 extern  cvar_t  *r_forceSunLightScale;
 extern  cvar_t  *r_forceSunAmbientScale;
@@ -2354,6 +2572,49 @@ extern  cvar_t  *r_shadowMapSize;
 extern  cvar_t  *r_shadowCascadeZNear;
 extern  cvar_t  *r_shadowCascadeZFar;
 extern  cvar_t  *r_shadowCascadeZBias;
+
+// HZM gl2 REAL CHARACTER SHADOWS. r_charShadows is the MASTER and defaults to 0:
+// with it off, every code path guarded below is skipped and the renderer behaves
+// exactly as it does today (blob decal only). The rest are inert until it is 1.
+extern  cvar_t  *r_charShadows;
+extern  cvar_t  *r_charShadowCascade;
+extern  cvar_t  *r_charShadowDist;
+extern  cvar_t  *r_charShadowLod;
+extern  cvar_t  *r_charShadowBiasFactor;
+extern  cvar_t  *r_charShadowBiasUnits;
+extern  cvar_t  *r_charShadowBlob;
+extern  cvar_t  *r_shadowCastFoliage;
+
+// HZM gl2 (bug-gl2-sphereslot-alias): 1 = scope the per-entity light-sphere cache to the
+// draw-surf LIST that built it, matching the scope of the index it validates. Default 0 =
+// today's behaviour exactly.
+extern  cvar_t  *r_sphereCacheScope;
+extern  cvar_t  *r_shadowDebug;
+extern  cvar_t  *r_coopSunPublish;
+
+// HZM gl2 CHARACTER LIGHTING. r_charLighting is the MASTER and defaults to 0: with it
+// off, backEnd.charLight.active is never set, every guarded path is skipped, and the
+// renderer behaves exactly as it does today. The rest are inert until it is 1.
+extern  cvar_t  *r_charLighting;
+extern  cvar_t  *r_charLightWrap;
+extern  cvar_t  *r_charLightShadow;
+extern  cvar_t  *r_charLightDebug;
+
+// HZM gl2 DYNAMIC-LIGHT CAST SHADOWS. r_hzmDlightShadows is the MASTER and defaults to
+// 0: with it off R_DlightShadowsActive() returns qfalse on its first line, no dlight
+// pshadow is ever built, tr.refdef.num_pshadows stays 0 exactly as it is today, and
+// every path guarded below is skipped. The rest are inert until it is 1.
+// None are CVAR_LATCH (vid_restart crashes gl2, bug-1181) or CVAR_CHEAT (a listen
+// server clamps CVAR_CHEAT back to the default, bug-1156).
+extern  cvar_t  *r_hzmDlightShadows;
+extern  cvar_t  *r_hzmDlightShadowLights;
+extern  cvar_t  *r_hzmDlightShadowMax;
+extern  cvar_t  *r_hzmDlightShadowDist;
+extern  cvar_t  *r_hzmDlightShadowMinRadius;
+extern  cvar_t  *r_hzmDlightShadowCasters;
+extern  cvar_t  *r_hzmDlightShadowChars;
+extern  cvar_t  *r_hzmDlightShadowDebug;
+
 extern  cvar_t  *r_ignoreDstAlpha;
 
 extern	cvar_t	*r_greyscale;
@@ -2388,6 +2649,15 @@ extern cvar_t	*r_drawstaticdecals;
 extern cvar_t	*r_drawterrain;
 extern cvar_t	*r_drawsprites;
 extern cvar_t	*r_drawspherelights;
+// HZM gl2 re-port (bug-gl2-modellight): gl1 tr_local.h:1590
+extern cvar_t	*r_fastentlight;
+
+// HZM coop - gore tier 4 (UV wounds) - HZM gl2 re-port (bug-gl2-gore), gl1 tr_local.h:1696-1701
+extern  cvar_t* r_goreUV;
+extern  cvar_t* r_goreDebug;
+extern  cvar_t* coop_goreSkinWoundScale;	// HZM coop - bloodier wounds on EXPOSED SKIN only (face/head/hands)
+extern  cvar_t* coop_goreSkinSnap;		// HZM coop - skin-snap fallback for moving enemies (0 = off)
+extern  cvar_t* coop_goreSkinSnapDist;	// HZM coop - skin-snap vertex tolerance in model units (clamped 8-64)
 
 extern cvar_t	*r_numdebuglines;
 extern cvar_t	*r_stipplelines;
@@ -2409,6 +2679,57 @@ extern cvar_t* r_farplane_nocull;
 extern cvar_t* r_farplane_nofog;
 extern cvar_t* r_skybox_farplane;
 extern cvar_t* r_farclip;
+
+//
+// HZM gl2 fog parity: the screen-space port of gl1's fixed-function global farplane fog.
+// r_globalFog* are tuning/diagnostic knobs; the shipped defaults reproduce gl1 1:1.
+//
+extern cvar_t* r_globalFog;				// 0 = off entirely (A/B kill switch)
+extern cvar_t* r_globalFogScale;		// multiplies the computed fog fraction
+extern cvar_t* r_globalFogStartScale;	// multiplies farplane_bias  (fog START)
+extern cvar_t* r_globalFogEndScale;		// multiplies farplane_distance (fog END)
+extern cvar_t* r_globalFogSky;			// 1 = fog sky pixels too (gl1 "nofog" sky = 0)
+extern cvar_t* r_globalFogRadial;		// 0 = planar eye Z (gl1), 1 = radial distance
+extern cvar_t* r_globalFogIdentityLight;// 1 = scale the fog colour by tr.identityLight
+extern cvar_t* r_globalFogDebug;		// 1 = log values, 2 = show fraction, 3 = show distance
+extern cvar_t* r_globalFogForward;		// 1 = mix fog IN the surface shaders (gl1 order), 0 = old screen-space pass
+extern cvar_t  *r_ppDoF;            // HZM gl2 (bug-1157) gl1-parity depth of field
+extern cvar_t  *r_ppSSAO;           // HZM gl2 (bug-1177) gl1-parity SSAO master (CVAR_LATCH - gates buffer alloc)
+extern cvar_t  *r_ppSSAORadius;
+extern cvar_t  *r_ppSSAOIntensity;
+extern cvar_t  *r_ppSSAOBias;
+extern cvar_t  *r_ppSSAODepthAware;
+
+// Global farplane fog state, latched from the MAIN world view in RB_DrawSurfs (which is
+// where gl1 calls RB_SetupFog) so the post pass can never inherit a portal / sky-portal /
+// shadow sub-view's parameters or a projection matrix it was not rasterised with.
+typedef struct {
+	qboolean	active;
+	float		start;			// gl1 GL_FOG_START = viewParms.farplane_bias
+	float		end;			// gl1 GL_FOG_END   = viewParms.farplane_distance
+	vec3_t		color;			// gl1 fog colour (farplane_color [* tr.identityLight])
+	float		projMat10;		// projectionMatrix[10] actually used for this view
+	float		projMat14;		// projectionMatrix[14] actually used for this view
+	float		projMat0;		// projectionMatrix[0]  (for the radial option)
+	float		projMat5;		// projectionMatrix[5]
+	float		zNear;			// derived from the matrix, for logging only
+	float		zFar;			// derived from the matrix, for logging only
+} globalFogState_t;
+
+extern globalFogState_t	rb_globalFog;
+
+void RB_SetupGlobalFog( void );
+
+// HZM gl2 FORWARD GLOBAL FOG: upload u_GlobalFogColor / u_GlobalFogParams for one draw.
+// stateBits selects gl1's per-stage fog target (black for additive, white for modulate,
+// fog colour otherwise); fogAsSky ties the draw to r_globalFogSky. Lives in tr_shade.c and is
+// also called from tr_sky.c, so it must have external linkage.
+void RB_SetGlobalFogUniforms( shaderProgram_t *sp, int stateBits, qboolean fogAsSky );
+// qtrue when the forward path owns the fog this frame. r_globalFogDebug and r_globalFogRadial
+// are implemented only by the screen-space pass, so either being set forces the legacy path -
+// otherwise flipping the forward default would silently kill the diagnostic tooling built for
+// this exact workstream (and an archived r_globalFogRadial 1 would become a silent no-op).
+qboolean R_UseForwardGlobalFog( void );
 
 // Lighting
 
@@ -2542,6 +2863,24 @@ int R_CullPointAndRadiusEx( const vec3_t origin, float radius, const cplane_t* f
 int R_CullPointAndRadius( const vec3_t origin, float radius );
 int R_CullLocalPointAndRadius( const vec3_t origin, float radius );
 
+// HZM gl2 real character shadows: single predicate for "the r_charShadows feature is
+// live this frame". Used to force the sun-shadow chain on without depending on the
+// user's archived r_depthPrepass, and to gate every behavioural change in the feature.
+// Returns qfalse whenever r_charShadows is 0, which is the default.
+qboolean R_CharShadowsActive( void );
+
+// HZM gl2 dynamic-light cast shadows: single predicate for "the r_hzmDlightShadows
+// feature is live this frame". Returns qfalse whenever r_hzmDlightShadows is 0, which
+// is the default, and whenever the FBO path (which the pshadow depth targets need) is
+// unavailable. Every guard for the feature goes through this one function.
+qboolean R_DlightShadowsActive( void );
+
+// HZM gl2 dynamic-light cast shadows: front-end pass. Picks the few most important
+// scene dlights, finds the entities they can cast, fills tr.refdef.pshadows[] and
+// renders one 512x512 depth map per shadow. Called from RE_RenderScene BEFORE the main
+// R_RenderView, so tr_world.c can hand out the pshadow bits for this frame.
+void R_RenderDlightShadowMaps(const refdef_t *fd);
+
 void R_SetupProjection(viewParms_t *dest, float zProj, float zFar, qboolean computeFrustum);
 void R_RotateForEntity( const trRefEntity_t *ent, const viewParms_t *viewParms, orientationr_t *or );
 
@@ -2591,6 +2930,13 @@ void	GL_Cull( int cullType );
 #define GLS_ATEST_GT_0							0x10000000
 #define GLS_ATEST_LT_80							0x20000000
 #define GLS_ATEST_GE_80							0x40000000
+// HZM gl2 re-port (bug-gl2-foliage): MOHAA foliage alpha-test modes (gl1 parity).
+// gl2's ATEST field is compared with == against the full GLS_ATEST_BITS mask, so
+// the remaining enumerated values of the 3-bit field are free for these.
+#define GLS_ATEST_LT_FOLIAGE1					0x30000000
+#define GLS_ATEST_GE_FOLIAGE1					0x50000000
+#define GLS_ATEST_LT_FOLIAGE2					0x60000000
+#define GLS_ATEST_GE_FOLIAGE2					0x70000000
 #define		GLS_ATEST_BITS						0x70000000
 
 #define GLS_DEFAULT			GLS_DEPTHMASK_TRUE
@@ -2626,6 +2972,12 @@ void	R_InitFogTable( void );
 float	R_FogFactor( float s, float t );
 void	R_InitImages( void );
 void	R_DeleteTextures( void );
+
+// HZM gl2 - targeted generated normal maps (tr_image.c)
+qboolean	R_HZM_GenNormalsWanted( const char *name );
+qboolean	R_HZM_IsGeneratedNormal( const image_t *img );
+void		R_HZM_GenNormalsReset( void );
+
 int		R_SumOfUsedImages( void );
 void	R_InitSkins( void );
 skin_t	*R_GetSkinByHandle( qhandle_t hSkin );
@@ -2670,6 +3022,17 @@ qboolean R_ImageExists(const char* name);
 int R_CountTextureMemory();
 qboolean R_LoadRawImage(const char *name, byte **pic, int *width, int *height);
 void R_FreeRawImage(byte *pic);
+
+// HZM coop - gore tier 4 (UV wounds) - tr_gore.c
+// HZM gl2 re-port (bug-gl2-gore), mirrors gl1 tr_local.h:2294-2304
+void RE_GoreImpact(const vec3_t vStart, const vec3_t vEnd); // exported to cgame (bullet segment)
+void RE_GoreReset(int entityNumber);                        // exported to cgame (entity fresh again)
+void RE_GoreKillSplash(int entityNumber);                   // exported to cgame (killing blow - bug-780)
+void R_GoreSkelSurfaceCheck(int baseVertex, int baseIndex); // RB_SkelMesh tail: ray-test skinned tris
+image_t *R_GoreOverrideImage(image_t *image);               // R_BindAnimatedImageToTMU: swap in wound copy
+void R_GoreCommitPending(void);                             // RE_EndFrame: stamp + upload
+void R_GoreLevelReset(void);                                // RE_BeginRegistration
+void R_GoreShutdown(void);                                  // RE_Shutdown (before R_DeleteTextures)
 
 //
 // tr_bsp.c
@@ -3023,6 +3386,11 @@ void Draw_StretchPic(float x, float y, float w, float h, float s1, float t1, flo
 void Draw_StretchPic2(float x, float y, float w, float h, float s1, float t1, float s2, float t2, float sx, float sy, qhandle_t hShader);
 void Draw_TilePic(float x, float y, float w, float h, qhandle_t hShader);
 void Draw_TilePicOffset(float x, float y, float w, float h, qhandle_t hShader, int offsetX, int offsetY);
+// HZM gl2 (bug #73 ghost-gun-over-menus): sceneless-frame stale-FBO clear; flag set by
+// RB_DrawSurfs, reset by RB_SwapBuffers, consumed by every immediate 2D entry point.
+void R_Ensure2DClear(void);
+void R_BindRenderFbo(void);
+extern int g_sceneThisFrame;
 void Draw_TrianglePic(const vec2_t vPoints[3], const vec2_t vTexCoords[3], qhandle_t hShader);
 void DrawBox(float x, float y, float w, float h);
 void AddBox(float x, float y, float w, float h);
@@ -3069,6 +3437,10 @@ LIGHTS
 void R_GetLightingForDecal(vec3_t vLight, const vec3_t vFacing, const vec3_t vOrigin);
 void R_GetLightingForSmoke(vec3_t vLight, const vec3_t vOrigin);
 void R_GetLightingGridValue(world_t* world, const vec3_t vPos, vec3_t vAmbientLight, vec3_t vDirectedLight);
+// HZM gl2 re-port (bug-gl2-modellight): gl1's single-color grid sampler
+// (gl1 tr_light.c R_GetLightingGridValue) - ambient+directed folded into one
+// value, used by entity/static-model grid lighting and sphere ambient setup
+void R_GetLightingGridValueSingle(world_t* world, const vec3_t vPos, vec3_t vLight);
 void RB_SetupEntityGridLighting();
 void RB_SetupStaticModelGridLighting(trRefdef_t* refdef, cStaticModelUnpacked_t* ent, const vec3_t lightOrigin);
 
@@ -3298,6 +3670,8 @@ void	RB_CalcRotateTexMatrix( float degsPerSecond, float *matrix );
 void RB_CalcTurbulentFactors( const waveForm_t *wf, float *amplitude, float *now );
 void	RB_CalcTransformTexMatrix( const texModInfo_t *tmi, float *matrix  );
 void	RB_CalcStretchTexMatrix( const waveForm_t *wf, float *matrix );
+void	RB_CalcTransWaveTexMatrix( const waveForm_t *wf, float *matrix );   // HZM gl2 parity (bug-1242)
+void	RB_CalcTransWaveTexMatrixT( const waveForm_t *wf, float *matrix );  // HZM gl2 parity (bug-1242)
 
 void	RB_CalcModulateColorsByFog( unsigned char *dstColors );
 float	RB_CalcWaveAlphaSingle( const waveForm_t *wf );
@@ -3445,8 +3819,20 @@ typedef enum {
 // these are sort of arbitrary limits.
 // the limits apply to the sum of all scenes in a frame --
 // the main view, all the 3D icons, etc
-#define	MAX_POLYS		600
-#define	MAX_POLYVERTS	3000
+// HZM gl2 (bug-gl2-maxpolys, #maxpolys): gl2 was still at the STOCK Q3 values (600 /
+// 3000) while gl1 was long ago raised to 32768 / 131072. The coop mod's dynamic-poly
+// producers (bullet-hole MARKS + blood/decal polys, submitted every frame by the
+// renderer-agnostic cgame via RE_AddPolyToScene2) are IDENTICAL for both renderers and
+// bounded by cg_maxMarks + the 10s mark lifetime - gl1's larger buffer simply holds the
+// sustained-combat load that gl2's tiny buffer dropped, spamming "Exceeded MAX POLYS"
+// and thinning the decals after a lot of shooting. The counts reset per frame
+// (R_InitNextFrame), so this is headroom, not a leak. Raised PAST gl1 (4x) for comfort;
+// the user wants MORE blood, not less. r_maxpolys/r_maxpolyverts default + floor clamp
+// to these, so the backEndData allocation (R_Init) grows to match (~17 MB, fine on
+// modern HW). Gore/blood-skin wounds are a separate texture-paint system (tr_gore.c,
+// GORE_MAX_INSTANCES/PENDING bounded) and submit ZERO scene polys, so they are unaffected.
+#define	MAX_POLYS		131072
+#define	MAX_POLYVERTS	524288
 #define	MAX_TERMARKS	1024
 
 // all of the information needed by the back end must be
@@ -3465,7 +3851,9 @@ typedef struct {
     //
     drawSurf_t  spriteSurfs[MAX_SPRITESURFS];
 	srfMarkFragment_t* terMarks;
-    refSprite_t sprites[2048];
+    // HZM (engine-limits audit): was the literal 2048, so raising MAX_SPRITES (the value
+    // RE_AddRefSpriteToScene bounds-checks against) would have overrun this array silently.
+    refSprite_t sprites[MAX_SPRITES];
     cStaticModelUnpacked_t* staticModels;
     byte* staticModelData;
 } backEndData_t;

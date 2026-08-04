@@ -112,6 +112,29 @@ cent->nextState is moved to cent->currentState and events are fired
 */
 static void CG_TransitionEntity(centity_t *cent)
 {
+    // HZM coop - gore tier 4 (UV wounds): a body that comes back to life must
+    // lose its accumulated client-side wound texture. The EF_DEAD falling edge
+    // catches player respawns, actor slot reuse and revives (last-known state
+    // was dead, new state is alive); the EF_TELEPORT_BIT toggle catches
+    // scripted warps/respawns that never showed us a corpse. PVS re-entry
+    // alone changes neither flag, so wounds correctly survive it.
+    if (cgi.R_GoreReset) {
+        if (((cent->currentState.eFlags & EF_DEAD) && !(cent->nextState.eFlags & EF_DEAD))
+            || ((cent->currentState.eFlags ^ cent->nextState.eFlags) & EF_TELEPORT_BIT)) {
+            cgi.R_GoreReset(cent->nextState.number);
+        }
+    }
+    // bug-780: the EF_DEAD RISING edge is the killing blow - have the renderer throw 2-3
+    // blood-only splashes onto the corpse's wound textures so bodies read properly
+    // bloodied even where the tier skins fail. Actors now set EF_DEAD server-side
+    // (Actor::HandleKilled) precisely for this edge; players and the body queue already
+    // carried it.
+    if (cgi.R_GoreKillSplash) {
+        if (!(cent->currentState.eFlags & EF_DEAD) && (cent->nextState.eFlags & EF_DEAD)) {
+            cgi.R_GoreKillSplash(cent->nextState.number);
+        }
+    }
+
     cent->currentState = cent->nextState;
     cent->currentValid = qtrue;
 

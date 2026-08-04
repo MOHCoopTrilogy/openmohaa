@@ -1121,7 +1121,7 @@ Weapon *BotController::FindWeaponWithAmmo()
         next = (Weapon *)G_GetEntity(inventory.ObjectAt(j));
 
         assert(next);
-        if (!next->IsSubclassOfWeapon() || next->IsSubclassOfInventoryItem()) {
+        if (!next || !next->IsSubclassOfWeapon() || next->IsSubclassOfInventoryItem()) {
             continue;
         }
 
@@ -1163,7 +1163,7 @@ Weapon *BotController::FindMeleeWeapon()
         next = (Weapon *)G_GetEntity(inventory.ObjectAt(j));
 
         assert(next);
-        if (!next->IsSubclassOfWeapon() || next->IsSubclassOfInventoryItem()) {
+        if (!next || !next->IsSubclassOfWeapon() || next->IsSubclassOfInventoryItem()) {
             continue;
         }
 

@@ -436,9 +436,9 @@ void SV_ClientsAlloc( void )
 	svs.clients = Z_Malloc( svs.iNumClients * sizeof( client_t ) );
 	Com_Memset( svs.clients, 0, svs.iNumClients * sizeof( client_t ) );
 	if( g_gametype->integer != GT_SINGLE_PLAYER ) {
-		svs.numSnapshotEntities = svs.iNumClients * PACKET_BACKUP * MAX_CLIENTS;
+		svs.numSnapshotEntities = svs.iNumClients * PACKET_BACKUP * MAX_CLIENTS * 4; // HZM bug-934: x4 - a single 2048-entity snapshot filled the old ring
 	} else {
-		svs.numSnapshotEntities = 1 * PACKET_BACKUP * MAX_CLIENTS;
+		svs.numSnapshotEntities = 1 * PACKET_BACKUP * MAX_CLIENTS * 4; // HZM bug-934: x4 - listen-server ring was 2048 = ONE max snapshot
 	}
 
 	SV_InitAllCGMessages();
@@ -533,9 +533,9 @@ void SV_ChangeMaxClients( void ) {
 	Z_Free( oldClients );
 
 	if( g_gametype->integer != GT_SINGLE_PLAYER ) {
-		svs.numSnapshotEntities = svs.iNumClients * PACKET_BACKUP * MAX_CLIENTS;
+		svs.numSnapshotEntities = svs.iNumClients * PACKET_BACKUP * MAX_CLIENTS * 4; // HZM bug-934: x4 - a single 2048-entity snapshot filled the old ring
 	} else {
-		svs.numSnapshotEntities = 1 * PACKET_BACKUP * MAX_CLIENTS;
+		svs.numSnapshotEntities = 1 * PACKET_BACKUP * MAX_CLIENTS * 4; // HZM bug-934: x4 - listen-server ring was 2048 = ONE max snapshot
 	}
 }
 

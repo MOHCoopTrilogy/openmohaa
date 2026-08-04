@@ -32,3 +32,4 @@ if (target_type STREQUAL "SHARED_LIBRARY")
 endif ()
 
 # HZM: touch to re-glob (added tr_grass_gl1.c)
+# HZM: touch to re-glob (added tr_gore.c - coop gore tier 4 UV wounds)

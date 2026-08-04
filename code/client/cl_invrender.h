@@ -114,7 +114,11 @@ void CL_Draw3DModel(
     vec3_t    offset,
     vec3_t    angle,
     vec3_t    color,
-    str       anim
+    str       anim,
+    qhandle_t attachModel = 0,      // HZM coop: optional model composited onto attachTag (helmet on operator)
+    const char *attachTag = NULL,
+    qhandle_t attachModel2 = 0,     // HZM coop: 2nd optional model composited onto attachTag2 (weapon in hand)
+    const char *attachTag2 = NULL
 );
 
 void     UI_DoInventory(qboolean activate_mouse);

@@ -65,8 +65,10 @@ long myftol( float f );
 // parallel on a dual cpu machine
 #define	SMP_FRAMES		2
 
-// 12 bits
-// see QSORT_SHADERNUM_SHIFT
+// HZM (engine-limits audit): the old "// 12 bits" comment here was wrong twice over - 16384 is
+// 14 bits, and the drawsurf sort key can only carry (32 - QSORT_SHADERNUM_SHIFT) = 11 of them.
+// MAX_SHADERS is the size of tr.shaders[] / tr.sortedShaders[]; the number of shaders that can
+// actually be *encoded* in a drawsurf is MAX_SORTED_SHADERS (see QSORT_SHADERNUM_SHIFT below).
 #define	MAX_SHADERS				16384
 
 //#define MAX_SHADER_STATES 2048
@@ -1182,6 +1184,14 @@ extern	refimport_t		ri;
 #define	MAX_SPRITESURFS			0x8000
 #define	DRAWSURF_MASK			(MAX_DRAWSURFS-1)
 
+// HZM (engine-limits audit): one sprite surf is emitted per visible refSprite PER VIEW
+// (R_AddSpriteSurfaces), and tr.refdef.numSpriteSurfs accumulates across every view in the
+// frame. MAX_SPRITESURFS is therefore the real ceiling and must never be smaller than
+// MAX_SPRITES; R_AddSpriteSurf indexes spriteSurfs[] with it, not with MAX_SPRITES.
+#if MAX_SPRITESURFS < MAX_SPRITES
+	#error "MAX_SPRITESURFS must be >= MAX_SPRITES (one sprite surf per sprite, per view)"
+#endif
+
 #define MAX_SPRITE_DIST				16384.0f
 #define MAX_SPRITE_DIST_SQUARED		(MAX_SPRITE_DIST * MAX_SPRITE_DIST)
 
@@ -1209,6 +1219,41 @@ the bits are allocated as follows:
 #define	QSORT_FOGNUM_SHIFT		2
 #define	QSORT_REFENTITYNUM_SHIFT	7
 #define	QSORT_STATICMODEL_SHIFT	20 // was 21, decreased in 2.30
+
+// HZM (engine-limits audit) - the real, usable shader ceiling for gl1.
+//
+// drawSurf_t::sort is an unsigned 32-bit word. The shader field is whatever is left above
+// QSORT_SHADERNUM_SHIFT, i.e. 32-21 = 11 bits = 2048 entries, but MAX_SHADERS is 16384. Above
+// 2047 the sortedIndex written by R_AddDrawSurf is truncated and R_DecomposeSort hands the
+// backend tr.sortedShaders[index % 2048] - a completely unrelated shader, with no warning of
+// any kind. This is the silent-truncation class of bug, so GeneratePermanentShader now prints
+// a very visible warning the moment the count crosses MAX_SORTED_SHADERS.
+//
+// The structural fix is to repack the key the way renderergl2 already does
+// (entity 4..15 / staticmodel 16 / shader 17..31 = 15 bits), which would make the whole 16384
+// encodable. That is deliberately NOT done here: it changes gl1's sort ORDER (and gl1's sprite
+// key, which ORs a 0..2^28 distance under the same shift), and gl1 is the shipping renderer.
+// Treat it as its own reviewed change, not a side effect of this audit.
+#define	QSORT_SHADERNUM_BITS	(32 - QSORT_SHADERNUM_SHIFT)
+#define	MAX_SORTED_SHADERS		(MAX_SHADERS < (1 << QSORT_SHADERNUM_BITS) ? MAX_SHADERS : (1 << QSORT_SHADERNUM_BITS))
+
+// The entity field was decoded with the bare literal 4095 in R_DecomposeSort. Name it, so the
+// ceiling that the static-model index and refEntity index must respect is greppable - and so
+// the overlap checks below are derived rather than hand-counted.
+#define	QSORT_ENTITYNUM_BITS	12
+#define	QSORT_ENTITYNUM_MASK	((1 << QSORT_ENTITYNUM_BITS) - 1)
+#define	QSORT_DLIGHTMAP_BITS	4
+
+// The fields must not overlap.
+#if QSORT_ENTITYNUM_SHIFT < QSORT_DLIGHTMAP_BITS
+	#error "QSORT_ENTITYNUM_SHIFT overlaps the dlightMap field at bit 0"
+#endif
+#if (QSORT_ENTITYNUM_SHIFT + QSORT_ENTITYNUM_BITS) > QSORT_STATICMODEL_SHIFT
+	#error "the entity field overlaps QSORT_STATICMODEL_SHIFT"
+#endif
+#if (QSORT_STATICMODEL_SHIFT + 1) > QSORT_SHADERNUM_SHIFT
+	#error "the staticmodel flag overlaps the shader field"
+#endif
 
 extern	int			gl_filter_min, gl_filter_max;
 
@@ -1398,7 +1443,7 @@ typedef struct {
     int rendererhandle;
     qboolean shadersParsed;
     int frame_skel_index;
-    int skel_index[1024];
+    int skel_index[MAX_GENTITIES]; // HZM 07-20 (bug-932): was a bare [1024] indexed by model->entityNumber - entities >= 1024 (real since the GENTITYNUM_BITS 11 op) wrote past it into adjacent globals = memory corruption/abort when any skeletal model rendered on a high-numbered entity
     fontheader_t* pFontDebugStrings;
 
 	int farclip;
@@ -1575,6 +1620,7 @@ extern	cvar_t	*r_clear;						// force screen clear every frame
 
 extern	cvar_t	*r_shadows;						// controls shadows: 0 = none, 1 = blur, 2 = stencil, 3 = black planar projection
 extern	cvar_t	*r_entlight_scale;
+extern	cvar_t	*r_entlight_tikiScale;	// HZM bug-916: extra brightness for the runtime-TIKI vertex-color fallback (placed cover) - flat grid light lacks the baked sun the map statics have
 extern	cvar_t	*r_entlight_errbound;
 extern	cvar_t	*r_entlight_cubelevel;
 extern	cvar_t	*r_entlight_cubefraction;
@@ -1691,6 +1737,13 @@ extern	cvar_t* r_loadftx;
 extern  cvar_t* r_showSkeleton;
 extern  cvar_t* r_developer;
 extern  cvar_t* r_fps;
+
+// HZM coop - gore tier 4 (UV wounds)
+extern  cvar_t* r_goreUV;
+extern  cvar_t* r_goreDebug;
+extern  cvar_t* coop_goreSkinWoundScale;	// HZM coop - bloodier wounds on EXPOSED SKIN only (face/head/hands)
+extern  cvar_t* coop_goreSkinSnap;		// HZM coop - skin-snap fallback for moving enemies (0 = off)
+extern  cvar_t* coop_goreSkinSnapDist;	// HZM coop - skin-snap vertex tolerance in model units (clamped 8-64)
 
 //====================================================================
 
@@ -2282,6 +2335,19 @@ void R_InfoWorldTris_f(void);
 void R_PrintInfoWorldtris(void);
 void R_DebugSkeleton(void);
 
+//
+// HZM coop - gore tier 4 (UV wounds) - tr_gore.c
+// Per-entity UV-space wound painting on CPU-skinned TIKI characters.
+//
+void RE_GoreImpact(const vec3_t vStart, const vec3_t vEnd); // exported to cgame (bullet segment)
+void RE_GoreReset(int entityNumber);                        // exported to cgame (entity fresh again)
+void RE_GoreKillSplash(int entityNumber);                   // exported to cgame (killing blow - bug-780)
+void R_GoreSkelSurfaceCheck(int baseVertex, int baseIndex); // RB_SkelMesh tail: ray-test skinned tris
+image_t *R_GoreOverrideImage(image_t *image);               // R_BindAnimatedImage: swap in wound copy
+void R_GoreCommitPending(void);                             // RE_EndFrame: stamp + upload
+void R_GoreLevelReset(void);                                // RE_BeginRegistration
+void R_GoreShutdown(void);                                  // RE_Shutdown (before R_DeleteTextures)
+
 extern int g_nStaticSurfaces;
 extern qboolean g_bInfostaticmodels;
 extern qboolean g_bInfoworldtris;
@@ -2516,7 +2582,9 @@ typedef struct {
 	srfMarkFragment_t* terMarks;
 	srfPoly_t	*polys;
 	polyVert_t	*polyVerts;
-	refSprite_t sprites[2048];
+	// HZM (engine-limits audit): was the literal 2048, so raising MAX_SPRITES (the value
+	// RE_AddRefSpriteToScene bounds-checks against) would have overrun this array silently.
+	refSprite_t sprites[MAX_SPRITES];
 	cStaticModelUnpacked_t* staticModels;
 	byte* staticModelData;
 	renderCommandList_t	commands;

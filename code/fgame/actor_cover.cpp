@@ -29,7 +29,26 @@ static int Cover_HideTime(int iTeam)
     if (iTeam == TEAM_AMERICAN) {
         return rand() % 2001 + 2000;
     } else {
-        return rand() % 11001 + 4000;
+        // [HZM coop 2026-07-23] German (enemy) troops hide 4-15s vs the American 2-4s, so enemy cover AI
+        // sits still much longer. coop_aiHideMinMs/MaxMs make the enemy hide window tunable; defaults
+        // 4000/15000 = vanilla (no change unless the coop dynamic-AI path lowers the max so they re-peek).
+        static cvar_t *coop_aiHideMinMs = NULL;
+        static cvar_t *coop_aiHideMaxMs = NULL;
+        if (!coop_aiHideMinMs) {
+            coop_aiHideMinMs = gi.Cvar_Get("coop_aiHideMinMs", "4000", 0);
+        }
+        if (!coop_aiHideMaxMs) {
+            coop_aiHideMaxMs = gi.Cvar_Get("coop_aiHideMaxMs", "15000", 0);
+        }
+        int lo = coop_aiHideMinMs->integer;
+        int hi = coop_aiHideMaxMs->integer;
+        if (lo < 250) {
+            lo = 250;
+        }
+        if (hi <= lo) {
+            hi = lo + 1;
+        }
+        return rand() % (hi - lo) + lo;
     }
 }
 

@@ -681,6 +681,33 @@ qboolean CG_EntityShadow(centity_t *cent, refEntity_t *model)
         return qfalse;
     }
 
+    // HZM gl2 REAL CHARACTER SHADOWS. renderergl2 publishes r_coopRealShadows = 1 only while
+    // it is actually writing skeletal characters into the sun cascade shadow maps
+    // (r_charShadows 1 and the sun chain live). Suppress BOTH the HZM Phase-A directional
+    // decal immediately below AND every vanilla foot/blob path after it, so the player sees
+    // exactly one shadow per actor instead of a real cast shadow with a decal painted on top.
+    //
+    // GL1-SAFE BY CONSTRUCTION: renderergl1 never sets this cvar, so under gl1 it stays at the
+    // "0" default registered right here and this branch is never taken - gl1 behaviour is
+    // bit-identical with no reasoning required. This mirrors the existing r_coopSunValid
+    // pattern (published by renderergl1/tr_scene.c, consumed just below).
+    //
+    // NOT cg_shadows: that is the SAME cvar the renderers register their internal r_shadows
+    // under, it gates the rend2 pshadow pass, it also gates CG_Splash water marks, and its
+    // registration defaults disagree between cgame (0) and both renderers (1).
+    //
+    // To force the decal back on while real shadows are running: r_charShadowBlob 1
+    // (renderer side - it makes the renderer publish 0 here).
+    {
+        static cvar_t *sRealShadows = NULL;
+        if (!sRealShadows) {
+            sRealShadows = cgi.Cvar_Get("r_coopRealShadows", "0", 0);
+        }
+        if (sRealShadows && sRealShadows->integer) {
+            return qfalse;
+        }
+    }
+
     // HZM coop - PHASE A directional shadow: when coop_shadowDir is on, draw a single elongated,
     // sun-oriented ground decal per model (overrides the straight-down foot/blob shadow). Uses fixed
     // sun-angle cvars (coop_shadowAz/El) so it needs no renderer sun-direction bridge. Pure cgame.
@@ -1163,7 +1190,7 @@ static const adsGunTune_t s_adsGunTune[] = {
     { "Walther P38", -1.5f, -0.5f,  1.5f,   0.0f, -0.02f,   0.5f, -9.5f,  1.0f, -0.145f,  0.02f },
     { "Webley Revolver",        2.5f, -1.5f,  0.0f, -0.02f, 0.12f,   0.5f,-10.0f, 1.0f,-0.16f, 0.08f },
     { "Nagant Revolver",        2.5f, -1.5f,  0.0f, -0.02f, 0.08f,   0.5f,-10.0f, 1.0f,-0.16f, 0.02f },
-    { "Beretta",                2.5f, -1.5f, -2.0f,  0.0f,  0.08f,  -1.0f, -8.5f, 1.0f,-0.14f, 0.02f },
+    { "Beretta",                0.0f, -1.0f, -2.0f,  0.005f, 0.075f, -1.0f, -8.5f, 1.0f,-0.14f, 0.02f },
     { "Hi-Standard Silenced",   0.0f, -1.0f, -2.0f, -0.02f, 0.02f,   1.0f, -8.0f, 1.0f,-0.12f, 0.02f },
     { "M1 Garand", -7.5f, -1.0f, -1.0f, -0.02f, -0.22f,   3.5f,-38.5f,  3.5f,  -0.75f,  0.08f },
     { "Mauser KAR 98K", -7.5f, -1.0f, -1.0f, -0.02f, -0.22f,   4.5f,-34.5f,  6.5f, -0.625f,  0.08f },
@@ -1175,7 +1202,7 @@ static const adsGunTune_t s_adsGunTune[] = {
     { "MP40",  0.5f,  2.0f, -1.5f,  0.02f,   0.0f,   2.5f,-20.0f,  1.5f, -0.335f,  0.05f },
     { "Sten Mark II",           1.0f,  1.5f, -1.5f,  0.02f,-0.04f,   1.0f,-20.0f, 1.5f,-0.28f, 0.02f },
     { "PPSH SMG", -2.5f, 11.0f, -2.0f,  0.14f, -0.08f,   1.5f,-18.0f,  2.5f,  -0.26f,  0.04f },
-    { "Moschetto", -8.0f,  6.0f, -2.0f,  0.10f, -0.28f,   2.0f,-18.5f,  1.5f, -0.285f,-0.005f },
+    { "Moschetto", -8.0f,  6.0f, -2.0f,  0.115f,-0.325f,   2.0f,-18.5f,  1.5f, -0.285f,-0.005f },
     { "BAR",  1.0f, -0.5f,  0.0f,   0.0f,  0.04f,   2.0f,-23.0f,  1.5f,  -0.38f, 0.155f },
     { "StG 44",  0.0f,  2.5f,  0.0f,  0.04f,  0.02f,   2.5f,-20.5f,  2.5f, -0.325f,  0.06f },
     { "Vickers-Berthier",  7.0f,-11.5f, -1.0f, -0.12f,  0.28f,   1.5f,-26.5f,  1.5f, -0.505f,  0.18f },
@@ -1183,6 +1210,31 @@ static const adsGunTune_t s_adsGunTune[] = {
     { "Panzerschreck",         11.0f,  7.5f, -1.0f,  0.08f, 0.30f,   1.5f, -7.0f, 1.0f,-0.06f, 0.04f },
     { "PIAT",                 -12.5f, 21.0f,  2.0f,  0.24f,-0.32f,   1.5f, -7.0f, 1.0f,-0.10f, 0.02f },
     { "shotgun",-12.5f, 12.0f,  2.0f,  0.12f, -0.42f,  -3.0f,-43.0f,  1.0f, -0.715f, -0.02f },
+    // [user 07-18] grease guns: dialled on the SILENCED variant; regular M3 copied to match (same gun).
+    { "Silenced Grease Gun",    3.0f,  0.0f,  0.0f,   0.0f, 0.095f,   1.0f,-10.5f,  1.5f, -0.165f,  0.02f },
+    { "M3 Grease Gun",          3.0f,  0.0f,  0.0f,   0.0f, 0.095f,   1.0f,-10.5f,  1.5f, -0.165f,  0.02f },
+    // [user 07-18 session 2] STANDING-ONLY tune pass (pistols + silenced variants, rifles, SMGs). The STAND
+    // fields are dialled; the CROUCH fields on these NEW rows are the inherited default state the adssave
+    // printed (crouch was NOT deliberately tuned this session) - fine as a starting point, refine later.
+    { "Silenced Colt .45",      0.0f, -1.0f,  1.5f, -0.015f,-0.005f,   1.5f, -8.5f,  4.0f, -0.14f,  0.04f },
+    { "Silenced Walther P38",  -2.0f,  0.0f,  1.5f, -0.005f,-0.025f,   1.5f, -8.5f,  4.0f, -0.14f,  0.04f },
+    { "Silenced TT-33",        -2.0f, -1.0f,  1.5f, -0.01f, -0.015f,   1.5f, -8.5f,  4.0f, -0.14f,  0.04f },
+    { "Silenced Beretta",      -1.0f, -1.5f,  1.5f, -0.005f, 0.01f,    1.5f, -8.5f,  4.0f, -0.14f,  0.04f },
+    { "Silenced Luger P08",    -1.5f, -1.5f,  1.5f, -0.01f, -0.025f,   1.5f, -8.5f,  4.0f, -0.14f,  0.04f },
+    { "Walther PPK",           -3.5f, -0.5f,  3.0f, -0.01f, -0.11f,    1.0f, -8.0f,  1.0f, -0.12f,  0.02f },
+    { "Luger P08",              0.0f, -1.5f,  0.0f, -0.01f, -0.035f,   1.0f, -8.0f,  1.0f, -0.12f,  0.02f },
+    { "Nambu Type 14",          1.5f, -1.5f,  0.0f, -0.015f, 0.015f,   1.0f, -8.0f,  1.0f, -0.12f,  0.02f },
+    { "TT-33 Tokarev",         -1.0f, -0.5f,  0.0f, -0.015f,-0.01f,    1.0f, -8.0f,  1.0f, -0.12f,  0.02f },
+    { "Welrod",                -1.0f, -2.0f,  0.0f, -0.015f,-0.01f,    1.0f, -8.0f,  1.0f, -0.12f,  0.02f },
+    { "M1 Carbine",           -10.5f, -0.5f, -1.0f, -0.015f,-0.385f,   4.5f,-34.5f,  6.5f, -0.625f, 0.08f },
+    { "Arisaka Type 99",       -7.0f, -1.0f,  1.0f, -0.015f,-0.29f,    2.0f,-34.5f,  0.0f, -0.625f, 0.045f },
+    { "Springfield M1903",    -18.0f,  0.5f,  1.0f,  0.01f, -0.73f,    2.0f,-34.5f,  0.0f, -0.625f, 0.045f },
+    { "Thompson 50rd",          4.5f,  2.0f,  0.0f,  0.02f,  0.08f,    1.0f,-10.5f,  1.5f, -0.165f, 0.02f },
+    { "Silenced MP40",          4.5f,  4.0f,  0.0f,  0.045f, 0.095f,   1.0f,-10.5f,  1.5f, -0.165f, 0.02f },
+    { "Type 100 SMG",          18.0f, -2.0f,  0.0f,  0.0f,   0.325f,   1.0f,-10.5f,  1.5f, -0.165f, 0.02f },
+    { "Silenced PPS-43",       -2.0f,  4.0f,  0.0f,  0.065f, 0.005f,   1.0f,-10.5f,  1.5f, -0.165f, 0.02f },
+    { "Beretta M38",           -8.0f,  6.5f, -1.5f,  0.125f,-0.335f,   2.5f,-20.0f,  1.5f, -0.335f, 0.05f },
+    { "Breda",                  1.5f,  2.0f, -3.0f,  0.045f, 0.035f,   2.0f,-23.0f,  1.5f, -0.38f,  0.155f },
 };
 
 const adsGunTune_t *CG_FindAdsTune(const char *wpn)
@@ -1223,6 +1275,13 @@ void CG_ModelAnim(centity_t *cent, qboolean bDoShaderTime)
     // KEEPS the body drawn, and the wheel-up handoff flips this in LOCKSTEP with cg.renderingThirdPerson
     // in cg_view.c - both sides must use CG_AdsForceFirstPerson or you get the camera-in-body bug).
     bThirdPerson |= (cg_3rd_person->integer && !CG_AdsForceFirstPerson()) ? qtrue : qfalse;
+    // HZM coop (bug-1234) - the bug-1217 DBNO LOCKSTEP THAT USED TO SIT HERE IS REVERTED.
+    // It forced bThirdPerson = qfalse for the whole downed state on the theory that the body
+    // draw had to match cg_view.c's camera force. That reasoning was sound in the abstract and
+    // WRONG for this project: the user could go third person while downed, deliberately, and
+    // relied on it - so the 'fix' removed a working feature to prevent a problem nobody had.
+    // If a camera-in-head artefact ever does appear while downed, fix it on the CAMERA side in
+    // cg_view.c, where the player still keeps the choice, not by force-hiding their body here.
     // HZM coop - IN COVER auto-3P: draw the own body whenever the cover view force is active
     // (lockstep with cg_view.c renderingThirdPerson - turret-camera-regression rule 2)
     bThirdPerson |= (cg.snap->ps.pm_flags & PMF_COOP_COVER) ? qtrue : qfalse;
@@ -1588,8 +1647,17 @@ void CG_ModelAnim(centity_t *cent, qboolean bDoShaderTime)
         }
 
         // set the attached model to have the same render FX
-        model.renderfx &= ~(RF_THIRD_PERSON | RF_THIRD_PERSON | RF_DEPTHHACK);
-        model.renderfx |= parent->renderfx & (RF_THIRD_PERSON | RF_THIRD_PERSON | RF_DEPTHHACK);
+        // HZM coop (bug-1217) - RF_THIRD_PERSON was written TWICE in both masks where
+        // RF_FIRST_PERSON belongs. The pair means "the child's view-visibility is EXACTLY the
+        // parent's": line 1 drops whatever the child was carrying, line 2 takes the parent's.
+        // With the typo the first-person bit could never be DROPPED, only inherited. Restores the
+        // intended semantics; verified bit-for-bit inert on today's data, so this is a latent-only
+        // correctness fix - nothing in fgame ever sets RF_FIRST_PERSON (the renderEffects script
+        // token table in entity.cpp has no name for it), and both CG_AttachEntity and
+        // CG_AttachEyeEntity already OR the parent's copy in (RF_FIRST_PERSON is deliberately NOT
+        // in RF_FLAGS_NOT_INHERITED), so child == parent either way for every entity that exists.
+        model.renderfx &= ~(RF_FIRST_PERSON | RF_THIRD_PERSON | RF_DEPTHHACK);
+        model.renderfx |= parent->renderfx & (RF_FIRST_PERSON | RF_THIRD_PERSON | RF_DEPTHHACK);
     }
 
     for (i = 0; i < 3; i++) {
@@ -1600,8 +1668,21 @@ void CG_ModelAnim(centity_t *cent, qboolean bDoShaderTime)
     // set surfaces
     memcpy(model.surfaces, s1->surfaces, MAX_MODEL_SURFACES);
 
+    // HZM coop (bug-1208) - THIS IS A VIEW-MODEL HIDER, so it must not run in third person.
+    // The stock parenthesisation was `((!cg_drawviewmodel->integer && !bThirdPerson) || STAT_INZOOM)`:
+    // !bThirdPerson guarded ONLY the cg_drawviewmodel clause, so the STAT_INZOOM clause fired
+    // unconditionally and nodraw'd EVERY surface of EVERY entity attached to the local player even
+    // while the 3rd-person body was on screen - the switcher helmet (attached to "Bip01 Head",
+    // coop_mod/helmet.scr), holstered weapons, gear, all of it. Reachable because zoom normally
+    // forces first person (see the STAT_INZOOM term where bThirdPerson is computed) EXCEPT on a
+    // turret: PMF_TURRET is exempt there, and VehicleTurretGun force-zooms its gunner purely to pin
+    // the fov (fgame/player.cpp ToggleZoom), so mounting any MG42 / jeep .30cal / halftrack in 3rd
+    // person stripped the player's helmet and every other attached prop.
+    // Hoisting !bThirdPerson out is bit-IDENTICAL in first person (it is already true there), so the
+    // viewmodel/zoom behaviour this block exists for is unchanged; it simply stops firing in 3P,
+    // where there is no viewmodel to hide.
     if (!(s1->renderfx & RF_ALWAYSDRAW) && s1->parent != ENTITYNUM_NONE && s1->parent == cg.snap->ps.clientNum
-        && ((!cg_drawviewmodel->integer && !bThirdPerson) || cg.snap->ps.stats[STAT_INZOOM])) {
+        && !bThirdPerson && (!cg_drawviewmodel->integer || cg.snap->ps.stats[STAT_INZOOM])) {
         // hide all surfaces while zooming or if the viewmodel shouldn't be shown
         for (i = 0; i < MAX_MODEL_SURFACES; i++) {
             model.surfaces[i] |= MDL_SURFACE_NODRAW;

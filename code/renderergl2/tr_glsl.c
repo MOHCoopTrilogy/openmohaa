@@ -1,4 +1,4 @@
-/*
+﻿/*
 ===========================================================================
 Copyright (C) 2006-2009 Robert Beckebans <trebor_7@users.sourceforge.net>
 
@@ -52,6 +52,24 @@ extern const char *fallbackShader_texturecolor_vp;
 extern const char *fallbackShader_texturecolor_fp;
 extern const char *fallbackShader_tonemap_vp;
 extern const char *fallbackShader_tonemap_fp;
+extern const char *fallbackShader_tonemap_hzm_fp;
+extern const char *fallbackShader_bloom_bright_fp;
+extern const char *fallbackShader_bloom_blur_fp;
+extern const char *fallbackShader_fxaa_fp;
+extern const char *fallbackShader_sharpen_fp;
+extern const char *fallbackShader_raindrops_fp;
+extern const char *fallbackShader_lowhealth_fp;
+extern const char *fallbackShader_suppression_fp;
+extern const char *fallbackShader_hitblood_fp;
+extern const char *fallbackShader_heathaze_fp;
+extern const char *fallbackShader_dof_fp;
+extern const char *fallbackShader_underwater_fp;
+extern const char *fallbackShader_chromab_fp;
+extern const char *fallbackShader_motionblur_fp;
+extern const char *fallbackShader_filmgrain_fp;
+extern const char *fallbackShader_frost_fp;
+extern const char *fallbackShader_globalfog_vp;
+extern const char *fallbackShader_globalfog_fp;
 
 typedef struct uniformInfo_s
 {
@@ -143,6 +161,7 @@ static uniformInfo_t uniformsInfo[] =
 	{ "u_ViewUp",          GLSL_VEC3 },
 
 	{ "u_InvTexRes",           GLSL_VEC2 },
+	{ "u_HzmParams",           GLSL_VEC4 },   // HZM gl2 post-FX spare (bug-1151)
 	{ "u_AutoExposureMinMax",  GLSL_VEC2 },
 	{ "u_ToneMinAvgMaxLinear", GLSL_VEC3 },
 
@@ -156,6 +175,27 @@ static uniformInfo_t uniformsInfo[] =
 	{ "u_AlphaTest", GLSL_INT },
 
 	{ "u_BoneMatrix", GLSL_MAT16_BONEMATRIX },
+
+	// HZM gl2 re-port (bug-gl2-nextbundle2): generic second bundle
+	// (must stay in sync with uniform_t in tr_local.h)
+	{ "u_Texture1Env",     GLSL_INT },
+	{ "u_Texture1TCGen",   GLSL_INT },
+	{ "u_Texture1Matrix0", GLSL_VEC4 },
+	{ "u_Texture1Matrix1", GLSL_VEC4 },
+	{ "u_Texture1Matrix2", GLSL_VEC4 },
+	{ "u_Texture1Matrix3", GLSL_VEC4 },
+	{ "u_Texture1Matrix4", GLSL_VEC4 },
+	{ "u_Texture1Matrix5", GLSL_VEC4 },
+	{ "u_Texture1Matrix6", GLSL_VEC4 },
+	{ "u_Texture1Matrix7", GLSL_VEC4 },
+
+	// HZM gl2 parity (bug-1249) - see UNIFORM_ALPHAGENPARAMS; new rows go AFTER this one, in
+	// exactly the order they were appended to uniform_t.
+	{ "u_AlphaGenParams",  GLSL_VEC4 },
+
+	// HZM gl2 FORWARD GLOBAL FOG (r_globalFogForward, bug-1306)
+	{ "u_GlobalFogColor",  GLSL_VEC4 },
+	{ "u_GlobalFogParams", GLSL_VEC4 },
 };
 
 typedef enum
@@ -354,12 +394,14 @@ static void GLSL_GetShaderHeader( GLenum shaderType, const GLchar *extra, char *
 						"#define TCGEN_LIGHTMAP %i\n"
 						"#define TCGEN_TEXTURE %i\n"
 						"#define TCGEN_ENVIRONMENT_MAPPED %i\n"
+						"#define TCGEN_ENVIRONMENT_MAPPED2 %i\n"
 						"#define TCGEN_FOG %i\n"
 						"#define TCGEN_VECTOR %i\n"
 						"#endif\n",
 						TCGEN_LIGHTMAP,
 						TCGEN_TEXTURE,
 						TCGEN_ENVIRONMENT_MAPPED,
+						TCGEN_ENVIRONMENT_MAPPED2,
 						TCGEN_FOG,
 						TCGEN_VECTOR));
 
@@ -375,9 +417,13 @@ static void GLSL_GetShaderHeader( GLenum shaderType, const GLchar *extra, char *
 								"#define alphaGen_t\n"
 								"#define AGEN_LIGHTING_SPECULAR %i\n"
 								"#define AGEN_PORTAL %i\n"
+								"#define AGEN_SCOORD %i\n"
+								"#define AGEN_TCOORD %i\n"
 								"#endif\n",
 								AGEN_LIGHTING_SPECULAR,
-								AGEN_PORTAL));
+								AGEN_PORTAL,
+								AGEN_SCOORD,
+								AGEN_TCOORD));
 
 	fbufWidthScale = 1.0f / ((float)glConfig.vidWidth);
 	fbufHeightScale = 1.0f / ((float)glConfig.vidHeight);
@@ -1382,6 +1428,269 @@ void GLSL_InitGPUShaders(void)
 
 	GLSL_FinishGPUShader(&tr.tonemapShader);
 
+
+	// HZM gl2 PARITY GRADE: gl1's ACES tonemap+grade, so gl2 can reproduce the OG look
+	// (r_tonemapMode 1). Shares the tonemap vertex shader; UNIFORM_COLOR carries
+	// (exposure, contrast, saturation, temp) and the fragment shader MUST therefore declare it
+	// as u_Color - GLSL_InitUniforms resolves uniforms by the NAME in uniformsInfo above
+	// (bug-1148: it was declared u_Grade, so the location was -1 and the grade never arrived).
+	attribs = ATTR_POSITION | ATTR_TEXCOORD;
+	extradefines[0] = '\0';
+
+	if (!GLSL_InitGPUShader(&tr.tonemapHzmShader, "tonemap_hzm", attribs, qtrue, extradefines, qtrue, fallbackShader_tonemap_vp, fallbackShader_tonemap_hzm_fp))
+	{
+		ri.Error(ERR_FATAL, "Could not load tonemap_hzm shader!");
+	}
+
+	GLSL_InitUniforms(&tr.tonemapHzmShader);
+	GLSL_SetUniformInt(&tr.tonemapHzmShader, UNIFORM_TEXTUREMAP, TB_COLORMAP);
+	GLSL_FinishGPUShader(&tr.tonemapHzmShader);
+
+	numEtcShaders++;
+
+	// HZM gl2 POST-FX PORT: bloom (bug-1149). gl1 runs bright-pass -> separable Gaussian -> additive
+	// composite every frame (renderergl1 tr_postprocess_gl1.c RB_PostFxApply) under r_ppBloom; gl2 had
+	// no bloom at all. Both stages share the TONEMAP vertex shader because its varying is var_TexCoords,
+	// the name these fragment shaders read. The additive composite needs no program of its own -
+	// FBO_Blit with a NULL program uses tr.textureColorShader, which is exactly gl1's ADD_FS
+	// (texture * u_Color).
+	attribs = ATTR_POSITION | ATTR_TEXCOORD;
+	extradefines[0] = 0;
+
+	if (!GLSL_InitGPUShader(&tr.bloomBrightShader, "bloom_bright", attribs, qtrue, extradefines, qtrue, fallbackShader_tonemap_vp, fallbackShader_bloom_bright_fp))
+	{
+		ri.Error(ERR_FATAL, "Could not load bloom_bright shader!");
+	}
+
+	GLSL_InitUniforms(&tr.bloomBrightShader);
+	GLSL_SetUniformInt(&tr.bloomBrightShader, UNIFORM_TEXTUREMAP, TB_COLORMAP);
+	GLSL_FinishGPUShader(&tr.bloomBrightShader);
+
+	numEtcShaders++;
+
+	attribs = ATTR_POSITION | ATTR_TEXCOORD;
+	extradefines[0] = 0;
+
+	if (!GLSL_InitGPUShader(&tr.bloomBlurShader, "bloom_blur", attribs, qtrue, extradefines, qtrue, fallbackShader_tonemap_vp, fallbackShader_bloom_blur_fp))
+	{
+		ri.Error(ERR_FATAL, "Could not load bloom_blur shader!");
+	}
+
+	GLSL_InitUniforms(&tr.bloomBlurShader);
+	GLSL_SetUniformInt(&tr.bloomBlurShader, UNIFORM_TEXTUREMAP, TB_COLORMAP);
+	GLSL_FinishGPUShader(&tr.bloomBlurShader);
+
+	numEtcShaders++;
+
+	// HZM gl2 POST-FX PORT (bug-1150): the screen-space tail of gl1's chain - FXAA, then the
+	// contrast-adaptive sharpen, then rain-on-lens. Same order gl1 runs them in, same r_pp* levers.
+	// All three share the tonemap vertex shader (its varying is var_TexCoords).
+
+	attribs = ATTR_POSITION | ATTR_TEXCOORD;
+	extradefines[0] = 0;
+
+	if (!GLSL_InitGPUShader(&tr.fxaaShader, "fxaa", attribs, qtrue, extradefines, qtrue, fallbackShader_tonemap_vp, fallbackShader_fxaa_fp))
+	{
+		ri.Error(ERR_FATAL, "Could not load fxaa shader!");
+	}
+
+	GLSL_InitUniforms(&tr.fxaaShader);
+	GLSL_SetUniformInt(&tr.fxaaShader, UNIFORM_TEXTUREMAP, TB_COLORMAP);
+	GLSL_FinishGPUShader(&tr.fxaaShader);
+
+	numEtcShaders++;
+
+	attribs = ATTR_POSITION | ATTR_TEXCOORD;
+	extradefines[0] = 0;
+
+	if (!GLSL_InitGPUShader(&tr.sharpenShader, "sharpen", attribs, qtrue, extradefines, qtrue, fallbackShader_tonemap_vp, fallbackShader_sharpen_fp))
+	{
+		ri.Error(ERR_FATAL, "Could not load sharpen shader!");
+	}
+
+	GLSL_InitUniforms(&tr.sharpenShader);
+	GLSL_SetUniformInt(&tr.sharpenShader, UNIFORM_TEXTUREMAP, TB_COLORMAP);
+	GLSL_FinishGPUShader(&tr.sharpenShader);
+
+	numEtcShaders++;
+
+	attribs = ATTR_POSITION | ATTR_TEXCOORD;
+	extradefines[0] = 0;
+
+	if (!GLSL_InitGPUShader(&tr.rainDropsShader, "raindrops", attribs, qtrue, extradefines, qtrue, fallbackShader_tonemap_vp, fallbackShader_raindrops_fp))
+	{
+		ri.Error(ERR_FATAL, "Could not load raindrops shader!");
+	}
+
+	GLSL_InitUniforms(&tr.rainDropsShader);
+	GLSL_SetUniformInt(&tr.rainDropsShader, UNIFORM_TEXTUREMAP, TB_COLORMAP);
+	GLSL_FinishGPUShader(&tr.rainDropsShader);
+
+	numEtcShaders++;
+
+	// HZM gl2 POST-FX PORT (bug-1151): the GAMEPLAY-DRIVEN stages of gl1's chain - heat haze +
+	// muzzle shimmer, low-health desat/red vignette/heartbeat, and the suppression tunnel-vignette.
+	// All read the same cgame-published signals gl1 reads (r_ppHeat, r_ppHealthFrac, r_ppSuppress).
+
+	attribs = ATTR_POSITION | ATTR_TEXCOORD;
+	extradefines[0] = 0;
+
+	if (!GLSL_InitGPUShader(&tr.heatHazeShader, "heathaze", attribs, qtrue, extradefines, qtrue, fallbackShader_tonemap_vp, fallbackShader_heathaze_fp))
+	{
+		ri.Error(ERR_FATAL, "Could not load heathaze shader!");
+	}
+
+	GLSL_InitUniforms(&tr.heatHazeShader);
+	GLSL_SetUniformInt(&tr.heatHazeShader, UNIFORM_TEXTUREMAP, TB_COLORMAP);
+	GLSL_FinishGPUShader(&tr.heatHazeShader);
+
+	numEtcShaders++;
+
+	attribs = ATTR_POSITION | ATTR_TEXCOORD;
+	extradefines[0] = 0;
+
+	if (!GLSL_InitGPUShader(&tr.lowHealthShader, "lowhealth", attribs, qtrue, extradefines, qtrue, fallbackShader_tonemap_vp, fallbackShader_lowhealth_fp))
+	{
+		ri.Error(ERR_FATAL, "Could not load lowhealth shader!");
+	}
+
+	GLSL_InitUniforms(&tr.lowHealthShader);
+	GLSL_SetUniformInt(&tr.lowHealthShader, UNIFORM_TEXTUREMAP, TB_COLORMAP);
+	GLSL_FinishGPUShader(&tr.lowHealthShader);
+
+	numEtcShaders++;
+
+	attribs = ATTR_POSITION | ATTR_TEXCOORD;
+	extradefines[0] = 0;
+
+	if (!GLSL_InitGPUShader(&tr.suppressionShader, "suppression", attribs, qtrue, extradefines, qtrue, fallbackShader_tonemap_vp, fallbackShader_suppression_fp))
+	{
+		ri.Error(ERR_FATAL, "Could not load suppression shader!");
+	}
+
+	GLSL_InitUniforms(&tr.suppressionShader);
+	GLSL_SetUniformInt(&tr.suppressionShader, UNIFORM_TEXTUREMAP, TB_COLORMAP);
+	GLSL_FinishGPUShader(&tr.suppressionShader);
+
+	// HZM coop [user 08-02] ON-HIT BLOOD - same wiring as suppression directly above.
+	if (!GLSL_InitGPUShader(&tr.hitBloodShader, "hitblood", attribs, qtrue, extradefines, qtrue, fallbackShader_tonemap_vp, fallbackShader_hitblood_fp))
+	{
+		ri.Error(ERR_FATAL, "Could not load hitblood shader!");
+	}
+	GLSL_InitUniforms(&tr.hitBloodShader);
+	GLSL_SetUniformInt(&tr.hitBloodShader, UNIFORM_TEXTUREMAP, TB_COLORMAP);
+	GLSL_FinishGPUShader(&tr.hitBloodShader);
+
+	numEtcShaders++;
+
+	// HZM gl2 POST-FX PORT (bug-1157): depth of field. Two samplers - the blurred colour on
+	// TB_COLORMAP (bound by FBO_Blit) and a COPY of scene depth on TB_LIGHTMAP, the same pairing
+	// depthBlur already uses. The copy matters: sampling tr.renderDepthImage directly would be a
+	// feedback loop, since it is the depth attachment of the very FBO this pass draws into.
+	attribs = ATTR_POSITION | ATTR_TEXCOORD;
+	extradefines[0] = 0;
+
+	if (!GLSL_InitGPUShader(&tr.dofShader, "dof", attribs, qtrue, extradefines, qtrue, fallbackShader_tonemap_vp, fallbackShader_dof_fp))
+	{
+		ri.Error(ERR_FATAL, "Could not load dof shader!");
+	}
+
+	GLSL_InitUniforms(&tr.dofShader);
+	GLSL_SetUniformInt(&tr.dofShader, UNIFORM_TEXTUREMAP, TB_COLORMAP);
+	GLSL_SetUniformInt(&tr.dofShader, UNIFORM_SCREENDEPTHMAP, TB_LIGHTMAP);
+	GLSL_FinishGPUShader(&tr.dofShader);
+
+	numEtcShaders++;
+
+	// HZM gl2 NEW POST-FX (bug-1158): cinematic-look additions, not gl1 ports - underwater
+	// distortion (real cgame signal, r_ppUnderwater), chromatic aberration, film grain. Same
+	// tonemap vertex shader and registration pattern as every stage above.
+
+	attribs = ATTR_POSITION | ATTR_TEXCOORD;
+	extradefines[0] = 0;
+
+	if (!GLSL_InitGPUShader(&tr.underwaterShader, "underwater", attribs, qtrue, extradefines, qtrue, fallbackShader_tonemap_vp, fallbackShader_underwater_fp))
+	{
+		ri.Error(ERR_FATAL, "Could not load underwater shader!");
+	}
+
+	GLSL_InitUniforms(&tr.underwaterShader);
+	GLSL_SetUniformInt(&tr.underwaterShader, UNIFORM_TEXTUREMAP, TB_COLORMAP);
+	GLSL_FinishGPUShader(&tr.underwaterShader);
+
+	numEtcShaders++;
+
+	attribs = ATTR_POSITION | ATTR_TEXCOORD;
+	extradefines[0] = 0;
+
+	if (!GLSL_InitGPUShader(&tr.chromabShader, "chromab", attribs, qtrue, extradefines, qtrue, fallbackShader_tonemap_vp, fallbackShader_chromab_fp))
+	{
+		ri.Error(ERR_FATAL, "Could not load chromab shader!");
+	}
+
+	GLSL_InitUniforms(&tr.chromabShader);
+	GLSL_SetUniformInt(&tr.chromabShader, UNIFORM_TEXTUREMAP, TB_COLORMAP);
+	GLSL_FinishGPUShader(&tr.chromabShader);
+
+	// HZM [user 07-29] CAMERA MOTION BLUR. Shares tonemap_vp like every other full-screen HZM pass.
+	// GLSL_InitUniforms is NOT optional here: `tr` is Com_Memset to 0 in R_Init, so an uninitialised
+	// program has every uniforms[] entry at 0 - which is a VALID GL location and sails straight past
+	// the `== -1` guard in GLSL_SetUniform*, then dereferences into the NULL uniformBuffer. That is a
+	// hard crash on the first frame the pass runs, not a silent no-op.
+	if (!GLSL_InitGPUShader(&tr.motionBlurShader, "motionblur", attribs, qtrue, extradefines, qtrue, fallbackShader_tonemap_vp, fallbackShader_motionblur_fp))
+	{
+		ri.Error(ERR_FATAL, "Could not load motionblur shader!");
+	}
+	GLSL_InitUniforms(&tr.motionBlurShader);
+	GLSL_SetUniformInt(&tr.motionBlurShader, UNIFORM_TEXTUREMAP, TB_COLORMAP);
+	GLSL_FinishGPUShader(&tr.motionBlurShader);
+
+	numEtcShaders++;
+
+	attribs = ATTR_POSITION | ATTR_TEXCOORD;
+	extradefines[0] = 0;
+
+	if (!GLSL_InitGPUShader(&tr.filmgrainShader, "filmgrain", attribs, qtrue, extradefines, qtrue, fallbackShader_tonemap_vp, fallbackShader_filmgrain_fp))
+	{
+		ri.Error(ERR_FATAL, "Could not load filmgrain shader!");
+	}
+
+	GLSL_InitUniforms(&tr.filmgrainShader);
+	GLSL_SetUniformInt(&tr.filmgrainShader, UNIFORM_TEXTUREMAP, TB_COLORMAP);
+	GLSL_FinishGPUShader(&tr.filmgrainShader);
+
+	numEtcShaders++;
+
+	attribs = ATTR_POSITION | ATTR_TEXCOORD;
+	extradefines[0] = 0;
+
+	if (!GLSL_InitGPUShader(&tr.frostShader, "frost", attribs, qtrue, extradefines, qtrue, fallbackShader_tonemap_vp, fallbackShader_frost_fp))
+	{
+		ri.Error(ERR_FATAL, "Could not load frost shader!");
+	}
+
+	GLSL_InitUniforms(&tr.frostShader);
+	GLSL_SetUniformInt(&tr.frostShader, UNIFORM_TEXTUREMAP, TB_COLORMAP);
+	GLSL_FinishGPUShader(&tr.frostShader);
+
+	numEtcShaders++;
+
+	// HZM gl2 re-port: MOHAA global farplane distance fog (screen-space depth pass)
+	attribs = ATTR_POSITION | ATTR_TEXCOORD;
+	extradefines[0] = '\0';
+
+	if (!GLSL_InitGPUShader(&tr.globalFogShader, "globalfog", attribs, qtrue, extradefines, qtrue, fallbackShader_globalfog_vp, fallbackShader_globalfog_fp))
+	{
+		ri.Error(ERR_FATAL, "Could not load globalfog shader!");
+	}
+
+	GLSL_InitUniforms(&tr.globalFogShader);
+
+	GLSL_SetUniformInt(&tr.globalFogShader, UNIFORM_TEXTUREMAP, TB_COLORMAP);
+	GLSL_SetUniformInt(&tr.globalFogShader, UNIFORM_LEVELSMAP,  TB_LEVELSMAP);
+
+	GLSL_FinishGPUShader(&tr.globalFogShader);
+
 	numEtcShaders++;
 
 
@@ -1570,6 +1879,23 @@ void GLSL_ShutdownGPUShaders(void)
 	GLSL_DeleteGPUShader(&tr.down4xShader);
 	GLSL_DeleteGPUShader(&tr.bokehShader);
 	GLSL_DeleteGPUShader(&tr.tonemapShader);
+	GLSL_DeleteGPUShader(&tr.tonemapHzmShader);
+	GLSL_DeleteGPUShader(&tr.bloomBrightShader);
+	GLSL_DeleteGPUShader(&tr.bloomBlurShader);
+	GLSL_DeleteGPUShader(&tr.fxaaShader);
+	GLSL_DeleteGPUShader(&tr.sharpenShader);
+	GLSL_DeleteGPUShader(&tr.rainDropsShader);
+	GLSL_DeleteGPUShader(&tr.heatHazeShader);
+	GLSL_DeleteGPUShader(&tr.lowHealthShader);
+	GLSL_DeleteGPUShader(&tr.suppressionShader);
+	GLSL_DeleteGPUShader(&tr.hitBloodShader);   // HZM coop [user 08-02]
+	GLSL_DeleteGPUShader(&tr.dofShader);
+	GLSL_DeleteGPUShader(&tr.underwaterShader);
+	GLSL_DeleteGPUShader(&tr.chromabShader);
+	GLSL_DeleteGPUShader(&tr.motionBlurShader);
+	GLSL_DeleteGPUShader(&tr.filmgrainShader);
+	GLSL_DeleteGPUShader(&tr.frostShader);
+	GLSL_DeleteGPUShader(&tr.globalFogShader);
 
 	for ( i = 0; i < 2; i++)
 		GLSL_DeleteGPUShader(&tr.calclevels4xShader[i]);
@@ -1623,6 +1949,23 @@ shaderProgram_t *GLSL_GetGenericShaderProgram(int stage)
 		case AGEN_PORTAL:
 			shaderAttribs |= GENERICDEF_USE_RGBAGEN;
 			break;
+
+		// HZM gl2 parity (bug-1249): alphaGen sCoord/tCoord are PARSED at tr_shader.c:1712-1714 and
+		// consumed by NOTHING - baseColor[3] kept its 1.0f initialiser and the stage drew fully
+		// OPAQUE. gl1 implements both at renderergl1/tr_shade.c:1143,1155 via
+		// RB_CalcAlphaFromTexCoords. deepbluesea_shoreline uses them to fade the ocean layers out
+		// across the patch, so on gl2 that fade never happened: a hard straight waterline, and a
+		// full-strength additive band where the shoreline shader abuts the open ocean.
+		//
+		// CalcColor lives inside #if defined(USE_RGBAGEN) in generic_vp.glsl, so THIS permutation
+		// select is what compiles the new branch - without it the whole change is a silent no-op.
+		case AGEN_SCOORD:
+		case AGEN_TCOORD:
+			if (r_hzmAlphaGenCoord && r_hzmAlphaGenCoord->integer) {
+				shaderAttribs |= GENERICDEF_USE_RGBAGEN;
+			}
+			break;
+
 		default:
 			break;
 	}

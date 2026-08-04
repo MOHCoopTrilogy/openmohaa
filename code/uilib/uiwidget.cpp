@@ -664,6 +664,16 @@ void DrawBoxWithSolidBorder(
     }
 }
 
+// HZM ultrawide (bug-1127 revisit, user verdict 2026-07-27): the uniform pillarbox/center
+// menu mode is OPT-IN now. Default = stock full-screen stretch (menus fill the ultrawide,
+// distorted) - the user prefers width over proportion. `seta ui_menuCenter 1` re-enables
+// the centered 4:3 board. Read via Cvar_GetString so an unset cvar cleanly reads "0".
+bool UI_MenuCenterEnabled(void)
+{
+    const char *v = uii.Cvar_GetString("ui_menuCenter", "0");
+    return v && atoi(v) != 0;
+}
+
 static bool scaleFrameVirtualRes(UIRect2D& frame, vec3_t outScale, const vec3_t newScale)
 {
     if (!VectorCompare2D(outScale, newScale)) {
@@ -1979,6 +1989,41 @@ void UIWidget::Display(const UIRect2D& drawframe, float parent_alpha)
     int    n;
     vec4_t col = {1, 1, 1, 1};
 
+    // HZM coop (bug-767, 5th overlapping-ESC report): DRAW-LEVEL self-guard for the two
+    // in-game ESC boards. They are exclusive by design (UI_MenuEscape pushes exactly one),
+    // yet across five reports SOMETHING kept re-showing the off-stack board every frame
+    // (hudList dangling pointers were one confirmed pump; the 5th report proved at least
+    // one more exists), defeating every event-level ForceHide. This is the one choke point
+    // every draw path funnels through (Display is non-virtual; both UpdateViews branches
+    // land here), so enforce the invariant where it cannot be bypassed: an ESC board only
+    // renders while it is the CURRENT menu's container. setShow(false) also kills its
+    // mouse routing (CanActivate/FindResponder walk the getShow chain), so a zombie board
+    // cannot eat clicks either. The rate-limited MENUDBG line is the forensic breadcrumb:
+    // if it appears in qconsole.log, some code path re-showed an off-stack board that
+    // frame and we can hunt the pump by timestamp.
+    if (m_parent == &uWinMan && isSubclassOf(UIWidgetContainer) && getName()
+        && !str::icmp(getName(), "dm_main")) {
+        Menu *pCur = menuManager.CurrentMenu();
+
+        if (!pCur || pCur->GetContainerWidget() != this) {
+            if (m_visible) {
+                static int iNextZombiePrint = 0;
+
+                setShow(false);
+
+                if (uid.time >= iNextZombiePrint) {
+                    iNextZombiePrint = uid.time + 1000;
+                    uii.Sys_Printf(
+                        "^~^~^ MENUDBG draw-suppress '%s' (current='%s')\n",
+                        getName(),
+                        pCur ? pCur->m_name.c_str() : "<none>"
+                    );
+                }
+            }
+            return;
+        }
+    }
+
     if (!isEnabled()) {
         return;
     }
@@ -2517,8 +2562,29 @@ void UIWidget::SetVirtualScale(vec2_t out)
         out[0] = uid.vidWidth / minWidth * m_scaleCvar->value;
         out[1] = uid.vidHeight / minHeight * m_scaleCvar->value;
     } else {
-        out[0] = uid.vidWidth / 640.0;
-        out[1] = uid.vidHeight / 480.0;
+        // HZM ultrawide (bug-1127, "menu center"): uniform menu scale. The stock
+        // (vidWidth/640, vidHeight/480) is NON-uniform on any aspect != 4:3 -> horizontal
+        // glyph stretch + over-magnification (5.375x vs 3.0 at 3440x1440 = the "hot
+        // garbage" menu text). One uniform factor keeps native proportions; the menu
+        // container's existing default center (UIWidgetContainer::AlignPosition,
+        // pos.x=(vidWidth-frame.width)*0.5) then pillarboxes+centers the whole menu, and
+        // every child inherits that origin via PropogateCoordinateSystem for BOTH draw
+        // (set2D<-m_screenframe) and mouse hit-test (m_clippedframe.contains) - they
+        // cannot desync. min() of the two factors means the menu always FITS: pillarbox
+        // when wider than 4:3, letterbox when narrower, so the center offset is >= 0 by
+        // construction. At exactly 4:3 this is byte-identical to the old behavior.
+        // OPT-IN via ui_menuCenter 1; default = stock stretch (user verdict 07-27).
+        if (UI_MenuCenterEnabled()) {
+            const float sx = uid.vidWidth / 640.0f;
+            const float sy = uid.vidHeight / 480.0f;
+            const float s  = (sx < sy) ? sx : sy;
+
+            out[0] = s;
+            out[1] = s;
+        } else {
+            out[0] = uid.vidWidth / 640.0f;
+            out[1] = uid.vidHeight / 480.0f;
+        }
     }
 }
 

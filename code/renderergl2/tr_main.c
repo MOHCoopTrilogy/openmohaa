@@ -72,7 +72,7 @@ qboolean R_CompareVert(srfVert_t * v1, srfVert_t * v2, qboolean checkST)
 =============
 R_CalcTexDirs
 
-Lengyel, Eric. “Computing Tangent Space Basis Vectors for an Arbitrary Mesh”. Terathon Software 3D Graphics Library, 2001. http://www.terathon.com/code/tangent.html
+Lengyel, Eric. ï¿½Computing Tangent Space Basis Vectors for an Arbitrary Meshï¿½. Terathon Software 3D Graphics Library, 2001. http://www.terathon.com/code/tangent.html
 =============
 */
 void R_CalcTexDirs(vec3_t sdir, vec3_t tdir, const vec3_t v1, const vec3_t v2,
@@ -104,7 +104,7 @@ void R_CalcTexDirs(vec3_t sdir, vec3_t tdir, const vec3_t v1, const vec3_t v2,
 =============
 R_CalcTangentSpace
 
-Lengyel, Eric. “Computing Tangent Space Basis Vectors for an Arbitrary Mesh”. Terathon Software 3D Graphics Library, 2001. http://www.terathon.com/code/tangent.html
+Lengyel, Eric. ï¿½Computing Tangent Space Basis Vectors for an Arbitrary Meshï¿½. Terathon Software 3D Graphics Library, 2001. http://www.terathon.com/code/tangent.html
 =============
 */
 vec_t R_CalcTangentSpace(vec3_t tangent, vec3_t bitangent, const vec3_t normal, const vec3_t sdir, const vec3_t tdir)
@@ -381,6 +381,51 @@ int R_CullPointAndRadiusEx( const vec3_t pt, float radius, const cplane_t* frust
 int R_CullPointAndRadius( const vec3_t pt, float radius )
 {
 	return R_CullPointAndRadiusEx(pt, radius, tr.viewParms.frustum, (tr.viewParms.flags & VPF_FARPLANEFRUSTUM) ? 5 : 4);
+}
+
+/*
+** R_CharShadowsActive
+**
+** HZM gl2 real character shadows. Single source of truth for "the r_charShadows feature
+** is live this frame". Everything the feature changes is gated on this, so r_charShadows 0
+** (the default) restores today's behaviour exactly, with no rebuild and no vid_restart.
+**
+** It also stands in for r_depthPrepass at the sites that gate the sun-shadow chain
+** (tr_scene.c sunCol/sunAmbCol, tr_scene.c VPF_USESUNLIGHT, tr_backend.c the depth-fill +
+** shadowmask block). The live sandbox archives r_depthPrepass to 0, and without this the
+** whole feature would silently no-op there.
+*/
+qboolean R_CharShadowsActive( void )
+{
+	if ( !r_charShadows || !r_charShadows->integer ) {
+		return qfalse;
+	}
+	return (qboolean)( glRefConfig.framebufferObject
+	                && r_sunlightMode->integer
+	                && ( r_forceSun->integer || tr.sunShadows ) );
+}
+
+/*
+** R_DlightShadowsActive
+**
+** HZM gl2 dynamic-light cast shadows. Single source of truth for "the r_hzmDlightShadows
+** feature is live this frame". The default (0) short-circuits on the first line, so every
+** guarded path - the dispatch in RE_RenderScene and the receive pass in tr_shade.c -
+** reduces to what it is today with no rebuild and no vid_restart.
+**
+** The FBO test is load-bearing, not defensive: without framebufferObject the pshadow depth
+** targets (tr.pshadowFbos, R_InitFBOs) do not exist at all and the upstream code falls back
+** to copying the BACK BUFFER into the shadow map, which would corrupt the visible frame.
+*/
+qboolean R_DlightShadowsActive( void )
+{
+	if ( !r_hzmDlightShadows || !r_hzmDlightShadows->integer ) {
+		return qfalse;
+	}
+	if ( !glRefConfig.framebufferObject || !tr.pshadowFbos[0] ) {
+		return qfalse;
+	}
+	return (qboolean)( r_hzmDlightShadowLights->integer > 0 && r_hzmDlightShadowMax->integer > 0 );
 }
 
 /*
@@ -1549,8 +1594,18 @@ void R_AddDrawSurf( surfaceType_t *surface, shader_t *shader,
 	index = tr.refdef.numDrawSurfs & DRAWSURF_MASK;
 	// the sort data is packed into a single 32 bit value so it can be
 	// compared quickly during the qsorting process
-	tr.refdef.drawSurfs[index].sort = (shader->sortedIndex << QSORT_SHADERNUM_SHIFT) 
-		| tr.shiftedEntityNum | ( fogIndex << QSORT_FOGNUM_SHIFT ) 
+	// HZM (engine-limits audit): the fog field used to be packed here as
+	// ( fogIndex << QSORT_FOGNUM_SHIFT ). QSORT_FOGNUM_SHIFT is 2 and the decoder reads it 5 bits
+	// wide (& 31), i.e. bits 2..6 - but QSORT_REFENTITYNUM_SHIFT is 4, so any fogIndex >= 4
+	// wrote straight into the refentity field and R_DecomposeSort then handed the backend the
+	// WRONG entity (wrong model transform). World surfaces got away with it because
+	// REFENTITYNUM_WORLD is all-ones, but brush models on a map with 4+ fog volumes did not.
+	// The fog field is write-only in this fork - R_DecomposeSort unconditionally forces
+	// *fogNum = 0 - so the safe fix is to stop packing it. If fog is ever re-enabled it needs
+	// bits of its own (only 2 and 3 are free) before it can go back into the key.
+	(void)fogIndex;
+	tr.refdef.drawSurfs[index].sort = (shader->sortedIndex << QSORT_SHADERNUM_SHIFT)
+		| tr.shiftedEntityNum
 		| ((int)pshadowMap << QSORT_PSHADOW_SHIFT) | (int)dlightMap
 		| tr.shiftedIsStatic;
 	tr.refdef.drawSurfs[index].cubemapIndex = cubemap;
@@ -1568,7 +1623,9 @@ void R_DecomposeSort( unsigned sort, int *entityNum, shader_t **shader,
                      qboolean *bStaticModel
 			) {
 	*fogNum = ( sort >> QSORT_FOGNUM_SHIFT ) & 31;
-	*shader = tr.sortedShaders[ ( sort >> QSORT_SHADERNUM_SHIFT ) & (MAX_SHADERS-1) ];
+	// HZM (engine-limits audit): mask with the encodable ceiling, not the array size - they are
+	// equal in gl2 today but only because shift 17 + SHADERNUM_BITS 14 happens to fit in 32.
+	*shader = tr.sortedShaders[ ( sort >> QSORT_SHADERNUM_SHIFT ) & (MAX_SORTED_SHADERS-1) ];
 	*entityNum = ( sort >> QSORT_REFENTITYNUM_SHIFT ) & REFENTITYNUM_MASK;
 	*pshadowMap = (sort >> QSORT_PSHADOW_SHIFT ) & 1;
     *dlightMap = sort & 1;
@@ -1618,6 +1675,14 @@ void R_SortDrawSurfs( drawSurf_t *drawSurfs, int numDrawSurfs,
 		return;
 	}
 
+	// HZM gl2 re-port (bug-gl2-portalsky): render the 3D skybox scene first,
+	// before any portal/mirror pass-through of this view, mirroring gl1
+	// R_SortDrawSurfs (gl1 tr_main.c:1322). Placed after the shadow-map
+	// early-out (gl1 has no such path) so shadow views never trigger it;
+	// R_Sky_Render additionally self-gates on numSurfs / sky_portal /
+	// skyRendered / isPortalSky.
+	R_Sky_Render();
+
 	// check for any pass through drawing, which
 	// may cause another view to be rendered first
 	for ( i = 0 ; i < numDrawSurfs ; i++ ) {
@@ -1646,6 +1711,12 @@ void R_SortDrawSurfs( drawSurf_t *drawSurfs, int numDrawSurfs,
     R_AddSpriteSurfCmd( spriteSurfs, numSpriteSurfs );
 }
 
+// ^~^~^ SKELDISP (TEMPORARY, deterministic): one-shot-per-model-handle dispatch trace. Reveals, with
+// no in-game input, whether a character model's entity actually reaches the RT_MODEL/MOD_TIKI dispatch
+// (and thus R_AddSkelSurfaces) or resolves to MOD_BAD. A model that registers (SKELREG ok, tr_model.cpp)
+// but never appears here => cgame never submits its entity. REMOVE with the rest of the skel trace.
+static unsigned char g_skeldispSeen[MAX_MOD_KNOWN];
+
 static void R_AddEntitySurface (int entityNum)
 {
 	trRefEntity_t	*ent;
@@ -1667,6 +1738,50 @@ static void R_AddEntitySurface (int entityNum)
 	//
 	if ( (ent->e.renderfx & RF_FIRST_PERSON) && (tr.viewParms.flags & VPF_NOVIEWMODEL)) {
 		return;
+	}
+
+	// HZM gl2 re-port (bug-gl2-portalsky): sky-room entities (RF_SKYENTITY)
+	// only draw inside the portal sky view and normal entities never do,
+	// mirroring gl1 R_AddEntitySurfaces (gl1 tr_main.c:1469-1478).
+	if (tr.viewParms.isPortalSky) {
+		// Expecting a sky entity in a sky portal
+		if (!(ent->e.renderfx & RF_SKYENTITY)) {
+			return;
+		}
+	} else {
+		if (ent->e.renderfx & RF_SKYENTITY) {
+			return;
+		}
+	}
+
+	// HZM gl2 PARITY FIX (portal-only entities leaking into the primary view).
+	// MOHAA's SERVER tags each entity per-snapshot with the visibility domain it was
+	// reached through (server/sv_snapshot.c:558-563):
+	//     portalEnt  -> RF_SHADOW_PLANE   "only reachable through a SVF_PORTAL entity"
+	//     portalsky  -> RF_SKYENTITY      "sky-room entity"
+	//     both       -> RF_WRAP_FRAMES    (the dedupe path, sv_snapshot.c:530-532)
+	// gl1 honours all three (renderergl1/tr_main.c:1427-1435) and gl2 honoured only the
+	// RF_SKYENTITY pair above - this isPortal/RF_SHADOW_PLANE block was simply never
+	// ported into R_AddEntitySurface. It IS present in gl2's own R_AddSpriteSurfaces
+	// (tr_main.c, "if (tr.viewParms.isPortal)" in the sprite loop), so sprites obeyed
+	// the rule while entities did not.
+	// Two consequences of the omission, both gl2-only:
+	//   1. a portal-only entity was drawn in the PRIMARY view, where there is no portal
+	//      clip plane - it renders through walls, at the position the portal PVS pass
+	//      found it, and nothing ever removes it while the portal keeps flagging it;
+	//   2. RF_SHADOW_PLANE is ALSO the renderer's planar-shadow flag (tr_mesh.c,
+	//      tr_animation.c, tr_model_iqm.c all test it), so such an entity silently opted
+	//      into a projected shadow using refEntity.shadowPlane - which nothing in this
+	//      codebase ever sets, because MOHAA repurposed the bit as a visibility tag.
+	// Byte-for-byte the gl1 rule.
+	if (tr.viewParms.isPortal) {
+		if (!(ent->e.renderfx & (RF_WRAP_FRAMES | RF_SHADOW_PLANE))) {
+			return;
+		}
+	} else {
+		if (ent->e.renderfx & RF_SHADOW_PLANE) {
+			return;
+		}
 	}
 
 	// simple generated models, like sprites and beams, are not culled
@@ -1693,6 +1808,20 @@ static void R_AddEntitySurface (int entityNum)
 		R_RotateForEntity( ent, &tr.viewParms, &tr.or );
 
 		tr.currentModel = R_GetModelByHandle( ent->e.hModel );
+		// ^~^~^ SKELDISP (temporary): first dispatch of each TIKI/BAD model handle.
+		{
+			int hm = ent->e.hModel;
+			if (hm >= 0 && hm < MAX_MOD_KNOWN && !g_skeldispSeen[hm]) {
+				g_skeldispSeen[hm] = 1;
+				if (tr.currentModel && (tr.currentModel->type == MOD_TIKI || tr.currentModel->type == MOD_BAD)) {
+					ri.Printf(PRINT_ALL,
+						"^~^~^ SKELDISP ent=%d hModel=%d modtype=%s model=%s rfx=0x%x reType=%d\n",
+						ent->e.entityNumber, hm,
+						(tr.currentModel->type == MOD_TIKI) ? "TIKI" : "BAD",
+						tr.currentModel->name, ent->e.renderfx, ent->e.reType);
+				}
+			}
+		}
 		if (!tr.currentModel) {
 			R_AddDrawSurf( &entitySurface, tr.defaultShader, 0, 0, 0, 0 /*cubeMap*/  );
 		} else {
@@ -1783,6 +1912,49 @@ void R_GenerateDrawSurfs( void ) {
 
 	// we know the size of the clipping volume. Now set the rest of the projection matrix.
 	R_SetupProjectionZ (&tr.viewParms);
+
+	//
+	// HZM gl2 re-port Fix 3: separate (un-zoomed) projection for the first-person view weapon.
+	// cgame sets r_weaponfovx to the un-zoomed fov_x; when ADS zooms the WORLD fov down, the gun
+	// would otherwise magnify off the bottom of the screen. Build a second projection at the weapon
+	// fov (copying the COMPLETED world matrix) and swap it in for RF_DEPTHHACK surfaces in the
+	// backend. Ported from gl1 tr_main.c R_SetupProjection; the fov terms reduce to 1/tan(fov/2)
+	// so no zProj factor is needed. Mono only - the stereo path has its own projection swap.
+	//
+	tr.viewParms.weaponFovActive = qfalse;
+	if ( tr.viewParms.stereoFrame == STEREO_CENTER
+		&& r_weaponfovx && r_weaponfovx->value > 1.0f
+		&& fabs( r_weaponfovx->value - tr.viewParms.fovX ) > 0.05f )
+	{
+		float wxmax, wymax, xmax, ymax;
+		float zFar  = tr.viewParms.zFar;
+		float zNear = r_znear->value;
+
+		wxmax = tan( r_weaponfovx->value * M_PI / 360.0f );
+		xmax  = tan( tr.viewParms.fovX * M_PI / 360.0f );
+		ymax  = tan( tr.viewParms.fovY * M_PI / 360.0f );
+		// preserve the world aspect ratio (ymax/xmax) so the gun is not stretched
+		wymax = ( xmax != 0.0f ) ? ( wxmax * ( ymax / xmax ) ) : ymax;
+
+		Com_Memcpy( tr.viewParms.weaponProjectionMatrix, tr.viewParms.projectionMatrix, sizeof( tr.viewParms.weaponProjectionMatrix ) );
+		tr.viewParms.weaponProjectionMatrix[0] = 1.0f / wxmax;
+		tr.viewParms.weaponProjectionMatrix[5] = 1.0f / wymax;
+
+		// pull the weapon's near plane closer than the world's so the rear of the raised ADS
+		// viewmodel is not sliced off ([0]/[5] are fov-only; only [10]/[14] carry the near plane)
+		{
+			float wzNear = ( r_weaponznear && r_weaponznear->value > 0.05f ) ? r_weaponznear->value : zNear;
+			if ( wzNear > zNear ) { wzNear = zNear; }
+			tr.viewParms.weaponProjectionMatrix[10] = -( zFar + wzNear ) / ( zFar - wzNear );
+			tr.viewParms.weaponProjectionMatrix[14] = -2.0f * zFar * wzNear / ( zFar - wzNear );
+		}
+
+		// screen-space nudge to line the iron sights up with the screen centre
+		if ( r_weaponshifty ) { tr.viewParms.weaponProjectionMatrix[9] = r_weaponshifty->value; }
+		if ( r_weaponshiftx ) { tr.viewParms.weaponProjectionMatrix[8] = r_weaponshiftx->value; }
+
+		tr.viewParms.weaponFovActive = qtrue;
+	}
 
 	R_AddEntitySurfaces ();
 
@@ -2100,6 +2272,11 @@ void R_RenderView (viewParms_t *parms) {
 
 	R_SetupProjection(&tr.viewParms, r_zproj->value, tr.viewParms.zFar, qtrue);
 
+	// HZM gl2 re-port (bug-gl2-portalsky): reset the per-view sky portal
+	// surface list, mirroring gl1 R_RenderView (gl1 tr_main.c:1832).
+	// R_Sky_Reset self-gates when this view IS the portal sky.
+	R_Sky_Reset();
+
 	R_GenerateDrawSurfs();
 
 	// if we overflowed MAX_DRAWSURFS, the drawsurfs
@@ -2198,9 +2375,15 @@ void R_RenderDlightCubemaps(const refdef_t *fd)
 }
 
 
+// HZM gl2 dynamic-light cast shadows: the "render the depth maps" half of
+// R_RenderPshadowMaps, lifted verbatim into its own function so the dlight-driven builder
+// below can reuse it instead of duplicating ~80 lines of view setup. Pure code motion -
+// R_RenderPshadowMaps' own call passes (0, num_pshadows, VPF_NONE), which is exactly the
+// loop it replaced.
+static void R_RenderPshadowMapRange( int firstShadow, int numShadows, int extraViewFlags );
+
 void R_RenderPshadowMaps(const refdef_t *fd)
 {
-	viewParms_t		shadowParms;
 	int i;
 
 	// first, make a list of shadows
@@ -2431,7 +2614,30 @@ void R_RenderPshadowMaps(const refdef_t *fd)
 	}
 
 	// next, render shadowmaps
-	for ( i = 0; i < tr.refdef.num_pshadows; i++)
+	R_RenderPshadowMapRange( 0, tr.refdef.num_pshadows, VPF_NONE );
+}
+
+
+/*
+=====================
+R_RenderPshadowMapRange
+
+HZM gl2: the depth-map rendering half of R_RenderPshadowMaps, unchanged except that it
+takes an explicit [firstShadow, firstShadow+numShadows) range and an extra view-flag mask.
+Both callers (upstream's lightgrid-driven R_RenderPshadowMaps and the dlight-driven
+R_RenderDlightShadowMaps) share it, so their view setup can never drift apart.
+
+`i` indexes tr.refdef.pshadows[] AND tr.pshadowFbos[]/tr.pshadowMaps[] - the receive pass
+(ProjectPshadowVBOGLSL) binds tr.pshadowMaps[l] for shadow l, so the two must stay in
+lockstep. Callers must therefore keep firstShadow+numShadows <= MAX_DRAWN_PSHADOWS.
+=====================
+*/
+static void R_RenderPshadowMapRange( int firstShadow, int numShadows, int extraViewFlags )
+{
+	viewParms_t		shadowParms;
+	int i;
+
+	for ( i = firstShadow; i < firstShadow + numShadows; i++)
 	{
 		int firstDrawSurf;
 		int firstSpriteSurf;
@@ -2461,7 +2667,7 @@ void R_RenderPshadowMaps(const refdef_t *fd)
 		if (glRefConfig.framebufferObject)
 			shadowParms.targetFbo = tr.pshadowFbos[i];
 
-		shadowParms.flags = VPF_DEPTHSHADOW | VPF_NOVIEWMODEL;
+		shadowParms.flags = (viewParmFlags_t)( VPF_DEPTHSHADOW | VPF_NOVIEWMODEL | extraViewFlags );
 		shadowParms.zFar = shadow->lightRadius;
 
 		VectorCopy(shadow->lightOrigin, shadowParms.or.origin);
@@ -2555,6 +2761,482 @@ void R_RenderPshadowMaps(const refdef_t *fd)
 
 			if (!glRefConfig.framebufferObject)
 				R_AddCapShadowmapCmd( i, -1 );
+		}
+	}
+}
+
+
+/*
+================================================================================
+HZM gl2 DYNAMIC-LIGHT CAST SHADOWS (r_hzmDlightShadows)
+
+Upstream rend2 builds its projected shadows from R_LightForPoint - the STATIC lightgrid
+direction - and only when r_shadows == 4, which MOHAA's cg_shadows never is. Everything
+downstream of the shadow LIST, though, is light-agnostic: R_PshadowSurface culls world
+surfaces against pshadow_t::lightOrigin/lightRadius/cullPlane, and pshadow_fp.glsl does a
+genuine point-light falloff `1 - |frag-lightOrigin|^2 / lightRadius^2` around that same
+origin. So the list is the only thing that has to change to turn it into a dynamic-light
+shadow system: put the DLIGHT's origin in lightOrigin and its radius in lightRadius, and
+the existing receive pass produces a shadow that is cast away from the flash and fades out
+at the edge of the flash's reach.
+
+Where the lights come from in THIS game (all default-on, no content work needed):
+  cgame  cg_parsemsg.cpp   coop_muzzleLight 160  55 ms per bullet, ANY shooter
+  cgame  cg_parsemsg.cpp   coop_explLight   420 260 ms per explosion
+  cgame  cg_ents.c         CG_EntityEffects: every entity carrying constantLight
+  fgame  explosion.cpp / weaputils.cpp  dlight_radius on explosions and projectiles
+  fgame  entity.cpp        script setLight/lightRadius/lightStyle on any entity
+Transient cgame lights shrink as they fade (radius * f), which is what makes
+r_hzmDlightShadowMinRadius double as a "only while it is still bright" gate.
+
+GEOMETRY NOTE - why pshadow_t::lightOrigin is NOT the dlight's position.
+The depth map is an ORTHOGRAPHIC slab of half-width viewRadius around the light axis,
+spanning depth 0..lightRadius forward from lightOrigin, and pshadow_fp reconstructs (s,t)
+as the fragment's offset from that axis divided by viewRadius. Because s and t are measured
+PERPENDICULAR to the axis, sliding lightOrigin along the axis does not move the shadow at
+all - it only chooses the depth range and where the distance falloff is measured from.
+That freedom is what makes the feature workable: pinning lightOrigin to the real dlight
+would require the caster to fit inside 0..dlightRadius, i.e. d + viewRadius <= radius, and
+a 53-unit actor (TIKI_GlobalRadius for a standing human is 0.7 * |bbox|, roughly 53) simply
+cannot fit inside a 160-unit muzzle flash at any useful distance. So, exactly as upstream
+does, lightOrigin sits on the caster's bounding sphere facing the light, and lightRadius
+becomes the light's REMAINING reach past that point - which is what makes the shadow fade
+out roughly where the light itself dies, floored at 3*viewRadius so the caster (diameter
+2*viewRadius) can never be clipped by the far plane.
+The dlight's actual position is still what sets the shadow's DIRECTION, which is the whole
+point. What is given up is an exactly physical falloff origin.
+================================================================================
+*/
+
+/*
+=====================
+R_DlightShadowCasterRadius
+
+Bounding-sphere radius of a potential caster, or 0 if it must not cast. Deliberately
+narrower than R_RenderPshadowMaps' switch: MOD_SPRITE is excluded (FX billboards - muzzle
+flashes and smoke puffs casting shadows of themselves is not a feature), and MOD_MDR /
+MOD_IQM are excluded because MOHAA ships neither and upstream flags both "never actually
+tested this".
+=====================
+*/
+static float R_DlightShadowCasterRadius( const trRefEntity_t *ent )
+{
+	model_t *model;
+	float    scale = 1.0f;
+
+	if ( ent->e.reType != RT_MODEL ) {
+		return 0.0f;
+	}
+
+	model = R_GetModelByHandle( ent->e.hModel );
+	if ( !model ) {
+		return 0.0f;
+	}
+
+	if ( ent->e.nonNormalizedAxes ) {
+		scale = VectorLength( ent->e.axis[0] );
+	}
+
+	switch ( model->type )
+	{
+		case MOD_TIKI:
+			if ( !model->d.tiki ) {
+				return 0.0f;
+			}
+			// TIKI entities are scaled by refEntity_t::scale, not by the axes
+			// (tr_model.cpp R_AddSkelSurfaces: tiki_scale = load_scale * e.scale).
+			// Upstream's R_RenderPshadowMaps drops this and undersizes the slab for any
+			// scaled model; the real per-entity R_GetRadius cannot be used here because it
+			// calls R_UpdatePoseInternal, which has side effects we must not trigger once
+			// per light per entity.
+			if ( ent->e.scale > 0.0f ) {
+				scale *= ent->e.scale;
+			}
+			return ri.TIKI_GlobalRadius( model->d.tiki ) * scale;
+
+		case MOD_MESH:
+			if ( !model->mdv[0] || ent->e.frame < 0 || ent->e.frame >= model->mdv[0]->numFrames ) {
+				return 0.0f;
+			}
+			return model->mdv[0]->frames[ent->e.frame].radius * scale;
+
+		default:
+			return 0.0f;
+	}
+}
+
+/*
+=====================
+R_FinalizeDlightPshadow
+
+Turn a collected caster sphere into a renderable pshadow lit by dl. Returns qfalse if the
+sphere no longer satisfies the two geometric requirements above, in which case the caller
+drops it - that is the post-merge re-check.
+=====================
+*/
+static qboolean R_FinalizeDlightPshadow( pshadow_t *ps, const dlight_t *dl )
+{
+	vec3_t up, dirToLight;
+	float  d, reach;
+
+	VectorSubtract( dl->origin, ps->viewOrigin, dirToLight );
+	d = VectorNormalize( dirToLight );
+
+	if ( d <= ps->viewRadius * 0.5f ) {
+		return qfalse;              // light sits essentially at the caster's centre:
+		                            // no stable direction, and it would jitter per frame
+	}
+	if ( d - ps->viewRadius >= dl->radius ) {
+		return qfalse;              // caster lies entirely outside the light's reach
+	}
+
+	// Projection origin on the caster's bounding sphere, facing the light. See the
+	// GEOMETRY NOTE above: this does not move the shadow, it only guarantees the caster
+	// fits in the depth range.
+	VectorMA( ps->viewOrigin, ps->viewRadius, dirToLight, ps->lightOrigin );
+
+	// How far the light still reaches past that point - the shadow's length, and the
+	// radius pshadow_fp's `1 - dist^2/R^2` falloff uses.
+	reach = dl->radius - ( d - ps->viewRadius );
+	if ( reach < ps->viewRadius * 3.0f ) {
+		reach = ps->viewRadius * 3.0f;   // upstream's floor; also keeps the caster
+		                                 // (diameter 2*viewRadius) off the far plane
+	}
+	ps->lightRadius = reach;
+
+	// lightViewAxis[0] is the direction light TRAVELS, i.e. light -> caster.
+	VectorScale( dirToLight, -1.0f, ps->lightViewAxis[0] );
+
+	VectorSet( up, 0, 0, -1 );
+	if ( fabsf( DotProduct( up, ps->lightViewAxis[0] ) ) > 0.9f ) {
+		VectorSet( up, -1, 0, 0 );
+	}
+
+	CrossProduct( ps->lightViewAxis[0], up, ps->lightViewAxis[1] );
+	VectorNormalize( ps->lightViewAxis[1] );
+	CrossProduct( ps->lightViewAxis[0], ps->lightViewAxis[1], ps->lightViewAxis[2] );
+
+	VectorCopy( ps->lightViewAxis[0], ps->cullPlane.normal );
+	ps->cullPlane.dist = DotProduct( ps->cullPlane.normal, ps->lightOrigin );
+	ps->cullPlane.type = PLANE_NON_AXIAL;
+	SetPlaneSignbits( &ps->cullPlane );
+
+	return qtrue;
+}
+
+/*
+=====================
+R_RenderDlightShadowMaps
+=====================
+*/
+void R_RenderDlightShadowMaps(const refdef_t *fd)
+{
+	int   lightOrder[MAX_DLIGHTS];
+	float lightScore[MAX_DLIGHTS];
+	int   numLights = 0;
+	int   maxLights, maxShadows, maxCasters, allowChars;
+	float maxDist, maxDistSq, minRadius;
+	int   firstShadow;
+	int   i, j, k, n;
+	int   numCandidateLights = 0;
+
+	if ( !R_DlightShadowsActive() ) {
+		return;
+	}
+	if ( tr.refdef.num_dlights <= 0 || tr.refdef.num_entities <= 0 ) {
+		return;
+	}
+
+	maxShadows = r_hzmDlightShadowMax->integer;
+	if ( maxShadows > MAX_DRAWN_PSHADOWS ) {
+		maxShadows = MAX_DRAWN_PSHADOWS;
+	}
+	// Never stomp shadows another builder already produced this frame (only possible if a
+	// user also sets cg_shadows 4, which MOHAA's UI never does).
+	firstShadow = tr.refdef.num_pshadows;
+	if ( firstShadow >= maxShadows ) {
+		return;
+	}
+
+	maxLights = r_hzmDlightShadowLights->integer;
+	if ( maxLights < 1 ) {
+		maxLights = 1;
+	} else if ( maxLights > MAX_DLIGHTS ) {
+		maxLights = MAX_DLIGHTS;   // lightOrder[]/lightScore[] are MAX_DLIGHTS long
+	}
+
+	maxCasters = r_hzmDlightShadowCasters->integer;
+	if ( maxCasters < 1 ) {
+		maxCasters = 1;
+	} else if ( maxCasters > 8 ) {
+		maxCasters = 8;   // pshadow_t::entityNums[8]
+	}
+
+	maxDist = r_hzmDlightShadowDist->value;
+	if ( maxDist <= 0.0f ) {
+		maxDist = 1400.0f;
+	}
+	maxDistSq = maxDist * maxDist;
+
+	minRadius = r_hzmDlightShadowMinRadius->value;
+	if ( minRadius < 1.0f ) {
+		minRadius = 1.0f;
+	}
+
+	allowChars = r_hzmDlightShadowChars->integer;
+
+	//
+	// 1. rank the scene's dlights and keep the best maxLights of them
+	//
+	for ( i = 0; i < tr.refdef.num_dlights && i < MAX_DLIGHTS; i++ )
+	{
+		const dlight_t *dl = &tr.refdef.dlights[i];
+		vec3_t          diff;
+		float           dist, bright, score;
+
+		if ( dl->radius < minRadius ) {
+			continue;
+		}
+
+		bright = dl->color[0];
+		if ( dl->color[1] > bright ) { bright = dl->color[1]; }
+		if ( dl->color[2] > bright ) { bright = dl->color[2]; }
+		if ( bright <= 0.02f ) {
+			continue;               // a black light casts nothing worth 4 render passes
+		}
+
+		VectorSubtract( dl->origin, fd->vieworg, diff );
+		dist = VectorLength( diff );
+		if ( dist > maxDist ) {
+			continue;
+		}
+		// behind the viewer by more than its own reach: nothing it lights can be on screen
+		if ( DotProduct( diff, fd->viewaxis[0] ) < -dl->radius ) {
+			continue;
+		}
+
+		numCandidateLights++;
+
+		// bigger, brighter and nearer wins
+		score = ( bright * dl->radius ) / ( dist + 1.0f );
+
+		// insertion sort, best first, truncated at maxLights. curIdx/curScore are the
+		// value being carried down the list; the outer loop's `i` is never touched.
+		{
+			int   curIdx   = i;
+			float curScore = score;
+
+			for ( j = 0; j < maxLights; j++ )
+			{
+				int   swapIdx;
+				float swapScore;
+
+				if ( j >= numLights ) {
+					lightOrder[j] = curIdx;
+					lightScore[j] = curScore;
+					numLights = j + 1;
+					break;
+				}
+				if ( lightScore[j] >= curScore ) {
+					continue;
+				}
+				swapIdx       = lightOrder[j];
+				swapScore     = lightScore[j];
+				lightOrder[j] = curIdx;
+				lightScore[j] = curScore;
+				curIdx        = swapIdx;
+				curScore      = swapScore;
+			}
+		}
+	}
+
+	//
+	// 2. for each surviving light, collect casters and build the shadow list
+	//
+	for ( n = 0; n < numLights && tr.refdef.num_pshadows < maxShadows; n++ )
+	{
+		const dlight_t *dl = &tr.refdef.dlights[ lightOrder[n] ];
+		int lightFirst = tr.refdef.num_pshadows;
+		int lightCount = 0;
+		int writeIdx;
+
+		for ( i = 0; i < tr.refdef.num_entities; i++ )
+		{
+			trRefEntity_t *ent = &tr.refdef.entities[i];
+			pshadow_t      shadow;
+			vec3_t         diff;
+			float          radius, d;
+
+			if ( ent->e.renderfx & ( RF_FIRST_PERSON | RF_NOSHADOW | RF_DEPTHHACK | RF_SKYENTITY ) ) {
+				continue;
+			}
+
+			radius = R_DlightShadowCasterRadius( ent );
+			if ( radius <= 0.0f ) {
+				continue;
+			}
+			// A caster bigger than the light is both physically silly and the one real
+			// perf cliff here: lightRadius is floored at 3*viewRadius, so a 400-unit
+			// vehicle would claim a 1200-unit shadow volume and R_PshadowSurface would
+			// then flag - and ProjectPshadowVBOGLSL re-draw - a large slice of the map.
+			if ( radius > dl->radius * 0.75f ) {
+				continue;
+			}
+
+			// bIsCharacter actors are the point of the feature, but they are also the
+			// entities RB_DepthFillSkip drops from depth passes; if the caller has turned
+			// that admission back off, do not spend a depth view rendering nothing.
+			if ( !allowChars && ent->e.tiki && ent->e.tiki->a && ent->e.tiki->a->bIsCharacter ) {
+				continue;
+			}
+
+			// Same two tests R_FinalizeDlightPshadow applies, done early so a hopeless
+			// caster never occupies a slot in the (small) per-light window. They are
+			// re-applied after the merge step, which grows viewRadius and moves viewOrigin.
+			VectorSubtract( ent->e.origin, dl->origin, diff );
+			d = VectorLength( diff );
+			if ( d <= radius * 0.5f ) {
+				continue;           // no stable light direction
+			}
+			if ( d - radius >= dl->radius ) {
+				continue;           // caster entirely outside the light's reach
+			}
+
+			VectorSubtract( ent->e.origin, fd->vieworg, diff );
+			if ( DotProduct( diff, diff ) > maxDistSq ) {
+				continue;
+			}
+
+			Com_Memset( &shadow, 0, sizeof( shadow ) );
+			shadow.numEntities = 1;
+			shadow.entityNums[0] = i;
+			shadow.viewRadius = radius;
+			VectorCopy( ent->e.origin, shadow.viewOrigin );
+			VectorCopy( ent->e.origin, shadow.entityOrigins[0] );
+			shadow.entityRadiuses[0] = radius;
+			// nearest to the light relative to its own size first - that is the caster
+			// whose shadow is largest and sharpest
+			shadow.sort = ( d * d ) / ( radius * radius );
+
+			for ( j = 0; j < maxCasters; j++ )
+			{
+				pshadow_t swap;
+
+				if ( lightFirst + j >= maxShadows ) {
+					break;          // global cap reached
+				}
+				if ( j >= lightCount ) {
+					lightCount = j + 1;
+					tr.refdef.pshadows[lightFirst + j] = shadow;
+					break;
+				}
+				if ( tr.refdef.pshadows[lightFirst + j].sort <= shadow.sort ) {
+					continue;
+				}
+				swap = tr.refdef.pshadows[lightFirst + j];
+				tr.refdef.pshadows[lightFirst + j] = shadow;
+				shadow = swap;
+			}
+		}
+
+		//
+		// 3. merge touching casters of THIS light into shared maps. Never across lights -
+		//    two lights give the same caster two different lightOrigins, and a merged
+		//    pshadow carries exactly one.
+		//
+		for ( i = lightFirst; i < lightFirst + lightCount; i++ )
+		{
+			pshadow_t *ps1 = &tr.refdef.pshadows[i];
+
+			for ( j = i + 1; j < lightFirst + lightCount; j++ )
+			{
+				pshadow_t *ps2 = &tr.refdef.pshadows[j];
+				qboolean   touch;
+
+				if ( ps1->numEntities == 8 ) {
+					break;
+				}
+
+				touch = qfalse;
+				if ( SpheresIntersect( ps1->viewOrigin, ps1->viewRadius, ps2->viewOrigin, ps2->viewRadius ) )
+				{
+					for ( k = 0; k < ps1->numEntities; k++ )
+					{
+						if ( SpheresIntersect( ps1->entityOrigins[k], ps1->entityRadiuses[k], ps2->viewOrigin, ps2->viewRadius ) )
+						{
+							touch = qtrue;
+							break;
+						}
+					}
+				}
+
+				if ( touch )
+				{
+					vec3_t newOrigin;
+					float  newRadius;
+
+					BoundingSphereOfSpheres( ps1->viewOrigin, ps1->viewRadius, ps2->viewOrigin, ps2->viewRadius, newOrigin, &newRadius );
+					VectorCopy( newOrigin, ps1->viewOrigin );
+					ps1->viewRadius = newRadius;
+
+					ps1->entityNums[ps1->numEntities] = ps2->entityNums[0];
+					VectorCopy( ps2->viewOrigin, ps1->entityOrigins[ps1->numEntities] );
+					ps1->entityRadiuses[ps1->numEntities] = ps2->viewRadius;
+
+					ps1->numEntities++;
+
+					for ( k = j; k < lightFirst + lightCount - 1; k++ )
+					{
+						tr.refdef.pshadows[k] = tr.refdef.pshadows[k + 1];
+					}
+
+					j--;
+					lightCount--;
+				}
+			}
+		}
+
+		//
+		// 4. resolve each surviving sphere against the light, dropping any the merge grew
+		//    out of range, and compact the survivors down.
+		//
+		writeIdx = lightFirst;
+		for ( i = lightFirst; i < lightFirst + lightCount; i++ )
+		{
+			if ( !R_FinalizeDlightPshadow( &tr.refdef.pshadows[i], dl ) ) {
+				continue;
+			}
+			if ( writeIdx != i ) {
+				tr.refdef.pshadows[writeIdx] = tr.refdef.pshadows[i];
+			}
+			writeIdx++;
+		}
+
+		tr.refdef.num_pshadows = writeIdx;
+	}
+
+	//
+	// 5. render the depth maps. VPF_PSHADOW is what tells RB_RenderDrawSurfList that this
+	//    depth-fill pass is a caster's ONLY chance and character actors must not be
+	//    skipped the way they are in the main-view z-prepass.
+	//
+	if ( tr.refdef.num_pshadows > firstShadow )
+	{
+		R_RenderPshadowMapRange( firstShadow, tr.refdef.num_pshadows - firstShadow, VPF_PSHADOW );
+	}
+
+	if ( r_hzmDlightShadowDebug && r_hzmDlightShadowDebug->integer )
+	{
+		static int lastPrint = 0;
+
+		if ( tr.refdef.time - lastPrint > 1000 || tr.refdef.time < lastPrint )
+		{
+			lastPrint = tr.refdef.time;
+			ri.Printf( PRINT_ALL,
+				"^~^~^ DLSHADOW dlights=%d passed=%d used=%d maps=%d (cap %d) ents=%d\n",
+				tr.refdef.num_dlights, numCandidateLights, numLights,
+				tr.refdef.num_pshadows - firstShadow, maxShadows,
+				tr.refdef.num_entities );
 		}
 	}
 }
@@ -2875,6 +3557,13 @@ void R_RenderSunShadowMaps(const refdef_t *fd, int level)
 		shadowParms.flags = VPF_DEPTHSHADOW | VPF_DEPTHCLAMP | VPF_ORTHOGRAPHIC | VPF_NOVIEWMODEL;
 		shadowParms.zFar = lightviewBounds[1][0];
 
+		// HZM gl2 real character shadows: tag which cascade this is so R_AddSkelSurfaces can
+		// budget character casters per cascade. 1-based, because the Com_Memset above (and
+		// every other view setup) zeroes the field, so 0 reliably means "not a sun cascade
+		// view". This propagates to the backend for free: R_AddDrawSurfCmd copies tr.viewParms
+		// whole and tr.viewParms is assigned from shadowParms just below.
+		shadowParms.shadowCascade = level + 1;
+
 		VectorCopy(lightOrigin, shadowParms.or.origin);
 		
 		VectorCopy(lightViewAxis[0], shadowParms.or.axis[0]);
@@ -3079,7 +3768,34 @@ void R_AddSpriteSurf(surfaceType_t* surface, shader_t* shader, float zDistance)
 		zDistance = MAX_SPRITE_DIST_SQUARED;
 	}
 
-	index = tr.refdef.numSpriteSurfs % MAX_SPRITES;
+	// HZM (engine-limits audit): this wrapped the write index at MAX_SPRITES (2048) while the
+	// destination is backEndData->spriteSurfs[MAX_SPRITESURFS] (32768) and *every* consumer
+	// counts in MAX_SPRITESURFS units - R_RenderView slices [firstSpriteSurf, numSpriteSurfs)
+	// and R_SortDrawSurfs clamps the count to MAX_SPRITESURFS. numSpriteSurfs accumulates over
+	// ALL views in a frame (portal sky, mirrors, sun-cascade shadow views), so 2 busy views were
+	// enough to push it past 2048: the writes wrapped back onto slot 0 while later views handed
+	// R_SortDrawSurfs a base pointer above 2048 - i.e. never-written slots. The radix sort then
+	// ordered garbage and RB_RenderSpriteSurfList dereferenced a stale/NULL surface pointer.
+	//
+	// Bound the index by the array it actually indexes, and refuse (loudly, once) rather than
+	// wrap when the array is genuinely full - wrapping is what turned an overflow into a crash,
+	// and it would also leave firstSpriteSurf pointing past the end of the array.
+	if (tr.refdef.numSpriteSurfs >= MAX_SPRITESURFS) {
+		static qboolean overflowWarned = qfalse;
+
+		if (!overflowWarned) {
+			overflowWarned = qtrue;
+			ri.Printf(
+				PRINT_WARNING,
+				"R_AddSpriteSurf: MAX_SPRITESURFS (%d) exceeded - sprites dropped."
+				" Raise MAX_SPRITESURFS in tr_local.h (it sizes backEndData_t::spriteSurfs).\n",
+				MAX_SPRITESURFS
+			);
+		}
+		return;
+	}
+
+	index = tr.refdef.numSpriteSurfs;
     tr.refdef.spriteSurfs[index].sort = (int)(MAX_SPRITE_DIST_SQUARED - zDistance) | (shader->sortedIndex << QSORT_SHADERNUM_SHIFT);
     tr.refdef.spriteSurfs[index].surface = surface;
     tr.refdef.numSpriteSurfs++;
@@ -3285,16 +4001,54 @@ qboolean SurfIsOffscreen2(const srfBspSurface_t* surface, shader_t* shader, int 
 	// we have in the game right now.
 	numTriangles = surface->numIndexes / 3;
 
+	// HZM [user 08-02]: OUT-OF-BOUNDS / STALE-SURFACE GUARD - this loop was the faulting
+	// instruction in 4 of 10 WER minidumps (3x t3l1 "crashes on load", 1x t3l2 "crashed when
+	// the plane flew overhead" - one and the same bug). The access violation was on
+	//     movss xmm0, [rsi + rax]   where rax = indices[i] * 0x3C (0x3C == sizeof(srfVert_t))
+	// i.e. exactly the VectorSubtract below. In three of the four dumps indices[i] came back
+	// as obvious garbage (one was 0x616c5f00 - ASCII "\0_la", i.e. it was reading out of a
+	// STRING), while numIndexes was a sane 9-12 and i was 6 every time. So the loop bound is
+	// fine and it is surface->indexes / surface->verts that point at the wrong memory.
+	// The only live caller is R_Sky_Render (tr_sky_portal.cpp), which blind-casts
+	// tr.portalsky.skySurfs[i]->data to srfBspSurface_t* - so a stale or wrongly-typed
+	// entry in that 32-slot array lands here still claiming SF_FACE and passing the check
+	// above. This guard turns a hard crash into a skipped sky portal.
+	// NOTE this is containment, not the cure: the real fix is to stop stale pointers
+	// entering tr.portalsky.skySurfs[] in the first place (reset numSurfs per view, and
+	// filter R_Sky_AddSurf to SF_FACE at collection time in tr_world.c).
+	if ( !surface->indexes || !surface->verts || surface->numVerts <= 0 ) {
+		return qfalse;
+	}
+
 	for ( i = 0; i < surface->numIndexes; i += 3 )
 	{
 		vec3_t normal;
 		float dot;
 		float len;
-		unsigned* indices;
+		const glIndex_t* indices;
+		unsigned idx;
 
-		indices = surface->indexes; // (unsigned*)(((char*)surface) + surface->ofsIndices);
+		// HZM [user 08-02]: *** THIS WAS THE ACTUAL CRASH. *** This declaration used to be
+		// "unsigned* indices", carried over verbatim when this function was re-ported from
+		// gl1. But the two renderers disagree on the index width:
+		//     renderergl1/tr_local.h:53  typedef unsigned int   glIndex_t;   // 32-bit
+		//     renderergl2/tr_local.h:61  typedef unsigned short glIndex_t;   // 16-bit
+		// so in gl2 surface->indexes is a *16-bit* array being read through a 32-bit
+		// pointer: every indices[i] silently fused TWO adjacent indices into one bogus
+		// value, and the stride ran off the end of the buffer at twice the intended rate.
+		// That is precisely what the minidumps showed - garbage like 0x616c5f00 (= shorts
+		// 0x5f00,0x616c) and a fault at i==6 on a 9-12 index buffer, every time.
+		// The compiler was telling us: warning C4133 "'=': incompatible types - from
+		// 'glIndex_t *const' to 'unsigned int *'".
+		indices = surface->indexes;
 
-		VectorSubtract( surface->verts[indices[i]].xyz, surfOr.viewOrigin, normal);
+		idx = indices[i];
+		if ( idx >= (unsigned)surface->numVerts ) {
+			// corrupt/stale surface - do not trust any of it
+			return qfalse;
+		}
+
+		VectorSubtract( surface->verts[idx].xyz, surfOr.viewOrigin, normal);
 
 		if (shader->fDistRange > 0) {
 			len = VectorLengthSquared(normal);			// lose the sqrt

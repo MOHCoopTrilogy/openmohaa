@@ -218,7 +218,9 @@ static void R_BindAnimatedImage( textureBundle_t *bundle ) {
 	int index;
 
 	if (bundle->numImageAnimations <= 1) {
-		GL_Bind(bundle->image[0]);
+		// HZM coop - gore tier 4 (UV wounds): entities with a wound-painted
+		// copy of this texture get their copy bound instead of the shared base
+		GL_Bind(R_GoreOverrideImage(bundle->image[0]));
 		return;
 	}
 
@@ -236,7 +238,8 @@ static void R_BindAnimatedImage( textureBundle_t *bundle ) {
 		index = bundle->numImageAnimations - 1;
 	}
 
-	GL_Bind(bundle->image[index]);
+	// HZM coop - gore tier 4 (UV wounds): same override for animated bundles
+	GL_Bind(R_GoreOverrideImage(bundle->image[index]));
 }
 
 /*
@@ -737,6 +740,62 @@ static void ProjectDlightTexture( void ) {
 
 /*
 ===============
+RB_TikiEntityVertexColorFallback
+
+HZM bug-916: rgbGen vertex / exactVertex shaders rely on baked per-vertex
+radiosity, which only exists for map-placed (BSP-compiled) static models.
+A runtime-spawned TIKI refentity (e.g. a script_model spawning
+models/static/*.tik) has no vertex colors at all: RB_SkelMesh only fills
+xyz/normals/texcoords and RB_BeginSurface leaves tess.vertexColorValid
+false, so the CGEN_VERTEX/CGEN_EXACT_VERTEX cases below used to break out
+without writing tess.svars.colors - uploading STALE colors left over from
+the previous batch (saturated yellow / near-black blowout on harsh-sun
+maps like e1l2).
+
+Instead, light such surfaces flat from the entity's light-grid sample -
+the same value grid-lit entities use - scaled by r_entlight_scale so
+placement lighting rides the same tuning dial as other entity lighting.
+
+Returns qtrue if it filled tess.svars.colors (only for TIKI refentities).
+===============
+*/
+static qboolean RB_TikiEntityVertexColorFallback( void )
+{
+	const byte	*grid;
+	int			r, g, b;
+	int			i;
+
+	if ( backEnd.currentStaticModel || !backEnd.currentEntity
+		|| backEnd.currentEntity == &tr.worldEntity || !backEnd.currentEntity->e.tiki ) {
+		return qfalse;
+	}
+
+	// compute the light grid sample for this entity if it has not been
+	// calculated yet this frame (no-op otherwise)
+	RB_Grid_SetupEntity();
+
+	grid = ( const byte * )&backEnd.currentEntity->iGridLighting;
+	// bug-916: r_entlight_tikiScale compensates for the missing baked-sun contribution the
+	// map-placed twins get from radiosity - dedicated dial so soldiers are unaffected.
+	r = ( int )( grid[0] * r_entlight_scale->value * r_entlight_tikiScale->value );
+	g = ( int )( grid[1] * r_entlight_scale->value * r_entlight_tikiScale->value );
+	b = ( int )( grid[2] * r_entlight_scale->value * r_entlight_tikiScale->value );
+	if ( r > 255 ) { r = 255; }
+	if ( g > 255 ) { g = 255; }
+	if ( b > 255 ) { b = 255; }
+
+	for ( i = 0; i < tess.numVertexes; i++ ) {
+		tess.svars.colors[i][0] = r;
+		tess.svars.colors[i][1] = g;
+		tess.svars.colors[i][2] = b;
+		tess.svars.colors[i][3] = 0xff;
+	}
+
+	return qtrue;
+}
+
+/*
+===============
 ComputeColors
 ===============
 */
@@ -766,6 +825,13 @@ static void ComputeColors( shaderStage_t *pStage )
 			if (!tess.vertexColorValid) {
 				static qboolean bWarned = qfalse;
 
+				// HZM bug-916: runtime TIKI entities have no baked vertex
+				// colors - light from the entity grid instead of leaving
+				// stale colors from the previous batch
+				if (RB_TikiEntityVertexColorFallback()) {
+					break;
+				}
+
 				if (!bWarned) {
 					// mohta and mohtt shows the warning once
                     bWarned = qtrue;
@@ -783,6 +849,13 @@ static void ComputeColors( shaderStage_t *pStage )
 		case CGEN_VERTEX:
             if (!tess.vertexColorValid) {
                 static qboolean bWarned = qfalse;
+
+				// HZM bug-916: runtime TIKI entities have no baked vertex
+				// colors - light from the entity grid instead of leaving
+				// stale colors from the previous batch
+				if (RB_TikiEntityVertexColorFallback()) {
+					break;
+				}
 
 				if (!bWarned) {
 					bWarned = qtrue;

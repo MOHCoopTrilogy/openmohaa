@@ -316,6 +316,17 @@ void FBO_Init(void)
 		FBO_AttachImage(tr.screenScratchFbo, tr.screenScratchImage, GL_COLOR_ATTACHMENT0, 0);
 		FBO_AttachImage(tr.screenScratchFbo, tr.renderDepthImage, GL_DEPTH_ATTACHMENT, 0);
 		R_CheckFBO(tr.screenScratchFbo);
+
+		// HZM gl2 fog parity: colour-only alias of the same scratch image. The global-fog
+		// post pass SAMPLES tr.renderDepthImage, and every other full-size FBO (renderFbo,
+		// msaaResolveFbo, screenScratchFbo, sunRaysFbo) has that very image bound as its
+		// depth attachment - rendering into one of those while sampling it is a rendering
+		// feedback loop and the fetched depth is undefined. Writing through this alias
+		// instead keeps the destination colour identical (same image) with no depth
+		// attachment, so the depth fetch is always well defined.
+		tr.globalFogFbo = FBO_Create("globalFog", tr.screenScratchImage->width, tr.screenScratchImage->height);
+		FBO_AttachImage(tr.globalFogFbo, tr.screenScratchImage, GL_COLOR_ATTACHMENT0, 0);
+		R_CheckFBO(tr.globalFogFbo);
 	}
 
 	if (tr.sunRaysImage)
@@ -487,6 +498,19 @@ void R_FBOList_f(void)
 	ri.Printf(PRINT_ALL, " %i FBOs\n", tr.numFBOs);
 }
 
+// HZM gl2 post-FX (bug-1151): a spare vec4 the ported gl1 stages can feed through the standard
+// FBO_Blit path. Several of those shaders need more scalars than UNIFORM_COLOR holds (heat haze
+// wants heat/time/muzzleHeat/muzzleRadius AND the muzzle screen point). Pushed unconditionally,
+// exactly like UNIFORM_AUTOEXPOSUREMINMAX below - shaders that do not declare u_HzmParams simply
+// resolve to location -1 and the set is a no-op.
+static vec4_t s_hzmBlitParams = { 0.0f, 0.0f, 0.0f, 0.0f };
+
+void FBO_SetHzmParams(const vec4_t p)
+{
+	if (p) { VectorCopy4(p, s_hzmBlitParams); }
+	else { VectorSet4(s_hzmBlitParams, 0.0f, 0.0f, 0.0f, 0.0f); }
+}
+
 void FBO_BlitFromTexture(struct image_s *src, vec4_t inSrcTexCorners, vec2_t inSrcTexScale, FBO_t *dst, ivec4_t inDstBox, struct shaderProgram_s *shaderProgram, vec4_t inColor, int blend)
 {
 	ivec4_t dstBox;
@@ -584,6 +608,7 @@ void FBO_BlitFromTexture(struct image_s *src, vec4_t inSrcTexCorners, vec2_t inS
 	GLSL_SetUniformMat4(shaderProgram, UNIFORM_MODELVIEWPROJECTIONMATRIX, projection);
 	GLSL_SetUniformVec4(shaderProgram, UNIFORM_COLOR, color);
 	GLSL_SetUniformVec2(shaderProgram, UNIFORM_INVTEXRES, invTexRes);
+	GLSL_SetUniformVec4(shaderProgram, UNIFORM_HZMPARAMS, s_hzmBlitParams);
 	GLSL_SetUniformVec2(shaderProgram, UNIFORM_AUTOEXPOSUREMINMAX, tr.refdef.autoExposureMinMax);
 	GLSL_SetUniformVec3(shaderProgram, UNIFORM_TONEMINAVGMAXLINEAR, tr.refdef.toneMinAvgMaxLinear);
 

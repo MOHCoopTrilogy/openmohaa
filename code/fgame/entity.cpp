@@ -1723,6 +1723,7 @@ Entity::Entity()
     gravity         = 1.0;
     groundentity    = NULL;
     groundcontents  = 0;
+    m_iTossStuckFrames = 0; // HZM bug-923
     velocity        = vec_zero;
     avelocity       = vec_zero;
     edict->clipmask = MASK_SOLID;
@@ -2334,12 +2335,24 @@ void Entity::updateOrigin(void)
             continue;
         }
         ent = (Entity *)G_GetEntity(children[i]);
+        // HZM 07-19 (bug-917): an attached child freed without parent cleanup leaves a stale
+        // entnum here - live dump: NULL read at Entity::updateOrigin+0x7b via Actor::DoMove
+        // (attach/holster churn on actors under heavy entity recycling). Heal the slot.
+        if (!ent) {
+            children[i] = ENTITYNUM_NONE;
+            num--;
+            continue;
+        }
         ent->setOrigin();
         num--;
     }
 
     for (i = 0; i < m_iNumGlues; i++) {
-        m_pGlues[i]->setOrigin();
+        // HZM 07-19 (bug-917): same guard for glued children (SafePtr nulls when the glue
+        // target is freed; deref would crash).
+        if (m_pGlues[i]) {
+            m_pGlues[i]->setOrigin();
+        }
     }
 }
 
@@ -2583,12 +2596,21 @@ void Entity::setAngles(Vector ang)
             continue;
         }
         ent = (Entity *)G_GetEntity(children[i]);
+        // HZM 07-19 (bug-917): stale child slot guard - see updateOrigin
+        if (!ent) {
+            children[i] = ENTITYNUM_NONE;
+            num--;
+            continue;
+        }
         ent->setAngles();
         num--;
     }
 
     for (i = 0; i < m_iNumGlues; i++) {
-        m_pGlues[i]->setAngles();
+        // HZM 07-19 (bug-917): freed glue target guard - see updateOrigin
+        if (m_pGlues[i]) {
+            m_pGlues[i]->setAngles();
+        }
     }
 }
 
@@ -3765,6 +3787,13 @@ qboolean Entity::attach(int parent_entity_num, int tag_num, qboolean use_angles,
     //
     parent = (Entity *)G_GetEntity(parent_entity_num);
 
+    // HZM 07-20 (bug-926): live dump crash site - attaching to a freed/invalid parent under the
+    // slot-1022 aliasing bug. A missing parent is a failed attach, not a crash.
+    if (!parent) {
+        warning("attach", "Parent entity %d does not exist.", parent_entity_num);
+        return false;
+    }
+
     if (parent->numchildren < MAX_MODEL_CHILDREN) {
         //
         // find a free spot in the parent
@@ -4413,8 +4442,17 @@ void Entity::AttachModelEvent(Event *ev)
             obj->NewAnim("idle");
         } else {
             warning("AttachModelEvent", "Could not attach model %s to tag \"%s\" on entnum #%d (targetname = %s)", modelname.c_str(), bone.c_str(), entnum, targetname.c_str());
+            // HZM (bug-1217): this if/else is Entity::Delete() hand-inlined, and the `this` of the
+            // copied body was never rewritten to `obj` - so the in-thinks arm posted EV_Remove on
+            // the PARENT (the player / actor / script_model that asked for the attachment) while
+            // the else arm right below it correctly destroyed the child. Reachable and severe: all
+            // script execution runs inside g_iInThinks (Director.Unpause is bracketed by it in
+            // g_main.cpp), and Entity::attach fails whenever the parent already holds
+            // MAX_MODEL_CHILDREN (16) children - which a player wearing a helmet, holstered
+            // weapons and gear can genuinely reach - so one over-budget `attachmodel` deleted the
+            // player and left the orphan prop in the world forever.
             if (g_iInThinks) {
-                PostEvent(EV_Remove, 0);
+                obj->PostEvent(EV_Remove, 0);
             } else {
                 delete obj;
             }
@@ -4457,6 +4495,12 @@ void Entity::RemoveAttachedModelEvent(Event *ev)
             }
 
             ent = (Entity *)G_GetEntity(children[i]);
+
+            // HZM 07-19 (bug-917): stale child slot guard - see updateOrigin
+            if (!ent) {
+                num--;
+                continue;
+            }
 
             if (ent->edict->s.tag_num == tag_num) {
                 if (!model_name.length() || model_name == ent->model) {
@@ -4506,6 +4550,11 @@ void Entity::AttachedModelAnimEvent(Event *ev)
             }
 
             ent = G_GetEntity(children[i]);
+            // HZM 07-19 (bug-917): stale child slot guard - see updateOrigin
+            if (!ent) {
+                num--;
+                continue;
+            }
             if (ent->edict->s.tag_num != tag_num) {
                 // not matching the requested tag num
                 continue;

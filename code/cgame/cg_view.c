@@ -83,6 +83,42 @@ static float s_shoulderSideSign = 1.0f;
 // import - no new cgame ABI. ADS/turret/scope/etc drop the capture (mouse aims the player again) and the
 // env eases the applied orbit back behind the shoulder rather than snapping.
 static float    s_freecamEnv     = 0.0f;
+
+// HZM coop [user 07-29] DBNO CAMERA envelope. 0 = normal framing, 1 = fully "downed" framing.
+// Same eased-envelope idiom as s_adsShoulderEnv / s_freecamEnv so going down and being revived
+// glide rather than cut - a hard jump of the eye by ~30 units reads as a teleport.
+static float    s_dbnoCamEnv     = 0.0f;
+
+/*
+=================
+CG_UpdateDbnoCam
+
+HZM coop [user 07-29] - eases s_dbnoCamEnv toward the DBNO state. Driven by coop_dbnoView, the
+same per-client cvar the script stuffs for the DBNO audio fade and the post-process vignette, so
+the camera can never disagree with the rest of the downed presentation.
+=================
+*/
+static void CG_UpdateDbnoCam(void)
+{
+    static cvar_t *pDbnoV = NULL, *pSpeed = NULL;
+    float          tgt, dt, rate, step;
+
+    if (!pDbnoV) { pDbnoV = cgi.Cvar_Get("coop_dbnoView",     "0",  0); }
+    if (!pSpeed) { pSpeed = cgi.Cvar_Get("cg_dbnoCamSpeed",   "6",  CVAR_ARCHIVE); }
+
+    tgt  = (pDbnoV->integer) ? 1.0f : 0.0f;
+    dt   = (cg.frametime > 0) ? (float)cg.frametime / 1000.0f : 0.0f;
+    rate = (pSpeed->value > 0.0f) ? pSpeed->value : 6.0f;
+
+    // ease back UP faster than down: being revived should feel like getting picked up, while
+    // going down should feel like collapsing into the dirt.
+    step = dt * ((tgt < s_dbnoCamEnv) ? rate * 1.6f : rate);
+    if (step > 1.0f) { step = 1.0f; }
+    s_dbnoCamEnv += (tgt - s_dbnoCamEnv) * step;
+    if (s_dbnoCamEnv > tgt - 0.003f && s_dbnoCamEnv < tgt + 0.003f) {
+        s_dbnoCamEnv = tgt; // settle
+    }
+}
 static qboolean s_freecamCapture = qfalse;
 
 /*
@@ -141,6 +177,26 @@ static void CG_OffsetThirdPersonView(void)
         if (!pFcDist) { pFcDist = cgi.Cvar_Get("cg_freecamDist", "100", CVAR_ARCHIVE); }
         fCamDist += (pFcDist->value - fCamDist) * s_freecamEnv;
         fCamSide += (0.0f - fCamSide) * s_freecamEnv;
+    }
+    // HZM coop [user 07-29] DBNO CHASE: downed, the stock framing pivots off a standing eye height
+    // and leaves the camera hovering well above a body lying in the dirt - you end up looking down at
+    // your own back instead of down the pistol, which is exactly the aim the user needs while crawling.
+    // Drop the pivot to near ground level, shorten the pull-back (a long boom clips through the floor
+    // when the pivot is this low) and reduce the vertical lift so the camera sits BEHIND the body
+    // rather than over it. Applied before the ADS/freecam blends so those still win the handoff.
+    if (s_dbnoCamEnv > 0.001f) {
+        static cvar_t *pDbDist = NULL, *pDbHeight = NULL, *pDbVert = NULL, *pDbSide = NULL;
+        // [user 07-29] Defaults are the values the user tuned in-game and asked to keep. Height is 16,
+        // not the 6 he had set: the mis-placed eye drop above was adding a further +10 to this same
+        // pivot while he was tuning, so folding it in here reproduces the framing he actually saw.
+        if (!pDbDist)   { pDbDist   = cgi.Cvar_Get("cg_dbnoCamDist",   "100", CVAR_ARCHIVE); }
+        if (!pDbHeight) { pDbHeight = cgi.Cvar_Get("cg_dbnoCamHeight", "16",  CVAR_ARCHIVE); }
+        if (!pDbVert)   { pDbVert   = cgi.Cvar_Get("cg_dbnoCamVert",   "-30", CVAR_ARCHIVE); }
+        if (!pDbSide)   { pDbSide   = cgi.Cvar_Get("cg_dbnoCamSide",   "14",  CVAR_ARCHIVE); }
+        fCamDist   += (pDbDist->value   - fCamDist)   * s_dbnoCamEnv;
+        fCamHeight += (pDbHeight->value - fCamHeight) * s_dbnoCamEnv;
+        fCamVert   += (pDbVert->value   - fCamVert)   * s_dbnoCamEnv;
+        fCamSide   += (pDbSide->value   - fCamSide)   * s_dbnoCamEnv;
     }
     if (s_adsShoulderEnv > 0.001f) {
         static cvar_t *pShDist = NULL, *pShSide = NULL, *pShUp = NULL;
@@ -361,6 +417,11 @@ static qboolean s_faCamInit  = qfalse;
 // renderer as r_ppSuppress. File-static so both CG_AddSuppression and CG_CalcFov share it.
 static float    s_coopSuppress = 0.0f;
 
+// HZM coop [user 08-02] - ON-HIT BLOOD intensity 0..1. Distinct from suppression: suppression is the
+// sustained "under fire" state (near-misses count), this fires only when a round actually LANDS on the
+// local player. Decayed in CG_CalcFov, published to the renderer as r_ppHit.
+static float    s_coopHit = 0.0f;
+
 // Bump the suppression intensity (clamped to 1). Called when an enemy round cracks past the listener.
 void CG_AddSuppression(float amount)
 {
@@ -567,6 +628,10 @@ CG_OffsetFirstPersonView
 */
 void CG_OffsetFirstPersonView(refEntity_t *pREnt, qboolean bUseWorldPosition)
 {
+    // HZM coop [user 2026-08-02] bug-1291 - eased 0..1 low-health limp envelope, driven by the
+    // server-stuffed coop_limpView. Static so it survives between frames; file-local so nothing
+    // else can drive the camera limp behind the server's back.
+    static float s_limpEnv = 0.0f;
     float     *origin;
     centity_t *pCent;
     dtiki_t   *tiki;
@@ -736,9 +801,39 @@ void CG_OffsetFirstPersonView(refEntity_t *pREnt, qboolean bUseWorldPosition)
         // view AFTER the origin, so the smooth-and-locked truck appears to hop against the bobbing camera -
         // this was the "truck steps forward in little jumps" stutter (noclip cured it by clearing walking).
         // Riders can't self-move, so no footstep bob belongs here; let it decay to zero (else branch).
+        // HZM coop [user 2026-08-02] bug-1291 - LOW-HEALTH LIMP, first-person half.
+        // "you should see the limp in first person (camera should imitate that as you move)".
+        // Driven ENTIRELY by coop_limpView, which the SERVER stuffs to the owning client on change
+        // (Player::TickLimp). The client deliberately does NOT re-derive a health threshold: if it
+        // did, a server admin setting coop_limp 0 would stop the body limping while every remote
+        // camera kept limping on its own compiled-in default.
+        // Eased rather than switched so the gait arrives as a consequence, not a mode flip.
+        {
+            static cvar_t *pLimpView = NULL;
+            static cvar_t *pLimpSpd  = NULL;
+            float          tgt, dt;
+            if (!pLimpView) { pLimpView = cgi.Cvar_Get("coop_limpView", "0", 0); }
+            if (!pLimpSpd)  { pLimpSpd  = cgi.Cvar_Get("cg_limpCamSpeed", "4", CVAR_ARCHIVE); }
+            tgt = (pLimpView && pLimpView->integer) ? 1.0f : 0.0f;
+            dt  = cg.frametime / 1000.0f;
+            if (dt < 0.0f) { dt = 0.0f; } else if (dt > 0.25f) { dt = 0.25f; }
+            s_limpEnv += (tgt - s_limpEnv) * dt * (pLimpSpd ? pLimpSpd->value : 4.0f);
+            if (s_limpEnv < 0.0f) { s_limpEnv = 0.0f; } else if (s_limpEnv > 1.0f) { s_limpEnv = 1.0f; }
+        }
+
         if (cg.predicted_player_state.walking && !(cg.predicted_player_state.pm_flags & PMF_NO_MOVE)) {
             fVel   = VectorLength(vVelocity);
             fPhase = fVel * 0.0015 + 0.9;
+            // LIMP DRAG: the bad foot's half-cycle takes longer, the good foot's is quicker, so the
+            // step TIMING is uneven and not just the depth. sin(phase - 0.94) is the foot-parity
+            // signal (see the vertical dip below). Clamped well above zero so the phase can never
+            // stall or run backwards, which would read as a freeze rather than a limp.
+            if (s_limpEnv > 0.0f) {
+                float fDrag = cgi.Cvar_Get("cg_limpDrag", "0.25", CVAR_ARCHIVE)->value;
+                float fMul  = 1.0f - s_limpEnv * fDrag * (float)sin(cg.fCurrentViewBobPhase - 0.94);
+                if (fMul < 0.35f) { fMul = 0.35f; } else if (fMul > 1.65f) { fMul = 1.65f; }
+                fPhase *= fMul;
+            }
             cg.fCurrentViewBobPhase += (cg.frametime / 1000.0 + cg.frametime / 1000.0) * M_PI * fPhase;
 
             if (cg.fCurrentViewBobAmp) {
@@ -796,8 +891,22 @@ void CG_OffsetFirstPersonView(refEntity_t *pREnt, qboolean bUseWorldPosition)
 
             VectorMA(origin, fPhase, vLeft, origin);
 
-            fPhase = sin(cg.fCurrentViewBobPhase - 0.94);
-            fPhase = (fabs(fPhase) - 0.5) * cg.fCurrentViewBobAmp * 0.06;
+            // Because of the fabs(), this vertical term has period PI - one lobe per FOOTSTEP - so
+            // the SIGN of sin(phase - 0.94) is foot parity. That makes the limp a continuous
+            // modulation of the existing dip rather than a new oscillator: one foot's dip goes deep,
+            // the other's stays shallow. Deliberately NOT floor(phase/PI)%2 parity, which steps
+            // discontinuously and pops. Placed BEFORE the MASK_PLAYERSOLID traces below, so a deep
+            // dip can never punch the eye through a floor or a waterline.
+            {
+                float fFootSign = (float)sin(cg.fCurrentViewBobPhase - 0.94);
+
+                fPhase = (fabs(fFootSign) - 0.5) * cg.fCurrentViewBobAmp * 0.06;
+
+                if (s_limpEnv > 0.0f) {
+                    float fDepth = cgi.Cvar_Get("cg_limpDepth", "0.55", CVAR_ARCHIVE)->value;
+                    fPhase *= 1.0f + s_limpEnv * fDepth * fFootSign;
+                }
+            }
 
             if (fPhase > 16.0) {
                 fPhase = 16.0;
@@ -806,6 +915,21 @@ void CG_OffsetFirstPersonView(refEntity_t *pREnt, qboolean bUseWorldPosition)
             }
 
             origin[2] += fPhase;
+
+            // LIMP ROLL: the favoured-leg lean. Scaled by the bob amplitude it belongs to, so it
+            // fades out with the bob instead of snapping off at full strength the frame the movement
+            // key is released, and damped under sights by the same convention the head-bob shaper
+            // uses - the sight picture must stay usable in the state the player most needs to aim.
+            if (s_limpEnv > 0.0f) {
+                float fRoll  = cgi.Cvar_Get("cg_limpRoll", "1.2", CVAR_ARCHIVE)->value;
+                float fScale = cg.fCurrentViewBobAmp / 287.0f; // sv_runspeed-ish reference
+                if (fScale > 1.0f) { fScale = 1.0f; }
+                if (CG_AimingDownSights() || cg.snap->ps.stats[STAT_INZOOM]) {
+                    fRoll *= cgi.Cvar_Get("cg_limpRollAds", "0.25", CVAR_ARCHIVE)->value;
+                }
+                cg.refdefViewAngles[2] +=
+                    s_limpEnv * fRoll * fScale * (float)sin(cg.fCurrentViewBobPhase - 0.94);
+            }
         }
 
         iMask = MASK_PLAYERSOLID;
@@ -1207,6 +1331,70 @@ void CG_OffsetFirstPersonView(refEntity_t *pREnt, qboolean bUseWorldPosition)
         }
     }
 
+    // HZM coop [user 07-29] DBNO EYE HEIGHT (bug-1238). The script pins the player at
+    // `modheight "prone"` while downed (dbno.scr:443), but prone viewheight still sits well above a
+    // body collapsed on its side - first person reads as kneeling, not bleeding out.
+    //
+    // APPLIED HERE, AT THE END, AND NOWHERE ELSE. This value has been placed wrong twice:
+    //   * in CG_CalcViewValues - discarded, because the eyes-bone block in this function does
+    //     `VectorCopy(pCent->lerpOrigin, origin)` and rebuilds the eye from the model tag. It was
+    //     not inert though: it silently moved the THIRD-person pivot and the camera trace start.
+    //   * mid-function, right after the eyes-bone block - also discarded, because the view-height
+    //     smoothing below it does a hard ASSIGNMENT, `origin[2] = cg.fCurrentViewHeight`, computed
+    //     from predicted_player_state viewheight. Anything written before that is simply gone.
+    // Everything that writes origin[2] has now run, so this is the only safe place.
+    //
+    // The view model moves by the SAME amount. This call chain runs backwards from most engines:
+    // cg_modelanim.c positions the first-person model FIRST, then calls in here to derive the CAMERA
+    // from its eyes bone (pREnt is that model, handed to R_AddRefEntityToScene right after we
+    // return). Dropping only the camera leaves the gun behind and it climbs the screen as the eye
+    // sinks; dropping both keeps the weapon at its usual screen position while the whole rig sits
+    // lower in the world - which is the point.
+    //
+    // The vec3_origin guard mirrors the caller's own check at cg_modelanim.c:1967, where an
+    // untouched model.origin of exactly zero is the sentinel for "fall back to s1->origin".
+    if (s_dbnoCamEnv > 0.001f) {
+        static cvar_t *pDbEye = NULL;
+        float          drop;
+
+        if (!pDbEye) { pDbEye = cgi.Cvar_Get("cg_dbnoEyeDrop", "50", CVAR_ARCHIVE); }
+        drop = pDbEye->value * s_dbnoCamEnv;
+
+        // [user 07-29] DO NOT let the cosmetic drop carry the eye through a surface. The underwater
+        // detection lives in CG_CalcFov, which runs at the END of CG_CalcViewValues - i.e. BEFORE
+        // CG_AddPacketEntities, and therefore before this drop is applied. So it tests the UNDROPPED
+        // eye: push the camera under the waterline here and the engine has already concluded you are
+        // dry. No FOV warp, no r_ppUnderwater, no fog - and MOHAA water is one-sided, so you get a
+        // clean impossible view of the seabed while lying on the beach.
+        //
+        // Re-running the detection after the drop would be worse: it would slam the full underwater
+        // warp over the screen while the player is lying in dry sand. The drop is a COSMETIC offset,
+        // so the honest fix is that it must not leave the volume the player is actually in. Trace it
+        // and stop at whatever it would have crossed - water surface or floor.
+        if (drop > 0.0f) {
+            trace_t tr;
+            vec3_t  from, to;
+
+            VectorCopy(origin, from);
+            VectorCopy(origin, to);
+            to[2] -= drop;
+
+            CG_Trace(&tr, from, vec3_origin, vec3_origin, to, cg.snap->ps.clientNum,
+                     MASK_CAMERASOLID, qfalse, qfalse, "DbnoEyeDrop");
+            if (tr.fraction < 1.0f) {
+                // back off a hair so the eye sits just short of the plane, never coplanar with it
+                drop *= tr.fraction;
+                drop -= 2.0f;
+                if (drop < 0.0f) { drop = 0.0f; }
+            }
+        }
+
+        origin[2] -= drop;
+        if (pREnt && !VectorCompare(pREnt->origin, vec3_origin)) {
+            pREnt->origin[2] -= drop;
+        }
+    }
+
     VectorCopy(origin, cg.playerHeadPos);
 }
 
@@ -1409,7 +1597,7 @@ static qboolean CG_FreecamEligible(void)
     playerState_t *ps;
 
     if (!pOn)    { pOn    = cgi.Cvar_Get("cg_freecam", "0", CVAR_ARCHIVE); }
-    if (!pDbnoV) { pDbnoV = cgi.Cvar_Get("coop_dbnoView", "0", CVAR_ARCHIVE); }
+    if (!pDbnoV) { pDbnoV = cgi.Cvar_Get("coop_dbnoView", "0", 0); }
 
     if (!cg.snap) {
         return qfalse;
@@ -1534,6 +1722,63 @@ qboolean CG_AdsForceFirstPerson(void)
     return (s_adsFpEnv > pFlip->value) ? qtrue : qfalse;
 }
 
+/*
+=================================================================================================
+HZM coop - PRECIP TYPE (bug-1206). The engine has exactly ONE precipitation system and it drives
+rain, snow AND our sandstorms through the same cg.rain.* configstrings, so "is it precipitating"
+is NOT the same question as "is it raining". The lens effects below used to classify by SPEED
+alone (>800 = rain, <=800 = snow), which is wrong for a dust storm: coop_mod/weather.scr's
+coop_weather_sandLook sets level.rain_speed 900 for driving near-horizontal dust, so a sandstorm
+scored as RAIN and the renderer drew water beads + trickle streaks down the lens in the middle of
+a desert dust storm.
+
+The weather TYPE is already published per-client and is authoritative: the server sets
+level.rain_shader, which arrives as CS_RAIN_SHADER and is stored in cg.rain.currentShader
+(cg_main.c CS_RAIN_SHADER). The three looks in weather.scr use distinct bases:
+    rain -> "textures/rain"        snow -> "textures/snow"        sand -> "textures/coop_sand"
+Native SP maps use "textures/rain" / "textures/snow" / "textures/snowflurry" too, so keying on
+the shader name covers scripted and native weather alike. Speed remains the FALLBACK for any map
+that sets a precip shader we do not recognise, so stock behaviour is unchanged everywhere else.
+
+NOTE this replaces the old workaround where weather.scr poked "r_ppRainDrops 0" on sand/snow
+maps: that is a server-side setcvar, so it only ever reached a LISTEN HOST (remote coop clients
+kept their beads), and because r_ppRainDrops is CVAR_ARCHIVE it also stomped the player's own
+Advanced Graphics setting for the rest of the session.
+=================================================================================================
+*/
+typedef enum {
+    PRECIP_NONE = 0,
+    PRECIP_RAIN,
+    PRECIP_SNOW,
+    PRECIP_DUST
+} coopPrecipType_t;
+
+static coopPrecipType_t CG_CoopPrecipType(void)
+{
+    const char *sh;
+
+    if (cg.rain.density <= 0.0f) {
+        return PRECIP_NONE;
+    }
+
+    sh = cg.rain.currentShader;
+    if (sh && sh[0]) {
+        // dust/sand first - it is the case the speed heuristic gets wrong
+        if (strstr(sh, "coop_sand") || strstr(sh, "sandstorm") || strstr(sh, "dust")) {
+            return PRECIP_DUST;
+        }
+        if (strstr(sh, "snow")) {
+            return PRECIP_SNOW;
+        }
+        if (strstr(sh, "rain")) {
+            return PRECIP_RAIN;
+        }
+    }
+
+    // unrecognised precip shader (or none published yet) -> stock speed heuristic
+    return (cg.rain.speed > 800.0f) ? PRECIP_RAIN : PRECIP_SNOW;
+}
+
 static int CG_CalcFov(void)
 {
     float x;
@@ -1631,15 +1876,27 @@ static int CG_CalcFov(void)
     // The renderer ramps it + applies the desaturate/red-vignette; cgame just reports it each frame.
     // Dead (health <= 0) reports 1.0 so the respawn/spectator view is never tinted.
     {
-        int        h    = cg.snap ? cg.snap->ps.stats[STAT_HEALTH] : 0;
-        static int s_peakHealth = 0;   // highest health seen THIS life = the self-calibrating "full" mark
-        float      frac = 1.0f;
+        int            h    = cg.snap ? cg.snap->ps.stats[STAT_HEALTH] : 0;
+        static int     s_peakHealth = 0; // highest health seen THIS life = the self-calibrating "full" mark
+        float          frac = 1.0f;
+        // hoisted (bug-1290): the downed flag is needed BEFORE the peak update, for the revive edge below
+        static cvar_t *pDbnoV = NULL;
+        if (!pDbnoV) { pDbnoV = cgi.Cvar_Get("coop_dbnoView", "0", 0); }
         // Neither STAT_MAXHEALTH (hardwired 100, player.cpp:7461) nor coop_health (750) reliably equals the
         // player's ACTUAL current max - coop spawns can be 100 / 250 / 750, and DBNO sets 9999. Dividing by
         // a fixed 750 made "full health" read as e.g. 100/750 = 0.13 -> a permanent red filter even at full
         // HP. Instead track the PEAK health observed this life: at full, current==peak -> frac 1 -> no red,
         // whatever the real max is. Red only ramps once health is actually LOST. Reset on death/spectate so
         // it recalibrates to the next spawn's full value.
+        // [2026-08-02] VERIFIED SOUND - do not "fix" this tracker. It was reported (by an automated
+        // audit) as latching on DBNO's `healthonly 9999`, giving a permanent full-strength vignette
+        // after any revive. That is FALSE: Entity::EventSetHealthOnly (entity.cpp) clamps
+        // `if (health > max_health) health = max_health`, so 9999 becomes max_health, and
+        // player.cpp:8113 writes stats[STAT_HEALTH] = health / max_health * 100 - a NORMALISED
+        // 0..100 percentage that can never exceed 100. The peak therefore caps at 100 on its own and
+        // cannot latch. Resetting it on revive would be an actual regression: a player revived at
+        // 100/750 real HP reads STAT_HEALTH 13, which SHOULD show as heavily injured; re-seeding the
+        // peak to 13 would report frac 1.0 and hide genuine low health exactly when it matters.
         if (h <= 0) {
             s_peakHealth = 0;
         } else if (h > s_peakHealth) {
@@ -1653,11 +1910,7 @@ static int CG_CalcFov(void)
         // DBNO carry-over: a downed player's health is reset to 100 (reads as 'full'), so force the injury to
         // near-max while downed - the screen should be a bleeding-out haze. dbno.scr flags it per-client via
         // coop_dbnoView (1 = down, 0 = up/revived/dead), stuffed exactly like the DBNO audio fade.
-        {
-            static cvar_t *pDbnoV = NULL;
-            if (!pDbnoV) { pDbnoV = cgi.Cvar_Get("coop_dbnoView", "0", CVAR_ARCHIVE); }
-            if (pDbnoV && pDbnoV->integer) { frac = 0.02f; }
-        }
+        if (pDbnoV && pDbnoV->integer) { frac = 0.02f; }
         cgi.Cvar_Set("r_ppHealthFrac", va("%g", frac));
     }
 
@@ -1683,16 +1936,79 @@ static int CG_CalcFov(void)
         if (h > 0 && maxH > 0 && s_lastSuppHealth > 0 && h < s_lastSuppHealth) {
             float lost = (float)(s_lastSuppHealth - h) / (float)maxH;
             CG_AddSuppression(0.25f + lost * 2.5f); // small flinch on any hit, scaled by severity (real max)
+
+            // HZM coop [user 08-02] ON-HIT BLOOD spikes off the SAME health-drop detector, so there is
+            // one source of truth for "I just got hit". Fast attack (straight to a level proportional to
+            // the wound) then a slow decay below - a hit should register instantly and linger, unlike
+            // suppression which ramps with sustained fire.
+            {
+                float bloodHit = 0.35f + lost * 3.0f;
+                if (bloodHit > 1.0f) { bloodHit = 1.0f; }
+                if (bloodHit > s_coopHit) { s_coopHit = bloodHit; }
+            }
         }
         s_lastSuppHealth = h;
 
-        // dead / spectating: clear it so the respawn view is never tinted
-        if (h <= 0) { s_coopSuppress = 0.0f; }
+        // HZM coop [2026-08-03, bug-1307] the old test here was `h <= 0` with a comment claiming
+        // "dead / spectating". Spectating was NOT covered: Player::Spectator() sets
+        // deadflag = DEAD_NO and health = max_health (fgame/player.cpp), so a spectator's
+        // STAT_HEALTH stays at max and the guard missed them entirely. Use the pm_flags test.
+        // Logged separately as a latent defect - the scripted floor below would otherwise make
+        // it reachable in play.
+        {
+            qboolean bAlive = (qboolean)(h > 0 && cg.snap
+                                         && !(cg.snap->ps.pm_flags & (PMF_SPECTATING | PMF_INTERMISSION)));
 
-        s_coopSuppress -= dt / fade;
-        if (s_coopSuppress < 0.0f) { s_coopSuppress = 0.0f; }
+            // dead / spectating / intermission: clear it so the respawn view is never tinted
+            if (!bAlive) { s_coopSuppress = 0.0f; }
 
-        cgi.Cvar_Set("r_ppSuppress", va("%g", s_coopSuppress));
+            s_coopSuppress -= dt / fade;
+            if (s_coopSuppress < 0.0f) { s_coopSuppress = 0.0f; }
+
+            // HZM coop - SCRIPTED SUPPRESSION (bug-1307). coop_suppHold (0..1) is a
+            // server-stuffed FLOOR held for the duration of a set piece (the e2l1 glider flak
+            // run, an artillery barrage). Applied AFTER the decay so the value cannot oscillate
+            // with frame rate, and gated on bAlive so a spectator or a corpse is never tinted.
+            // Stuffed per-client on CHANGE only - see coop_mod/main.scr::coop_setSuppression.
+            // Flags stay 0, never CVAR_ARCHIVE - bug-1202: archiving coop_dbnoView once
+            // persisted a forced max-injury effect to disk.
+            {
+                static cvar_t *pSuppHold = NULL;
+                if (!pSuppHold) { pSuppHold = cgi.Cvar_Get("coop_suppHold", "0", 0); }
+                if (bAlive && pSuppHold->value > s_coopSuppress) {
+                    s_coopSuppress = (pSuppHold->value > 1.0f) ? 1.0f : pSuppHold->value;
+                }
+            }
+
+            // One-shot spike, e.g. a single flak burst. Self-consuming, so it can never stick
+            // even if a clearing stuff is lost.
+            {
+                static cvar_t *pSuppBump = NULL;
+                if (!pSuppBump) { pSuppBump = cgi.Cvar_Get("coop_suppBump", "0", 0); }
+                if (pSuppBump->value > 0.0f) {
+                    if (bAlive) { CG_AddSuppression(pSuppBump->value); }
+                    cgi.Cvar_Set("coop_suppBump", "0");
+                }
+            }
+
+            cgi.Cvar_Set("r_ppSuppress", va("%g", s_coopSuppress));
+
+            // HZM coop [user 08-02] ON-HIT BLOOD decay + publish. Shares this block's dt and
+            // health read. coop_hitBloodFade defaults slower than suppression's 1.4s so the
+            // splats linger a beat. Same bAlive gate (bug-1307) - the old h <= 0 test had the
+            // identical spectator hole.
+            {
+                cvar_t *pHitFade = cgi.Cvar_Get("coop_hitBloodFade", "2.2", CVAR_ARCHIVE);
+                float   hitFade  = (pHitFade && pHitFade->value > 0.1f) ? pHitFade->value : 2.2f;
+
+                if (!bAlive) { s_coopHit = 0.0f; }   // dead/spectating: never tint the respawn view
+
+                s_coopHit -= dt / hitFade;
+                if (s_coopHit < 0.0f) { s_coopHit = 0.0f; }
+
+                cgi.Cvar_Set("r_ppHit", va("%g", s_coopHit));
+            }
+        }
     }
 
     // HZM coop - HEAT HAZE: decay s_coopHeat each frame + publish r_ppHeat (spiked near explosions via
@@ -1734,10 +2050,11 @@ static int CG_CalcFov(void)
         s_lastWetTime = cg.time;
         if (dtw < 0.0f) { dtw = 0.0f; } else if (dtw > 0.5f) { dtw = 0.5f; }
 
-        // HZM coop - RAIN ONLY: the precip system drives snow AND rain (snow = slow ~150, rain = fast ~2048).
-        // Water-on-lens only makes sense for rain, so gate on speed (>800) - snow leaves the screen dry. This
-        // covers both the dynamic-weather snow and native snow maps (central_europe_winter etc.).
-        if (cg.rain.density > 0.0f && cg.rain.speed > 800.0f) {
+        // HZM coop - RAIN ONLY: the precip system drives rain, snow AND sandstorms. Water-on-lens only makes
+        // sense for RAIN, so key on the weather TYPE published by the server (CG_CoopPrecipType, above) -
+        // snow and dust both leave the screen dry. Was a bare `cg.rain.speed > 800` test, which classified
+        // the sandstorm look (rain_speed 900) as rain and beaded up the lens during a dust storm (bug-1206).
+        if (CG_CoopPrecipType() == PRECIP_RAIN) {
             trace_t trw;
             vec3_t  vUpEnd, vZ = {0.0f, 0.0f, 0.0f};
             VectorCopy(cg.refdef.vieworg, vUpEnd);
@@ -1754,6 +2071,45 @@ static int CG_CalcFov(void)
         s_rainWet += (target - s_rainWet) * (1.0f - exp(-k * dtw));
         if (s_rainWet < 0.0f) { s_rainWet = 0.0f; }
         cgi.Cvar_Set("r_ppRainWet", va("%g", s_rainWet));
+
+        // HZM gl2 post-FX (bug-1158): SNOW's counterpart to the rain-on-lens bridge just above.
+        // Same precip system, same speed split (rain >800, snow <=800) - the rain branch above
+        // deliberately excludes snow ("snow leaves the screen dry"), so snow currently drives no
+        // lens effect at all. This publishes an eased frost fraction on the SNOW branch of the same
+        // CG_CoopPrecipType classifier, for a frost-on-lens effect that accumulates while it snows
+        // and clears once you get under cover - same target-then-ease shape as s_rainWet, just the
+        // snow condition and its own (slower - frost builds, it doesn't splash) ease rate.
+        {
+            static int   s_lastFrostTime = 0;
+            static float s_frostAmt      = 0.0f;
+            float        dtf, targetFrost = 0.0f, kf;
+
+            if (s_lastFrostTime == 0) { s_lastFrostTime = cg.time; }
+            dtf = (cg.time - s_lastFrostTime) / 1000.0f;
+            s_lastFrostTime = cg.time;
+            if (dtf < 0.0f) { dtf = 0.0f; } else if (dtf > 0.5f) { dtf = 0.5f; }
+
+            // Same TYPE gate as the rain branch (bug-1206): frost is for SNOW only. The old
+            // `speed <= 800` complement would also have claimed any slow-moving dust look.
+            if (CG_CoopPrecipType() == PRECIP_SNOW) {
+                trace_t trf;
+                vec3_t  vUpEndF, vZf = {0.0f, 0.0f, 0.0f};
+                VectorCopy(cg.refdef.vieworg, vUpEndF);
+                vUpEndF[2] += 4096.0f;
+                cgi.CM_BoxTrace(&trf, cg.refdef.vieworg, vUpEndF, vZf, vZf, 0, MASK_SOLID, qfalse);
+                if ((trf.surfaceFlags & SURF_SKY) || trf.fraction >= 0.999f) {
+                    targetFrost = cg.rain.density * 2.5f;
+                    if (targetFrost > 1.0f) { targetFrost = 1.0f; }
+                }
+            }
+
+            // frost builds slowly (~4s to fully accumulate) and thaws slowly too (~6s) - it should
+            // read as accumulation over time outdoors, not a fast in/out like beads
+            kf = (targetFrost > s_frostAmt) ? 0.28f : 0.18f;
+            s_frostAmt += (targetFrost - s_frostAmt) * (1.0f - exp(-kf * dtf));
+            if (s_frostAmt < 0.0f) { s_frostAmt = 0.0f; }
+            cgi.Cvar_Set("r_ppFrostAmt", va("%g", s_frostAmt));
+        }
     }
 
     x = cg.refdef.width / tan(fov_x / 360 * M_PI);
@@ -1770,6 +2126,31 @@ static int CG_CalcFov(void)
         inwater = qtrue;
     } else {
         inwater = qfalse;
+    }
+
+    // HZM gl2 post-FX (bug-1158): publish the SAME underwater/slime/lava detection this function
+    // already computes above (for the existing FOV-warp) as an eased 0..1 fraction, matching the
+    // r_ppRainWet/r_ppHeat publish idiom just above - a decaying-toward-target value the renderer
+    // reads to drive an underwater screen distortion. Eased rather than a hard on/off so a surface
+    // crossing doesn't snap the screen warp instantly; the target itself is the boolean detection
+    // that already exists, so this adds no new water-detection logic, only the publish + ease.
+    {
+        static int   s_lastWetUwTime = 0;
+        static float s_underwater    = 0.0f;
+        float        dtu, targetUw = inwater ? 1.0f : 0.0f, ku;
+
+        if (s_lastWetUwTime == 0) { s_lastWetUwTime = cg.time; }
+        dtu = (cg.time - s_lastWetUwTime) / 1000.0f;
+        s_lastWetUwTime = cg.time;
+        if (dtu < 0.0f) { dtu = 0.0f; } else if (dtu > 0.5f) { dtu = 0.5f; }
+
+        // fast in (~0.3s, the moment you break the surface), slower out (~1s, matches the FOV-warp
+        // easing character rather than snapping the instant you resurface)
+        ku = (targetUw > s_underwater) ? 3.3f : 1.0f;
+        s_underwater += (targetUw - s_underwater) * (1.0f - exp(-ku * dtu));
+        if (s_underwater < 0.0f) { s_underwater = 0.0f; }
+        if (s_underwater > 1.0f) { s_underwater = 1.0f; }
+        cgi.Cvar_Set("r_ppUnderwater", va("%g", s_underwater));
     }
 
     // set it
@@ -1971,7 +2352,7 @@ static int CG_CalcViewValues(void)
             // per-client via coop_dbnoView (same per-client stuff as the DBNO audio fade).
             {
                 static cvar_t *pDbnoV = NULL, *pDbnoMul = NULL;
-                if (!pDbnoV)   { pDbnoV   = cgi.Cvar_Get("coop_dbnoView", "0", CVAR_ARCHIVE); }
+                if (!pDbnoV)   { pDbnoV   = cgi.Cvar_Get("coop_dbnoView", "0", 0); }
                 if (!pDbnoMul) { pDbnoMul = cgi.Cvar_Get("coop_dbnoSwayMult", "1.6", CVAR_ARCHIVE); }
                 if (pDbnoV && pDbnoV->integer) {
                     frac = 0.02f;
@@ -2077,9 +2458,10 @@ static int CG_CalcViewValues(void)
     // chases the gun's aim (bTurret3p). Script/cutscene cameras (no PMF_TURRET) always win, any view.
     {
         static cvar_t *pDbnoV = NULL;
-        if (!pDbnoV) { pDbnoV = cgi.Cvar_Get("coop_dbnoView", "0", CVAR_ARCHIVE); }
+        if (!pDbnoV) { pDbnoV = cgi.Cvar_Get("coop_dbnoView", "0", 0); }
         CG_UpdateAdsStage(); // advance the shoulder/first-person envelopes + handle the release reset
         CG_UpdateFreecam();  // HZM coop - free-cam orbit: decide mouse capture + ease the orbit envelope
+        CG_UpdateDbnoCam();  // HZM coop [user 07-29] - ease the downed-camera envelope
         cg.renderingThirdPerson = (cg_3rd_person->integer && !CG_AdsForceFirstPerson()) ? qtrue : qfalse;
         // HZM coop - a NATIVE zoom (sniper scope / binoculars, STAT_INZOOM) also forces FIRST person:
         // in third person the scope reticle implies the eye-line while the camera sits off-shoulder,
@@ -2091,7 +2473,15 @@ static int CG_CalcViewValues(void)
         if (ps->stats[STAT_INZOOM] && !(ps->pm_flags & PMF_TURRET)) { cg.renderingThirdPerson = qfalse; }
         // DBNO forces FIRST person (you're crawling / bleeding out - the downed pistol + bleed-out vignette
         // read in 1st person). Returns to your chosen view the instant you're revived / dead / respawned.
-        if (pDbnoV && pDbnoV->integer) { cg.renderingThirdPerson = qfalse; }
+        // HZM coop [user 07-29] DBNO no longer FORCES first person. It used to ("the downed pistol +
+        // bleed-out vignette read in 1st person"), but that took the choice away - the user plays
+        // downed in third person deliberately, and with the ground-level DBNO framing above it is the
+        // better aiming view. Keep the old behaviour available as an opt-in rather than deleting it.
+        {
+            static cvar_t *pDbnoForce1p = NULL;
+            if (!pDbnoForce1p) { pDbnoForce1p = cgi.Cvar_Get("cg_dbnoForceFirstPerson", "0", CVAR_ARCHIVE); }
+            if (pDbnoV && pDbnoV->integer && pDbnoForce1p->integer) { cg.renderingThirdPerson = qfalse; }
+        }
         // HZM coop - IN COVER forces THIRD person (the pose/peek only reads from outside; user:
         // "1st person cover should auto shift to third"). Server drops PMF_COOP_COVER the frame
         // cover ends, so a first-person player snaps straight back to first person on exit.

@@ -454,6 +454,7 @@ TurretGun::TurretGun()
     // HZM coop: MG overheat state
     m_fHeat                = 0;
     m_bOverheated          = false;
+    m_bFiringBeforeOverheat = false;   // HZM coop - AI resume-after-cooldown latch
     m_fOverheatRecoverTime = 0;
 
     // set the camera
@@ -1279,22 +1280,81 @@ static float HZM_AiTurretDamageScale()
     return f;
 }
 
+// HZM coop [user 07-29/30]: AI turret ACCURACY. g_turret_spread is declared (gamecvars.cpp:246),
+// registered with a default of 16 (:637) and then READ BY NOTHING - grep the whole tree. So AI
+// turrets have always fired with whatever spread the TIK carries. mg42_gun.tik ships with
+// `bulletspread 40 40`, not 0 as first assumed - so a FLOOR (the original design here) is a no-op
+// unless the floor value exceeds the TIK's own spread, which the initial default of 45 barely did.
+// That is why coop_mg42AiDamage alone (already at 40%) never fixed the feel - 40% of a near-certain
+// hit is still a near-certain hit - and why the first spread fix (a floor of 45 against a TIK
+// spread of 40) was practically invisible too.
+//
+// coop_mg42AiSpread is now an ADDITIVE bonus on top of whatever the TIK already carries, applied
+// only to AI-fired shots - so it always widens the cone regardless of the TIK's baseline. Default
+// 60 on top of the TIK's 40 roughly triples MG42 cone area (spread scales the cone edge, not area,
+// so 100 vs 40 is a much bigger practical change than the numbers alone suggest). Player-manned
+// turrets are untouched - the restore below runs on every path.
+static float HZM_AiTurretSpreadBonus()
+{
+    cvar_t *cv = gi.Cvar_Get("coop_mg42AiSpread", "180", 0);
+    float   f  = cv->value;
+    if (f < 0.0f) {
+        f = 0.0f;
+    }
+    if (f > 400.0f) {
+        f = 400.0f;
+    }
+    return f;
+}
+
+// HZM coop [user 08-02]: master switch for the AI turret heat cycle. 1 = on (shipping
+// behaviour), 0 = AI turrets never overheat. Exists mainly so the heat cycle can be
+// bisected away in one console command when diagnosing MG42 gunner behaviour.
+static bool HZM_AiTurretOverheatEnabled()
+{
+    cvar_t *cv = gi.Cvar_Get("coop_mg42AiOverheat", "1", 0);
+    return cv->integer != 0;
+}
+
 void TurretGun::AI_DoFiring()
 {
-    float minBurstTime, maxBurstTime;
-    float minBurstDelay, maxBurstDelay;
-    float fSavedDamage;
+    float  minBurstTime, maxBurstTime;
+    float  minBurstDelay, maxBurstDelay;
+    float  fSavedDamage;
+    Vector vSavedSpread;
 
     // HZM coop: AI-manned turrets run the SAME heat cycle as player-manned ones (P_ThinkActive
     // above): ~2s of sustained fire cooks the barrel, then a lockout while it cools (25/s),
     // slow bleed (8/s) between bursts. The 3D steam sound doubles as the player's cue that the
     // enemy gun is down - that is the window to advance.
+    // HZM coop [user 08-02]: coop_mg42AiOverheat 0 disables the AI heat cycle entirely.
+    // Added because there was previously NO way to switch this off, which made the whole
+    // "gunners overheat then wander off" report untestable by bisection - with this, one
+    // console command separates the heat cycle from the (unrelated) abandon-the-gun bug
+    // fixed in actor_machinegunner.cpp.
+    if (!HZM_AiTurretOverheatEnabled()) {
+        m_bOverheated = false;
+        m_fHeat       = 0.0f;
+    } else
     if (m_bOverheated) {
         m_iFiring = TURRETFIRESTATE_NONE;
         m_fHeat -= 25.0f * level.frametime;
         if (m_fHeat <= 0.0f) {
             m_fHeat       = 0.0f;
             m_bOverheated = false;
+            // HZM coop [user 08-02]: RESUME FIRING after the lockout. The scripted MG42 nests
+            // (global/mg42_active.scr, used on m3l1a/b, m3l3, m4l1/2/3, m6l1a/b/c, m6l2a,
+            // t2l1, t2l2) issue "startfiring" exactly once and then latch self.isfiring = 1.
+            // We clear m_iFiring behind the script's back on overheat, and nothing ever
+            // re-issues startfiring - so the gun went silent and only recovered ~6.5s later
+            // via mg42_active.scr's FAKE RELOAD path, playing a reload the designer never
+            // intended. Restoring the fire state here closes that desync at the source.
+            if (m_bFiringBeforeOverheat) {
+                m_bFiringBeforeOverheat = false;
+                if (owner && owner->IsSubclassOfActor()) {
+                    m_iFiring = TURRETFIRESTATE_BEGIN_FIRE;
+                }
+            }
         }
         return;
     }
@@ -1304,6 +1364,7 @@ void TurretGun::AI_DoFiring()
             m_fHeat       = 100.0f;
             m_bOverheated = true;
             m_iFiring     = TURRETFIRESTATE_NONE;
+            m_bFiringBeforeOverheat = true;   // HZM coop - remember to resume, see above
             Sound("coop_mg_overheat");
             return;
         }
@@ -1328,7 +1389,14 @@ void TurretGun::AI_DoFiring()
             // the same turret TIK is used player-manned, which keeps full damage)
             fSavedDamage               = bulletdamage[FIRE_PRIMARY];
             bulletdamage[FIRE_PRIMARY] = fSavedDamage * HZM_AiTurretDamageScale();
+            vSavedSpread               = bulletspread[FIRE_PRIMARY];
+            {
+                float fBonus = HZM_AiTurretSpreadBonus();
+                bulletspread[FIRE_PRIMARY][0] += fBonus;
+                bulletspread[FIRE_PRIMARY][1] += fBonus;
+            }
             Fire(FIRE_PRIMARY);
+            bulletspread[FIRE_PRIMARY] = vSavedSpread;
             bulletdamage[FIRE_PRIMARY] = fSavedDamage;
         }
 
@@ -1362,7 +1430,14 @@ void TurretGun::AI_DoFiring()
         // HZM coop: AI damage scale for this shot only (see TG_MOH path above)
         fSavedDamage               = bulletdamage[FIRE_PRIMARY];
         bulletdamage[FIRE_PRIMARY] = fSavedDamage * HZM_AiTurretDamageScale();
+        vSavedSpread               = bulletspread[FIRE_PRIMARY];
+        {
+            float fBonus = HZM_AiTurretSpreadBonus();
+            bulletspread[FIRE_PRIMARY][0] += fBonus;
+            bulletspread[FIRE_PRIMARY][1] += fBonus;
+        }
         Fire(FIRE_PRIMARY);
+        bulletspread[FIRE_PRIMARY] = vSavedSpread;
         bulletdamage[FIRE_PRIMARY] = fSavedDamage;
 
         if (m_fMaxBurstTime > 0) {
@@ -1592,6 +1667,14 @@ void TurretGun::P_TurretUsed(Player *player)
             m_iFiring = TURRETFIRESTATE_NONE;
         }
     } else {
+        // HZM coop [user 08-02]: refuse to MOUNT while down-but-not-out. A DBNO player could
+        // previously man paks, cannons, flaks and MG42s while crawling. This is the single mount
+        // branch for TurretGun, and PortableTurret::P_TurretUsed falls through to it, so one check
+        // covers every hand-placed turret type.
+        if (player->IsCoopDbno()) {
+            return;
+        }
+
         m_vUserViewAng = player->GetViewAngles();
 
         if (fabs(AngleSubtract(m_vUserViewAng[1], angles[1])) <= m_fMaxUseAngle) {
@@ -1937,6 +2020,7 @@ void TurretGun::Archive(Archiver& arc)
 
     arc.ArchiveFloat(&m_fFireToggleTime);
     arc.ArchiveInteger(&m_iFiring);
+    arc.ArchiveBool(&m_bFiringBeforeOverheat);   // HZM coop - travels with m_iFiring
     arc.ArchiveVector(&m_vUserViewAng);
     arc.ArchiveSafePointer(&m_pUserCamera);
 

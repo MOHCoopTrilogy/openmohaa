@@ -619,6 +619,16 @@ Event EV_Player_CoopLobbyRepose
     "the per-frame statemap never ticks in between (no twitch) and the slung weapon is left alone.",
     EV_NORMAL
 );
+Event EV_Player_CoopLimpTest
+(
+    "coop_limptest",
+    EV_CONSOLE,
+    "F",
+    "frac",
+    "HZM coop DEV: set the player's health to <frac> of max (default 0.25) WITHOUT killing them, so "
+    "the low-health limp can be tested without dying first. Clamped to at least 1hp.",
+    EV_NORMAL
+);
 Event EV_Player_CoopLobbyCycleAnim
 (
     "coop_lobbycycleanim",
@@ -1299,6 +1309,14 @@ Event EV_Player_CoopMarkWall // HZM coop - wall probe v5 (bug-953)
     NULL,
     "HZM coop - forensic report of whatever the player is aiming at (brush id, shader, species)"
 );
+Event EV_Player_CoopSetDbno // HZM coop - DBNO state [user 08-02]
+(
+    "coop_setdbno",
+     EV_DEFAULT,
+     "i",
+     "active",
+     "HZM coop - publish DBNO (down-but-not-out) state to the engine so turret mount can refuse it"
+);
 Event EV_Player_CoopSetCover // HZM coop - TAKE COVER [214]
 (
     "coop_setcover",
@@ -1958,6 +1976,7 @@ CLASS_DECLARATION(Sentient, Player, "player") {
     {&EV_Player_CoopLobbyUnpose,         &Player::CoopLobbyUnpose              },
     {&EV_Player_CoopLobbyRepose,         &Player::CoopLobbyRepose              },
     {&EV_Player_CoopLobbyCycleAnim,      &Player::CoopLobbyCycleAnim           },
+    {&EV_Player_CoopLimpTest,            &Player::EventCoopLimpTest            },
     {&EV_Player_CoopLobbyHoldPose,       &Player::CoopLobbyHoldPose            },
     {&EV_Player_CoopLobbyInput,          &Player::CoopLobbyInput               },
     {&EV_Player_CoopLobbyCursor,         &Player::CoopLobbyCursor              },
@@ -2029,6 +2048,7 @@ CLASS_DECLARATION(Sentient, Player, "player") {
     {&EV_GetCoopAdsHeld,                  &Player::EventGetCoopAdsHeld          },
     {&EV_Player_CoopKillWall,             &Player::EventCoopKillWall            }, // HZM coop - wall probe v5
     {&EV_Player_CoopMarkWall,             &Player::EventCoopMarkWall            }, // HZM coop - wall probe v5
+    {&EV_Player_CoopSetDbno,              &Player::EventCoopSetDbno             }, // HZM coop - DBNO state [user 08-02]
     {&EV_Player_CoopSetCover,             &Player::EventCoopSetCover            }, // HZM coop - take cover [214]
     {&EV_Player_GetCoopCover,             &Player::EventGetCoopCover            }, // HZM coop - take cover [214]
     {&EV_Player_GetReady,                 &Player::EventGetReady                },
@@ -2306,6 +2326,9 @@ Player::Player()
     // start with a full stamina pool on (re)spawn; TickSprint clamps this down to the cvar max each frame
     m_fCoopStamina    = 9999.0f;
     m_bCoopSprinting  = false;
+    m_bCoopLimping    = false;   // HZM coop - low-health limp (bug-1291)
+    m_bCoopWounded    = false;   // HZM coop - bug-1324
+    m_iCoopLimpSent   = -1;      // force the first coop_limpView stuff, whatever its value
     m_bCoopShoulderAim = false; // HZM coop - 3P shoulder-aim stage (userinfo mirror)
     m_bCoopView3p      = false; // HZM coop - client view mode (u_view3p userinfo mirror)
     m_vCoopCoverNormal = vec_zero; // HZM coop - anchored cover OUT normal [215]
@@ -2313,6 +2336,8 @@ Player::Player()
     m_bCoopCoverPeek   = false;    // HZM coop - RMB peek-aim from cover [215]
     m_fCoopVehTurretTime = -10.0f; // HZM coop - vehicle-turret manning stamp [219]
     m_fCoopProbeTime   = -10.0f;   // HZM coop - GUNNERPROBE throttle [221]
+    m_pCoopBotTarget   = NULL;     // HZM coop - bot combat drive (dev/test, coop_botInput) target cache
+    m_iCoopBotRetarget = 0;        // HZM coop - bot combat drive next-rescan stamp
     m_iCoopVarCoverLast = -1;      // HZM coop - force the first coop_incover var push [235]
     m_bCoopLobbyInputOn   = false; // HZM coop - lobby usercmd input bridge stays off until the lobby enables it
     m_iCoopLobbyRightPrev = 0;
@@ -2329,6 +2354,7 @@ Player::Player()
     m_bCoopGearLoop  = false; // HZM coop - gear rattle off
     m_fCoopSprintDur  = 0.0f;
     // HZM coop - TAKE COVER [214]: start clear (no request, no valid pose)
+    m_bCoopDbno           = false;   // HZM coop [user 08-02]
     m_bCoopCoverRequested = false;
     m_bCoopCoverWall      = false;
     m_bCoopCoverLow       = false;
@@ -4567,6 +4593,44 @@ void Player::ClientMove(usercmd_t *ucmd)
     }
     //====
 
+    // HZM coop [user 2026-08-02] bug-1291 - LIMP SPEED. Applied AFTER the whole multiplier chain, as a
+    // SCALE of the speed that survived it, not as an absolute `sv_runspeed * k` written mid-chain. That
+    // placement matters: written earlier it would be silently overwritten by the Alt-walk branch and
+    // then re-scaled by sv_dmspeedmult and speed_multiplier[], so the tuned number would not be the
+    // number the player actually moves at - which is precisely how the walk-animation-at-run-speed
+    // skating of bugs 319/554 happened. Scaling here keeps the limp proportional to whatever the rest
+    // of the chain decided (crouch, ADS, gametype) instead of fighting it.
+    if (m_bCoopLimping) {
+        cvar_t *pLimpMult = gi.Cvar_Get("coop_limpSpeedMult", "0.60", CVAR_ARCHIVE);
+        float   m         = pLimpMult ? pLimpMult->value : 0.60f;
+        float   fPreLimp  = (float)client->ps.speed;
+        float   fFloor;
+
+        if (m < 0.2f) { m = 0.2f; } else if (m > 1.0f) { m = 1.0f; }
+        client->ps.speed = (int)(fPreLimp * m);
+
+        // [user 2026-08-02] bug-1292 - NEVER FREEZE. Every slowdown in this function MULTIPLIES:
+        // iron-sight ADS, scope GetZoomMovement, the weapon weight mult, crouch, sv_dmspeedmult and
+        // speed_multiplier[] all stack, and the limp then multiplies again - so an ADS or scoped
+        // limping player collapses toward a standstill. "you should be able to move just slower than
+        // normal ... when injured" applies to first-person ADS as much as to the shoulder stage.
+        // Floor it at coop_limpMinFrac of the player's own run speed, but NEVER above what the same
+        // player would have been doing WITHOUT the limp (fPreLimp) - so an injured player can never
+        // end up faster than a healthy one in the identical stance, which a naive floor would allow
+        // for a scoped sniper whose healthy speed is already below the floor.
+        fFloor = GetRunSpeed() * sv_dmspeedmult->value
+               * gi.Cvar_Get("coop_limpMinFrac", "0.35", CVAR_ARCHIVE)->value;
+        if (m_iMovePosFlags & MPF_POSITION_CROUCHING) {
+            fFloor *= sv_crouchspeedmult->value;
+        }
+        if (fFloor > fPreLimp) {
+            fFloor = fPreLimp; // injured is never faster than healthy in the same stance
+        }
+        if ((float)client->ps.speed < fFloor) {
+            client->ps.speed = (int)fFloor;
+        }
+    }
+
     // HZM coop [227] - 3P SHOULDER-AIM SPEED FLOOR. The measured shoulder-move speed (45) never
     // matched anything the audited multiplier chain could produce ("starts off very very slow" -
     // user), so instead of scaling the possibly-poisoned value, FLOOR it after ALL multipliers:
@@ -4574,6 +4638,9 @@ void Player::ClientMove(usercmd_t *ucmd)
     // coop_adsSpeedMult3p (def 1.0 = full run pace, no heavy-weapon drag; raiseable to 1.6).
     // Crouch keeps its own scale so crouch-aiming doesn't rocket. SPEEDPROBE below still reports
     // the chain so the underlying culprit can be identified.
+    // HZM coop [2026-08-02] bug-1291 - `&& !m_bCoopLimping`: this FLOOR would otherwise raise a
+    // limping player back to full run pace whenever the 3P shoulder stage is up, undoing the limp
+    // clamp above and skating the injured clip at run speed.
     if (m_bCoopShoulderAim && !m_bCoopSprinting) {
         cvar_t *p3pMult = gi.Cvar_Get("coop_adsSpeedMult3p", "0.7", CVAR_ARCHIVE); // [237] -0.10 again per user (was 0.8); live-tunable 0.5-1.6
         float   m3      = p3pMult ? p3pMult->value : 1.0f;
@@ -4583,6 +4650,19 @@ void Player::ClientMove(usercmd_t *ucmd)
         fFloor = GetRunSpeed() * sv_dmspeedmult->value * m3;
         if (m_iMovePosFlags & MPF_POSITION_CROUCHING) {
             fFloor *= sv_crouchspeedmult->value;
+        }
+        // HZM coop [user 2026-08-02] bug-1292 - SCALE the floor while limping, do not SKIP it.
+        // This floor is the only thing that gives the 3P shoulder stage a usable movement speed
+        // (the raw chain produces ~45 - see the note above), so excluding limping players from it
+        // entirely left them at ~45 * coop_limpSpeedMult, i.e. standing still. Applying the limp
+        // multiplier to the FLOOR instead keeps them mobile but slower than an uninjured player
+        // in the same stance, which is the intent: "you should be able to move just slower than
+        // normal when using over shoulder when injured".
+        if (m_bCoopLimping) {
+            cvar_t *pLimpMult = gi.Cvar_Get("coop_limpSpeedMult", "0.60", CVAR_ARCHIVE);
+            float   ml        = pLimpMult ? pLimpMult->value : 0.60f;
+            if (ml < 0.2f) { ml = 0.2f; } else if (ml > 1.0f) { ml = 1.0f; }
+            fFloor *= ml;
         }
         if ((float)client->ps.speed < fFloor) {
             client->ps.speed = (int)fFloor;
@@ -4978,6 +5058,87 @@ void Player::UpdateEnemies(void)
 
 /*
 ==============
+CoopBotDrive        HZM coop - dev/test only (coop_botInput)
+
+Server-side usercmd injection: overwrites THIS frame's usercmd so a connected
+client automatically aims at, fires on, and advances toward the nearest visible
+German. This is how the 4 test clients hold a real firefight with the AI while
+nobody is at the keyboard - because the bot fires actual bullets with real
+line-of-sight, the enemy AI genuinely engages, retaliates, and (with the dynamic
+-AI stack on) repositions, which the script-side damage simulation could never
+make it do. Called from the very top of ClientThink; a no-op unless coop_botInput
+is set, so vanilla behavior is completely unchanged when the cvar is 0.
+==============
+*/
+void Player::CoopBotDrive(usercmd_t *ucmd)
+{
+    if (IsDead() || IsSpectator() || m_pVehicle || m_pTurret) {
+        return;
+    }
+
+    Vector eye = EyePosition();
+
+    // Revalidate / rescan the target at most a few times a second (cheap + steady aim). The cached
+    // SafePtr auto-clears if the enemy is freed; we still drop it when it dies or breaks LOS.
+    Sentient *target = m_pCoopBotTarget;
+    if (target && (target->health <= 0 || target->deadflag || !CanSee(target, 360.0f, 8192.0f, false))) {
+        target = NULL;
+    }
+    if (!target || level.inttime >= m_iCoopBotRetarget) {
+        m_iCoopBotRetarget = level.inttime + 400;
+        Sentient *best     = NULL;
+        float     bestDist = 1.0e18f;
+        for (Sentient *obj = level.m_HeadSentient[TEAM_GERMAN]; obj != NULL; obj = obj->m_NextSentient) {
+            if (obj == this || obj->health <= 0 || obj->deadflag) {
+                continue;
+            }
+            float d = (obj->centroid - origin).lengthSquared();
+            if (d >= bestDist) {
+                continue;
+            }
+            if (!CanSee(obj, 360.0f, 8192.0f, false)) {
+                continue;
+            }
+            best     = obj;
+            bestDist = d;
+        }
+        if (best) {
+            target = best;
+        }
+        m_pCoopBotTarget = target;
+    }
+
+    if (!target) {
+        return; // nothing to engage this frame - leave the raw input untouched (bot idles)
+    }
+
+    // --- aim: point the view at the target's centroid via the usercmd angles ---
+    // pmove computes viewangle = SHORT2ANGLE(ucmd->angles + delta_angles), so to land on the desired
+    // world angle we set ucmd->angles = ANGLE2SHORT(desired) - delta_angles (short arithmetic wraps).
+    Vector aimAng = (target->centroid - eye).toAngles();
+    ucmd->angles[0] = (short)(ANGLE2SHORT(aimAng[0]) - client->ps.delta_angles[0]);
+    ucmd->angles[1] = (short)(ANGLE2SHORT(aimAng[1]) - client->ps.delta_angles[1]);
+    ucmd->angles[2] = (short)(0 - client->ps.delta_angles[2]);
+
+    // --- fire in bursts (~600ms on / ~400ms off) so autos don't jam and the AI gets gaps to move ---
+    if ((level.inttime % 1000) < 600) {
+        ucmd->buttons |= BUTTON_ATTACKLEFT;
+    }
+
+    // --- movement: close to mid range, hold there, gentle strafe so the bot isn't a static target ---
+    float dist = (target->centroid - origin).length();
+    if (dist > 700.0f) {
+        ucmd->forwardmove = 127;
+    } else if (dist < 300.0f) {
+        ucmd->forwardmove = (signed char)-80;
+    } else {
+        ucmd->forwardmove = 0;
+    }
+    ucmd->rightmove = ((level.inttime % 3000) < 1500) ? (signed char)90 : (signed char)-90;
+}
+
+/*
+==============
 ClientThink
 
 This will be called once for each client frame, which will
@@ -4986,6 +5147,19 @@ usually be a couple times for each server frame.
 */
 void Player::ClientThink(void)
 {
+    // HZM coop - BOT COMBAT DRIVE (dev/test, coop_botInput): inject an auto-combat usercmd before any
+    // of the frame's input is consumed, so the whole downstream (button diff, weapon fire, ClientMove)
+    // sees the bot's aim/fire/move. Master cvar default 0 => never called => pure vanilla.
+    {
+        static cvar_t *pCoopBotInput = NULL;
+        if (!pCoopBotInput) {
+            pCoopBotInput = gi.Cvar_Get("coop_botInput", "0", 0);
+        }
+        if (pCoopBotInput->integer && current_ucmd) {
+            CoopBotDrive(current_ucmd);
+        }
+    }
+
     // sanity check the command time to prevent speedup cheating
     if (current_ucmd->serverTime > level.svsTime) {
         //
@@ -5002,6 +5176,10 @@ void Player::ClientThink(void)
         return;
     }
 
+    // HZM coop - TickLimp MUST run before TickSprint: TickSprint reads m_bCoopLimping to suppress
+    // sprinting while wounded, and reading a stale flag for one frame is exactly the order-dependent
+    // class of bug this codebase has already paid for twice (bugs 319 / 554).
+    TickLimp();
     TickSprint();
 
     // HZM coop [223] - Shift is the SPRINT key, so BUTTON_RUN arrives CLEAR while it's held (legacy
@@ -12363,6 +12541,19 @@ void Player::EventCoopMarkWall(Event *ev)
     );
 }
 
+// HZM coop [user 08-02]: script publishes DBNO here (coop_mod/dbno.scr). Read by
+// TurretGun::P_TurretUsed and VehicleTurretGun::TurretUsed to refuse mounting while downed -
+// a crawling player was previously able to man paks, cannons, flaks and MG42s.
+void Player::EventCoopSetDbno(Event *ev)
+{
+    m_bCoopDbno = ev->GetInteger(1) ? true : false;
+
+    // If they went down while already manning something, evict them.
+    if (m_bCoopDbno) {
+        RemoveFromVehiclesAndTurrets();
+    }
+}
+
 void Player::EventCoopSetCover(Event *ev)
 {
     m_bCoopCoverRequested = ev->GetInteger(1) ? true : false;
@@ -12790,6 +12981,91 @@ bool Player::HasVotedNo() const
     return !voted;
 }
 
+//====
+// HZM coop [user 2026-08-02] - LOW-HEALTH LIMP (bug-1291).
+// "when the player gets really low health they should start playing the same limp animation the
+// actors do, and you should see the limp in first person".
+//
+// SINGLE AUTHORITY. This runs on the server and decides the whole feature: the flag drives the
+// COOP_LIMPING statemap conditional (3P body) AND the ClientMove speed clamp, and the same decision
+// is stuffed to the owning client as coop_limpView for the first-person camera. The client never
+// re-derives a threshold, so `coop_limp 0` on the server genuinely disables it everywhere - not just
+// the body, which is what a client-side threshold read would have given.
+//
+// HEALTH SIGNAL. health / max_health, clamped. Deliberately NOT a "peak health this life" tracker:
+// that pattern was proposed and rejected because Entity::EventSetHealthOnly CLAMPS to max_health
+// (entity.cpp), so DBNO's `healthonly 9999` can never inflate a peak in the first place, and a peak
+// tracker would instead mis-read a legitimately weakened player. max_health is the honest divisor
+// and is what stats[STAT_HEALTH] is already normalised against at player.cpp:8113 - so the server
+// and the client are reading the SAME quantity and cannot disagree about when the limp starts.
+//====
+void Player::TickLimp()
+{
+    cvar_t  *pOn    = gi.Cvar_Get("coop_limp", "1", CVAR_ARCHIVE);
+    cvar_t  *pStart = gi.Cvar_Get("coop_limpStart", "0.30", CVAR_ARCHIVE);
+    float    start  = pStart ? pStart->value : 0.30f;
+    float    frac   = 1.0f;
+    qboolean enabled = (pOn && pOn->integer) ? qtrue : qfalse;
+    int      want;
+
+    if (start < 0.0f) { start = 0.0f; } else if (start > 1.0f) { start = 1.0f; }
+
+    if (max_health > 0.0f) {
+        frac = health / max_health;
+        if (frac < 0.0f) { frac = 0.0f; } else if (frac > 1.0f) { frac = 1.0f; }
+    }
+
+    // A limp is a LOCOMOTION state, so every pose that owns locomotion outright suppresses it:
+    // dead, downed (DBNO has its own crawl + haze), on a turret or in a vehicle (the body is not
+    // driving movement at all), and while airborne.
+    // [user 2026-08-03] bug-1324 - the sprint gate must NOT include the ground term. Limp state
+    // (statemap + speed clamp + FP camera) requires groundentity, but every airborne frame (jump,
+    // stair edge, slope bounce, knockback) cleared m_bCoopLimping - and with Shift+W still held,
+    // TickSprint saw "not limping" and fired a genuine sprint burst mid-limp: gear-rattle loop,
+    // full-volume run footsteps from SPRINT_FORWARD, stamina drain, then the out-of-breath pant on
+    // landing. Split the decision: m_bCoopWounded = the pure health test, m_bCoopLimping = wounded
+    // AND grounded (unchanged consumers).
+    m_bCoopWounded = false;
+    if (enabled && !deadflag && !m_bCoopDbno && !m_pVehicle && !m_pTurret && frac < start) {
+        m_bCoopWounded = true;
+    }
+    m_bCoopLimping = (m_bCoopWounded && groundentity) ? true : false;
+
+    // Tell the OWNING client only, and only when it CHANGES - a per-frame stuff would flood the
+    // reliable command buffer (the same rule dbno.scr follows for coop_dbnoView).
+    want = m_bCoopLimping ? 1 : 0;
+    if (want != m_iCoopLimpSent) {
+        m_iCoopLimpSent = want;
+        gi.SendServerCommand(edict - g_entities, "stufftext \"set coop_limpView %d\"", want);
+    }
+}
+
+//====
+// HZM coop [user 2026-08-02] - DEV: jump straight to a chosen health fraction so the low-health limp
+// (and the injury vignette, and anything else health-gated) can be tested without first being shot to
+// pieces. Sets health directly rather than applying damage, so there is no pain animation, no DBNO
+// trigger and no attacker bookkeeping - a test harness, not a simulated hit.
+//====
+void Player::EventCoopLimpTest(Event *ev)
+{
+    float frac = (ev->NumArgs() > 0) ? ev->GetFloat(1) : 0.25f;
+    float target;
+
+    if (frac < 0.0f) { frac = 0.0f; } else if (frac > 1.0f) { frac = 1.0f; }
+    if (deadflag || max_health <= 0.0f) {
+        gi.Printf("coop_limptest: not while dead\n");
+        return;
+    }
+
+    target = max_health * frac;
+    if (target < 1.0f) { target = 1.0f; } // never kill via the test command
+
+    health = target;
+    gi.Printf("coop_limptest: health %.0f / %.0f (%.0f%%) - limp starts below %s\n",
+              health, max_health, (health / max_health) * 100.0f,
+              gi.Cvar_Get("coop_limpStart", "0.30", CVAR_ARCHIVE)->string);
+}
+
 void Player::TickSprint()
 {
     float timeHeld;
@@ -12844,9 +13120,12 @@ void Player::TickSprint()
 
         // want to sprint: enabled, alive, not on a turret/vehicle, Shift held, NOT aiming, NOT forcing walk,
         // actually moving forward (forwardmove > 0; rules out standing still / walking backward / strafing).
+        // HZM coop [2026-08-02] bug-1291 - a limping player cannot sprint. Without this, both
+        // COOP_SPRINTING and COOP_LIMPING are true out of RUN_FORWARD and which one wins depends on
+        // row order inside one statemap file - a silent, order-dependent bug.
         wantSprint = qfalse;
         if (enabled && !deadflag && !m_pVehicle && !m_pTurret && walkKey && !aiming && !altWalk
-            && last_ucmd.forwardmove > 0) {
+            && !m_bCoopWounded && last_ucmd.forwardmove > 0) { // bug-1324: wounded, not limping - see TickLimp
             wantSprint = qtrue;
         }
 
@@ -12889,7 +13168,10 @@ void Player::TickSprint()
             cvar_t *pBreathT  = gi.Cvar_Get("coop_sprintBreathTime", "5", CVAR_ARCHIVE);
             float   breathT   = pBreathT ? pBreathT->value : 5.0f;
 
-            if (pBreathOn && pBreathOn->integer && !deadflag && m_fCoopSprintDur >= (breathT - 0.05f)) {
+            // bug-1324: no effort-pant when the sprint was ENDED BY getting wounded - the pant right
+            // as the limp began read as a sprint SFX bug on top of an injury.
+            if (pBreathOn && pBreathOn->integer && !deadflag && !m_bCoopWounded
+                && m_fCoopSprintDur >= (breathT - 0.05f)) {
                 const char *snd = (G_Random() < 0.5f) ? "coop_sprint_breath1" : "coop_sprint_breath2";
                 Sound(snd, CHAN_VOICE, -1.0f, 160, NULL, -1.0f, 1, 0, 1, 1200);
             }

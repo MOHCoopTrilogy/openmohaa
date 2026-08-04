@@ -2036,7 +2036,7 @@ static void CG_UpdateHudFade(void)
     // health/ammo panels fade. coop_dbnoView is the per-client DBNO signal (also forces the bleed-out view).
     {
         static cvar_t *pHudDbno = NULL;
-        if (!pHudDbno) { pHudDbno = cgi.Cvar_Get("coop_dbnoView", "0", CVAR_ARCHIVE); }
+        if (!pHudDbno) { pHudDbno = cgi.Cvar_Get("coop_dbnoView", "0", 0); }
         if ((cg.predicted_player_state.pm_flags & PMF_COOP_COVER) || (pHudDbno && pHudDbno->integer)) {
             s_hudTouchTime = cg.time;
         }
@@ -2089,10 +2089,172 @@ static void CG_UpdateHudFade(void)
     }
 }
 
+// HZM gl2 re-port (bug-gl2-dbnofx / bug-gl2-suppressfx): renderergl2 has no HZM post-FX
+// module, so the low-health desaturate/red-vignette and the suppression tunnel-vignette
+// (gl1 post passes, renderergl1/tr_postprocess_gl1.c) never appear under gl2. Approximate
+// both as plain 2D overlays drawn through the material pipeline: a "*white" colour wash +
+// the existing radial-alpha vignette texture (textures/hud/coop_ads_vignette - black with
+// a clear centre). Gated HARD to cl_renderer == opengl2 so it can never double with gl1's
+// shader implementation. Consumes the exact same cvars gl1 consumes (r_ppLowHealth*,
+// r_ppSuppression / r_ppSuppress*, r_ppHealthFrac) - cg_view.c publishes the dynamic ones
+// every frame, so the on/off switches and tuning dials behave identically on both renderers.
+static void CG_DrawGl2PostFxFallback(void)
+{
+    static cvar_t   *pRenderer = NULL;
+    static qhandle_t hWhite    = 0;
+    static qhandle_t hVig      = 0;
+    float            vidW, vidH;
+    vec4_t           col;
+
+    if (!pRenderer) {
+        pRenderer = cgi.Cvar_Get("cl_renderer", "opengl1", 0);
+    }
+    if (!pRenderer || Q_stricmp(pRenderer->string, "opengl2")) {
+        return; // gl1 (or anything else): the renderer's own post-FX pass owns these effects
+    }
+
+    if (!hWhite) {
+        hWhite = cgi.R_RegisterShaderNoMip("*white");
+    }
+    if (!hVig) {
+        hVig = cgi.R_RegisterShaderNoMip("textures/hud/coop_ads_vignette");
+    }
+
+    vidW = (float)cgs.glconfig.vidWidth;
+    vidH = (float)cgs.glconfig.vidHeight;
+
+    // ---- low-health / DBNO: red wash + darkened edges (plan Fix 5) ----
+    {
+        static cvar_t *pOn = NULL, *pFrac = NULL, *pStart = NULL, *pAmt = NULL, *pBeat = NULL;
+        if (!pOn) {
+            pOn = cgi.Cvar_Get("r_ppLowHealth", "1", CVAR_ARCHIVE);
+        }
+        if (!pFrac) {
+            pFrac = cgi.Cvar_Get("r_ppHealthFrac", "1", 0);
+        }
+        if (!pStart) {
+            pStart = cgi.Cvar_Get("r_ppLowHealthStart", "0.5", CVAR_ARCHIVE);
+        }
+        if (!pAmt) {
+            pAmt = cgi.Cvar_Get("r_ppLowHealthAmount", "1.0", CVAR_ARCHIVE);
+        }
+        if (!pBeat) {
+            pBeat = cgi.Cvar_Get("r_ppLowHealthBeat", "0.25", CVAR_ARCHIVE);
+        }
+
+        if (pOn->integer) {
+            // identical ramp to gl1 (tr_postprocess_gl1.c:755-785): clear onset at the
+            // threshold, ramping to full as you bleed out, with the heartbeat throb.
+            // cg_view.c forces r_ppHealthFrac to 0.02 while DBNO -> near-max here.
+            float frac  = pFrac->value;
+            float start = pStart->value;
+            float hurt  = 0.0f;
+            if (start < 0.05f) {
+                start = 0.05f;
+            }
+            if (frac < start) {
+                float ramp = (start - frac) / start;
+                float depth, beatRate;
+                if (ramp < 0.0f) {
+                    ramp = 0.0f;
+                } else if (ramp > 1.0f) {
+                    ramp = 1.0f;
+                }
+                hurt = (0.35f + 0.65f * ramp) * pAmt->value;
+                if (hurt > 1.0f) {
+                    hurt = 1.0f;
+                }
+                depth = pBeat->value;
+                if (depth < 0.0f) {
+                    depth = 0.0f;
+                } else if (depth > 1.0f) {
+                    depth = 1.0f;
+                }
+                beatRate = 1.8f + hurt * 1.6f;
+                hurt *= (1.0f - depth) + depth * (float)sin(cg.time * 0.001f * beatRate);
+                if (hurt < 0.0f) {
+                    hurt = 0.0f;
+                }
+                if (hurt > 1.0f) {
+                    hurt = 1.0f;
+                }
+            }
+            if (hurt > 0.001f) {
+                // whole-frame red wash (alpha blending can't desaturate, so the wash
+                // carries the "wounded" read the gl1 shader gets from its red mix)
+                if (hWhite) {
+                    col[0] = 0.45f;
+                    col[1] = 0.02f;
+                    col[2] = 0.02f;
+                    col[3] = hurt * 0.30f;
+                    cgi.R_SetColor(col);
+                    cgi.R_DrawStretchPic(0, 0, vidW, vidH, 0, 0, 1, 1, hWhite);
+                }
+                // darkened edges: radial-alpha vignette (clear centre -> dark edges)
+                // approximates the shader's edge-heavy red + edge-darken terms
+                if (hVig) {
+                    col[0] = 1.0f;
+                    col[1] = 1.0f;
+                    col[2] = 1.0f;
+                    col[3] = hurt * 0.60f;
+                    cgi.R_SetColor(col);
+                    cgi.R_DrawStretchPic(0, 0, vidW, vidH, 0, 0, 1, 1, hVig);
+                }
+                cgi.R_SetColor(NULL);
+            }
+        }
+    }
+
+    // ---- suppression: tunnel-vignette (plan Fix 6) ----
+    {
+        static cvar_t *pOn = NULL, *pVal = NULL, *pAmt = NULL;
+        if (!pOn) {
+            pOn = cgi.Cvar_Get("r_ppSuppression", "1", CVAR_ARCHIVE);
+        }
+        if (!pVal) {
+            pVal = cgi.Cvar_Get("r_ppSuppress", "0", 0);
+        }
+        if (!pAmt) {
+            pAmt = cgi.Cvar_Get("r_ppSuppressAmount", "1.0", CVAR_ARCHIVE);
+        }
+
+        if (pOn->integer) {
+            float s = pVal->value * pAmt->value;
+            if (s < 0.0f) {
+                s = 0.0f;
+            } else if (s > 1.0f) {
+                s = 1.0f;
+            }
+            if (s > 0.001f) {
+                // tunnel closes in: matches gl1's edge term c *= (1 - vig * s * 0.72)
+                if (hVig) {
+                    col[0] = 1.0f;
+                    col[1] = 1.0f;
+                    col[2] = 1.0f;
+                    col[3] = s * 0.72f;
+                    cgi.R_SetColor(col);
+                    cgi.R_DrawStretchPic(0, 0, vidW, vidH, 0, 0, 1, 1, hVig);
+                }
+                // faint neutral-grey wash stands in for the shader's desaturation term
+                if (hWhite) {
+                    col[0] = 0.5f;
+                    col[1] = 0.5f;
+                    col[2] = 0.5f;
+                    col[3] = s * 0.18f;
+                    cgi.R_SetColor(col);
+                    cgi.R_DrawStretchPic(0, 0, vidW, vidH, 0, 0, 1, 1, hWhite);
+                }
+                cgi.R_SetColor(NULL);
+            }
+        }
+    }
+}
+
 void CG_Draw2D(void)
 {
     CG_UpdateHudFade();
     CG_UpdateCountdown();
+    CG_DrawGl2PostFxFallback(); // HZM gl2 re-port: under the HUD, over the scene (gl2 only)
     CG_DrawZoomOverlay();
     CG_DrawAdsVignette();
     CG_DrawLagometer();

@@ -1250,7 +1250,7 @@ void R_AddDrawSurf(surfaceType_t* surface, shader_t* shader, int dlightMap) {
 	// the sort data is packed into a single 32 bit value so it can be
 	// compared quickly during the qsorting process
 	tr.refdef.drawSurfs[index].sort = (shader->sortedIndex << QSORT_SHADERNUM_SHIFT) 
-		| tr.shiftedEntityNum | tr.shiftedIsStatic | (dlightMap & 15);
+		| tr.shiftedEntityNum | tr.shiftedIsStatic | (dlightMap & ((1 << QSORT_DLIGHTMAP_BITS) - 1));
 	tr.refdef.drawSurfs[index].surface = surface;
 	tr.refdef.numDrawSurfs++;
 }
@@ -1268,7 +1268,34 @@ void R_AddSpriteSurf(surfaceType_t* surface, shader_t* shader, float zDistance)
 		zDistance = MAX_SPRITE_DIST_SQUARED;
 	}
 
-	index = tr.refdef.numSpriteSurfs % MAX_SPRITES;
+	// HZM (engine-limits audit): this wrapped the write index at MAX_SPRITES (2048) while the
+	// destination is backEndData->spriteSurfs[MAX_SPRITESURFS] (32768) and *every* consumer
+	// counts in MAX_SPRITESURFS units - R_RenderView slices [firstSpriteSurf, numSpriteSurfs)
+	// and R_SortDrawSurfs clamps the count to MAX_SPRITESURFS. numSpriteSurfs accumulates over
+	// ALL views in a frame (portal sky, mirrors), so 2 busy views were enough to push it past
+	// 2048: the writes wrapped back onto slot 0 while later views handed R_SortDrawSurfs a base
+	// pointer above 2048 - i.e. never-written slots. The radix sort then ordered garbage and
+	// RB_RenderSpriteSurfList dereferenced a stale/NULL surface pointer.
+	//
+	// Bound the index by the array it actually indexes, and refuse (loudly, once) rather than
+	// wrap when the array is genuinely full - wrapping is what turned an overflow into a crash,
+	// and it would also leave firstSpriteSurf pointing past the end of the array.
+	if (tr.refdef.numSpriteSurfs >= MAX_SPRITESURFS) {
+		static qboolean overflowWarned = qfalse;
+
+		if (!overflowWarned) {
+			overflowWarned = qtrue;
+			ri.Printf(
+				PRINT_WARNING,
+				"R_AddSpriteSurf: MAX_SPRITESURFS (%d) exceeded - sprites dropped."
+				" Raise MAX_SPRITESURFS in tr_local.h (it sizes backEndData_t::spriteSurfs).\n",
+				MAX_SPRITESURFS
+			);
+		}
+		return;
+	}
+
+	index = tr.refdef.numSpriteSurfs;
     tr.refdef.spriteSurfs[index].sort = (int)(MAX_SPRITE_DIST_SQUARED - zDistance) | (shader->sortedIndex << QSORT_SHADERNUM_SHIFT);
     tr.refdef.spriteSurfs[index].surface = surface;
     tr.refdef.numSpriteSurfs++;
@@ -1280,9 +1307,13 @@ R_DecomposeSort
 =================
 */
 void R_DecomposeSort(unsigned int sort, int* entityNum, shader_t** shader, int* dlightMap, qboolean* bStaticModel) {
-	*shader = tr.sortedShaders[ ( sort >> QSORT_SHADERNUM_SHIFT ) & (MAX_SHADERS-1) ];
-	*entityNum = ( sort >> QSORT_ENTITYNUM_SHIFT ) & 4095;
-	*dlightMap = sort & 15;
+	// HZM (engine-limits audit): masked with MAX_SHADERS-1 (16383), which claims 14 bits from a
+	// field that is only QSORT_SHADERNUM_BITS (11) wide. Numerically identical today - the shift
+	// already discards everything above bit 31 - but it advertised a capacity the key does not
+	// have. Mask with the real encodable ceiling so this stays correct if the layout is repacked.
+	*shader = tr.sortedShaders[ ( sort >> QSORT_SHADERNUM_SHIFT ) & (MAX_SORTED_SHADERS-1) ];
+	*entityNum = ( sort >> QSORT_ENTITYNUM_SHIFT ) & QSORT_ENTITYNUM_MASK;
+	*dlightMap = sort & ((1 << QSORT_DLIGHTMAP_BITS) - 1);
 	*bStaticModel = sort & (1 << QSORT_STATICMODEL_SHIFT);
 }
 

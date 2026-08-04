@@ -107,8 +107,20 @@ UIRect2D UIPulldownMenu::getAlignmentRect(UIWidget *parent)
 
     UIRect2D parentRect = parent->getClientFrame();
     if (m_bVirtual) {
-        m_vVirtualScale[0] = (float)uid.vidWidth / SCREEN_WIDTH;
-        m_vVirtualScale[1] = (float)uid.vidHeight / SCREEN_HEIGHT;
+        // HZM ultrawide (bug-1127): match UIWidget::SetVirtualScale's factor choice -
+        // uniform when ui_menuCenter 1, stock per-axis stretch otherwise (user default).
+        extern bool UI_MenuCenterEnabled(void);
+        if (UI_MenuCenterEnabled()) {
+            const float sx = (float)uid.vidWidth / SCREEN_WIDTH;
+            const float sy = (float)uid.vidHeight / SCREEN_HEIGHT;
+            const float s  = (sx < sy) ? sx : sy;
+
+            m_vVirtualScale[0] = s;
+            m_vVirtualScale[1] = s;
+        } else {
+            m_vVirtualScale[0] = (float)uid.vidWidth / SCREEN_WIDTH;
+            m_vVirtualScale[1] = (float)uid.vidHeight / SCREEN_HEIGHT;
+        }
     }
 
     int maxheight = m_font->getHeight(m_bVirtual ? m_vVirtualScale : NULL);
@@ -204,6 +216,15 @@ void UIPulldownMenu::MouseDragged(Event *ev)
         for (int i = 1; i <= m_desc.NumObjects(); i++) {
             uipull_describe *desc  = m_desc.ObjectAt(i);
             float            width = getDescWidth(desc) * m_vVirtualScale[0];
+
+            // HZM bug-756: the hit column is sized by the menushader's native pixel width, so a
+            // small (or missing -> 16x16 default image) shader left most of the widget dead - e.g.
+            // the Video Options "Display Mode" overlay only responded on a 16px sliver. A pulldown
+            // with a SINGLE title has nothing to share the bar with: make its column span the whole
+            // widget. Multi-title menu bars keep the per-title shader widths.
+            if (m_desc.NumObjects() == 1 && width < getClientFrame().size.width) {
+                width = getClientFrame().size.width;
+            }
             if (atx <= point.x && atx + width > point.x) {
                 newSubMenu          = i;
                 subdesc             = desc;

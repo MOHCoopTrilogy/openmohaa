@@ -2879,6 +2879,11 @@ Actor::Actor()
     // coop gore gates - no retail behavior changes.
     blood_model = "fx_bspurt.tik";
 
+    // HZM coop - headshot-kill burst FX: register its tik on the spawn path so the first
+    // headshot kill never pays a mid-combat model registration (bug-866 precache lesson).
+    // CacheResource is an idempotent index lookup after the first call.
+    CacheResource("models/fx/bh_human_uniform_hard.tik");
+
     m_pszDebugState = "";
     m_pFallPath     = NULL;
     m_iOriginTime   = -1;
@@ -2992,6 +2997,7 @@ Actor::Actor()
 
     m_State      = -1;
     m_iStateTime = 0;
+    m_iCoopJinkTime = 0;
 
     m_iGunPositionCheckTime   = 0;
     m_vLastEnemyPos           = vec3_origin;
@@ -12193,9 +12199,34 @@ void Actor::BecomeCorpse(void)
 {
     AddToBodyQue();
 
-    setContents(CONTENTS_TRIGGER);
     edict->r.svFlags &= ~SVF_MONSTER;
-    setSolidType(SOLID_NOT);
+
+    // [user 2026-08-03] bug-1321 - STANDING RULE: "All models should be susceptible to complete
+    // annihilation by shooting them even if dead." Every other piece of that was already in place:
+    // Sentient::Damage has no deadflag early-out (vanilla's is commented out), takedamage stays
+    // DAMAGE_AIM through death, the accumulate path still runs, and CoopGoreTryGibSkins is written
+    // expressly to re-fire on "post-death damage events (shooting the body)". The single thing
+    // defeating all of it was the SOLID_NOT below: sv_world.c:555 skips SOLID_NOT for EVERY trace, so
+    // bullets passed clean through a corpse and it could never take one point of post-death damage.
+    //
+    // CONTENTS_WEAPONCLIP is the only flag in MASK_SHOT that appears in neither MASK_PLAYERSOLID nor
+    // MASK_MONSTERSOLID, so the corpse stops bullets without turning into a body-block that players or
+    // AI collide with. Flatten the bbox first: a corpse otherwise keeps its full standing-height box,
+    // and WEAPONCLIP *is* in MASK_CANSEE, so a man-high invisible box would blind AI through it. A
+    // ground-hugging slab sits below eye-to-eye sight lines. coop_corpseShootable 0 restores vanilla.
+    {
+        static cvar_t *pShoot = NULL;
+        if (!pShoot) { pShoot = gi.Cvar_Get("coop_corpseShootable", "1", CVAR_ARCHIVE); }
+
+        if (g_gametype->integer != GT_SINGLE_PLAYER && pShoot->integer) {
+            setSize(Vector(-32.0f, -32.0f, 0.0f), Vector(32.0f, 32.0f, 16.0f));
+            setContents(CONTENTS_WEAPONCLIP);
+            setSolidType(SOLID_BBOX);
+        } else {
+            setContents(CONTENTS_TRIGGER);
+            setSolidType(SOLID_NOT);
+        }
+    }
 
     CheckGround();
     if (groundentity) {

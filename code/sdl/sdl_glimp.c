@@ -478,6 +478,33 @@ static int GLimp_SetMode(int mode, qboolean fullscreen, qboolean noborder, qbool
 				"Cannot determine display aspect, assuming 1.333\n" );
 	}
 
+	// HZM bug-753 addendum: FIRST-LAUNCH NATIVE RESOLUTION AUTO-DETECT. One-shot: if the archived
+	// flag has never been set (fresh install, or an existing config from before this feature),
+	// adopt the Windows desktop resolution of the current display as the game resolution: archive
+	// r_mode -1 + r_customwidth/r_customheight = desktop size (the exact cvar set the Video
+	// Options resolution picker writes), then set the flag so this NEVER re-fires and can never
+	// fight a later manual pick from the list. r_mode/r_custom* are CVAR_LATCH so those Cvar_Sets
+	// only latch - for THIS window we switch the local mode to -2 (= use desktop resolution
+	// directly, read above from desktopMode) so the very first window is already native without
+	// waiting for a vid_restart; the latched values apply/archive from then on and describe the
+	// same size. Multi-monitor: 'display' is the existing window's display, or the primary (0) on
+	// a true first launch. If the desktop mode query failed, skip WITHOUT setting the flag so it
+	// retries next launch. Registered here (not tr_init.c) so every renderer shares it.
+	{
+		cvar_t *detected = ri.Cvar_Get( "r_resAutoDetected", "0", CVAR_ARCHIVE );
+
+		if( !detected->integer && desktopMode.w > 0 && desktopMode.h > 0 )
+		{
+			ri.Printf( PRINT_ALL, "First launch: adopting native desktop resolution %dx%d\n",
+					desktopMode.w, desktopMode.h );
+			ri.Cvar_Set( "r_mode", "-1" );
+			ri.Cvar_Set( "r_customwidth", va( "%d", desktopMode.w ) );
+			ri.Cvar_Set( "r_customheight", va( "%d", desktopMode.h ) );
+			ri.Cvar_Set( "r_resAutoDetected", "1" );
+			mode = -2;
+		}
+	}
+
 	ri.Printf (PRINT_ALL, "...setting mode %d:", mode );
 
 	if (mode == -2)
@@ -534,10 +561,32 @@ static int GLimp_SetMode(int mode, qboolean fullscreen, qboolean noborder, qbool
 		// friendly); 0 = "Exclusive Fullscreen" (real mode change). Both report isFullscreen so input grab
 		// behaves the same. FULLSCREEN_DESKTOP includes the FULLSCREEN bit, so existing flag tests still match.
 		if( ri.Cvar_VariableIntegerValue( "r_desktopfullscreen" ) )
-			flags |= SDL_WINDOW_FULLSCREEN_DESKTOP;
+		{
+			// HZM bug-753: SDL always sizes a FULLSCREEN_DESKTOP window to the DESKTOP and ignores the
+			// requested w/h (and SDL_SetWindowDisplayMode), so a resolution picked in the Video Options
+			// while in Borderless was silently ignored - worse, glConfig kept the picked size while the
+			// real drawable was desktop-sized (corner-rendered picture + misaligned mouse). Borderless now
+			// honors the picked size: at the desktop size use true FULLSCREEN_DESKTOP (canonical borderless
+			// fullscreen); at any OTHER size open a centered BORDERLESS window of exactly the picked size.
+			if( desktopMode.h > 0 &&
+				( glConfig.vidWidth != desktopMode.w || glConfig.vidHeight != desktopMode.h ) )
+			{
+				flags |= SDL_WINDOW_BORDERLESS;
+				x = ( desktopMode.w / 2 ) - ( glConfig.vidWidth / 2 );
+				y = ( desktopMode.h / 2 ) - ( glConfig.vidHeight / 2 );
+				glConfig.isFullscreen = qfalse;
+			}
+			else
+			{
+				flags |= SDL_WINDOW_FULLSCREEN_DESKTOP;
+				glConfig.isFullscreen = qtrue;
+			}
+		}
 		else
+		{
 			flags |= SDL_WINDOW_FULLSCREEN;
-		glConfig.isFullscreen = qtrue;
+			glConfig.isFullscreen = qtrue;
+		}
 	}
 	else
 	{
@@ -1224,6 +1273,15 @@ void GLimp_EndFrame( void )
 
 		// Is the state we want different from the current state?
 		needToToggle = !!r_fullscreen->integer != fullscreen;
+
+		// HZM bug-753: Borderless mode at a non-native picked resolution is deliberately a plain
+		// BORDERLESS window (no SDL fullscreen flag) sized to the pick - see GLimp_SetMode. Don't
+		// "correct" it back to FULLSCREEN_DESKTOP here or the picked size would be desktop-sized again.
+		if( r_fullscreen->integer && ri.Cvar_VariableIntegerValue( "r_desktopfullscreen" )
+			&& !glConfig.isFullscreen )
+		{
+			needToToggle = qfalse;
+		}
 
 		if( needToToggle )
 		{

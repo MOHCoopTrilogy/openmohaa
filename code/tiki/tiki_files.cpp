@@ -203,6 +203,28 @@ dtikianim_t *TIKI_LoadTikiAnim(const char *path)
                     TIKI_FreeStorage(&loaddef);
                     return NULL;
                 }
+
+                // HZM (bug-1244) SETUP OP-BUFFER OVERFLOW WARNING. TIKI_InitSetup gives the setup
+                // op-stream a fixed 8192-byte MSG (tiki_parse.cpp:727 = 65,536 bits). MSG_WriteBits
+                // returns BEFORE updating cursize once it is full, so an over-long `setup` block is
+                // truncated in COMPLETE SILENCE: every directive past the cliff - surface/shader
+                // assignments, scale, the gear `case weapon` blocks - is simply dropped, and the
+                // model then renders wrong in ways that look like anything except a parse problem.
+                //
+                // This has now cost two separate debugging sessions: mangled 2nd-ranger allies on
+                // m1l1 (a redundant `scale 0.52` straddling the cliff), and German officers rendering
+                // with no trousers on m1l2b. Both models had been GROWN past the limit by adding
+                // per-surface gore-tier skin lines. Silence is the whole problem, so say something.
+                if (modelBuf.overflowed) {
+                    TIKI_Warning(
+                        "TIKI_LoadTIKIfile: SETUP BUFFER OVERFLOW in '%s' - the setup block exceeded "
+                        "the 8192-byte op limit and was TRUNCATED. Directives past the cut were "
+                        "silently dropped (missing surfaces/skins, wrong scale, missing gear). "
+                        "Shorten the setup block: comments are free, extra `surface <name> shader` "
+                        "lines are not.\n",
+                        path
+                    );
+                }
             } else if (!Q_stricmp(token, "init")) {
                 TIKI_ParseInit(&loaddef);
             } else if (!Q_stricmp(token, "animations")) {

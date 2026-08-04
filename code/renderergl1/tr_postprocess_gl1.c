@@ -181,11 +181,21 @@ static const char *SSAO_FS =
 	"uniform float u_intensity;\n"
 	"varying vec2 v_uv;\n"
 	"float lin(vec2 uv){ float d = texture2D(u_depth, uv).r; return (u_zNear*u_zFar)/(u_zFar - d*(u_zFar-u_zNear)); }\n"
+	// HZM coop - AO camera-motion fix. Root cause of the "glitchy shadows swim when I move the camera":
+	// the occlusion test was a HARD step(u_bias, diff) at a fixed absolute-world bias. AO is computed at
+	// HALF resolution and bilinearly upsampled, so a binary (hard-edged) AO mask crawls/shimmers as
+	// geometry slides across the screen (temporal aliasing of a low-res hard mask) - the classic SSAO
+	// "swim on motion". Fix: use smoothstep for BOTH the onset and the far-occluder fade, over a band that
+	// scales with depth, so a pixel crossing the threshold ramps gracefully (no pop) and the AO edges stay
+	// stable frame-to-frame. Same uniforms / 8 taps / intensity math - only the per-tap response softened.
 	"float occl(float c, vec2 uv){\n"
 	"  float s = lin(uv);\n"
-	"  float diff = c - s;\n"
-	"  float occ = step(u_bias, diff);\n"
-	"  float fade = 1.0 - clamp((diff - u_bias) / (u_radius + 1.0), 0.0, 1.0);\n"
+	"  float diff = c - s;\n"                                  // >0 => neighbour is closer (an occluder in front)
+	"  float scale = 1.0 + c * 0.02;\n"                        // depth-proportional band (wider/steadier at range)
+	"  float bias  = u_bias * scale;\n"
+	"  float range = (u_radius + 1.0) * scale;\n"
+	"  float occ   = smoothstep(bias, bias + range * 0.5, diff);\n"      // soft onset (was a hard step -> pop/crawl)
+	"  float fade  = 1.0 - smoothstep(range, range * 2.0, diff);\n"      // soft rejection of far occluders/silhouettes
 	"  return occ * fade;\n"
 	"}\n"
 	"void main(){\n"
@@ -201,7 +211,12 @@ static const char *SSAO_FS =
 	"  o += occl(c, v_uv + vec2( r*0.7, -r*0.7 ));\n"
 	"  o += occl(c, v_uv + vec2(-r*0.7, -r*0.7 ));\n"
 	"  float ao = clamp(1.0 - (o / 8.0) * u_intensity, 0.0, 1.0);\n"
-	"  gl_FragColor = vec4(ao, c / u_zFar, 0.0, 1.0);\n" // r=AO, g=normalized linear depth (for the bilateral blur)
+	// HZM coop - AO camera-motion fix (part 2): pack the bilateral-blur depth normalized by a FIXED
+	// reference, NOT the per-frame u_zFar. tr.viewParms.zFar is recomputed every frame from the visible
+	// bounds (tr_main.c SetFarClip), so it swings as you look around; normalizing by it made the bilateral
+	// blur's edge-stop strength (exp(-|dDepth|*u_sharp) in SSAOBLUR_FS) "breathe" frame-to-frame, so the AO
+	// silhouettes flickered on camera motion. A fixed 4096" ref keeps the edge weighting frame-stable.
+	"  gl_FragColor = vec4(ao, clamp(c * (1.0/4096.0), 0.0, 1.0), 0.0, 1.0);\n" // r=AO, g=depth (fixed ref) for bilateral blur
 	"}\n";
 
 // composite AO: broadcast the red channel (AO) to rgb. Used to multiply AO onto the scene. Works for both

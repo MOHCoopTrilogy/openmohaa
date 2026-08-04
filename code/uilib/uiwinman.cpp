@@ -626,6 +626,38 @@ void UIWindowManager::CreateMenus(void)
 
     menuManager.DeleteAllMenus();
 
+    // HZM coop (bug-767): drop DUPLICATE same-named widget containers before building menus.
+    // Every URC scan path ("new UILayout" in cl_ui.cpp: the CL_InitializeUI ui/*.urc loop and
+    // the "loadmenu" command) only ADDS containers to uWinMan; nothing removes a same-named
+    // container from an earlier scan. This routine then builds one Menu per container with no
+    // name dedup, so after any second scan every menu name would exist twice: only the first
+    // copy is reachable through menuManager.FindMenu/PushMenu, while the stale twin can still
+    // be drawn and still receives mouse input (input hit-testing walks uWinMan children, not
+    // the menu stack) = doubled/garbled menu text and dead buttons. Keep the FIRST container
+    // (preserves FindMenu order for existing callers); tear later copies down with the
+    // standard recursive Shutdown()+delete recipe (the widget destructor unlinks itself from
+    // uWinMan.m_children, so the downward walk stays valid).
+    for (i = uWinMan.m_children.NumObjects(); i >= 2; i--) {
+        UIWidget *w = uWinMan.m_children.ObjectAt(i);
+        int       j;
+
+        if (!w->isSubclassOf(UIWidgetContainer) || !w->getName() || !*w->getName()) {
+            continue;
+        }
+
+        for (j = 1; j < i; j++) {
+            UIWidget *earlier = uWinMan.m_children.ObjectAt(j);
+
+            if (earlier->isSubclassOf(UIWidgetContainer) && earlier->getName()
+                && !str::icmp(earlier->getName(), w->getName())) {
+                uii.Sys_Printf("UIWindowManager::CreateMenus: dropping duplicate menu container '%s'\n", w->getName());
+                w->Shutdown();
+                delete w;
+                break;
+            }
+        }
+    }
+
     n = uWinMan.m_children.NumObjects();
     for (i = 1; i <= n; i++) {
         UIWidget *w = uWinMan.m_children.ObjectAt(i);

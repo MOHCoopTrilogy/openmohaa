@@ -95,7 +95,7 @@ typedef struct {
 // the parseEntities array must be large enough to hold PACKET_BACKUP frames of
 // entities, so that when a delta compressed message arives from the server
 // it can be un-deltad from the original
-#define	MAX_PARSE_ENTITIES	2048
+#define	MAX_PARSE_ENTITIES	8192	// HZM 07-20 (bug-934): was 2048 - used as a power-of-two ring (& MASK); with 2048-entity snapshots (GENTITYNUM_BITS 11) the old ring wrapped within one busy snapshot -> CL_GetSnapshot overflow -> session abort at the minefield (detector reveals mines = more snapshot entities). 4 max-size snapshots of headroom.
 
 extern int g_console_field_width;
 extern int g_console_charWidth;

@@ -2577,6 +2577,532 @@ void R_LoadImage( const char *name, byte **pic, int *width, int *height, GLenum 
 
 
 /*
+============================================================================
+
+HZM gl2 - TARGETED GENERATED NORMAL MAPS   (r_hzmGenNormals, default 0)
+
+Upstream rend2's r_genNormalMaps is a global flip: EVERY mipmapped+picmipped
+COLORALPHA image that reaches R_FindImageFile gets a full-resolution normal map
+synthesised from its own luminance, and the diffuse is destructively re-brightened
+to compensate. On a 2002 hand-painted asset set carrying a ~2.8GB ESRGAN HD pack
+that is the wrong trade in three independent ways, so this is a narrower
+re-implementation rather than a re-use of that switch:
+
+ 1. SCOPE. Upstream generates for every image the shader parser touches - effect
+    sprites, decals, blend-only stages, anything that can never reach a lit
+    lightall permutation. Those cost VRAM and load time and can never show relief.
+    Here R_HZM_GenNormalsWanted() filters by path (built-in exclusions plus the
+    r_hzmGenNormalInclude / r_hzmGenNormalExclude lists), and a stage is only
+    MARKED as carrying generated relief in CollapseStagesToLightall - i.e. only
+    when it genuinely resolved to a light type.
+
+ 2. NOISE - the real risk on this art. The generator is a 3x3 Sobel over a
+    luminance height field. MOHAA's source textures are 128-256px with heavy 2002
+    palette dither, and the HD packs layered on top are ESRGAN upscales that
+    INVENT high-frequency micro-detail. Sobel turns both straight into per-texel
+    normal jitter that sparkles through mip transitions. Two defences here: the
+    height field is box-downsampled to r_hzmGenNormalMaxSize BEFORE the Sobel, and
+    optionally blurred (r_hzmGenNormalBlur). The downsample is the important one -
+    it removes the noise at source, cuts generation time and the extra VRAM by the
+    SQUARE of the ratio, and costs almost nothing perceptually because a normal map
+    is low-frequency shading information the mip chain blurs away regardless.
+
+ 3. ALBEDO. Upstream rewrites the diffuse in place (RGBA->YCoCgA, divide luma by
+    the generated normal's z, back to RGB), brightening painted-in shade by up to
+    8x so the new per-pixel shading does not double up with it. Defensible for
+    Q3's flat-lit textures; on hand-painted MOHAA art, where the painted shading IS
+    the art direction, it blows out grime, mortar and baked contact shadow. Off by
+    default, behind r_hzmGenNormalBrighten.
+
+Note the mechanism this shares with upstream: the relief the Sobel produces is
+strongest where the source texture is DARKEST (normal.z is the centre height, so a
+dark texel yields a small z and therefore a steep normal). On art where dark means
+"the artist painted dirt here", that reads as a crater in the dirt. That is the
+"relief where the art intends flat" failure mode, and it is why this ships off, why
+the strength control exists, and why the scope is opt-in.
+
+With r_hzmGenNormals 0 nothing below ever runs: no IMGFLAG_GENNORMALMAP is set by
+this path, so R_FindImageFile's generation block stays as unreachable as it is
+today, no stage is marked, and tr_shade.c's overrides all reduce to their previous
+expressions.
+============================================================================
+*/
+
+// generated-normal registry. image_t comes from ri.Hunk_Alloc, which RE_BeginRegistration
+// clears on every map load, so this MUST be reset alongside the image hash table
+// (R_InitImages) or it would hand out dangling pointers on the second map.
+static image_t *hzm_genNormalImages[MAX_DRAWIMAGES];
+static int      hzm_numGenNormalImages;
+static float    hzm_genNormalMB;			// accumulated in MB, not bytes: 2048 full-res
+											// uncompressed maps would overflow an int
+static int      hzm_genNormalMsec;
+static qboolean hzm_genNormalWarned;
+
+void R_HZM_GenNormalsReset( void )
+{
+	hzm_numGenNormalImages = 0;
+	hzm_genNormalMB        = 0.0f;
+	hzm_genNormalMsec      = 0;
+	hzm_genNormalWarned    = qfalse;
+}
+
+qboolean R_HZM_IsGeneratedNormal( const image_t *img )
+{
+	int i;
+
+	if ( !img )
+		return qfalse;
+
+	for ( i = 0; i < hzm_numGenNormalImages; i++ )
+	{
+		if ( hzm_genNormalImages[i] == img )
+			return qtrue;
+	}
+
+	return qfalse;
+}
+
+// space / comma / semicolon separated substring list
+static qboolean R_HZM_PathListMatch( const char *path, const char *list )
+{
+	const char *p = list;
+	char        token[MAX_QPATH];
+	int         i;
+
+	if ( !list || !list[0] )
+		return qfalse;
+
+	while ( *p )
+	{
+		while ( *p == ' ' || *p == '\t' || *p == ',' || *p == ';' )
+			p++;
+
+		i = 0;
+		while ( *p && *p != ' ' && *p != '\t' && *p != ',' && *p != ';' && i < MAX_QPATH - 1 )
+			token[i++] = *p++;
+		token[i] = '\0';
+
+		if ( i && Q_stristr( path, token ) )
+			return qtrue;
+	}
+
+	return qfalse;
+}
+
+// true if the name (extension stripped) ends with suffix
+static qboolean R_HZM_NameHasSuffix( const char *name, const char *suffix )
+{
+	char stripped[MAX_QPATH];
+	int  nameLen, sufLen;
+
+	COM_StripExtension( name, stripped, sizeof( stripped ) );
+
+	nameLen = (int)strlen( stripped );
+	sufLen  = (int)strlen( suffix );
+
+	if ( sufLen > nameLen )
+		return qfalse;
+
+	return (qboolean)( Q_stricmp( stripped + nameLen - sufLen, suffix ) == 0 );
+}
+
+// Directory tokens that must never grow relief. Sky is already safe (skyParms uses its
+// own R_FindImageFile call sites and never sets IMGFLAG_GENNORMALMAP) and most UI art is
+// already safe (the IMGFLAG_PICMIP|IMGFLAG_MIPMAP gate excludes anything declaring
+// nopicmip/nomipmaps), but neither of those is guaranteed for every shipped shader.
+static const char *hzm_genNormalExcludeBuiltin =
+	"textures/decals/ textures/effects/ textures/fx/ textures/hud/ textures/menu/ "
+	"textures/sky/ textures/skies/ textures/console/ textures/loading/ textures/lens "
+	"textures/flare textures/glow textures/lightmap "
+	"decals/ sprites/ gfx/ ui/ menu/ hud/ fonts/ effects/ models/fx/";
+
+/*
+==================
+R_HZM_GenNormalsWanted
+
+Path filter. Called from the shader parser for every map/clampmap token, so it must be
+cheap and it must be a pure function of the path (the same texture reached through two
+different shaders has to get the same answer, or the image cache would hand out one
+image with two different flag sets).
+
+  r_hzmGenNormals 1 = allow-list mode. Only paths matching r_hzmGenNormalInclude
+      (default "textures/") are eligible. This is what keeps models/ out: a TIKI skeletal
+      vertex carries no tangent (RB_SkelMesh writes xyz/normal/texcoord only), so a normal
+      map on a character would be rotated by a constant garbage basis - see the
+      r_charLighting work, which force-zeroes u_NormalScale for exactly this reason.
+  r_hzmGenNormals 2 = broad mode. Everything except the exclusions.
+==================
+*/
+qboolean R_HZM_GenNormalsWanted( const char *name )
+{
+	if ( !r_hzmGenNormals || r_hzmGenNormals->integer <= 0 || !name || !name[0] )
+		return qfalse;
+
+	// Never build relief out of something that already IS a normal or glow map. "_n" and "_nh"
+	// are rend2's own unambiguous conventions, so a file with those names is data, not art.
+	//
+	// "_s" is deliberately NOT in this list even though rend2 treats it as the specular
+	// convention: on THIS asset set it provably is not one. bug-1155 established that MOHAA
+	// ships 39 files ending in _s that are ordinary diffuse textures, 34 of them alongside a
+	// matching base name - which is exactly why r_specularMapping defaults to 0 here. Excluding
+	// them would leave 39 real wall textures flat next to neighbours that got relief, which
+	// reads as a bug, in exchange for protecting against specular maps this game does not have.
+	// Anyone who later authors genuine _s maps can add "_s." to r_hzmGenNormalExclude.
+	if ( R_HZM_NameHasSuffix( name, "_n" ) || R_HZM_NameHasSuffix( name, "_nh" )
+		|| R_HZM_NameHasSuffix( name, "_glow" ) )
+		return qfalse;
+
+	if ( R_HZM_PathListMatch( name, hzm_genNormalExcludeBuiltin ) )
+		return qfalse;
+
+	if ( r_hzmGenNormalExclude && R_HZM_PathListMatch( name, r_hzmGenNormalExclude->string ) )
+		return qfalse;
+
+	if ( r_hzmGenNormals->integer == 1 )
+	{
+		if ( !r_hzmGenNormalInclude || !r_hzmGenNormalInclude->string[0] )
+			return qfalse;
+
+		if ( !R_HZM_PathListMatch( name, r_hzmGenNormalInclude->string ) )
+			return qfalse;
+	}
+
+	// r_normalMapping gates BOTH the generation block in R_FindImageFile and the "<diffuse>_n"
+	// probe in CollapseStagesToLightall that binds the result, so with it off this feature is
+	// silently inert. It is CVAR_LATCH, so say so once rather than leaving the user to wonder
+	// why nothing changed.
+	if ( !r_normalMapping->integer && !hzm_genNormalWarned )
+	{
+		hzm_genNormalWarned = qtrue;
+		ri.Printf( PRINT_WARNING, "WARNING: r_hzmGenNormals is on but r_normalMapping is 0 - "
+			"no relief can be generated or sampled. Set r_normalMapping 1 (CVAR_LATCH: needs a "
+			"map load, or set it on the command line).\n" );
+	}
+
+	return qtrue;
+}
+
+// luminance -> height. Same weights and same "make linear" square as upstream's
+// RGBAtoNormal so the two generators can be compared directly.
+static void R_HZM_HeightFromRGBA( const byte *in, byte *out, int numPixels )
+{
+	int i;
+
+	for ( i = 0; i < numPixels; i++, in += 4 )
+	{
+		int h = ( in[0] >> 2 ) + ( in[1] >> 1 ) + ( in[2] >> 2 );
+		out[i] = (byte)( h * h / 255 );
+	}
+}
+
+// box downsample by 2, single channel, in place. Writes strictly behind the read cursor.
+static void R_HZM_HalveHeight( byte *h, int width, int height )
+{
+	int   x, y;
+	int   nw = width >> 1;
+	int   nh = height >> 1;
+	byte *out = h;
+
+	for ( y = 0; y < nh; y++ )
+	{
+		const byte *r0 = h + ( y * 2 )     * width;
+		const byte *r1 = h + ( y * 2 + 1 ) * width;
+
+		for ( x = 0; x < nw; x++ )
+		{
+			*out++ = (byte)( ( r0[x * 2] + r0[x * 2 + 1] + r1[x * 2] + r1[x * 2 + 1] ) >> 2 );
+		}
+	}
+}
+
+// separable 1-2-1 binomial blur, single channel
+static void R_HZM_BlurHeight( byte *h, byte *tmp, int width, int height, qboolean clampToEdge )
+{
+	int x, y;
+
+	for ( y = 0; y < height; y++ )
+	{
+		const byte *row = h + y * width;
+		byte       *dst = tmp + y * width;
+
+		for ( x = 0; x < width; x++ )
+		{
+			int xm = clampToEdge ? ( x > 0 ? x - 1 : 0 ) : ( ( x - 1 + width ) % width );
+			int xp = clampToEdge ? ( x < width - 1 ? x + 1 : width - 1 ) : ( ( x + 1 ) % width );
+
+			dst[x] = (byte)( ( row[xm] + 2 * row[x] + row[xp] ) >> 2 );
+		}
+	}
+
+	for ( y = 0; y < height; y++ )
+	{
+		int ym = clampToEdge ? ( y > 0 ? y - 1 : 0 ) : ( ( y - 1 + height ) % height );
+		int yp = clampToEdge ? ( y < height - 1 ? y + 1 : height - 1 ) : ( ( y + 1 ) % height );
+
+		const byte *r0 = tmp + ym * width;
+		const byte *r1 = tmp + y  * width;
+		const byte *r2 = tmp + yp * width;
+		byte       *dst = h + y * width;
+
+		for ( x = 0; x < width; x++ )
+		{
+			dst[x] = (byte)( ( r0[x] + 2 * r1[x] + r2[x] ) >> 2 );
+		}
+	}
+}
+
+// Sobel over the height field -> tangent-space normal in RGB, height kept in A (so an
+// authored parallax pass could still use it). Same kernel and same encoding as upstream's
+// RGBAtoNormal, reading a dedicated height buffer instead of the diffuse's alpha channel.
+static void R_HZM_HeightToNormal( const byte *h, byte *out, int width, int height, qboolean clampToEdge )
+{
+	int x, y, max = 1;
+	int numPixels = width * height;
+	int i;
+
+	// level out heights - keeps normal.z (the centre height) away from zero
+	for ( i = 0; i < numPixels; i++ )
+		max = MAX( max, h[i] );
+
+	for ( y = 0; y < height; y++ )
+	{
+		byte *outbyte = out + y * width * 4;
+
+		for ( x = 0; x < width; x++ )
+		{
+			byte    s[9];
+			int     x2, y2, k;
+			vec3_t  normal;
+
+			k = 0;
+			for ( y2 = -1; y2 <= 1; y2++ )
+			{
+				int src_y = y + y2;
+
+				if ( clampToEdge )
+					src_y = CLAMP( src_y, 0, height - 1 );
+				else
+					src_y = ( src_y + height ) % height;
+
+				for ( x2 = -1; x2 <= 1; x2++ )
+				{
+					int src_x = x + x2;
+
+					if ( clampToEdge )
+						src_x = CLAMP( src_x, 0, width - 1 );
+					else
+						src_x = ( src_x + width ) % width;
+
+					s[k++] = (byte)MIN( 255, h[src_y * width + src_x] + ( 255 - max ) );
+				}
+			}
+
+			// 0 1 2
+			// 3 4 5
+			// 6 7 8
+			normal[0] =       s[0]            -     s[2]
+			            + 2 * s[3]            - 2 * s[5]
+			            +     s[6]            -     s[8];
+
+			normal[1] =       s[0] + 2 * s[1] +     s[2]
+			            -     s[6] - 2 * s[7] -     s[8];
+
+			normal[2] = s[4] * 4;
+
+			if ( !VectorNormalize2( normal, normal ) )
+				VectorSet( normal, 0, 0, 1 );
+
+			*outbyte++ = FloatToOffsetByte( normal[0] );
+			*outbyte++ = FloatToOffsetByte( normal[1] );
+			*outbyte++ = FloatToOffsetByte( normal[2] );
+			*outbyte++ = s[4];
+		}
+	}
+}
+
+/*
+==================
+R_HZM_GenerateNormalMap
+
+pic is the freshly decoded RGBA8 diffuse, still owned by R_FindImageFile. Not modified
+unless r_hzmGenNormalBrighten is on.
+==================
+*/
+static void R_HZM_GenerateNormalMap( const char *normalName, byte *pic, int width, int height,
+									 imgFlags_t normalFlags, qboolean clampToEdge,
+									 qboolean allowBrighten )
+{
+	byte    *heightBuf, *tmpBuf, *normalPic;
+	int      genW = width, genH = height;
+	int      maxSize, blur, i, startMsec, elapsed;
+	image_t *img;
+
+	if ( width < 2 || height < 2 )
+		return;
+
+	if ( hzm_numGenNormalImages >= MAX_DRAWIMAGES )
+		return;
+
+	startMsec = ri.Milliseconds();
+
+	heightBuf = ri.Malloc( width * height );
+	R_HZM_HeightFromRGBA( pic, heightBuf, width * height );
+
+	// downsample BEFORE the Sobel: this is the noise filter, the VRAM budget and the
+	// generation-time budget, all in one step
+	maxSize = r_hzmGenNormalMaxSize->integer;
+	if ( maxSize > 0 )
+	{
+		if ( maxSize < 16 )
+			maxSize = 16;
+
+		// HZM (bug-1231): the even-dimension guard made this cap POWER-OF-TWO ONLY. Any texture with
+		// an odd dimension - and the HD packs are full of non-power-of-two art - failed the test on
+		// the first iteration, skipped the downsample entirely and generated a normal map at FULL
+		// resolution, ignoring r_hzmGenNormalMaxSize. With ~1.5 GB of HD texture packs mounted that
+		// roughly doubled texture VRAM on a COLD load and took the game down on the largest maps
+		// (m3l2, reproduced four times; never on a map RESTART, because generation only runs the
+		// first time each texture is loaded - which is why every restart test passed).
+		// R_HZM_HalveHeight tolerates odd dims: nw/nh are width>>1 / height>>1 and the reads stay
+		// in bounds, it just drops the trailing row/column. Irrelevant for a height field.
+		while ( MAX( genW, genH ) > maxSize && genW > 2 && genH > 2 )
+		{
+			R_HZM_HalveHeight( heightBuf, genW, genH );
+			genW >>= 1;
+			genH >>= 1;
+		}
+	}
+
+	blur = r_hzmGenNormalBlur->integer;
+	if ( blur > 0 )
+	{
+		if ( blur > 4 )
+			blur = 4;
+
+		tmpBuf = ri.Malloc( genW * genH );
+		for ( i = 0; i < blur; i++ )
+			R_HZM_BlurHeight( heightBuf, tmpBuf, genW, genH, clampToEdge );
+		ri.Free( tmpBuf );
+	}
+
+	normalPic = ri.Malloc( genW * genH * 4 );
+	R_HZM_HeightToNormal( heightBuf, normalPic, genW, genH, clampToEdge );
+
+	// upstream's destructive albedo re-brighten, opt-in. Needs the full-resolution normal,
+	// so it recomputes one rather than sampling the (possibly downscaled) generated map.
+	// allowBrighten is false when pic is a throwaway sibling decode (the DDS path below):
+	// there is no point rewriting a buffer that is about to be freed, and the real diffuse
+	// in that case is a compressed DXT block set we cannot touch anyway.
+	if ( allowBrighten && r_hzmGenNormalBrighten->integer )
+	{
+		byte *fullNormal = ri.Malloc( width * height * 4 );
+		byte *fullHeight = ri.Malloc( width * height );
+		int   x, y;
+
+		R_HZM_HeightFromRGBA( pic, fullHeight, width * height );
+		R_HZM_HeightToNormal( fullHeight, fullNormal, width, height, clampToEdge );
+
+		RGBAtoYCoCgA( pic, pic, width, height );
+		for ( y = 0; y < height; y++ )
+		{
+			byte *picbyte  = pic        + y * width * 4;
+			byte *normbyte = fullNormal + y * width * 4;
+
+			for ( x = 0; x < width; x++ )
+			{
+				int div = MAX( normbyte[2] - 127, 16 );
+				picbyte[0] = CLAMP( picbyte[0] * 128 / div, 0, 255 );
+				picbyte  += 4;
+				normbyte += 4;
+			}
+		}
+		YCoCgAtoRGBA( pic, pic, width, height );
+
+		ri.Free( fullHeight );
+		ri.Free( fullNormal );
+	}
+
+	img = R_CreateImage( normalName, normalPic, genW, genH, IMGTYPE_NORMAL, normalFlags, 0 );
+
+	ri.Free( normalPic );
+	ri.Free( heightBuf );
+
+	elapsed = ri.Milliseconds() - startMsec;
+
+	if ( img )
+	{
+		// Approximate VRAM cost. RawImage_GetFormat sends an alpha-less IMGTYPE_NORMAL to
+		// GL_COMPRESSED_RG_RGTC2 (BC5) / BPTC / DXT5, all 1 byte per texel; without any
+		// compression it lands on GL_RGB8 at 3. The 4/3 is the mip tail.
+		float bpt = ( ( glRefConfig.textureCompression & ( TCR_RGTC | TCR_BPTC ) )
+					|| glConfig.textureCompression == TC_S3TC_ARB ) ? 1.0f : 3.0f;
+
+		hzm_genNormalImages[hzm_numGenNormalImages++] = img;
+		hzm_genNormalMB += ( (float)genW * (float)genH * bpt * 4.0f / 3.0f ) / ( 1024.0f * 1024.0f );
+		hzm_genNormalMsec += elapsed;
+
+		if ( r_hzmGenNormalDebug->integer )
+		{
+			ri.Printf( PRINT_ALL, "^~^~^ GENNORM %s  %dx%d -> %dx%d  %dms   (n=%d ~%.1fMB %dms total)\n",
+				normalName, width, height, genW, genH, elapsed,
+				hzm_numGenNormalImages, hzm_genNormalMB, hzm_genNormalMsec );
+		}
+	}
+}
+
+/*
+==================
+R_HZM_GenerateNormalMapFromSource
+
+Closes the DDS blind spot. R_LoadImage tries "<name>.dds" FIRST whenever
+r_ext_compressed_textures is on (the default), and tr_image_dds.c hands the DXT blocks
+straight to GL with picFormat set to a GL_COMPRESSED_* constant - so the diffuse pixels
+never exist on the CPU and the Sobel has nothing to read. In this sandbox that is 361 of
+the 2183 non-decal world-texture entries across the four AA_HD_Project packs, roughly 17%,
+and they are interleaved with .jpg/.tga siblings inside the same theme directories: without
+this path a wall would come out with relief on some of its textures and none on the ones
+that happened to ship as DDS, which reads as a bug rather than as a setting.
+
+So decode a NON-DDS sibling purely as a height source, by walking imageLoaders[] directly
+(that table has no dds entry, so it cannot recurse into the compressed file). The generated
+map is thrown away at the end of the map like any other; the DDS itself is still what gets
+drawn as the diffuse. Note the source is usually the retail-resolution .tga/.jpg rather than
+the HD upscale, which is if anything BETTER input - it carries none of the micro-detail
+ESRGAN invented - and it is going to be downsampled to r_hzmGenNormalMaxSize regardless.
+==================
+*/
+static void R_HZM_GenerateNormalMapFromSource( const char *name, const char *normalName,
+											   imgFlags_t normalFlags, qboolean clampToEdge )
+{
+	char  baseName[MAX_QPATH];
+	byte *srcPic = NULL;
+	int   srcWidth = 0, srcHeight = 0;
+	int   i;
+
+	COM_StripExtension( name, baseName, sizeof( baseName ) );
+
+	for ( i = 0; i < numImageLoaders; i++ )
+	{
+		imageLoaders[i].ImageLoader( va( "%s.%s", baseName, imageLoaders[i].ext ),
+									 &srcPic, &srcWidth, &srcHeight );
+		if ( srcPic )
+			break;
+	}
+
+	if ( !srcPic )
+	{
+		if ( r_hzmGenNormalDebug->integer )
+			ri.Printf( PRINT_ALL, "^~^~^ GENNORM skip %s - compressed source, no uncompressed sibling\n", name );
+		return;
+	}
+
+	R_HZM_GenerateNormalMap( normalName, srcPic, srcWidth, srcHeight, normalFlags, clampToEdge, qfalse );
+
+	ri.Free( srcPic );
+}
+
+
+/*
 ===============
 R_FindImageFile
 
@@ -2642,7 +3168,15 @@ image_t	*R_FindImageFile( const char *name, imgType_t type, imgFlags_t flags )
 		normalImage = R_FindImageFile(normalName, IMGTYPE_NORMAL, normalFlags);
 
 		// if not, generate it
-		if (normalImage == NULL)
+		// HZM gl2: r_hzmGenNormals owns this image if its path filter claims it. Upstream's
+		// r_genNormalMaps keeps everything else, so the two switches coexist and either one
+		// alone behaves exactly as before.
+		if (normalImage == NULL && R_HZM_GenNormalsWanted(name))
+		{
+			R_HZM_GenerateNormalMap(normalName, pic, width, height, normalFlags,
+									(qboolean)((flags & IMGFLAG_CLAMPTOEDGE) != 0), qtrue);
+		}
+		else if (normalImage == NULL && r_genNormalMaps->integer)
 		{
 			byte *normalPic;
 			int x, y;
@@ -2725,7 +3259,27 @@ image_t	*R_FindImageFile( const char *name, imgType_t type, imgFlags_t flags )
 #endif
 
 			R_CreateImage( normalName, normalPic, normalWidth, normalHeight, IMGTYPE_NORMAL, normalFlags, 0 );
-			ri.Free( normalPic );	
+			ri.Free( normalPic );
+		}
+	}
+	// HZM gl2 (r_hzmGenNormals): the same thing for a diffuse that arrived COMPRESSED. This is
+	// a separate else-if rather than a relaxation of the picFormat test above so that the
+	// upstream r_genNormalMaps path stays byte-identical - it never runs for a DDS and it must
+	// keep not running, including the "_n" probe.
+	else if (r_normalMapping->integer && (picFormat != GL_RGBA8) && (type == IMGTYPE_COLORALPHA) &&
+		((flags & checkFlagsTrue) == checkFlagsTrue) && !(flags & checkFlagsFalse) &&
+		R_HZM_GenNormalsWanted(name))
+	{
+		char normalName[MAX_QPATH];
+		imgFlags_t normalFlags = (flags & ~IMGFLAG_GENNORMALMAP) | IMGFLAG_NOLIGHTSCALE;
+
+		COM_StripExtension(name, normalName, MAX_QPATH);
+		Q_strcat(normalName, MAX_QPATH, "_n");
+
+		if (R_FindImageFile(normalName, IMGTYPE_NORMAL, normalFlags) == NULL)
+		{
+			R_HZM_GenerateNormalMapFromSource(name, normalName, normalFlags,
+											  (qboolean)((flags & IMGFLAG_CLAMPTOEDGE) != 0));
 		}
 	}
 
@@ -2965,7 +3519,12 @@ void R_CreateBuiltinImages( void ) {
 		if (r_shadowBlur->integer || r_hdr->integer)
 			tr.screenScratchImage = R_CreateImage("screenScratch", NULL, width, height, IMGTYPE_COLORALPHA, IMGFLAG_NO_COMPRESSION | IMGFLAG_CLAMPTOEDGE, rgbFormat);
 
-		if (r_shadowBlur->integer || r_ssao->integer)
+		// HZM gl2 (bug-1157): DoF samples a COPY of the scene depth, and this is that copy.
+		// Upstream only allocates it for shadow blur / SSAO, both of which ship OFF here, so the
+		// DoF port has to opt in or it would sample a NULL image.
+		// (bug-1177) r_ppSSAO joins the OR for the same reason - purely widening it, so the image can
+		// only exist in MORE cases than before: shadow blur and DoF cannot regress, nothing double-allocates.
+		if (r_shadowBlur->integer || r_ssao->integer || (r_ppSSAO && r_ppSSAO->integer) || (r_ppDoF && r_ppDoF->integer))
 			tr.hdrDepthImage = R_CreateImage("*hdrDepth", NULL, width, height, IMGTYPE_COLORALPHA, IMGFLAG_NO_COMPRESSION | IMGFLAG_CLAMPTOEDGE, GL_R32F);
 
 		if (r_drawSunRays->integer)
@@ -2997,7 +3556,8 @@ void R_CreateBuiltinImages( void ) {
 			tr.quarterImage[x] = R_CreateImage(va("*quarter%d", x), NULL, width / 2, height / 2, IMGTYPE_COLORALPHA, IMGFLAG_NO_COMPRESSION | IMGFLAG_CLAMPTOEDGE, GL_RGBA8);
 		}
 
-		if (r_ssao->integer)
+		// (bug-1177) r_ppSSAO is the coop menu's AO master; r_ssao is stock rend2's. Either enables SSAO.
+		if (r_ssao->integer || (r_ppSSAO && r_ppSSAO->integer))
 		{
 			tr.screenSsaoImage = R_CreateImage("*screenSsao", NULL, width / 2, height / 2, IMGTYPE_COLORALPHA, IMGFLAG_NO_COMPRESSION | IMGFLAG_CLAMPTOEDGE, GL_RGBA8);
 		}
@@ -3114,6 +3674,13 @@ R_InitImages
 */
 void	R_InitImages( void ) {
 	Com_Memset(hashTable, 0, sizeof(hashTable));
+
+	// HZM gl2 (r_hzmGenNormals): every image_t came from ri.Hunk_Alloc and
+	// RE_BeginRegistration calls ri.Hunk_Clear before R_Init, so the generated-normal
+	// registry has to be dropped here alongside the image hash table or the second map
+	// load would test freed pointers.
+	R_HZM_GenNormalsReset();
+
 	// build brightness translation tables
 	R_SetColorMappings();
 

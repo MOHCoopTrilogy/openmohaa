@@ -2152,6 +2152,26 @@ void R_LoadStaticModelDefs(gamelump_t* lump) {
     }
 
     s_worldData.numStaticModels = lump->length / sizeof(cStaticModel_t);
+
+    // HZM (engine-limits audit): R_AddStaticModelSurfaces packs the static model index into the
+    // drawsurf sort key's entity field (tr.shiftedEntityNum = i << QSORT_ENTITYNUM_SHIFT) and
+    // R_DecomposeSort recovers it with QSORT_ENTITYNUM_MASK. Past that ceiling the index both
+    // aliases onto another model AND spills upward into the static-model flag and the shader
+    // index - i.e. wrong transform plus wrong shader, with nothing logged. There is no clean
+    // place to clamp it (the models are legitimately in the BSP), so at least say so loudly.
+    if (s_worldData.numStaticModels > QSORT_ENTITYNUM_MASK + 1) {
+        ri.Printf(
+            PRINT_WARNING,
+            "^1WARNING: map has %d static models but the drawsurf sort key can only encode %d"
+            " (QSORT_ENTITYNUM_BITS=%d). Models at index %d and above will render with the wrong"
+            " transform and may corrupt the shader field.\n",
+            s_worldData.numStaticModels,
+            QSORT_ENTITYNUM_MASK + 1,
+            QSORT_ENTITYNUM_BITS,
+            QSORT_ENTITYNUM_MASK + 1
+        );
+    }
+
     s_worldData.staticModels = ri.Hunk_Alloc(s_worldData.numStaticModels * sizeof(cStaticModelUnpacked_t), h_dontcare);
 
     in = lump->buffer;

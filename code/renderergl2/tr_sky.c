@@ -477,6 +477,14 @@ static void DrawSkySide( struct image_s *image, const int mins[2], const int max
 		GLSL_SetUniformVec4(sp, UNIFORM_DIFFUSETEXMATRIX7, st[1]);
 
 		GLSL_SetUniformInt(sp, UNIFORM_ALPHATEST, 0);
+
+		// HZM gl2 FORWARD GLOBAL FOG (bug-1306): the skybox is drawn straight from here with a
+		// hand-bound tr.lightallShader[0], so it never passes through RB_IterateStagesGeneric.
+		// stateBits 0 = opaque = fog toward the fog colour; fogAsSky qtrue so r_globalFogSky
+		// governs it. This is the piece a screen-space depth pass structurally cannot do:
+		// fogging the sky WITHOUT also erasing every no-depth-write sprite drawn in front of
+		// it, because here the fog reads the shell being rasterised, not the depth buffer.
+		RB_SetGlobalFogUniforms( sp, 0, qtrue );
 	}
 
 	R_DrawElements(tess.numIndexes - tess.firstIndex, tess.firstIndex);

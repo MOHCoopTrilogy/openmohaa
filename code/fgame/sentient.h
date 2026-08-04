@@ -148,6 +148,14 @@ protected:
     void             AddBloodSpurt(Vector direction);
     void             TryDropBloodTrail(void); // HZM coop - wounded+moving AI drip ground blood splats
     void             DropBloodPool(void);     // HZM coop - persistent blood pool under a killed sentient
+    void             CoopGoreTryDripAttach(qboolean corpse); // HZM coop - gore tier 2: attach looping drip FX
+    void             EventCoopGorePoolGrow(Event *ev);       // HZM coop - gore tier 2: growing corpse pool step
+    void             CoopGoreUpdateSkinTier(void);           // HZM coop - gore tier 1: flip blood-skin bits
+    void             EventCoopGoreReset(Event *ev);          // HZM coop - gore tier 1: script heal hook
+    void             CoopGoreTryGibSkins(int meansofdeath, Entity *inflictor); // HZM coop - gore tier 1e: extreme explosion-death skins (index 3)
+    void             EventCoopGoreGibMark(Event *ev);        // HZM coop - gore tier 1e: script mark for scripted blasts
+    void             CoopGoreTryWoundProp(int location, int meansofdeath, const Vector &position); // HZM coop - gore tier 3: wound prop at the hit point (bug-735: entry-point attach)
+    void             CoopHeadshotKillFx(const Vector &pos, const Vector &dir); // HZM coop - guaranteed burst+wall-splat on a confirmed headshot kill
     qboolean         ShouldBleed(int meansofdeath, qboolean dead);
     qboolean         ShouldGib(int meansofdeath, float damage);
     str              GetBloodSpurtName(void);
@@ -218,8 +226,25 @@ public:
     float             max_mouth_angle;
     int               max_gibs;
     float             next_bleed_time;
+    float             m_fCoopBloodSeverity;    // HZM coop [user 07-29] 0..1 wound severity, scales the blood-trail gates
     float             m_fNextBloodTrailTime;   // HZM coop - blood-trail throttle (time gate)
     Vector            m_vLastBloodTrailOrigin; // HZM coop - blood-trail throttle (distance gate)
+    float             m_fCoopGoreDamage;       // HZM coop - gore tier 2: ACCUMULATED applied damage (aihandler
+                                               // fakes AI health at 5000, so gore tiers key on damage taken,
+                                               // never on health fraction - see CoopGoreTryDripAttach)
+    SafePtr<Entity>   m_pCoopDripEmitter;      // HZM coop - gore tier 2: attached looping drip FX (NULL = none)
+    int               m_iCoopGoreSkinTier;     // HZM coop - gore tier 1: current blood-skin index (0/1/2;
+                                               // 3 = gore tier 1e extreme explosion-death corpse, terminal)
+    qboolean          m_bCoopGoreGibMark;      // HZM coop - gore tier 1e: script flagged us inside a scripted blast
+    float             m_fCoopGoreGibMarkTime;  // HZM coop - gore tier 1e: level.time the script mark expires
+    void              CoopGoreHeal(float amount); // HZM coop - gore tier 1: healed -> reduce gore, retier
+    Vector            m_vCoopPoolPos;          // HZM coop - gore tier 2: floor point of the growing corpse pool
+    Vector            m_vCoopPoolNormal;       // HZM coop - gore tier 2: floor normal of the growing corpse pool
+    int               m_iCoopPoolGen;          // HZM coop - gore tier 2 (bug-817): this pool's start ordinal;
+                                               // only the 6 newest chains keep creeping (decal-budget cap)
+    SafePtr<Entity>   m_pCoopWoundProp[4];     // HZM coop - gore tier 3: attached hit-location wound props
+                                               // (slot count = COOP_GORE_MAX_WOUNDPROPS in sentient.cpp;
+                                               // SafePtr auto-NULLs when a prop is freed with its body)
     bool              m_bForceDropHealth;
     bool              m_bForceDropWeapon;
 
@@ -275,6 +300,7 @@ public:
     void           takeItem(const char *itemname);
     void           takeAmmoType(const char *ammoname);
     void           AddItem(Item *object);
+    void           PruneStaleInventory(void); // HZM bug-924: heal stale/freed slots instead of skipping them
     void           RemoveItem(Item *object);
     void           RemoveWeapons(void);
     Weapon        *GetWeapon(int index);
@@ -331,6 +357,7 @@ public:
     void         Holster(qboolean putaway);
     void         SafeHolster(qboolean putaway);
     void         ActivateNewWeapon(void);
+    void         UpdateCoopHolsteredWeapons(void); // HZM coop - weapons-on-back persistence
     void         ActivateNewWeapon(Event *ev);
     void         UpdateWeapons(void);
     VehicleTank *GetVehicleTank(void);

@@ -38,7 +38,7 @@ extern "C" {
     // multiple commands may be combined into a single packet, so this
     // needs to be larger than PACKET_BACKUP
 
-#define MAX_ENTITIES_IN_SNAPSHOT 1024
+#define MAX_ENTITIES_IN_SNAPSHOT 2048 // HZM 07-20 (bug-934): follow MAX_GENTITIES - 1024 silently truncated what cgame could see
 
     // snapshots are a view of the server at a given time
 
@@ -441,6 +441,13 @@ functions exported to the main executable
         hdelement_t  *HudDrawElements;
         clientAnim_t *anim;
         stopWatch_t  *stopWatch;
+
+        // HZM coop - gore tier 4 (UV wounds): renderer bridge, appended at the
+        // end of the struct so every existing member keeps its offset. NULL
+        // when the active renderer does not support UV wound painting.
+        void (*R_GoreImpact)(const vec3_t vStart, const vec3_t vEnd);
+        void (*R_GoreReset)(int iEntityNumber);
+        void (*R_GoreKillSplash)(int iEntityNumber); // bug-780: killing blow -> corpse splashes
 
     } clientGameImport_t;
 

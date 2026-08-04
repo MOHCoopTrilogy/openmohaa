@@ -152,6 +152,92 @@ void RB_CalcDeformVertexes( deformStage_t *ds )
 }
 
 /*
+========================
+RB_CalcFlapVertexes
+
+HZM gl2 re-port (bug-gl2-flap): deformVertexes flap s|t - waving flags,
+banners and canvas (328 retail uses, e.g. flags.shader) were frozen rigid
+because the parse existed but the deform case did not. Port of gl1
+RB_CalcFlapVertexes (gl1 tr_shade_calc.c:306-389), adapted to gl2's packed
+int16 normals and flat texcoord array. Two gl1 details intentionally not
+carried over: (1) the entity-surfaces / r_static_shaderdata* waveform
+fallbacks are dead code in gl1 (the 1234567.0f sentinel is never produced by
+the deform parser), so the parsed waveform is used directly; (2) gl1 computes
+a deformationSpread offset per vertex but never feeds it into the wave -
+reproduced faithfully by omitting the dead computation.
+========================
+*/
+void RB_CalcFlapVertexes( deformStage_t *ds, texDirection_t coordsToUse )
+{
+	int i;
+	vec3_t offset;
+	float scale;
+	float *xyz = ( float * ) tess.xyz;
+	int16_t	*normal = tess.normal[0];
+	const float *st = ( const float * ) tess.texCoords[0];
+	float *table;
+	float min, max;
+	float vertexScale;
+	vec3_t fNormal;
+
+	min = ds->bulgeWidth;
+	max = ds->bulgeHeight;
+
+	if ( ds->deformationWave.frequency ) {
+		table = TableForFunc( ds->deformationWave.func );
+
+		for ( i = 0; i < tess.numVertexes; i++, xyz += 4, st += 2, normal += 4 ) {
+			scale = WAVEVALUE( table, ds->deformationWave.base,
+				ds->deformationWave.amplitude,
+				ds->deformationWave.phase,
+				ds->deformationWave.frequency );
+
+			vertexScale = ( max - min ) * st[coordsToUse] + min;
+			// HZM gl2 clamp: this is a faithful port of gl1's formula (renderergl1
+			// tr_shade_calc.c:369), which multiplies by the vertex's RAW, unbounded texcoord.
+			// That's harmless on small hand-authored UVs (flags/banners, the deform's original
+			// use case) but on a large continuous world surface with high raw UV (e.g. the D-Day
+			// ocean plane, mapped across hundreds of texture-space units) it blows the offset up
+			// into a huge, per-vertex-varying displacement - visible as violent streaking/smearing
+			// that gets worse the further the UV runs, and a hard discontinuity at patch seams
+			// where raw UV ranges differ. Clamp so a legitimate small flap keeps working exactly
+			// as authored while a runaway large-surface case can't explode.
+			if ( vertexScale > 8.0f ) { vertexScale = 8.0f; }
+			else if ( vertexScale < -8.0f ) { vertexScale = -8.0f; }
+
+			R_VaoUnpackNormal( fNormal, normal );
+
+			offset[0] = scale * vertexScale * fNormal[0];
+			offset[1] = scale * vertexScale * fNormal[1];
+			offset[2] = scale * vertexScale * fNormal[2];
+
+			xyz[0] += offset[0];
+			xyz[1] += offset[1];
+			xyz[2] += offset[2];
+		}
+	} else {
+		scale = EvalWaveForm( &ds->deformationWave );
+
+		for ( i = 0; i < tess.numVertexes; i++, xyz += 4, st += 2, normal += 4 ) {
+			vertexScale = ( max - min ) * st[coordsToUse] + min;
+			// HZM gl2 clamp: see the identical comment in the frequency branch above.
+			if ( vertexScale > 8.0f ) { vertexScale = 8.0f; }
+			else if ( vertexScale < -8.0f ) { vertexScale = -8.0f; }
+
+			R_VaoUnpackNormal( fNormal, normal );
+
+			offset[0] = vertexScale * scale * fNormal[0];
+			offset[1] = vertexScale * scale * fNormal[1];
+			offset[2] = vertexScale * scale * fNormal[2];
+
+			xyz[0] += offset[0];
+			xyz[1] += offset[1];
+			xyz[2] += offset[2];
+		}
+	}
+}
+
+/*
 =========================
 RB_CalcDeformNormals
 
@@ -435,17 +521,27 @@ Autosprite2Deform
 Autosprite2 will pivot a rectangular quad along the center of its long axis
 =====================
 */
+// HZM gl2 (#71 swimming billboard trees): the stock-ioq3 edgeVerts table +
+// Autosprite2Deform below were the Quake3 versions; MOHAA (gl1) rewrote both.
+// The Q3 algorithm reprojects using the two shortest edges and an index-walk to
+// pick a direction, which mis-orients autosprite2 quads that are keyed off their
+// LONG axis (tree trunks) -> the far-LOD tree billboards lurched/"swam" as the
+// camera moved. Ported gl1's OpenMOHAA Autosprite2Deform verbatim (different
+// edgeVerts order + short/long-edge + firstOnLeft/secondOnLeft reprojection),
+// adapting gl1's viewParms.ori -> gl2's viewParms.or. Also restored the
+// `backEnd.currentStaticModel ||` term in the local-forward branch (gl2 was
+// missing it), so static-model trees rotate about their own trunk axis.
 int edgeVerts[6][2] = {
 	{ 0, 1 },
-	{ 0, 2 },
 	{ 0, 3 },
-	{ 1, 2 },
+	{ 0, 2 },
 	{ 1, 3 },
-	{ 2, 3 }
+	{ 1, 2 },
+	{ 3, 2 }
 };
 
 static void Autosprite2Deform( void ) {
-	int		i, j, k;
+	int		i, j;
 	int		indexes;
 	float	*xyz;
 	vec3_t	forward;
@@ -457,7 +553,7 @@ static void Autosprite2Deform( void ) {
 		ri.Printf( PRINT_WARNING, "Autosprite2 shader %s had odd index count\n", tess.shader->name );
 	}
 
-	if ( backEnd.currentEntity != &tr.worldEntity ) {
+	if ( backEnd.currentStaticModel || backEnd.currentEntity != &tr.worldEntity ) {
 		GlobalVectorToLocal( backEnd.viewParms.or.axis[0], forward );
 	} else {
 		VectorCopy( backEnd.viewParms.or.axis[0], forward );
@@ -467,18 +563,24 @@ static void Autosprite2Deform( void ) {
 	// we could precalculate a lot of it is an issue, but it would mess up
 	// the shader abstraction
 	for ( i = 0, indexes = 0 ; i < tess.numVertexes ; i+=4, indexes+=6 ) {
-		float	lengths[2];
-		int		nums[2];
+		float shortLengths[2];
+		int shortNums[2];
+		float longLengths[2];
+		int longNums[2];
 		vec3_t	mid[2];
 		vec3_t	major, minor;
-		float	*v1, *v2;
+		float	*v1, *v2, *v3, *v4;
+		qboolean firstOnLeft, secondOnLeft;
+		float edgeLength;
 
 		// find the midpoint
 		xyz = tess.xyz[i];
 
 		// identify the two shortest edges
-		nums[0] = nums[1] = 0;
-		lengths[0] = lengths[1] = 999999;
+		shortNums[0] = shortNums[1] = 0;
+		shortLengths[0] = shortLengths[1] = 1000000000;
+		longNums[1] = longNums[0] = 0;
+		longLengths[1] = longLengths[0] = 0;
 
 		for ( j = 0 ; j < 6 ; j++ ) {
 			float	l;
@@ -488,22 +590,32 @@ static void Autosprite2Deform( void ) {
 			v2 = xyz + 4 * edgeVerts[j][1];
 
 			VectorSubtract( v1, v2, temp );
-			
+
 			l = DotProduct( temp, temp );
-			if ( l < lengths[0] ) {
-				nums[1] = nums[0];
-				lengths[1] = lengths[0];
-				nums[0] = j;
-				lengths[0] = l;
-			} else if ( l < lengths[1] ) {
-				nums[1] = j;
-				lengths[1] = l;
+			if ( l < shortLengths[0] ) {
+				shortNums[1] = shortNums[0];
+				shortLengths[1] = shortLengths[0];
+				shortNums[0] = j;
+				shortLengths[0] = l;
+			} else if ( l < shortLengths[1] ) {
+				shortNums[1] = j;
+				shortLengths[1] = l;
+			}
+
+			if (l > longLengths[0]) {
+				longNums[1] = longNums[0];
+				longLengths[1] = longLengths[0];
+				longNums[0] = j;
+				longLengths[0] = l;
+			} else if (l > longLengths[1]) {
+				longNums[1] = j;
+				longLengths[1] = l;
 			}
 		}
 
 		for ( j = 0 ; j < 2 ; j++ ) {
-			v1 = xyz + 4 * edgeVerts[nums[j]][0];
-			v2 = xyz + 4 * edgeVerts[nums[j]][1];
+			v1 = xyz + 4 * edgeVerts[shortNums[j]][0];
+			v2 = xyz + 4 * edgeVerts[shortNums[j]][1];
 
 			mid[j][0] = 0.5f * (v1[0] + v2[0]);
 			mid[j][1] = 0.5f * (v1[1] + v2[1]);
@@ -516,33 +628,59 @@ static void Autosprite2Deform( void ) {
 		// cross this with the view direction to get minor axis
 		CrossProduct( major, forward, minor );
 		VectorNormalize( minor );
-		
-		// re-project the points
-		for ( j = 0 ; j < 2 ; j++ ) {
-			float	l;
 
-			v1 = xyz + 4 * edgeVerts[nums[j]][0];
-			v2 = xyz + 4 * edgeVerts[nums[j]][1];
+        v1 = xyz + 4 * edgeVerts[shortNums[0]][0];
+        v2 = xyz + 4 * edgeVerts[shortNums[0]][1];
 
-			l = 0.5 * sqrt( lengths[j] );
-			
-			// we need to see which direction this edge
-			// is used to determine direction of projection
-			for ( k = 0 ; k < 5 ; k++ ) {
-				if ( tess.indexes[ indexes + k ] == i + edgeVerts[nums[j]][0]
-					&& tess.indexes[ indexes + k + 1 ] == i + edgeVerts[nums[j]][1] ) {
-					break;
-				}
-			}
-
-			if ( k == 5 ) {
-				VectorMA( mid[j], l, minor, v1 );
-				VectorMA( mid[j], -l, minor, v2 );
-			} else {
-				VectorMA( mid[j], -l, minor, v1 );
-				VectorMA( mid[j], l, minor, v2 );
-			}
+        // we need to see which direction this edge
+        // is used to determine direction of projection
+		if (edgeVerts[shortNums[0]][0] == edgeVerts[longNums[0]][0]
+			|| edgeVerts[shortNums[0]][0] == edgeVerts[longNums[0]][1])
+		{
+			firstOnLeft = qtrue;
 		}
+		else
+		{
+			firstOnLeft = qfalse;
+        }
+
+        if (edgeVerts[shortNums[1]][0] == edgeVerts[longNums[1]][0]
+            || edgeVerts[shortNums[1]][0] == edgeVerts[longNums[1]][1])
+        {
+            secondOnLeft = qtrue;
+        }
+        else
+        {
+			secondOnLeft = qfalse;
+        }
+
+		if (firstOnLeft == secondOnLeft)
+        {
+            v3 = xyz + 4 * edgeVerts[shortNums[1]][0];
+            v4 = xyz + 4 * edgeVerts[shortNums[1]][1];
+		}
+		else
+        {
+            v3 = xyz + 4 * edgeVerts[shortNums[1]][1];
+            v4 = xyz + 4 * edgeVerts[shortNums[1]][0];
+		}
+
+        // re-project the points
+		edgeLength = sqrt(shortLengths[0]) * 0.5;
+        v1[0] = -edgeLength * minor[0] + mid[0][0];
+        v1[1] = -edgeLength * minor[1] + mid[0][1];
+        v1[2] = -edgeLength * minor[2] + mid[0][2];
+		v2[0] = minor[0] * edgeLength + mid[0][0];
+        v2[1] = minor[1] * edgeLength + mid[0][1];
+        v2[2] = minor[2] * edgeLength + mid[0][2];
+
+        edgeLength = sqrt(shortLengths[1]) * 0.5;
+		v3[0] = -edgeLength * minor[0] + mid[1][0];
+        v3[1] = -edgeLength * minor[1] + mid[1][1];
+        v3[2] = -edgeLength * minor[2] + mid[1][2];
+		v4[0] = minor[0] * edgeLength + mid[1][0];
+        v4[1] = minor[1] * edgeLength + mid[1][1];
+        v4[2] = minor[2] * edgeLength + mid[1][2];
 	}
 }
 
@@ -599,6 +737,20 @@ void RB_DeformTessGeometry( void ) {
 		case DEFORM_TEXT6:
 		case DEFORM_TEXT7:
 			DeformText( backEnd.refdef.text[ds->deformation - DEFORM_TEXT0] );
+			break;
+		// HZM gl2 re-port (bug-gl2-flap): mirror gl1 RB_DeformTessGeometry
+		// (gl1 tr_shade_calc.c:936-941)
+		// [user 07-31] DIAGNOSTIC KILL SWITCH: r_hzmFlapDeform 0 skips this entirely (falls through
+		// to no deform at all), to A/B against the ocean streaking bug live, no rebuild/relaunch.
+		case DEFORM_FLAP_S:
+			if ( !r_hzmFlapDeform || r_hzmFlapDeform->integer ) {
+				RB_CalcFlapVertexes( ds, USE_S_COORDS );
+			}
+			break;
+		case DEFORM_FLAP_T:
+			if ( !r_hzmFlapDeform || r_hzmFlapDeform->integer ) {
+				RB_CalcFlapVertexes( ds, USE_T_COORDS );
+			}
 			break;
 		}
 	}
@@ -781,6 +933,31 @@ void RB_CalcScaleTexMatrix( const float scale[2], float *matrix )
 /*
 ** RB_CalcScrollTexMatrix
 */
+/*
+** RB_CalcTransWaveTexMatrix / ...T
+**
+** HZM gl2 parity (bug-1242). gl1 implements these per-vertex in tr_shade_calc.c
+** (RB_CalcTransWaveTexCoords / ...T) as a uniform translation of every texcoord by EvalWaveForm.
+** A uniform translation is exactly what gl2 expresses as an identity matrix with a non-zero offset
+** column, so this is an exact port rather than an approximation - S goes in matrix[4], T in
+** matrix[5], matching RB_CalcScrollTexMatrix directly below.
+*/
+void RB_CalcTransWaveTexMatrix( const waveForm_t *wf, float *matrix )
+{
+	float p = EvalWaveForm( wf );
+
+	matrix[0] = 1.0f; matrix[2] = 0.0f; matrix[4] = p;
+	matrix[1] = 0.0f; matrix[3] = 1.0f; matrix[5] = 0.0f;
+}
+
+void RB_CalcTransWaveTexMatrixT( const waveForm_t *wf, float *matrix )
+{
+	float p = EvalWaveForm( wf );
+
+	matrix[0] = 1.0f; matrix[2] = 0.0f; matrix[4] = 0.0f;
+	matrix[1] = 0.0f; matrix[3] = 1.0f; matrix[5] = p;
+}
+
 void RB_CalcScrollTexMatrix( const float scrollSpeed[2], float *matrix )
 {
 	double timeScale = tess.shaderTime;

@@ -1626,8 +1626,17 @@ void CL_Vid_Restart_f( void ) {
 	CL_InitRef();
 	// initialize the UI
 	//CL_InitializeUI();
-	// initialize the ui library
-	UI_ResolutionChange();
+	// HZM (bug-1145 "advanced settings apply crashes gl2"): the stock UI_ResolutionChange()
+	// call used to sit HERE, between CL_InitRef() and CL_StartHunkUsers(). That is too early.
+	// CL_ShutdownRef/CL_InitRef UNLOAD and RELOAD the renderer DLL, so every renderer global -
+	// including every cvar_t* - is NULL again, and UI_ResolutionChange walks the UI's
+	// regged-material list re-registering every menu shader against that dead renderer.
+	// renderergl1 survives it because gl1 runs R_Init() from GetRefAPI (DLL load); renderergl2
+	// runs R_Init() from RE_BeginRegistration, which does not happen until CL_StartHunkUsers
+	// below -> NULL cvar deref (InitShaderEx r_pbr->integer, then R_LoadImage; both verified
+	// from minidumps). The call is also REDUNDANT: CL_StartHunkUsers calls UI_ResolutionChange()
+	// itself, right after CL_BeginRegistration, i.e. against a fully initialised renderer -
+	// and cls.rendererRegistered was just cleared above, so that call is guaranteed to run.
 	// clear aliases
 	Alias_Clear();
 
@@ -1746,7 +1755,9 @@ CL_ConfigString
 ==================
 */
 const char *CL_ConfigString( int index ) {
-	if( index > MAX_CONFIGSTRINGS ) {
+	// HZM (bug-1180): was `index > MAX_CONFIGSTRINGS`, an off-by-one that let index ==
+	// MAX_CONFIGSTRINGS read one past the end of stringOffsets[]. Also guard negatives.
+	if( index < 0 || index >= MAX_CONFIGSTRINGS ) {
 		Com_Error( ERR_DROP, "CL_ConfigString: bad index: %i", index );
 	}
 	return &cl.gameState.stringData[ cl.gameState.stringOffsets[ index ] ];

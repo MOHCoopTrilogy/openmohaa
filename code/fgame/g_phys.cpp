@@ -172,7 +172,11 @@ void G_Impact(Entity *e1, trace_t *trace)
     level.impact_trace = *trace;
 
     // touch anything, including the world
-    if (e1->edict->solid != SOLID_NOT) {
+    // HZM 07-19 (bug-914): guard e2->entity like the second block below does - a freed edict
+    // (mine chain-reaction deleting entities mid-frame) left this AddEntity storing NULL, which
+    // TriggerStuff then rejected with a ScriptError per touch (exception storm -> crash while
+    // sweeping the e1l2 minefield).
+    if (e1->edict->solid != SOLID_NOT && e2->entity) {
         ev = new Event(EV_Touch);
         ev->AddEntity(e2->entity);
         e1->ProcessEvent(ev);
@@ -1126,6 +1130,49 @@ void G_Physics_Toss(Entity *ent)
 
     if (!edict->inuse) {
         return;
+    }
+
+    // HZM 07-20 (bug-923): an allsolid toss trace has fraction=0 and a ZEROED plane (cm_trace.c
+    // documents "the plane is not valid"), so the normal[2] > 0.7 ground check below can never
+    // pass - the item's position freezes at its drop origin while avelocity keeps spinning it
+    // forever (guns dropped from hand/holster tags poking into rocks, or resting on solid
+    // landmine trigger boxes). After ~0.5s stuck, snap the item down to real ground and settle
+    // it. Items + MOVETYPE_TOSS only: thrown grenades are Projectile/MOVETYPE_BOUNCE, gibs are
+    // MOVETYPE_GIB - both excluded; a normally-falling item never traces allsolid so its
+    // counter stays 0 and behavior is unchanged.
+    if (ent->movetype == MOVETYPE_TOSS && ent->IsSubclassOfItem()) {
+        // HZM 07-20 (bug-923 round 2): cover the WEDGE case too - a gun dropped into a steep rock
+        // crease never traces allsolid, it just keeps CONTACTING surfaces with normal[2] <= 0.7
+        // (too steep to count as ground), so it never settles and its avelocity yaw-spin never
+        // zeroes (reinforcement AI die on exactly that terrain). Hard-stuck (allsolid) counts
+        // triple so it still settles in ~10 frames; steep-scrape settles after ~30 contact frames
+        // (~1.5s) - a gun still tumbling down a long slope just settles early, which reads fine.
+        if (trace.allsolid) {
+            ent->m_iTossStuckFrames += 3;
+        } else if (trace.fraction < 1.0f && trace.plane.normal[2] <= 0.7f) {
+            ent->m_iTossStuckFrames++;
+        }
+        if (ent->m_iTossStuckFrames >= 30) {
+            trace_t tr = G_Trace(
+                ent->origin, vec_zero, vec_zero, ent->origin - Vector(0, 0, 8192), ent,
+                ent->edict->clipmask ? ent->edict->clipmask : MASK_SOLID, qfalse,
+                "G_Physics_Toss_stuck"
+            );
+            if (!tr.startsolid && tr.fraction < 1.0f) {
+                ent->setOrigin(Vector(tr.endpos) + Vector(0, 0, 2));
+                ent->groundentity   = tr.ent;
+                ent->groundplane    = tr.plane;
+                ent->groundcontents = tr.contents;
+            } else {
+                ent->groundentity = &g_entities[ENTITYNUM_WORLD];
+            }
+            ent->velocity  = vec_zero;
+            ent->avelocity = vec_zero;
+            ent->ProcessEvent(EV_Stop); // Item::Landed -> MOVETYPE_NONE
+            return;
+        }
+        // no reset: a tumbling gun that keeps scraping steep rock just settles early via the
+        // snap-down above; a clean landing settles through the normal[2] > 0.7 path below anyway
     }
 
     if (trace.fraction < 1) {

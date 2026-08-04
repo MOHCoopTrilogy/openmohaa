@@ -3925,8 +3925,19 @@ void ScriptThread::EventTrace(Event *ev)
     case 4:
         mins = ev->GetVector(4);
     case 3:
-        if (ev->GetInteger(3)) {
+        // HZM coop: arg3 selects the mask. 0 = MASK_SOLID with entities (default),
+        // 1 = MASK_SOLID world-only (retail behavior), 2 = player-movement mask
+        // (MASK_PLAYERSOLID minus bodies) so scripts can probe exactly what blocks
+        // a walking player, including playerclip/fence that MASK_SOLID cannot see.
+        switch (ev->GetInteger(3)) {
+        case 1:
             content_mask &= ~MASK_IGNORE_ENTS;
+            break;
+        case 2:
+            content_mask = (MASK_PLAYERSOLID & ~CONTENTS_BODY);
+            break;
+        default:
+            break;
         }
     case 2:
     case 1:

@@ -1724,7 +1724,13 @@ gentity_t *Level::AllocEdict(Entity *entity)
         }
 
         // allow two spots for none and world
-        if (i == globals.max_entities - 2.0f) {
+        // HZM 07-20 (bug-926): clamp against the PROTOCOL ceiling too, not just max_entities.
+        // With `maxentities 2048` in a config (shipped for years), max_entities-2 = 2046 and this
+        // guard NEVER fired - the allocator handed out slot 1022 (ENTITYNUM_WORLD) repeatedly under
+        // pressure, each spawn STOMPING the previous occupant with no cleanup. That aliasing was
+        // the producer of the entire stale-entity crash family (bugs 914/915/917/919/920/924/925).
+        // The wire cannot address entities >= ENTITYNUM_WORLD regardless of the cvar (GENTITYNUM_BITS wide).
+        if (i >= ENTITYNUM_WORLD || i == globals.max_entities - 2.0f) {
             // Try one more time before failing, relax timing completely
 
             edict = &g_entities[game.maxclients];
@@ -1735,10 +1741,21 @@ gentity_t *Level::AllocEdict(Entity *entity)
                 }
             }
 
-            if (i == globals.max_entities - 2.0f) {
+            if (i >= ENTITYNUM_WORLD || i == globals.max_entities - 2.0f) {
                 gi.Error(ERR_DROP, "Level::AllocEdict: no free edicts");
             }
         }
+    }
+
+    // HZM 07-20 (bug-924/926): near-ceiling allocation tracer. Live incident: respawn-kit weapons
+    // all reported entnum 1022 (ENTITYNUM_WORLD) colliding in the player's inventory while the
+    // pool ran at its 1024 ceiling on e1l2. Print every high-slot handout so the next repro shows
+    // exactly which slot the allocator returned and how full the pool was.
+    if ((edict - g_entities) >= globals.max_entities - 8) {
+        gi.DPrintf(
+            "^~^~^ EDICTHI alloc slot=%d num_entities=%d max=%d\n", (int)(edict - g_entities),
+            globals.num_entities, globals.max_entities
+        );
     }
 
     LL_Remove(edict, next, prev);

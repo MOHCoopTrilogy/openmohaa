@@ -315,7 +315,12 @@ void CVAR_Init(void)
     skill      = gi.Cvar_Get("skill", "1", CVAR_USERINFO | CVAR_SERVERINFO | CVAR_LATCH);
 
     maxclients  = gi.Cvar_Get("sv_maxclients", "1", 0);
-    maxentities = gi.Cvar_Get("maxentities", "1024", CVAR_LATCH);
+    // HZM fix (bug-1167 investigation): default was still 1024 from before GENTITYNUM_BITS was
+    // raised 10->11 (MAX_GENTITIES 2048, "Entity Pool 2048" fix). Nothing in this repo's configs
+    // ever overrides maxentities, so a fresh boot silently mallocs g_entities[] at 1024 slots
+    // while Level::AllocEdict's free-slot scan can walk up to ENTITYNUM_WORLD (2046) - an
+    // out-of-bounds heap write once the pool is busy enough to need slots past 1024.
+    maxentities = gi.Cvar_Get("maxentities", "2048", CVAR_LATCH);
 
     password           = gi.Cvar_Get("password", "", CVAR_USERINFO);
     sv_privatePassword = gi.Cvar_Get("sv_privatePassword", "", CVAR_TEMP);

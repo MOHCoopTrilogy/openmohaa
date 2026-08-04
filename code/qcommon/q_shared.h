@@ -1658,7 +1658,13 @@ typedef enum
 #define MIN_MAP_BOUNDS          ( -MAX_MAP_BOUNDS )
 #define MAP_SIZE                ( MAX_MAP_BOUNDS - MIN_MAP_BOUNDS )
 
-#define	GENTITYNUM_BITS		10		// don't need to send any more
+// HZM 07-20 (bug-927 follow-up): 10 -> 11 = TRUE 2048-entity pool. PROTOCOL CONSTANT - every
+// entity number on the wire is packed with this width, so openmohaa.exe + cgame.dll + game.dll
+// MUST be rebuilt and deployed TOGETHER (same discipline as the MAX_MODELS 2048 and MAX_SOUNDS
+// operations). ENTITYNUM_WORLD/NONE become 2046/2047 automatically; the AllocEdict protocol
+// clamp (level.cpp) follows ENTITYNUM_WORLD symbolically. maxentities 2048 in the coop server
+// cfgs is now an honest value.
+#define	GENTITYNUM_BITS		11
 #define	MAX_GENTITIES		(1<<GENTITYNUM_BITS)
 
 // entitynums are communicated with GENTITY_BITS, so any reserved
@@ -1671,7 +1677,10 @@ typedef enum
 #define MAX_SERVER_SOUNDS			64
 #define MAX_SERVER_SOUNDS_BITS		(MAX_SERVER_SOUNDS-1)
 
-#define	MAX_MODELS			1024		// these are sent over the net as 8 bits
+#define	MAX_MODELS			2048		// HZM COOP: raised 1024->2048 (bug-866: CS_MODELS overflow made
+// e1l2 props/enemies register as model 0 = invisible). entityState.modelindex is a 16-bit
+// netfield (msg.cpp), so 2048 fits with no protocol/bit change. Layout: highest configstring
+// index CS_AXIS = 3673 < MAX_CONFIGSTRINGS (4096). Rebuild exe + game.dll + cgame.dll together.
 // HZM COOP: raised 512 -> 1024. The coop mod registers >512 unique sounds per map
 // (combat VO + ambience + vehicle + coop content), overflowing SV_SoundIndex and
 // silently dropping sounds (e.g. m1l1 truck engine). Requires matching changes:
@@ -1683,7 +1692,64 @@ typedef enum
 // the 1024 pool -> 56 "Couldn't load sound" + music/dialogue dropping mid-mission. 1280 needs the
 // sound_index at 11 bits (was 10); layout CS_WEAPONS=2516, CS_MAX=2650, still < 2736 (compile #error
 // guards it). NOTE: protocol change - client (cgame/exe) AND server (game/exe) must all be on this build.
-#define	MAX_SOUNDS			1280	// raised 512->1024->1280 (HZM coop); sound_index is 11 bits in MSG_*Sounds
+// [HZM 07-28] 1280 -> 1600 (bug-1180), after MAX_CONFIGSTRINGS was raised 4096 -> 8192 above.
+// History: an earlier jump straight to 2000 (bug-1179) killed the server at map load with
+// "SV_FindIndex: bad start index 4260", because the binding limit was NOT the sound_index wire
+// field but the CONFIGSTRING LAYOUT in fgame/bg_public.h, where every block after CS_SOUNDS is
+// computed off MAX_SOUNDS:  CS_AXIS (highest) = MAX_SOUNDS + 2393, which must stay under
+// MAX_CONFIGSTRINGS. With the ceiling now at 8192 that constraint is gone (it would permit ~5800).
+//
+// So why 1600 and not the 2048 the wire allows? Because a THIRD limit binds now, and it is the
+// dangerous one: MAX_GAMESTATE_CHARS (below) is the byte pool holding every configstring's TEXT,
+// and the whole gamestate - all those strings plus every entity baseline - is serialised into ONE
+// msgBuffer[MAX_MSGLEN] (131072) in sv_client.c SV_SendClientGameState. Raising MAX_SOUNDS does not
+// itself spend pool bytes (empty slots are skipped), but it lets the game REGISTER more sound paths,
+// and the mod is currently saturating 1280, so it will use what it is given: ~40 bytes per path.
+// +320 slots is roughly +13KB, comfortably inside the pool's remaining headroom. Going to 2048
+// (+768 slots, ~+30KB) risks exceeding the pool, whose overflow surfaces as a client ERR_DROP
+// "MAX_GAMESTATE_CHARS exceeded" AT CONNECT. Raising the pool in turn needs MAX_MSGLEN raised, since
+// the pool is already ~75% of it - that is a bigger protocol change and wants real measurement
+// first, which the new gamestate-size report in SV_SendClientGameState now provides.
+// Wire cap remains 2048: sound_index is 11 bits (msg.cpp MSG_ReadSounds/MSG_WriteSounds) and IS a
+// silent-truncation field, unlike the configstring index - never exceed it without widening both.
+// [HZM 07-28] REVERTED 1600 -> 1280 (bug-1183). A FOURTH limit binds, and it is the one that
+// actually bites: every configstring set AFTER the gamestate is sent goes to the client as a
+// RELIABLE COMMAND (SV_SetConfigstring -> SV_SendConfigstring -> SV_SendServerCommand, e.g.
+// `cs 3118 "sound/coop_deathvox/dv_276.wav0"`). MAX_RELIABLE_COMMANDS is 512 (qcommon.h) and
+// sv_main.c drops the client the moment reliableSequence - reliableAcknowledge hits 513, with
+// "Server command overflow". At map load this mod already queues ~140 loadout-registry stufftexts
+// plus the normal spawn traffic, so it sits close to the ceiling; +320 sound registrations pushed
+// it to 514 and the client was dropped mid-spawn ("Server disconnected", twice).
+// The SV_FindIndex overflow WARNINGS at 1280 are the engine REFUSING those extra registrations -
+// noisy, but they were protecting this. Raising sound capacity for real therefore ALSO needs
+// MAX_RELIABLE_COMMANDS raised (it is masked with &(N-1) so it must stay a power of two: 512 ->
+// 1024) and/or the loadout registry trimmed to fewer commands - not this constant alone.
+// [HZM 07-28] 1280 -> 1600 (bug-1186), NOW SAFE because MAX_RELIABLE_COMMANDS was raised to 1024
+// FIRST (qcommon.h) - that was the missing prerequisite that made the identical raise fail as
+// bug-1183. Evidence this was needed: a single m1l1 session logged 227 SV_FindIndex overflows
+// dropping 179 DISTINCT sounds - 87 coop_flvo battle chatter, 82 dialogue, 55 coop_gurgle wounded
+// vocals, 5 coop_headshot, plus sound/vehicle/Truck_intro.wav (the m1l1 truck engine, whose alias
+// was already correct - it simply could not register). 1600 covers all 179 with room to spare.
+// The full constraint chain on this constant, in the order it binds:
+//   1. CONFIGSTRING LAYOUT - CS_AXIS = MAX_SOUNDS + 2393 < MAX_CONFIGSTRINGS (8192). At 1600 that
+//      is 3993, fine. (This is what broke at 2000 when the ceiling was still 4096 - bug-1179.)
+//   2. RELIABLE COMMANDS - one per post-gamestate registration; now 1024 (see above).
+//   3. WIRE - sound_index is 11 bits in MSG_ReadSounds/MSG_WriteSounds, hard cap 2048, and it
+//      SILENTLY TRUNCATES. Never exceed without widening both sides.
+//   4. MAX_GAMESTATE_CHARS (98304) - the text pool, already ~75% of msgBuffer[MAX_MSGLEN]; +320
+//      sound paths is ~13KB, still inside it. Going to the 2048 wire cap would need this raised,
+//      which in turn needs MAX_MSGLEN raised. Not attempted.
+#define	MAX_SOUNDS			1600	// raised 512->1024->1280->1600 (HZM coop); sound_index is 11 bits in MSG_*Sounds
+
+// HZM (engine-limits audit): constraint 3 above was a COMMENT only - nothing stopped a future
+// MAX_SOUNDS raise from silently overflowing the wire field, which is the exact failure mode
+// this whole audit exists to kill. Name the wire width, have msg.cpp use it instead of a bare
+// literal 11, and make the coupling a build break instead of a code-review hope.
+// Raising this is a PROTOCOL change: openmohaa.exe + cgame.dll + game.dll must ship together.
+#define	SOUND_INDEX_BITS	11
+#if MAX_SOUNDS > (1 << SOUND_INDEX_BITS)
+	#error "MAX_SOUNDS exceeds what sound_index can carry in MSG_WriteSounds/MSG_ReadSounds - widen SOUND_INDEX_BITS (protocol change: exe + cgame.dll + game.dll together)"
+#endif
 #define MAX_OBJECTIVES		20
 #define MAX_LIGHTSTYLES		32
 // [user 07-10] 64 -> 128: the DEBUG "give all" + big give-all arsenals (49 guns + FG42 + grenades +
@@ -1699,10 +1765,26 @@ typedef enum
 // 22 free), so any further MAX_SOUNDS/MODELS/WEAPONS bump would trip the CS_MAX #error. Raising this
 // is SAFE + cheap: it only sizes the gamestate stringOffsets[] + server configstrings[]/csUpdated[]
 // arrays (all MAX_CONFIGSTRINGS-symbolic, no hardcoded 2736, no bit-width/mask uses it), the CS index
-// is a 16-bit [short] so 4096 << 65535, and 4096 keeps the SAME 12-bit index width as 2736. The actual
+// is a 16-bit [short] so 4096 << 65535. The actual
 // string BYTES live in the separate MAX_GAMESTATE_CHARS (96KB) below - unchanged. PROTOCOL change:
 // client (cgame/exe) AND server (game/exe) must ALL be on this build (struct sizes must match).
-#define	MAX_CONFIGSTRINGS	4096
+//
+// [HZM 07-28] 4096 -> 8192 (bug-1180). CORRECTION to the note above: it also used to claim "4096 keeps
+// the SAME 12-bit index width as 2736". That is FALSE and it is what made this raise look scary for
+// years. There is NO 12-bit configstring index anywhere in this codebase - audited end to end:
+//   * gamestate bulk send  : MSG_WriteShort / MSG_ReadShort = 16 bits (msg.cpp:441 / :634), and the
+//                            read SIGN-EXTENDS, so the true wire ceiling is 32767, not 4096.
+//   * live update          : a TEXT reliable command ("cs %i"), sv_init.c SV_SendConfigstring - no
+//                            width limit at all; client parses with atoi.
+//   * demo                 : same 16-bit encoding, replayed through the same parser.
+//   * savegame             : only the STRING is archived; the index is a compile-time constant.
+// (The one 12-bit MSG_WriteBits in the msg layer, msg.cpp:2694, is packed Euler ANGLE quantisation -
+// tmp * 4096.0f / 360.0f - and has nothing to do with configstrings.)
+// An over-raise would also fail LOUDLY (csNum < 0 guard -> ERR_DROP), never silently truncate.
+// Cost of 8192: +16KB per gameState_t, +32KB server pointer array, +16KB per client csUpdated[]
+// (~1MB at 64 clients). Chosen over anything larger because csUpdated[] is per-client and nothing in
+// the CS layout can ever need more than ~5800 (see the CS_AXIS arithmetic on MAX_SOUNDS below).
+#define	MAX_CONFIGSTRINGS	8192
 #define MAX_HUDDRAW_ELEMENTS 256
 
 #define MAX_SUBTITLES 4

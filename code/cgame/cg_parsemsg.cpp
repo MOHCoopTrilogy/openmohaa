@@ -514,13 +514,23 @@ static void CG_MakeBulletTracerInternal(
     fZingDistC  = 9999.0;
     iNumImpacts = 0;
 
+    // [HZM 07-28, bug-1200] muzzle 0.35 -> 0.15 and barrel 0.6 -> 0.25. At the old rates ~72% of
+    // shots produced SOME smoke (0.35 muzzle puff + 0.6 back-wisp, rolled independently), which
+    // stacked under sustained fire and read as a permanent cloud at the barrel. These are all
+    // CVAR_ARCHIVE and re-read every volley, so they can be tuned live from the console.
     // HZM coop - SMOKE WHIPS: read the live cvars once. coop_smokeWhip is the master on/off;
     // coop_smokeWhipMuzzle / coop_smokeWhipImpact are per-event spawn CHANCES for a subtle lingering
     // gun-smoke wisp (SFX_COOP_GUNSMOKE) at the barrel / at bullet impacts (0 = off, 1 = every event).
     {
         cvar_t *pSW  = cgi.Cvar_Get("coop_smokeWhip",       "1",    CVAR_ARCHIVE);
-        cvar_t *pSWM = cgi.Cvar_Get("coop_smokeWhipMuzzle", "0.35", CVAR_ARCHIVE);
-        cvar_t *pSWI = cgi.Cvar_Get("coop_smokeWhipImpact", "0.35", CVAR_ARCHIVE);
+        cvar_t *pSWM = cgi.Cvar_Get("coop_smokeWhipMuzzle", "0.15", CVAR_ARCHIVE);
+        // [HZM 07-28, bug-1176 round 2] impact chance 0.35 -> 0.12. Halving the puff's SIZE in
+        // coop_gunsmoke.tik was not enough on its own: this fires ON TOP of the engine's own
+        // per-surface impact effect, so on a sandy/dirt map every third round stacked a second
+        // growing cloud over the vanilla one and read as one huge blast. Cutting the RATE thins
+        // it to an occasional wisp. coop_smokeWhipImpact 0 disables ours entirely - which is also
+        // the clean A/B for telling our smoke apart from the stock surface effect.
+        cvar_t *pSWI = cgi.Cvar_Get("coop_smokeWhipImpact", "0.12", CVAR_ARCHIVE);
         if (pSW->integer) {
             swMuzzle = pSWM->value;
             swImpact = pSWI->value;
@@ -541,7 +551,7 @@ static void CG_MakeBulletTracerInternal(
     // so it reads as smoke curling off your own gun, not a plume in your face. coop_barrelSmoke = per-volley
     // spawn chance (0 = off). The look (short/thin) is baked in models/fx/coop_barrelsmoke.tik.
     {
-        cvar_t *pBS = cgi.Cvar_Get("coop_barrelSmoke", "0.6", CVAR_ARCHIVE);
+        cvar_t *pBS = cgi.Cvar_Get("coop_barrelSmoke", "0.25", CVAR_ARCHIVE);
         if (pBS->value > 0.0f && i_iNumBullets > 0 && random() < pBS->value) {
             vec3_t vBackDir, vBackAng, vBPos;
             VectorSubtract(i_vStart, i_vEnd[0], vBackDir); // reverse of the bullet line = back toward the shooter
@@ -615,6 +625,22 @@ static void CG_MakeBulletTracerInternal(
                     );
                 }
             }
+        }
+    }
+
+    // HZM coop - gore tier 4 (UV wounds): every bullet segment we hear about is
+    // server-authoritative (start = shot origin, end = where the server's trace
+    // stopped, i.e. ON the victim for flesh hits). Forward each segment to the
+    // renderer, which ray-tests the CPU-skinned triangles of nearby character
+    // models (players + allied AND enemy AI - anything ischaracter) and paints
+    // an exact bullet wound into that entity's per-entity diffuse copy at the
+    // true surface UV. Wall hits simply never find a character triangle near
+    // their end point and expire. Cheap call; the renderer gates on r_goreUV.
+    if (cgi.R_GoreImpact) {
+        int iGoreBullet;
+
+        for (iGoreBullet = 0; iGoreBullet < i_iNumBullets; iGoreBullet++) {
+            cgi.R_GoreImpact(i_vStart, i_vEnd[iGoreBullet]);
         }
     }
 

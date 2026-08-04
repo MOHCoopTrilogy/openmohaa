@@ -443,7 +443,12 @@ void Trigger::TriggerStuff(Event *ev)
     // Fixed in OPM
     //  Safety check
     if (other == NULL) {
-        ScriptError("trigger '%s' triggered by NULL entity", TargetName().c_str());
+        // HZM 07-19 (bug-914): was ScriptError - when a minefield chain-reaction frees touchers
+        // mid-frame, every queued touch resolves to NULL here and the per-touch throw became an
+        // exception storm that crashed the server (e1l2 detector sweep). A dead toucher is not
+        // an error worth throwing over - log at dev level and ignore the touch.
+        gi.DPrintf("trigger '%s' touched by NULL entity - ignored\n", TargetName().c_str());
+        return;
     }
 
     // Always respond to activate messages from the world since they're probably from
@@ -903,7 +908,10 @@ void TriggerAll::TriggerStuff(Event *ev)
     // Fixed in OPM
     //  Safety check
     if (other == NULL) {
-        ScriptError("trigger '%s' triggered by NULL entity", TargetName().c_str());
+        // HZM 07-19 (bug-914): same as Trigger::TriggerStuff - ignore dead touchers instead of
+        // throwing (the throw storm during the e1l2 minefield sweep crashed the server).
+        gi.DPrintf("trigger '%s' touched by NULL entity - ignored\n", TargetName().c_str());
+        return;
     }
 
     // Always respond to activate messages from the world since they're probably from
@@ -3223,7 +3231,13 @@ void TriggerLandmine::EventSetDamageable(Event *ev)
 void TriggerLandmine::SetDamageable(qboolean damageable)
 {
     if (damageable) {
-        setContentsSolid();
+        // HZM 07-20 (bug-938): was setContentsSolid() - every armed damageable mine was an
+        // INVISIBLE SOLID BOX. e1l2 alone scatters 33 of them over open ground and paths
+        // (BSP-verified at the gun emplacements and roads) = the "invisible walls you can
+        // jump over" the user kept hitting. CONTENTS_WEAPONCLIP keeps them in MASK_SHOT
+        // (shooting mines to clear them still works) while player/AI movement passes
+        // through - stepping onto a wired mine still detonates via the trigger touch.
+        setContents(CONTENTS_WEAPONCLIP);
     } else {
         setContents(0);
     }

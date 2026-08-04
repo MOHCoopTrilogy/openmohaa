@@ -424,6 +424,7 @@ protected:
     void         EventSetSoundParameters(Event *ev);
     void         EventSetVolumeParameters(Event *ev);
     void         EventDamage(Event *ev);
+    void         CoopZombieRescue(void); // HZM coop - bug-1323: un-entomb health<=0 never-died vehicles
     void         EventStopAtEnd(Event *ev);
     void         EventSkidding(Event *ev);
     void         EventContinueSkidding(Event *ev);
@@ -540,7 +541,8 @@ public:
 
     DrivableVehicle(void);
 
-    virtual void Killed(Event *ev) override;
+void         EventDamage(Event *ev); // HZM coop - bug-1323 wrapper
+        virtual void Killed(Event *ev) override;
 };
 
 class VehicleWheelsX4 : public DrivableVehicle

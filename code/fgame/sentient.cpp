@@ -631,6 +631,40 @@ Event EV_Sentient_Client_Landing
     "fVolume iEquipment",
     "Play a landing sound that is appropriate to the surface we are landing on\n"
 );
+// HZM coop - gore tier 2: one step of the GROWING corpse blood pool. Self-chained PostEvent started by
+// DropBloodPool; each step layers one more (larger) non-fading coop_bloodpool decal on the same floor point.
+Event EV_Sentient_CoopGorePoolGrow
+(
+    "_coop_gore_pool_grow",
+    EV_DEFAULT,
+    "i",
+    "step",
+    "HZM coop - internal: drop one ring of the growing blood pool under a corpse"
+);
+// HZM coop - gore tier 1: script hook for heals the engine cannot see (officer canteen, DBNO revive,
+// aihandler script-side HP). No arg = full reset (clean uniform + counters + drip removed); with an
+// amount = subtract that much healed damage from the gore counter and re-tier (partial heals).
+Event EV_Sentient_CoopGoreReset
+(
+    "gore_reset",
+    EV_DEFAULT,
+    "F",
+    "healed_amount",
+    "HZM coop - gore tier 1: clear blood skins/counters (no arg) or credit a partial heal (amount)"
+);
+// HZM coop - gore tier 1e (extreme explosion-death skins): script hook for SCRIPTED blasts whose applied
+// damage does not carry an explosive MOD (e.g. t1l1 truck passengers killed by bare `hurt` when the truck
+// blows up). Call `<victim> gore_gibmark` just before/with the scripted blast damage; if the victim dies
+// while the mark is fresh (default 2s window) the corpse gets the tier-3 gib skins exactly as if the
+// engine had seen MOD_EXPLOSION. Marks on survivors expire harmlessly.
+Event EV_Sentient_CoopGoreGibMark
+(
+    "gore_gibmark",
+    EV_DEFAULT,
+    "F",
+    "window_seconds",
+    "HZM coop - gore tier 1e: mark this sentient as dying to a scripted explosion (optional window, default 2s)"
+);
 
 CLASS_DECLARATION(Animate, Sentient, NULL) {
     {&EV_Sentient_ReloadWeapon,           &Sentient::ReloadWeapon                 },
@@ -699,6 +733,9 @@ CLASS_DECLARATION(Animate, Sentient, NULL) {
     {&EV_Sentient_GetNewActiveWeapon,     &Sentient::GetNewActiveWeapon           },
     {&EV_Sentient_GetNewActiveWeaponHand, &Sentient::GetNewActiveWeaponHand       },
     {&EV_Sentient_Client_Landing,         &Sentient::EventClientLanding           },
+    {&EV_Sentient_CoopGorePoolGrow,       &Sentient::EventCoopGorePoolGrow        }, // HZM coop - gore tier 2
+    {&EV_Sentient_CoopGoreReset,          &Sentient::EventCoopGoreReset           }, // HZM coop - gore tier 1
+    {&EV_Sentient_CoopGoreGibMark,        &Sentient::EventCoopGoreGibMark         }, // HZM coop - gore tier 1e
     {NULL,                                NULL                                    }
 };
 
@@ -757,7 +794,15 @@ Sentient::Sentient()
     attack_blocked_time     = 0;
     m_fHelmetSpeed          = 0;
     m_fNextBloodTrailTime   = 0;            // HZM coop - blood trail
+    m_fCoopBloodSeverity    = 0;            // HZM coop [user 07-29] - blood-trail severity scale
     m_vLastBloodTrailOrigin = vec_zero;     // HZM coop - blood trail
+    m_fCoopGoreDamage       = 0;            // HZM coop - gore tier 2 (drips + growing pool)
+    m_iCoopGoreSkinTier     = 0;            // HZM coop - gore tier 1 (damage-tier blood skins)
+    m_bCoopGoreGibMark      = qfalse;       // HZM coop - gore tier 1e (extreme explosion-death skins)
+    m_fCoopGoreGibMarkTime  = 0;            // HZM coop - gore tier 1e
+    m_vCoopPoolPos          = vec_zero;     // HZM coop - gore tier 2
+    m_vCoopPoolNormal       = vec_zero;     // HZM coop - gore tier 2
+    m_iCoopPoolGen          = 0;            // HZM coop - gore tier 2 (bug-817: continuous pool growth)
 
     inventory.ClearObjectList();
 
@@ -933,6 +978,15 @@ void Sentient::SetBloodModel(Event *ev)
 
 void Sentient::AddItem(Item *object)
 {
+    // HZM 07-19 (bug-920): refuse duplicate entnums - RemoveItem/~Item remove only ONE
+    // occurrence, so a double-add leaves a permanently stale entry that dangles once the
+    // item entity is freed (the producer shape behind the bug-915/917/919 crash family).
+    if (inventory.IndexOfObject(object->entnum)) {
+        // HZM bug-924: membership-safe refusal (container holds raw entnums, so the listed int
+        // already resolves to this new entity) - but print loudly to timestamp producer activity.
+        gi.DPrintf("^~^~^ INVDUP add refused ent=%d model=%s owner=%d\n", object->entnum, object->model.c_str(), entnum);
+        return;
+    }
     inventory.AddObject(object->entnum);
 }
 
@@ -960,7 +1014,10 @@ void Sentient::RemoveWeapons(void)
         int     entnum = inventory.ObjectAt(i);
         Weapon *item   = (Weapon *)G_GetEntity(entnum);
 
-        if (item->IsSubclassOfWeapon()) {
+        // HZM 07-19 (bug-915): a stale inventory entnum (item freed without owner cleanup) made
+        // these unguarded derefs crash - live dump: AV read at Sentient::FindItem+0x95 while using
+        // the mine detector. Release builds compile the asserts out, so skip dead slots instead.
+        if (item && item->IsSubclassOfWeapon()) {
             item->Delete();
         }
     }
@@ -972,7 +1029,7 @@ Weapon *Sentient::GetWeapon(int index)
         int     entnum = inventory.ObjectAt(i);
         Weapon *item   = (Weapon *)G_GetEntity(entnum);
 
-        if (item->IsSubclassOfWeapon()) {
+        if (item && item->IsSubclassOfWeapon()) {
             if (!index) {
                 return item;
             }
@@ -994,6 +1051,9 @@ Item *Sentient::FindItemByExternalName(const char *itemname)
     for (i = 1; i <= num; i++) {
         item = (Item *)G_GetEntity(inventory.ObjectAt(i));
         assert(item);
+        if (!item || !item->isSubclassOf(Item)) {
+            continue; // HZM 07-19 (bug-915/919): stale OR RECYCLED slot (entnum reused by a non-Item under blast churn - live dump: wild read at FindItem+0xad, addr -1)
+        }
         if (!Q_stricmp(item->getName(), itemname)) {
             return item;
         }
@@ -1018,6 +1078,9 @@ Item *Sentient::FindItemByModelname(const char *mdl)
     for (i = 1; i <= num; i++) {
         item = (Item *)G_GetEntity(inventory.ObjectAt(i));
         assert(item);
+        if (!item || !item->isSubclassOf(Item)) {
+            continue; // HZM 07-19 (bug-915/919): stale or recycled slot
+        }
         if (!Q_stricmp(item->model, tmpmdl)) {
             return item;
         }
@@ -1036,6 +1099,9 @@ Item *Sentient::FindItemByClassName(const char *classname)
     for (i = 1; i <= num; i++) {
         item = (Item *)G_GetEntity(inventory.ObjectAt(i));
         assert(item);
+        if (!item || !item->isSubclassOf(Item)) {
+            continue; // HZM 07-19 (bug-915/919): stale or recycled slot
+        }
         if (!Q_stricmp(item->edict->entname, classname)) {
             return item;
         }
@@ -1044,9 +1110,27 @@ Item *Sentient::FindItemByClassName(const char *classname)
     return NULL;
 }
 
+// HZM 07-20 (bug-924): stale slots (entity freed while listed; producer at large -
+// bug-915/917/919/920/925 family) were only SKIPPED by the guards, so they accumulate:
+// walks hide them ("missing" weapons in cycling), FindItem misses so later re-gives spawn
+// duplicates, and any unswept walk crashes. Heal: remove every slot that no longer
+// resolves to an Item, loudly, so the next incident timestamps the producer.
+void Sentient::PruneStaleInventory(void)
+{
+    for (int i = inventory.NumObjects(); i > 0; i--) {
+        Entity *e = G_GetEntity(inventory.ObjectAt(i));
+        if (!e || !e->isSubclassOf(Item)) {
+            gi.DPrintf("^~^~^ INVSTALE pruned ent=%d slot=%d owner=%d\n", inventory.ObjectAt(i), i, entnum);
+            inventory.RemoveObjectAt(i);
+        }
+    }
+}
+
 Item *Sentient::FindItem(const char *itemname)
 {
     Item *item;
+
+    PruneStaleInventory(); // HZM bug-924: heal before searching
 
     item = FindItemByExternalName(itemname);
     if (!item) {
@@ -1062,6 +1146,8 @@ void Sentient::FreeInventory(void)
 {
     int   num;
     int   i;
+
+    PruneStaleInventory(); // HZM bug-924
     Item *item;
     Ammo *ammo;
 
@@ -1072,7 +1158,10 @@ void Sentient::FreeInventory(void)
     num = inventory.NumObjects();
     for (i = num; i > 0; i--) {
         item = (Item *)G_GetEntity(inventory.ObjectAt(i));
-        item->Delete();
+        // HZM 07-19 (bug-919): same stale/recycled-slot guard as FindItem
+        if (item && item->isSubclassOf(Item)) {
+            item->Delete();
+        }
     }
     inventory.ClearObjectList();
 
@@ -1108,7 +1197,7 @@ qboolean Sentient::HasWeaponClass(int iWeaponClass)
     for (i = 1; i <= inventory.NumObjects(); i++) {
         weapon = (Weapon *)G_GetEntity(inventory.ObjectAt(i));
 
-        if (weapon->IsSubclassOfWeapon()) {
+        if (weapon && weapon->IsSubclassOfWeapon()) {
             if (weapon->GetWeaponClass() & iWeaponClass) {
                 // weapon class found
                 return qtrue;
@@ -1128,7 +1217,7 @@ qboolean Sentient::HasPrimaryWeapon(void)
     for (i = 1; i <= inventory.NumObjects(); i++) {
         weapon = (Weapon *)G_GetEntity(inventory.ObjectAt(i));
 
-        if (weapon->IsSubclassOfWeapon()) {
+        if (weapon && weapon->IsSubclassOfWeapon()) {
             if (!(weapon->GetWeaponClass() & WEAPON_CLASS_MISC) && !weapon->IsSecondaryWeapon()) {
                 // Sentient has a primary weapon
                 return qtrue;
@@ -1148,7 +1237,7 @@ qboolean Sentient::HasSecondaryWeapon(void)
     for (i = 1; i <= inventory.NumObjects(); i++) {
         weapon = (Weapon *)G_GetEntity(inventory.ObjectAt(i));
 
-        if (weapon->IsSubclassOfWeapon()) {
+        if (weapon && weapon->IsSubclassOfWeapon()) {
             if (weapon->IsSecondaryWeapon()) {
                 // Sentient has a secondary weapon
                 return qtrue;
@@ -1567,10 +1656,16 @@ void Sentient::ArmorDamage(Event *ev)
 
     // COOP: same-team damage is filtered in ALL gametypes (was SP-only) so the officer's
     // reinforcements/bodyguards can't kill each other or the officer, and coop teammates don't friendly-fire.
+    float fCoopPrevHealth = health; // HZM coop - headshot-kill confirm reads the alive->dead edge below
     if (!(flags & FL_GODMODE)
         && (!(attacker) || (attacker) == this
             || !(attacker->IsSubclassOfSentient()) || (attacker->m_Team != m_Team))) {
         health -= damage;
+        // HZM coop - gore tier 2: accumulate APPLIED damage only. Gore tiers key on this, never on health
+        // fraction, because aihandler.scr fakes rank-and-file AI health at 5000 (real HP lives script-side).
+        m_fCoopGoreDamage += damage;
+        CoopGoreUpdateSkinTier(); // HZM coop - gore tier 1: bloody the uniform as damage accumulates
+        CoopGoreTryWoundProp(location, meansofdeath, position); // HZM coop - gore tier 3: wound prop at the hit point
     }
 
     // Set means of death
@@ -1597,6 +1692,22 @@ void Sentient::ArmorDamage(Event *ev)
                 health = 1;
             }
         }
+    }
+
+    // HZM coop - CONFIRMED HEADSHOT KILL (cue + guaranteed visible feedback). Lives HERE, not in
+    // BulletAttack, because rank-and-file AI carry the aihandler 5000-health buffer: the player's
+    // bullet only WOUNDS them engine-side and the real killing blow is the pain handler's scripted
+    // overkill (aihandler.scr::handlePain), which preserves attacker/position/direction/MOD/location
+    // and arrives through this same event - the old BulletAttack hook could never see those kills.
+    // Engine-side kills (buffer-less sentients, dogs) pass through here too, so this is the single
+    // choke point; IsDead() at the top makes any later script overkill on the same corpse a no-op,
+    // and the same-team damage filter above means an allied victim never reaches health <= 0.
+    if (fCoopPrevHealth > 0 && health <= 0 && attacker && attacker->IsSubclassOfPlayer()
+        && !IsSubclassOfPlayer()
+        && (meansofdeath == MOD_BULLET || meansofdeath == MOD_FAST_BULLET || meansofdeath == MOD_SHOTGUN)
+        && (location == HITLOC_HEAD || location == HITLOC_HELMET || location == HITLOC_NECK)) {
+        attacker->Sound("coop_headshot", CHAN_LOCAL);
+        CoopHeadshotKillFx(position, direction);
     }
 
     if (meansofdeath == MOD_SLIME) {
@@ -1632,7 +1743,21 @@ void Sentient::ArmorDamage(Event *ev)
 
         health = 0;
 
+        // HZM coop - gore tier 1 (bug-735): the KILLING BLOW always leaves a heavy-tier corpse. Without
+        // this, enemies that died before crossing the accumulated-damage gates (fast TTK is the norm)
+        // kept a clean uniform. Saturating the counter and re-tiering routes through every existing gate
+        // (com_blood / coop_goreSkins / bleedable check) inside CoopGoreUpdateSkinTier.
+        m_fCoopGoreDamage = 999999.0f;
+        CoopGoreUpdateSkinTier();
+
+        // HZM coop - gore tier 1e: an EXPLOSION kill (native explosive MOD, direct projectile impact,
+        // or a fresh script gore_gibmark) upgrades the corpse from the heavy tier to the extreme
+        // gib-splatter skins (index 3), with a per-corpse random coverage pattern.
+        CoopGoreTryGibSkins(meansofdeath, inflictor);
+
         DropBloodPool(); // HZM coop - leave a persistent blood pool under the body where it dies
+
+        CoopGoreTryDripAttach(qtrue); // HZM coop - gore tier 2: short full-rate bleed-out drip on the corpse
 
         if (attacker) {
             const EntityPtr attackerPtr = attacker;
@@ -1682,6 +1807,8 @@ void Sentient::ArmorDamage(Event *ev)
         event.AddInteger(location);
 
         ProcessEvent(event);
+
+        CoopGoreTryDripAttach(qfalse); // HZM coop - gore tier 2: looping slow drip once wounded enough
     }
 
     delegate_damage.Execute(*ev);
@@ -1807,28 +1934,169 @@ void Sentient::AddBloodSpurt(Vector direction)
     }
 }
 
+// HZM coop - GUARANTEED HEADSHOT-KILL FEEDBACK (the "confirmed headshot but no visible gore" fix).
+// Each gore channel can individually miss on a headshot kill: the UV wound stamp needs the client
+// pose to match the server segment (movers miss the skin snap) and a stamp on a WORN HELMET pops
+// off with the helmet; the helmet pop needs headgear and hitloc 0/1 (neck kills never pop); the
+// blood pool grows slowly at the feet. So the confirmed kill itself - the same alive->dead edge
+// that plays the coop_headshot cue - spawns one unmissable server-authoritative burst: the
+// flesh-hit blood tik at the wound (the HRRTM blood addon ships a rich streaks+splat override of
+// bh_human_uniform_hard) plus a persistent coop_bloodsplat mark on whatever surface sits behind
+// the head along the bullet path (the classic wall splat). Entities are short-lived (1s Animate;
+// a Decal is a 1-frame self-removing edict) and per-frame budgeted (bug-866 decap lesson: cap
+// per-death spawns even when they look player-paced).
+void Sentient::CoopHeadshotKillFx(const Vector &pos, const Vector &dir)
+{
+    static cvar_t *pOn = NULL, *pDist = NULL, *pSize = NULL, *pDbg = NULL;
+    static float   fFrameTime = -1.0f;
+    static int     iFrameCount;
+    Animate       *burst;
+    Vector         vPos;
+    Vector         vDir;
+    int            iSplat = 0;
+
+    if (!pOn) {
+        pOn   = gi.Cvar_Get("coop_headshotFx", "1", CVAR_ARCHIVE);
+        pDist = gi.Cvar_Get("coop_headshotFxSplatDist", "140", CVAR_ARCHIVE);
+        pSize = gi.Cvar_Get("coop_headshotFxSplatSize", "16", CVAR_ARCHIVE);
+        pDbg  = gi.Cvar_Get("coop_goreDebug", "0", 0);
+    }
+    if (!com_blood->integer || !pOn->integer) {
+        return;
+    }
+
+    if (fFrameTime != level.time) {
+        fFrameTime  = level.time;
+        iFrameCount = 0;
+    }
+    if (iFrameCount >= 4) {
+        return; // per-frame budget - headshot kills are player-paced, this is belt-and-braces
+    }
+    iFrameCount++;
+
+    // scripted damage may carry a zero position/direction - fall back to head-height centroid / down
+    vPos = pos;
+    if (vPos == vec_zero) {
+        vPos = centroid + Vector(0, 0, maxs.z * 0.3f);
+    }
+    vDir = dir;
+    if (vDir.length() < 0.1f) {
+        vDir = Vector(0, 0, -1);
+    }
+    vDir.normalize();
+
+    burst = new Animate;
+    burst->setModel("models/fx/bh_human_uniform_hard.tik");
+    burst->setSolidType(SOLID_NOT);
+    burst->setOrigin(vPos);
+    {
+        Vector vBack(-vDir.x, -vDir.y, -vDir.z);
+        burst->setAngles(vBack.toAngles()); // effect sprays back toward the shooter (AddBloodSpurt convention)
+    }
+    burst->PostEvent(EV_Remove, 1);
+
+    if (pDist->value > 1.0f) {
+        trace_t splat = G_Trace(
+            vPos + vDir * 4.0f, vec_zero, vec_zero, vPos + vDir * pDist->value, this, MASK_DEADSOLID, false,
+            "CoopHeadshotKillFx"
+        );
+        if (splat.fraction < 1.0f && !splat.startsolid) {
+            Decal *decal = new Decal;
+            decal->setShader("coop_bloodsplat");
+            decal->setColor(0.50f, 0.03f, 0.03f); // the mod's fresh-blood tint (see AddBloodSpurt)
+            decal->setOrigin(Vector(splat.endpos) + Vector(splat.plane.normal) * 0.2f);
+            decal->setDirection(splat.plane.normal);
+            decal->setOrientation("random");
+            decal->setRadius(pSize->value + G_Random(pSize->value * 0.5f));
+            iSplat = 1;
+        }
+    }
+
+    if (pDbg->integer) {
+        gi.Printf(
+            "^~^~^ HSFX ent=%d pos=(%.0f %.0f %.0f) splat=%d\n", entnum, vPos.x, vPos.y, vPos.z, iSplat
+        );
+    }
+}
+
 // HZM coop - PERSISTENT BLOOD POOL under a body where it dies. Unlike the impact splats (which the client
 // fades out in ~10s), this uses the "coop_bloodpool" decal shader, which CG_Decal renders WITHOUT the fade
 // (it lasts until the mark pool recycles it), so blood is actually there when you walk up to a corpse. Big +
 // dark crimson. coop_bloodPool = radius (0 = off). Traces to the floor under the body's centroid.
+// HZM coop - gore tier 2 (bug-817: continuous, non-popping pool growth). The pool no longer
+// stamps 4 big rings that visibly POP - it starts small and layers ~9 finely-spaced rings with
+// small OVERLAPPING radius deltas every 0.6-0.9s so the edge just creeps outward. s_coopPoolGen
+// is a monotonic ordinal assigned to each new pool; the grow chain stops once 6 NEWER pools
+// exist (COOP_GORE_MAX_POOLS), so at most the 6 most-recent kills are actively growing at once
+// (decal-budget cap; the rings already placed persist regardless as world marks).
+#define COOP_GORE_MAX_POOLS  6
+#define COOP_GORE_POOL_STEPS 7   // bug-828: 9 -> 7 (smaller pool, fewer decals; brightness fixed by tint)
+static int s_coopPoolGen = 0;
+
 void Sentient::DropBloodPool(void)
 {
-    static cvar_t *pBP = NULL;
+    static cvar_t *pBP = NULL, *pDbg = NULL;
     float          rad;
     trace_t        trace;
     Vector         end;
 
-    if (!pBP) { pBP = gi.Cvar_Get("coop_bloodPool", "44", CVAR_ARCHIVE); }
+    if (!pBP) { pBP = gi.Cvar_Get("coop_bloodPool", "32", CVAR_ARCHIVE); }
+    if (!pDbg) { pDbg = gi.Cvar_Get("coop_goreDebug", "0", 0); }
+
+    // HZM coop - no body gore on players / no player pooling (bug-792 final spec): pools mark
+    // dead ACTORS only - allied AND axis AI, incl. officer/wave/reinforcement actors (verified
+    // 07-18 log: GOREPOOL reached on officer + ranger + rank-and-file deaths). Players never
+    // pool, alive or dead. This also keeps the grow chain off players (only DropBloodPool
+    // starts it).
+    if (IsSubclassOfPlayer()) {
+        if (pDbg->integer) { gi.Printf("^~^~^ GOREPOOL ent=%d BLOCKED player (no pooling for players)\n", entnum); }
+        return;
+    }
+
     rad = pBP ? pBP->value : 44.0f;
-    if (rad <= 1.0f) { return; }
+    if (rad <= 1.0f) {
+        if (pDbg->integer) { gi.Printf("^~^~^ GOREPOOL ent=%d BLOCKED coop_bloodPool=%.1f\n", entnum, rad); }
+        return;
+    }
 
     // green/blue bleeders (rare) keep their tint; everyone else is a dark red pool
     str splat = GetBloodSplatName();
-    if (!splat.length()) { return; } // this thing doesn't bleed
+    if (!splat.length()) {
+        if (pDbg->integer) { gi.Printf("^~^~^ GOREPOOL ent=%d BLOCKED no blood_model (model %s)\n", entnum, model.c_str()); }
+        return; // this thing doesn't bleed
+    }
 
     end = centroid - Vector(0, 0, 256);
     trace = G_Trace(centroid, vec_zero, vec_zero, end, this, MASK_DEADSOLID, false, "DropBloodPool");
-    if (trace.fraction >= 1.0f) { return; } // no floor under the body
+    if (trace.fraction >= 1.0f) {
+        if (pDbg->integer) { gi.Printf("^~^~^ GOREPOOL ent=%d BLOCKED no floor under (%.0f %.0f %.0f)\n", entnum, centroid[0], centroid[1], centroid[2]); }
+        return; // no floor under the body
+    }
+
+    // HZM coop - gore tier 2 (GROWING pool): with coop_gorePool 1 (default) the pool doesn't stamp at full
+    // size - the base layer starts small and a self-chained PostEvent (EV_Sentient_CoopGorePoolGrow) LAYERS
+    // progressively larger coop_bloodpool decals on the same floor point over ~6-7s (bug-817: many fine
+    // overlapping rings so the edge creeps instead of popping). The shader renders non-fading, so the
+    // overlap reads as one spreading pool. coop_gorePool 0 = exactly the old single full-size decal (no-op).
+    {
+        static cvar_t *pGrow = NULL;
+        if (!pGrow) { pGrow = gi.Cvar_Get("coop_gorePool", "1", CVAR_ARCHIVE); }
+        if (pGrow->integer) {
+            m_vCoopPoolPos    = Vector(trace.endpos) + (Vector(trace.plane.normal) * 0.25f);
+            m_vCoopPoolNormal = trace.plane.normal;
+            // bug-817 (user "grows more seamlessly"): the base layer starts SMALL and the grow chain
+            // creeps it out in fine overlapping rings (EventCoopGorePoolGrow). bug-828 (user round 2
+            // "pool too big"): base start 0.45 -> 0.40 (plus coop_bloodPool 44->32 and POOL_END
+            // 1.15->0.72 in the grow fn) so the finished pool is clearly smaller than the body.
+            rad *= 0.40f;
+
+            m_iCoopPoolGen = ++s_coopPoolGen; // decal-budget cap: only the 6 newest chains creep
+
+            Event *growEv = new Event(EV_Sentient_CoopGorePoolGrow);
+            growEv->AddInteger(1);
+            PostEvent(growEv, 0.6f + G_Random(0.3f));
+        }
+    }
 
     Decal *decal = new Decal;
     decal->setShader("coop_bloodpool"); // distinct shader -> cgame renders it non-fading (CG_Decal)
@@ -1837,12 +2105,641 @@ void Sentient::DropBloodPool(void)
     } else if (splat == "bluesplat.spr") {
         decal->setColor(0.10f, 0.16f, 0.45f);
     } else {
-        decal->setColor(0.34f, 0.02f, 0.02f); // dark crimson pool
+        // bug-828 ROOT-CAUSE fix (user "pool too bright red; original splatter is darker"): the
+        // decal's vertex COLOUR drives the rendered RGB (the mark poly path modulates by it; the dark
+        // pool TEXTURE only supplies the blob ALPHA). At 0.50 red a SOLID blob reads full crimson, and
+        // the overlapping grow rings converge toward that colour = bright centre. Dropped to the mod's
+        // #150200 authority (21,2,0 -> 0.082,0.008): the solid pool now renders near-black maroon like
+        // the original bloodsplat, and any N overlapping rings converge to #150200 (no bright centre).
+        decal->setColor(0.082f, 0.008f, 0.0f);
     }
     decal->setOrigin(Vector(trace.endpos) + (Vector(trace.plane.normal) * 0.25f));
     decal->setDirection(trace.plane.normal);
     decal->setOrientation("random");
     decal->setRadius(rad + G_Random(rad * 0.3f));
+
+    if (pDbg->integer) {
+        gi.Printf("^~^~^ GOREPOOL ent=%d base r=%.0f at (%.0f %.0f %.0f)\n",
+                  entnum, rad, trace.endpos[0], trace.endpos[1], trace.endpos[2]);
+    }
+}
+
+// HZM coop - GORE TIER 2: one ring of the GROWING corpse blood pool. Chained from DropBloodPool: each step
+// drops one more non-fading coop_bloodpool decal at the stored floor point with a larger radius (plus a hair
+// of XY jitter so the edge creeps unevenly), then posts the next step. The chain lives on the corpse entity,
+// so if the corpse is removed early the remaining steps simply don't fire - the decals already down persist
+// on their own (they are world marks, not children of the body).
+void Sentient::EventCoopGorePoolGrow(Event *ev)
+{
+    // bug-817 (user "grows more seamlessly"): a LINEAR radius ramp across COOP_GORE_POOL_STEPS
+    // fine rings (ring 1 = 0.53x coop_bloodPool -> final ring = 1.15x), i.e. ~8% radius per step.
+    // The small overlapping deltas mean each new ring only extends the pool by a thin crescent, so
+    // the edge creeps instead of jumping (the old 0.82/0.94/1.05/1.18 ramp popped 4 big rings).
+    // bug-828 (user "pool too big"): final ring 1.15x -> 0.72x of coop_bloodPool (and the cvar
+    // default itself 44 -> 32), so even a user with coop_bloodPool archived at 44 gets ~32u radius
+    // (was ~50u) - clearly smaller than the body.
+    static const float POOL_START = 0.50f;
+    static const float POOL_END   = 0.72f;
+    static cvar_t     *pBP        = NULL, *pDbg = NULL;
+    int                step       = ev->GetInteger(1);
+    float              rad, frac;
+    str                splat;
+
+    if (!pBP) { pBP = gi.Cvar_Get("coop_bloodPool", "32", CVAR_ARCHIVE); }
+    if (!pDbg) { pDbg = gi.Cvar_Get("coop_goreDebug", "0", 0); }
+    rad = pBP->value;
+    if (rad <= 1.0f || step < 1 || step > COOP_GORE_POOL_STEPS) {
+        return;
+    }
+
+    // decal-budget cap: once 6 NEWER pools have started, this older chain stops creeping (its
+    // already-placed rings persist as world marks). Keeps at most the 6 newest kills growing.
+    if (s_coopPoolGen - m_iCoopPoolGen >= COOP_GORE_MAX_POOLS) {
+        if (pDbg->integer) {
+            gi.Printf("^~^~^ GOREPOOL ent=%d capped at ring %d (gen %d, newest %d)\n",
+                      entnum, step, m_iCoopPoolGen, s_coopPoolGen);
+        }
+        return;
+    }
+
+    frac = POOL_START + (POOL_END - POOL_START) * (float)(step - 1) / (float)(COOP_GORE_POOL_STEPS - 1);
+
+    splat = GetBloodSplatName();
+
+    Decal *decal = new Decal;
+    decal->setShader("coop_bloodpool"); // same non-fading shader + tints as the DropBloodPool base layer
+    if (splat == "greensplat.spr") {
+        decal->setColor(0.12f, 0.40f, 0.10f);
+    } else if (splat == "bluesplat.spr") {
+        decal->setColor(0.10f, 0.16f, 0.45f);
+    } else {
+        // bug-828: match the DropBloodPool base tint - #150200 vertex colour so the overlapping grow
+        // rings converge to near-black maroon instead of accumulating toward bright crimson.
+        decal->setColor(0.082f, 0.008f, 0.0f);
+    }
+    // tighter XY jitter than the old 4-ring version so the overlapping rings stay concentric (a
+    // creeping edge, not a wandering blob)
+    decal->setOrigin(m_vCoopPoolPos + Vector(G_CRandom(2), G_CRandom(2), 0));
+    decal->setDirection(m_vCoopPoolNormal);
+    decal->setOrientation("random");
+    decal->setRadius(rad * frac + G_Random(rad * 0.05f));
+
+    if (pDbg->integer) {
+        gi.Printf("^~^~^ GOREPOOL ent=%d ring %d/%d r=%.0f\n", entnum, step, COOP_GORE_POOL_STEPS, rad * frac);
+    }
+
+    if (step < COOP_GORE_POOL_STEPS) {
+        Event *growEv = new Event(EV_Sentient_CoopGorePoolGrow);
+        growEv->AddInteger(step + 1);
+        PostEvent(growEv, 0.6f + G_Random(0.3f)); // bug-817: continuous creep, full pool in ~6-7s
+    }
+}
+
+// HZM coop - GORE TIER 2 (blood drip): attach a small looping drip-FX entity (models/fx/coop_blooddrip*.tik,
+// pure client-side emitters whose falling streaks leave the mod's coop_bloodsplat mark where they land via
+// bouncedecal - zero protocol traffic) to a badly wounded human or a fresh corpse. Applies to ALL bleedable
+// humans - enemy AI, allied AI (escorts, paradropped reinforcements) AND players; GetBloodSplatName() empty
+// means "doesn't bleed" (and vehicles/turrets aren't Sentients at all), so non-flesh is excluded naturally.
+// WOUNDED GATE - the aihandler trap: rank-and-file AI run with FAKED engine health 5000 (real HP lives in
+// script flags), so a health-fraction test would never fire for them. Those tier on ACCUMULATED applied
+// damage (m_fCoopGoreDamage) instead; real-health sentients (players, vanilla-health AI) use a health
+// fraction. Concurrency is capped by a small SafePtr slot table (each emitter costs ~2-3 client tempmodels
+// per second); slots auto-NULL when their emitter entity is freed.
+#define COOP_GORE_MAX_DRIPS  8
+#define COOP_GORE_FAKEHP_MIN 2000.0f // engine health at/above this = aihandler-faked (real maxes are <= ~1000)
+
+static SafePtr<Entity> s_coopDripSlots[COOP_GORE_MAX_DRIPS];
+
+void Sentient::CoopGoreTryDripAttach(qboolean corpse)
+{
+    static cvar_t *pDrip = NULL, *pDmg = NULL, *pFrac = NULL, *pWoundT = NULL, *pCorpseT = NULL;
+    int            i, slot, tagnum;
+    float          thresholdDmg, frac, lifetime;
+    Animate       *drip;
+
+    if (!pDrip) {
+        pDrip    = gi.Cvar_Get("coop_goreDrip", "1", CVAR_ARCHIVE);
+        pDmg     = gi.Cvar_Get("coop_goreDripDamage", "70", CVAR_ARCHIVE); // bug-735: 120 was above typical lethal accum
+
+        pFrac    = gi.Cvar_Get("coop_goreDripHealthFrac", "0.35", CVAR_ARCHIVE);
+        pWoundT  = gi.Cvar_Get("coop_goreDripWoundTime", "20", CVAR_ARCHIVE);
+        pCorpseT = gi.Cvar_Get("coop_goreDripCorpseTime", "12", CVAR_ARCHIVE);
+    }
+
+    if (!com_blood->integer || !pDrip->integer) {
+        return;
+    }
+    // HZM coop - no body gore on players (bug-792): the drip emitter is ATTACHED to the
+    // body - wounded (living) AND corpse - so players skip it entirely, in both branches.
+    // This is also the "pooling while merely injured" the user reported: a stationary
+    // wounded player's drip bouncedecals accumulated under their feet and read as a
+    // premature blood pool. Players keep ground pools ON DEATH + blood trails (world
+    // decals); AI on both sides keep the full drip behavior.
+    if (IsSubclassOfPlayer()) {
+        return;
+    }
+    if (!GetBloodSplatName().length()) {
+        return; // this thing doesn't bleed (non-flesh)
+    }
+    if (m_pCoopDripEmitter) {
+        if (!corpse) {
+            return; // already dripping
+        }
+        // death while the slow wounded drip is up: retire it, the corpse gets the full-rate one
+        m_pCoopDripEmitter->PostEvent(EV_Remove, 0);
+        m_pCoopDripEmitter = NULL;
+    }
+
+    if (!corpse) {
+        // wounded-enough gate (see the fake-5000 note above)
+        if (max_health >= COOP_GORE_FAKEHP_MIN) {
+            thresholdDmg = pDmg->value > 1.0f ? pDmg->value : 70.0f;
+            if (m_fCoopGoreDamage < thresholdDmg) {
+                return;
+            }
+            // require another half threshold of FRESH damage before a re-attach after this drip expires -
+            // approximates the script-side heals (officer medkits etc.) the engine can't see
+            m_fCoopGoreDamage = thresholdDmg * 0.5f;
+        } else {
+            frac = pFrac->value;
+            if (frac <= 0.0f || frac > 1.0f) { frac = 0.35f; }
+            if (max_health <= 0 || health > max_health * frac) {
+                return;
+            }
+        }
+    }
+
+    // concurrency cap: find a free slot (SafePtr auto-NULLs when its emitter entity is freed)
+    slot = -1;
+    for (i = 0; i < COOP_GORE_MAX_DRIPS; i++) {
+        if (!s_coopDripSlots[i]) {
+            slot = i;
+            break;
+        }
+    }
+    if (slot < 0) {
+        return; // cap reached - skip quietly, this is pure cosmetics
+    }
+
+    tagnum = gi.Tag_NumForName(edict->tiki, "Bip01 Spine1");
+    if (tagnum < 0) {
+        return; // not a biped rig
+    }
+
+    drip = new Animate;
+    drip->setModel(corpse ? "models/fx/coop_blooddrip.tik" : "models/fx/coop_blooddrip_slow.tik");
+    drip->setSolidType(SOLID_NOT);
+    if (!drip->attach(entnum, tagnum, qfalse, vec_zero)) {
+        delete drip;
+        return;
+    }
+
+    lifetime = corpse ? pCorpseT->value : pWoundT->value;
+    if (lifetime < 1.0f) { lifetime = 1.0f; }
+    drip->PostEvent(EV_Remove, lifetime);
+
+    s_coopDripSlots[slot] = drip;
+    m_pCoopDripEmitter    = drip;
+}
+
+// HZM coop - GORE TIER 1 (damage-tier blood skins). Every roster player/AI TIK carries up to 3 shaders
+// per uniform surface (clean / _blood1 / _blood2 - see scripts/coop_gore.shader + gen_gore_skins.py);
+// this writes the skin index straight into entityState.surfaces (replicated netfields, late joiners get
+// full state) so the renderer picks the bloodied diffuse. Applies to ALL bleedable humans - enemy AI,
+// allied AI AND players (GetBloodSplatName() empty = non-flesh = excluded). Surfaces without authored
+// blood skins are a harmless no-op (renderer clamps out-of-range skin indices back to 0).
+// TIER GATE - same aihandler trap as the drip: faked-5000-HP AI tier on ABSOLUTE accumulated damage
+// (coop_goreTier1/2Dmg), real-health sentients on a FRACTION of max health (coop_goreTier1/2Frac,
+// defaults 35% / 70%). Respawn is self-cleaning (InitModel wipes surface bits; Player::InitHealth
+// resets the counters); script-side heals call the gore_reset event.
+void Sentient::CoopGoreUpdateSkinTier(void)
+{
+    static cvar_t *pSkins = NULL, *pFrac1 = NULL, *pFrac2 = NULL, *pDmg1 = NULL, *pDmg2 = NULL;
+    static cvar_t *pDbg = NULL; // bug-754: live verification print (coop_goreDebug 1)
+    static cvar_t *pPerm = NULL; // [user 2026-08-03] bug-1320: coop_gorePermanent - blood never wiped
+    float          t1, t2;
+    int            tier, i, numsurfaces;
+
+    // HZM coop - no body gore on players (bug-792, user 07-18: "blood appearing on my skin
+    // from being shot"): the tier-1 blood-skin overlays painted the PLAYER model too (3P/
+    // freecam self-view + what teammates see). Nothing is ever painted/attached ON a player
+    // body - this extends the bug-785 no-holes rule. AI on BOTH sides keep every tier;
+    // ground pools + blood trails are world decals, not body paint, and stay for players.
+    if (IsSubclassOfPlayer()) {
+        return;
+    }
+
+    // HZM coop - gore tier 1e: a gibbed corpse is terminal - post-death damage events must never
+    // re-tier it back down to heavy (tier computation below would yield 2). gore_reset writes
+    // m_iCoopGoreSkinTier = 0 directly, so revive/heal paths still clean up correctly.
+    if (m_iCoopGoreSkinTier >= 3) {
+        return;
+    }
+
+    if (!pDbg) { pDbg = gi.Cvar_Get("coop_goreDebug", "0", 0); }
+    if (!pSkins) {
+        // RETUNED 2026-07-18 (bug-735): the old 60/140 absolute + 0.35/0.70 fraction gates sat ABOVE what
+        // rank-and-file AI actually absorb before dying (SMG/pistol hits are 25-37 dmg, rifles 60-120, and
+        // script HP is ~100) - most enemies died clean. New gates: one solid hit = light, ~two = heavy.
+        pSkins = gi.Cvar_Get("coop_goreSkins", "1", CVAR_ARCHIVE);
+        pFrac1 = gi.Cvar_Get("coop_goreTier1Frac", "0.22", CVAR_ARCHIVE);
+        pFrac2 = gi.Cvar_Get("coop_goreTier2Frac", "0.50", CVAR_ARCHIVE);
+        pDmg1  = gi.Cvar_Get("coop_goreTier1Dmg", "35", CVAR_ARCHIVE);
+        pDmg2  = gi.Cvar_Get("coop_goreTier2Dmg", "90", CVAR_ARCHIVE);
+    }
+
+    if (!com_blood->integer || !pSkins->integer || !edict->tiki) {
+        if (pDbg->integer) {
+            gi.Printf("^~^~^ GORESKIN ent=%d BLOCKED com_blood=%d coop_goreSkins=%d tiki=%d\n",
+                      entnum, com_blood->integer, pSkins->integer, edict->tiki ? 1 : 0);
+        }
+        return;
+    }
+    if (!GetBloodSplatName().length() && !IsSubclassOfPlayer()) {
+        // non-flesh doesn't bleed. Players are ALWAYS flesh but only get blood_model assigned
+        // lazily by the blood-trail path (Player::Postthink), so they pass explicitly here.
+        if (pDbg->integer) {
+            gi.Printf("^~^~^ GORESKIN ent=%d BLOCKED no blood_model (model %s)\n",
+                      entnum, model.c_str());
+        }
+        return;
+    }
+
+    if (max_health >= COOP_GORE_FAKEHP_MIN) {
+        t1 = pDmg1->value;
+        t2 = pDmg2->value;
+    } else {
+        t1 = max_health * pFrac1->value;
+        t2 = max_health * pFrac2->value;
+    }
+    if (t1 <= 0.0f || t2 <= t1) {
+        t1 = 35.0f; // guard nonsense cvar values
+        t2 = 90.0f;
+    }
+
+    if (m_fCoopGoreDamage >= t2) {
+        tier = 2;
+    } else if (m_fCoopGoreDamage >= t1) {
+        tier = 1;
+    } else {
+        tier = 0;
+    }
+    // [user 2026-08-03] bug-1320 - STANDING RULE: "I don't ever want blood wiped from any model."
+    // The tier is now MONOTONIC within a life - it can rise with damage but never fall. Before this, a
+    // heal credited the damage counter back (Health::PickupHealth -> CoopGoreHeal, or a script
+    // gore_reset carrying an amount) and the recomputed tier below came out LOWER, so a bloodied
+    // soldier visibly wiped clean. Healing still credits m_fCoopGoreDamage, so later damage maths is
+    // unchanged; only the visual downgrade is gone. coop_gorePermanent 0 restores the old behaviour.
+    if (!pPerm) { pPerm = gi.Cvar_Get("coop_gorePermanent", "1", CVAR_ARCHIVE); }
+    if (pPerm->integer && tier < m_iCoopGoreSkinTier) {
+        return;
+    }
+    if (tier == m_iCoopGoreSkinTier) {
+        return;
+    }
+    m_iCoopGoreSkinTier = tier;
+
+    // bug-754: machine-parseable tier-flip evidence. With coop_goreDebug 1 every flip logs the
+    // entity, tier, accumulated damage and model, so "skins aren't showing" can be split into
+    // driver-never-fired vs renderer-didn't-show in one play session.
+    if (pDbg->integer) {
+        gi.Printf("^~^~^ GORESKIN ent=%d tier=%d dmg=%.0f max_health=%.0f model=%s\n",
+                  entnum, tier, m_fCoopGoreDamage, max_health, model.c_str());
+    }
+
+    numsurfaces = gi.TIKI_NumSurfaces(edict->tiki);
+    if (numsurfaces > MAX_MODEL_SURFACES) {
+        numsurfaces = MAX_MODEL_SURFACES;
+    }
+    // tier IS the skin index: 0 clean, 1 = SKINOFFSET_BIT0 (light), 2 = SKINOFFSET_BIT1 (heavy).
+    // Written exactly (never additive) so tier transitions and downgrades are both correct, and the
+    // nodraw/crossfade bits other systems own (helmet!) are preserved.
+    for (i = 0; i < numsurfaces; i++) {
+        edict->s.surfaces[i] =
+            (edict->s.surfaces[i] & ~(MDL_SURFACE_SKINOFFSET_BIT0 | MDL_SURFACE_SKINOFFSET_BIT1)) | tier;
+    }
+}
+
+// HZM coop - GORE TIER 3 (hit-location wound props): on a qualifying BULLET hit, attach a tiny wound-patch
+// model (models/fx/coop_wound1.tik - the retail crossed-quad xbeam mesh wearing our coop_wound1 shader,
+// hole + blood art baked at the mod's exact blood hue #150200) at the bone the deep LBD trace actually
+// reported for this hit. The HITLOC -> bone map is the engine's own szLocArray table (cm_trace_lbd.cpp),
+// read here through gi.CM_GetHitLocationInfo so the prop lands on the correct limb segment with the same
+// bone-local sphere-center offset the hit test used. Attached entities replicate via parent/tag_num, so
+// all clients + late joiners see them; the body's destructor EV_Removes its children, so props can never
+// outlive the corpse. Applies to bleedable AI humans - enemy AND allied (players are skipped: HZM coop -
+// no holes on players); non-flesh (vehicles/turrets) is excluded naturally. Crash-safe by construction:
+// any missing tiki/tag/table entry = silent skip.
+#define COOP_GORE_MAX_WOUNDPROPS 4 // per body; MUST match m_pCoopWoundProp[] in sentient.h
+
+void Sentient::CoopGoreTryWoundProp(int location, int meansofdeath, const Vector &position)
+{
+    static cvar_t *pWounds = NULL;
+    const char    *tagname;
+    float          locRadius;
+    vec3_t         locOffset;
+    int            i, slot, tagnum;
+    Animate       *prop;
+    Vector         attachOfs;
+
+    if (!pWounds) {
+        pWounds = gi.Cvar_Get("coop_goreWounds", "1", CVAR_ARCHIVE);
+    }
+
+    if (!com_blood->integer || !pWounds->integer || !edict->tiki) {
+        return;
+    }
+    // HZM coop - no holes on players: tier-3 wound props are visually bullet holes,
+    // and players must never show holes (matches the renderer-side UV-stamp gate in
+    // tr_gore.c).  AI / allied AI keep their wound props; players keep blood drips
+    // and the gore skin tiers.
+    if (IsSubclassOfPlayer()) {
+        return;
+    }
+    if (meansofdeath != MOD_BULLET && meansofdeath != MOD_FAST_BULLET && meansofdeath != MOD_SHOTGUN) {
+        return; // bullet wounds only - blast/melee/fire don't leave a neat entry hole
+    }
+    if (location < HITLOC_HEAD || location >= NUMBODYLOCATIONS) {
+        return; // MISS/GENERAL or garbage
+    }
+    switch (location) {
+    case HITLOC_HELMET: // still HELMET after CheckHitLocation = actually wearing one; prop would float on it
+    case HITLOC_R_HAND: // hands/feet: segments too small, prop reads as a growth
+    case HITLOC_L_HAND:
+    case HITLOC_R_FOOT:
+    case HITLOC_L_FOOT:
+        return;
+    default:
+        break;
+    }
+    if (!GetBloodSplatName().length() && !IsSubclassOfPlayer()) {
+        return; // non-flesh doesn't bleed (players get blood_model lazily, so they pass explicitly)
+    }
+
+    // cap: first free slot or bail (SafePtr slots auto-NULL if a prop was freed with its body)
+    slot = -1;
+    for (i = 0; i < COOP_GORE_MAX_WOUNDPROPS; i++) {
+        if (!m_pCoopWoundProp[i]) {
+            slot = i;
+            break;
+        }
+    }
+    if (slot < 0) {
+        return; // body already carries its maximum - pure cosmetics, skip quietly
+    }
+
+    tagname = gi.CM_GetHitLocationInfo(location, &locRadius, locOffset);
+    if (!tagname || !*tagname) {
+        return;
+    }
+    tagnum = gi.Tag_NumForName(edict->tiki, tagname);
+    if (tagnum < 0) {
+        return; // not a biped rig (or bone missing) - skip silently
+    }
+
+    // bug-735: attach at the BULLET ENTRY POINT, not the bone-sphere center. The LBD sphere center sits
+    // INSIDE the mesh (radius 4-9u) while the prop spans only ~4u, so center-attached props were swallowed
+    // by the body and effectively never visible. Convert the damage position into the tag's local frame,
+    // then clamp it onto the hit sphere's shell (+1u proud) so the crossed quads poke out of the cloth.
+    attachOfs = Vector(locOffset); // fallback: old sphere-center behavior (position missing/degenerate)
+    if (position != vec_zero) {
+        orientation_t tagOr;
+        Vector        local, fromCenter;
+        float         len;
+
+        GetTagPositionAndOrientation(tagnum, &tagOr);
+        Vector delta = position - Vector(tagOr.origin);
+        local.x    = DotProduct(delta, tagOr.axis[0]);
+        local.y    = DotProduct(delta, tagOr.axis[1]);
+        local.z    = DotProduct(delta, tagOr.axis[2]);
+        fromCenter = local - Vector(locOffset);
+        len        = fromCenter.length();
+        if (len > 0.25f && len < locRadius * 6.0f) {
+            fromCenter *= (locRadius + 1.0f) / len;
+            attachOfs = Vector(locOffset) + fromCenter;
+        }
+    }
+
+    prop = new Animate;
+    prop->setModel("models/fx/coop_wound1.tik");
+    prop->setSolidType(SOLID_NOT);
+    prop->setScale(0.8f + G_Random(0.5f)); // slight size variety so stacked hits don't read as copies
+    // small jitter so repeat hits to one segment don't z-fight on the exact same spot
+    if (!prop->attach(entnum, tagnum, qfalse, attachOfs + Vector(G_CRandom(0.75f), G_CRandom(0.75f), G_CRandom(0.75f)))) {
+        delete prop;
+        return; // parent's child table full (helmet + drip + props) - skip
+    }
+
+    m_pCoopWoundProp[slot] = prop;
+}
+
+// HZM coop - gore tier 1: an engine-visible heal credits the gore counter back and re-tiers
+// (tiers can go DOWN - a patched-up soldier looks cleaner). Called from Health::PickupHealth.
+void Sentient::CoopGoreHeal(float amount)
+{
+    if (amount <= 0.0f) {
+        return;
+    }
+    m_fCoopGoreDamage -= amount;
+    if (m_fCoopGoreDamage < 0.0f) {
+        m_fCoopGoreDamage = 0.0f;
+    }
+    CoopGoreUpdateSkinTier();
+}
+
+// HZM coop - gore tier 1: the script-side heal hook ("gore_reset"). Script heals live outside the
+// engine's view (officer canteen/health post, aihandler coop_actorActualHealth, DBNO revive), so
+// those paths call this. No arg = full reset; with an amount = partial-heal credit.
+void Sentient::EventCoopGoreReset(Event *ev)
+{
+    int i, numsurfaces;
+
+    if (ev->NumArgs() > 0) {
+        CoopGoreHeal(ev->GetFloat(1));
+        return;
+    }
+
+    m_fCoopGoreDamage   = 0;
+    m_bCoopGoreGibMark  = qfalse; // HZM coop - gore tier 1e: a heal/revive also clears a pending script mark
+
+    // [user 2026-08-03] bug-1320 - same standing rule as the monotonic guard in
+    // CoopGoreUpdateSkinTier. The no-arg script "gore_reset" is called by revive / canteen-heal /
+    // aihandler paths, and it used to hard-clear the skin bits - the one remaining way blood came off a
+    // model. Under coop_gorePermanent it credits the damage counter (harmless: the monotonic guard
+    // stops the zeroed counter from re-tiering anything down) but leaves the painted blood alone.
+    // Player respawn is unaffected: Player::Respawn zeroes m_iCoopGoreSkinTier directly, not via this
+    // event, so a new life still starts clean.
+    {
+        static cvar_t *pPerm = NULL;
+        if (!pPerm) { pPerm = gi.Cvar_Get("coop_gorePermanent", "1", CVAR_ARCHIVE); }
+        if (pPerm->integer) {
+            return;
+        }
+    }
+
+    m_iCoopGoreSkinTier = 0;
+    if (edict->tiki) { // force-clear the skin bits even if the cvars were toggled off mid-life
+        numsurfaces = gi.TIKI_NumSurfaces(edict->tiki);
+        if (numsurfaces > MAX_MODEL_SURFACES) {
+            numsurfaces = MAX_MODEL_SURFACES;
+        }
+        for (i = 0; i < numsurfaces; i++) {
+            edict->s.surfaces[i] &= ~(MDL_SURFACE_SKINOFFSET_BIT0 | MDL_SURFACE_SKINOFFSET_BIT1);
+        }
+    }
+    if (m_pCoopDripEmitter) { // a healed sentient stops dripping too
+        m_pCoopDripEmitter->PostEvent(EV_Remove, 0);
+        m_pCoopDripEmitter = NULL;
+    }
+    for (i = 0; i < COOP_GORE_MAX_WOUNDPROPS; i++) { // HZM coop - gore tier 3: patched up = wound props come off
+        if (m_pCoopWoundProp[i]) {
+            m_pCoopWoundProp[i]->PostEvent(EV_Remove, 0);
+            m_pCoopWoundProp[i] = NULL;
+        }
+    }
+}
+
+// HZM coop - gore tier 1e: is this surface exposed SKIN (face/hands/neck)? Exact-name matches only,
+// mirroring the generator's FACE_SURF_RE/HAND_SURF_RE ('headwrap'/'headgear'/'helmet' must NOT qualify).
+// Skin surfaces always take the full gib splatter - an "extremely bloody" corpse never rolls a clean face.
+static qboolean CoopGoreSurfIsSkin(const char *name)
+{
+    static const char *skinNames[] = {"head", "face", "neck", "hand", "hands"};
+    char               withSuffix[64];
+    size_t             i;
+
+    for (i = 0; i < sizeof(skinNames) / sizeof(skinNames[0]); i++) {
+        if (!Q_stricmp(name, skinNames[i])) {
+            return qtrue;
+        }
+        Com_sprintf(withSuffix, sizeof(withSuffix), "%s_c", skinNames[i]);
+        if (!Q_stricmp(name, withSuffix)) {
+            return qtrue;
+        }
+    }
+    return qfalse;
+}
+
+// HZM coop - gore tier 1e: the explosive means-of-death set. Native engine blasts (grenades, rockets,
+// generic explosions/exploders, AA/tank guns, landmines) plus direct projectile impacts (a bazooka/tank
+// shell that kills on body contact reports MOD_IMPACT before its radius blast - still an explosion kill).
+static qboolean CoopGoreModIsExplosive(int meansofdeath, Entity *inflictor)
+{
+    switch (meansofdeath) {
+    case MOD_EXPLOSION:
+    case MOD_EXPLODEWALL:
+    case MOD_GRENADE:
+    case MOD_ROCKET:
+    case MOD_AAGUN:
+    case MOD_LANDMINE:
+        return qtrue;
+    case MOD_IMPACT:
+        return (inflictor && inflictor->IsSubclassOfProjectile()) ? qtrue : qfalse;
+    default:
+        return qfalse;
+    }
+}
+
+// HZM coop - GORE TIER 1e (extreme explosion-death "gib" skins). Called once from the killing-blow path,
+// right after CoopGoreUpdateSkinTier() has written the heavy tier: if the kill was an explosion (native
+// explosive MOD, projectile direct impact, or a fresh script gore_gibmark), upgrade the corpse's surfaces
+// from skin index 2 to skin index 3 - the *_blood3 gib-splatter shaders authored in scripts/coop_gore3.shader
+// (uniform AND face/hand skin, see gen_gore3_skins.py). RANDOMNESS: a per-corpse coverage pattern decides
+// which CLOTH surfaces take the extreme skin vs. keep the ordinary heavy tier (skin surfaces always flip),
+// and the art itself is one of 3 authored splatter styles per texture - so repeated deaths differ.
+// SAFETY: index 3 is only ever written to surfaces whose TIKI actually carries 4 shaders - the renderer
+// clamps out-of-range skin indices to 0 (CLEAN), so a blind write would UN-bloody unauthored surfaces
+// (tr_model.cpp iShaderNum >= numskins -> 0). Surfaces without a 4th skin simply stay heavy.
+// Replication is free: skin bits live in entityState.surfaces (netfields, late joiners get full state).
+void Sentient::CoopGoreTryGibSkins(int meansofdeath, Entity *inflictor)
+{
+    static cvar_t        *pGib = NULL, *pSkins = NULL, *pDbg = NULL;
+    const dtikisurface_t *dsurf;
+    int                   i, numsurfaces, pattern, nExtreme;
+    float                 keepHeavyChance;
+
+    // bug-792 rule: nothing is ever painted on a PLAYER body (3P/freecam self-view + teammates).
+    if (IsSubclassOfPlayer()) {
+        return;
+    }
+
+    if (!pGib) {
+        pGib   = gi.Cvar_Get("coop_goreGibSkins", "1", CVAR_ARCHIVE);
+        pSkins = gi.Cvar_Get("coop_goreSkins", "1", CVAR_ARCHIVE);
+        pDbg   = gi.Cvar_Get("coop_goreDebug", "0", 0);
+    }
+
+    // same master gates as the tier system it extends (com_blood kills all gore; the gib tier also
+    // requires the base skin tiers to be on, plus its own coop_goreGibSkins switch).
+    if (!com_blood->integer || !pSkins->integer || !pGib->integer || !edict->tiki) {
+        return;
+    }
+    if (!GetBloodSplatName().length()) {
+        return; // non-flesh doesn't bleed
+    }
+
+    if (!CoopGoreModIsExplosive(meansofdeath, inflictor)
+        && !(m_bCoopGoreGibMark && level.time <= m_fCoopGoreGibMarkTime)) {
+        return; // not an explosion death
+    }
+
+    numsurfaces = gi.TIKI_NumSurfaces(edict->tiki);
+    if (numsurfaces > MAX_MODEL_SURFACES) {
+        numsurfaces = MAX_MODEL_SURFACES;
+    }
+
+    // per-corpse coverage pattern: 0 = full drench (every authored surface), 1 = patchy (cloth keeps
+    // the ordinary heavy tier 25% of the time), 2 = contrasty (45%). Skin (face/hands) always flips.
+    pattern = (int)G_Random(3.0f);
+    if (pattern > 2) {
+        pattern = 2; // G_Random can return exactly its bound
+    }
+    keepHeavyChance = (pattern == 0) ? 0.0f : ((pattern == 1) ? 0.25f : 0.45f);
+
+    nExtreme = 0;
+    for (i = 0; i < numsurfaces; i++) {
+        dsurf = &edict->tiki->surfaces[i];
+        if (dsurf->numskins < 4) {
+            continue; // no authored gib skin - writing index 3 would render CLEAN (renderer clamp)
+        }
+        if (!CoopGoreSurfIsSkin(dsurf->name) && keepHeavyChance > 0.0f && G_Random(1.0f) < keepHeavyChance) {
+            continue; // this cloth surface keeps the heavy tier for per-corpse variation
+        }
+        // both skin bits set = skin index 3 (nodraw/crossfade bits other systems own are preserved)
+        edict->s.surfaces[i] |= (MDL_SURFACE_SKINOFFSET_BIT0 | MDL_SURFACE_SKINOFFSET_BIT1);
+        nExtreme++;
+    }
+
+    if (nExtreme) {
+        // terminal tier: locks CoopGoreUpdateSkinTier out of re-tiering the corpse down to 2 when
+        // post-death damage events (shooting the body) run the accumulate path again.
+        m_iCoopGoreSkinTier = 3;
+    }
+
+    if (pDbg->integer) {
+        // machine-parseable evidence (same convention as GORESKIN): split "gibs aren't showing" into
+        // driver-never-fired vs renderer-didn't-show in one session.
+        gi.Printf("^~^~^ GOREGIB ent=%d mod=%d mark=%d pattern=%d gib_surfs=%d/%d model=%s\n",
+                  entnum, meansofdeath, m_bCoopGoreGibMark ? 1 : 0, pattern, nExtreme, numsurfaces,
+                  model.c_str());
+    }
+}
+
+// HZM coop - gore tier 1e: the script-side mark ("gore_gibmark"). Scripted blasts that apply damage
+// without an explosive MOD (bare `hurt`, MOD_CRUSH) call this on their victims just before the damage;
+// dying inside the window (default 2s) counts as an explosion death. Survivors' marks expire harmlessly.
+void Sentient::EventCoopGoreGibMark(Event *ev)
+{
+    float window = 2.0f;
+
+    if (ev->NumArgs() > 0) {
+        window = ev->GetFloat(1);
+        if (window <= 0.0f) {
+            window = 2.0f;
+        }
+    }
+    m_bCoopGoreGibMark     = qtrue;
+    m_fCoopGoreGibMarkTime = level.time + window;
 }
 
 // HZM coop - BLOOD TRAIL. A wounded (health below a fraction of max) AI that is MOVING drips ground
@@ -1880,17 +2777,50 @@ void Sentient::TryDropBloodTrail(void)
         return;
     }
 
-    // time gate
-    pVar     = gi.Cvar_Get("coop_bloodTrailInterval", "0.45", CVAR_ARCHIVE);
-    interval = pVar->value;
-    if (interval < 0.1f) { interval = 0.1f; }
-    if (level.time < m_fNextBloodTrailTime) {
-        return;
-    }
+    // HZM coop [user 07-29] SEVERITY SCALING. The gates below were flat, so a man at 95% of the wound
+    // threshold bled exactly as hard as one seconds from death - and a DBNO player, whom the script pins
+    // at `healthonly 100` against a 750 max (13% health), dripped at the same sparse rate as a scratch.
+    // Worse for DBNO specifically: the distance gate is 56 units and a downed crawl covers that slowly,
+    // so the trail read as essentially absent exactly when the player is most obviously bleeding out.
+    //
+    // Deliberately NOT written as a DBNO special case. The engine has no per-player DBNO flag at all
+    // (nothing in fgame knows about it - it is script state), so a special case would have meant new
+    // engine/script plumbing and four exit paths to keep in sync, each one a chance to leave a player
+    // stuck bleeding. Scaling by how hurt you are needs none of that, covers DBNO because DBNO IS the
+    // low-health case, and makes ordinary wounds escalate as they worsen - which is the effect the user
+    // actually described wanting.
+    //
+    // sev: 0 at the wound threshold, 1 at death's door. coop_bloodTrailScale 0 restores the flat gates.
+    {
+        float hfrac, sev, k;
 
-    // distance gate (must have travelled far enough since the last drop)
-    pVar    = gi.Cvar_Get("coop_bloodTrailDist", "56", CVAR_ARCHIVE);
-    mindist = pVar->value;
+        pVar = gi.Cvar_Get("coop_bloodTrailScale", "1", CVAR_ARCHIVE);
+        k    = pVar->value;
+        if (k < 0.0f) { k = 0.0f; }
+        if (k > 1.0f) { k = 1.0f; }
+
+        hfrac = (max_health > 0.0f) ? (health / max_health) : 1.0f;
+        sev   = (frac > 0.0f) ? ((frac - hfrac) / frac) : 0.0f;
+        if (sev < 0.0f) { sev = 0.0f; }
+        if (sev > 1.0f) { sev = 1.0f; }
+        sev *= k;
+
+        // time gate - down to 30% of the configured interval at full severity
+        pVar     = gi.Cvar_Get("coop_bloodTrailInterval", "0.45", CVAR_ARCHIVE);
+        interval = pVar->value * (1.0f - 0.70f * sev);
+        if (interval < 0.1f) { interval = 0.1f; }
+        if (level.time < m_fNextBloodTrailTime) {
+            return;
+        }
+
+        // distance gate - down to 25% at full severity, which is what makes a slow DBNO crawl leave a
+        // continuous trail instead of an occasional isolated splat
+        pVar    = gi.Cvar_Get("coop_bloodTrailDist", "56", CVAR_ARCHIVE);
+        mindist = pVar->value * (1.0f - 0.75f * sev);
+        if (mindist < 8.0f) { mindist = 8.0f; }
+
+        m_fCoopBloodSeverity = sev; // handed to the chance roll below
+    }
     if ((origin - m_vLastBloodTrailOrigin).lengthSquared() < mindist * mindist) {
         return;
     }
@@ -1905,7 +2835,7 @@ void Sentient::TryDropBloodTrail(void)
     }
 
     pVar   = gi.Cvar_Get("coop_bloodTrailChance", "0.8", CVAR_ARCHIVE);
-    chance = pVar->value;
+    chance = pVar->value + (1.0f - pVar->value) * m_fCoopBloodSeverity; // -> 1.0 at death's door
     if (G_Random() > chance) {
         return;
     }
@@ -2154,7 +3084,7 @@ Item *Sentient::NextItem(Item *item)
         next_item = (Item *)G_GetEntity(inventory.ObjectAt(i));
         assert(next_item);
 
-        if (next_item->isSubclassOf(InventoryItem) && item_found) {
+        if (next_item && next_item->isSubclassOf(InventoryItem) && item_found) {
             return next_item;
         }
 
@@ -2185,7 +3115,7 @@ Item *Sentient::PrevItem(Item *item)
         prev_item = (Item *)G_GetEntity(inventory.ObjectAt(i));
         assert(prev_item);
 
-        if (prev_item->isSubclassOf(InventoryItem) && item_found) {
+        if (prev_item && prev_item->isSubclassOf(InventoryItem) && item_found) {
             return prev_item;
         }
 
@@ -2228,6 +3158,7 @@ void Sentient::DropInventoryItems(void)
     num = inventory.NumObjects();
     for (i = num; i >= 1; i--) {
         item = (Item *)G_GetEntity(inventory.ObjectAt(i));
+        if (!item) { continue; } // HZM 07-19 (bug-920): stale slot guard
         // Added in 2.30
         //  Force drop the item when specified
         if (m_bForceDropWeapon && item->IsSubclassOfWeapon()) {
@@ -2437,6 +3368,7 @@ void Sentient::ArchivePersistantData(Archiver& arc)
 
             index = inventory.ObjectAt(i);
             ent   = G_GetEntity(index);
+            if (!ent) { continue; } // HZM 07-19 (bug-920): stale slot guard
             name  = ent->model;
 
             if (IsItemName(name)) {
@@ -2560,6 +3492,9 @@ void Sentient::DoubleArmor(void)
         Item *item;
         item = (Item *)G_GetEntity(inventory.ObjectAt(i));
 
+        if (!item) {
+            continue; // HZM 07-20 (bug-925): stale inventory slot guard
+        }
         if (item->isSubclassOf(Armor)) {
             item->setAmount(item->getAmount() * 2);
         }
@@ -3023,9 +3958,21 @@ void Sentient::EventPopHelmet(Event *ev)
     obj->avelocity.z = crandom() * 300.0;
 }
 
-void Sentient::ReceivedItem(Item *item) {}
+void Sentient::ReceivedItem(Item *item)
+{
+    // HZM coop - weapons-on-back: a weapon given but never drawn should still show holstered
+    if (item && item->IsSubclassOfWeapon()) {
+        UpdateCoopHolsteredWeapons();
+    }
+}
 
-void Sentient::RemovedItem(Item *item) {}
+void Sentient::RemovedItem(Item *item)
+{
+    // HZM coop - weapons-on-back: refill the spot a dropped/taken weapon vacated
+    if (item && item->IsSubclassOfWeapon()) {
+        UpdateCoopHolsteredWeapons();
+    }
+}
 
 void Sentient::AssertValidSquad()
 {

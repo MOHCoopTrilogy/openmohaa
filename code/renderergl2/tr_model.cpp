@@ -1,4 +1,4 @@
-/*
+﻿/*
 ===========================================================================
 Copyright (C) 2024 the OpenMoHAA team
 
@@ -29,10 +29,280 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 #define LL(x) x = LittleLong(x)
 
 qboolean   g_bInfoworldtris = qfalse;
-static int entityNumIndexes[MAX_ENTITIES];
+// HZM (bug-gl2-invisible-friendly-actor 2nd-cause audit): was [MAX_ENTITIES] (1023) but this is
+// indexed in RB_SkelMesh by (backEnd.currentEntity - backEnd.refdef.entities), the refdef SLOT,
+// which ranges 0..MAX_REFENTITIES-1 (4095) because gl2's refdef.entities[] is [MAX_REFENTITIES].
+// gl1 kept refdef.entities[] at [MAX_ENTITIES] so it never overran; gl2 did not, so any skeletal
+// actor in a refdef slot >= 1023 OOB-wrote the adjacent staticModelNumIndexes[]. Sized to match
+// the refdef array. (All readers use ARRAY_LEN so this is safe.)
+static int entityNumIndexes[MAX_REFENTITIES];
 static int staticModelNumIndexes[4095];
 
 static int R_CullSkelModel(dtiki_t *tiki, refEntity_t *e, skelAnimFrame_t *newFrame, float fScale, float *vLocalOrg);
+
+// ============================================================================
+// ^~^~^ SKELDIAG/SKELDRAW/SKELREG - TEMPORARY skeletal-actor render trace
+// (bug-gl2-invisible-friendly-actor, 2nd independent cause). A single e2l2 boot reveals exactly
+// where a character actor drops out of the gl2 skeletal path. DETERMINISTIC - NO in-game input:
+//   ^~^~^ SKELREG  (R_RegisterModelInternal): one line per .tik model at load - did it register?
+//   ^~^~^ SKELDIAG (R_AddSkelSurfaces): first time each model reaches the skeletal ADD path.
+//   ^~^~^ SKELDRAW (RB_SkelMesh): first time each model reaches the backend DRAW (ext~0 = collapsed).
+// Each of SKELDIAG/SKELDRAW auto-fires ONCE per model handle (dedup) with no cvar. The r_skeldiag
+// cvar still exists as an OPTIONAL verbose per-frame mode (set r_skeldiag N) but is NOT required.
+// A model that appears in SKELREG (registered) but never in SKELDIAG => it never reaches the
+// renderer's skeletal submission (drop is upstream: cgame/dispatch, see SKELDISP in tr_main.c).
+// REMOVE this block once the 2nd cause is identified and fixed.
+// ============================================================================
+static cvar_t *r_skeldiag           = NULL;
+
+// HZM gl2 (bug-1153): the SKEL* forensics were written for the Phillips hunt (bug-1135, CLOSED) and
+// several of them fire once per model handle with NO cvar gate, so every session spams the console
+// and qconsole.log with SKELREG / SKELDIAG / SKELDRAW / SKELDISP / SKELAGG lines. They are still
+// useful, so they are now gated behind the r_skeldiag cvar that already existed for the verbose
+// per-frame mode - default 0, i.e. silent. `r_skeldiag 1` in a boot config brings them all back.
+// (CVAR_TEMP, not CVAR_CHEAT: a listen server runs sv_cheats 0, which would clamp a cheat cvar
+// straight back to 0 and make the diagnostic unusable - see bug-1148.)
+static qboolean R_SkelDiagOn(void)
+{
+    if (!r_skeldiag) {
+        r_skeldiag = ri.Cvar_Get("r_skeldiag", "0", CVAR_TEMP);
+    }
+    return (qboolean)(r_skeldiag->integer != 0);
+}
+
+static int     g_skeldiagFrameTag   = -1;   // tr.frame_skel_index of the frame currently bookkept
+static int     g_skeldiagFramesLeft = 0;    // frames still to trace (armed from r_skeldiag, OPTIONAL)
+static int     g_skeldiagFrontLines = 0;    // SKELDIAG verbose lines emitted this frame
+static int     g_skeldiagBackLines  = 0;    // SKELDRAW verbose lines emitted this frame
+static qboolean g_skeldiagInit      = qfalse;
+// pose-decision handoff: R_UpdatePoseInternal records, R_AddSkelSurfaces reads
+static int     g_skeldiagPoseRan     = 0;   // 1=posed fresh, 0=skip(already posed this frame), 3=forced over a reused pre-pass, -1=no entnum
+static int     g_skeldiagPoseSkelIdx = 0;   // tr.skel_index[entnum] value read
+static int     g_skeldiagPoseFrameIdx = 0;  // tr.frame_skel_index at that moment
+static int     g_skeldiagPrePosed    = 0;   // 1 = a gl2 pre-pass (shadow/sun) already posed this entity this frame before the main add
+static int     g_skeldiagMainPose    = 0;   // main-add pose decision (0=reused pre-pass, 1=fresh, 3=forced) - not clobbered by R_GetFrame
+// backend dedup: last frame tag a given refdef slot was logged (verbose mode, one SKELDRAW per entity/frame)
+static int     g_skeldrawSlotSeen[MAX_REFENTITIES];
+
+// ============================================================================
+// ^~^~^ SKELTEST - TEMPORARY live per-frame bisect toggles (default 0 = EXACT current behavior).
+// The user flips these in the console while staring at an invisible LIVE enemy; whichever makes it
+// POP INTO VIEW pinpoints the culprit code path. Each is a plain registered cvar (not latched), read
+// every frame in the relevant path, and prints a one-line confirmation when its value changes.
+//   r_test_noprepass 1  - skip char skeletal add in gl2 shadow/sun pre-passes (main view poses fresh, gl1-like)
+//   r_test_twosided  1  - force char skeletal surfaces to CT_TWO_SIDED (disable backface cull)  [in tr_shade.c]
+//   r_test_forcepose 1  - RE_ForceUpdatePose char models at the main add (never reuse a pre-pass pose)
+//   r_test_forcelod0 1  - force full detail / no LOD reduction for char skeletal models
+//   r_test_maskrfx   N  - strip suspect renderfx bits on char models: 1=RF_SHADOW_PRECISE(0x1000000),
+//                         2=RF_SHADOW(0x800), 3=both shadow bits, 4=RF_FRAMELERP(0x10), 5=all three,
+//                         other=literal bitmask
+// REMOVE this block once the culprit is identified.
+// ============================================================================
+static cvar_t *r_test_noprepass = NULL;
+static cvar_t *r_test_twosided  = NULL;
+static cvar_t *r_test_forcepose = NULL;
+static cvar_t *r_test_forcelod0 = NULL;
+static cvar_t *r_test_maskrfx   = NULL;
+
+static void R_SkelTest_Poll(void)
+{
+    static int lp[5] = {-999, -999, -999, -999, -999};
+    cvar_t    *cv[5];
+    const char *nm[5] = {"r_test_noprepass", "r_test_twosided", "r_test_forcepose", "r_test_forcelod0", "r_test_maskrfx"};
+    int        i;
+
+    if (!r_test_noprepass) {
+        r_test_noprepass = ri.Cvar_Get("r_test_noprepass", "0", 0);
+        r_test_twosided  = ri.Cvar_Get("r_test_twosided", "0", 0);
+        r_test_forcepose = ri.Cvar_Get("r_test_forcepose", "1", 0); // PERMANENT FIX default-ON; set 0 for A/B only
+        r_test_forcelod0 = ri.Cvar_Get("r_test_forcelod0", "0", 0);
+        r_test_maskrfx   = ri.Cvar_Get("r_test_maskrfx", "0", 0);
+    }
+    cv[0] = r_test_noprepass; cv[1] = r_test_twosided; cv[2] = r_test_forcepose;
+    cv[3] = r_test_forcelod0; cv[4] = r_test_maskrfx;
+    for (i = 0; i < 5; i++) {
+        if (cv[i]->integer != lp[i]) {
+            lp[i] = cv[i]->integer;
+            if (R_SkelDiagOn())
+            ri.Printf(PRINT_ALL, "^~^~^ SKELTEST %s = %d (applied)\n", nm[i], lp[i]);
+        }
+    }
+}
+
+// Resolve the r_test_maskrfx preset into a renderfx bitmask to clear.
+static int R_SkelTest_RfxMask(void)
+{
+    int v = r_test_maskrfx ? r_test_maskrfx->integer : 0;
+    switch (v) {
+    case 0:  return 0;
+    case 1:  return 0x1000000;  // RF_SHADOW_PRECISE
+    case 2:  return 0x800;      // RF_SHADOW
+    case 3:  return 0x1000800;  // both shadow bits
+    case 4:  return 0x10;       // RF_FRAMELERP
+    case 5:  return 0x1000810;  // shadows + framelerp
+    default: return v;          // literal bitmask
+    }
+}
+
+// ============================================================================
+// ^~^~^ SKELAGG - per-model AGGREGATE of ALL emitted skinned-vertex positions across every mesh/
+// surface of a char model in a frame (model space AND world space). Resolves the long-standing ext
+// ambiguity: a TINY aggregate extent => the skin genuinely COLLAPSES (skinning bug); a FULL-SIZE
+// aggregate => the verts are fine and the actor is discarded DOWNSTREAM (depth/scissor/blend/alpha
+// /view). Accumulated per hModel across the frame's surfaces and FLUSHED on the next frame's first
+// surface (so the flushed value is a complete frame). Bounded to the first few frames per model.
+// Keyed by hModel (0..MAX_MOD_KNOWN-1). REMOVE with the rest of the SKEL* scaffolding.
+// ============================================================================
+static int    g_aggFrame[MAX_MOD_KNOWN];
+static int    g_aggFlushed[MAX_MOD_KNOWN];
+static int    g_aggEnt[MAX_MOD_KNOWN];
+static int    g_aggVerts[MAX_MOD_KNOWN];
+static int    g_aggSurfs[MAX_MOD_KNOWN];
+static vec3_t g_aggMMin[MAX_MOD_KNOWN], g_aggMMax[MAX_MOD_KNOWN]; // model space
+static vec3_t g_aggWMin[MAX_MOD_KNOWN], g_aggWMax[MAX_MOD_KNOWN]; // world space
+static int    g_skelVertsLines = 0;                              // bound per-surface SKELVERTS spam
+
+static void R_SkelAgg_Add(int render_count, const vec3_t mmin, const vec3_t mmax, const vec3_t wmin, const vec3_t wmax)
+{
+    trRefEntity_t *e  = backEnd.currentEntity;
+    int            hm = e->e.hModel;
+    int            f  = g_skeldiagFrameTag;
+    int            k;
+
+    if (hm <= 0 || hm >= MAX_MOD_KNOWN) {
+        return;
+    }
+    if (g_aggFrame[hm] != f) {
+        // flush the just-completed previous frame's aggregate
+        if (g_aggSurfs[hm] > 0 && g_aggFlushed[hm] < 6) {
+            g_aggFlushed[hm]++;
+            if (R_SkelDiagOn())
+            ri.Printf(PRINT_ALL,
+                "^~^~^ SKELAGG ent=%d hModel=%d model=%s surfs=%d verts=%d mext=[%.1f %.1f %.1f] "
+                "mbnds=[%.1f %.1f %.1f]-[%.1f %.1f %.1f] wext=[%.1f %.1f %.1f] wctr=[%.0f %.0f %.0f]\n",
+                g_aggEnt[hm], hm, (e->e.tiki && e->e.tiki->a) ? e->e.tiki->a->name : "?",
+                g_aggSurfs[hm], g_aggVerts[hm],
+                g_aggMMax[hm][0] - g_aggMMin[hm][0], g_aggMMax[hm][1] - g_aggMMin[hm][1], g_aggMMax[hm][2] - g_aggMMin[hm][2],
+                g_aggMMin[hm][0], g_aggMMin[hm][1], g_aggMMin[hm][2], g_aggMMax[hm][0], g_aggMMax[hm][1], g_aggMMax[hm][2],
+                g_aggWMax[hm][0] - g_aggWMin[hm][0], g_aggWMax[hm][1] - g_aggWMin[hm][1], g_aggWMax[hm][2] - g_aggWMin[hm][2],
+                (g_aggWMin[hm][0] + g_aggWMax[hm][0]) * 0.5f, (g_aggWMin[hm][1] + g_aggWMax[hm][1]) * 0.5f,
+                (g_aggWMin[hm][2] + g_aggWMax[hm][2]) * 0.5f);
+        }
+        // reset for the new frame
+        g_aggFrame[hm] = f;
+        g_aggEnt[hm]   = e->e.entityNumber;
+        g_aggVerts[hm] = 0;
+        g_aggSurfs[hm] = 0;
+        for (k = 0; k < 3; k++) {
+            g_aggMMin[hm][k] = g_aggWMin[hm][k] = 1e9f;
+            g_aggMMax[hm][k] = g_aggWMax[hm][k] = -1e9f;
+        }
+    }
+    for (k = 0; k < 3; k++) {
+        if (mmin[k] < g_aggMMin[hm][k]) g_aggMMin[hm][k] = mmin[k];
+        if (mmax[k] > g_aggMMax[hm][k]) g_aggMMax[hm][k] = mmax[k];
+        if (wmin[k] < g_aggWMin[hm][k]) g_aggWMin[hm][k] = wmin[k];
+        if (wmax[k] > g_aggWMax[hm][k]) g_aggWMax[hm][k] = wmax[k];
+    }
+    g_aggVerts[hm] += render_count;
+    g_aggSurfs[hm]++;
+}
+// DETERMINISTIC one-shot-per-model dedup (keyed by refEntity hModel, 0..MAX_MOD_KNOWN-1)
+static unsigned char g_skelSeenAdd[MAX_MOD_KNOWN];   // logged a SKELDIAG for this model handle
+static unsigned char g_skelSeenDraw[MAX_MOD_KNOWN];  // logged a SKELDRAW for this model handle
+// SKELREG running totals (register-time)
+static int     g_skelregTotal = 0;
+static int     g_skelregChar  = 0;
+static int     g_skelregNull  = 0;
+
+// Advance the trace window. Called once at the top of R_AddSkelSurfaces (frontend runs before the
+// backend within a frame, so the decrement happens exactly once per frame). Returns whether the
+// OPTIONAL verbose per-frame trace is active this frame.
+static qboolean R_SkelDiag_FrameTick(void)
+{
+    if (!r_skeldiag) {
+        r_skeldiag = ri.Cvar_Get("r_skeldiag", "0", CVAR_TEMP);
+    }
+    if (!g_skeldiagInit) {
+        int i;
+        for (i = 0; i < MAX_REFENTITIES; i++) {
+            g_skeldrawSlotSeen[i] = -1;
+        }
+        g_skeldiagInit = qtrue;
+    }
+    if (tr.frame_skel_index != g_skeldiagFrameTag) {
+        g_skeldiagFrameTag   = tr.frame_skel_index;
+        g_skeldiagFrontLines = 0;
+        g_skeldiagBackLines  = 0;
+        if (r_skeldiag->integer > 0) {
+            g_skeldiagFramesLeft = r_skeldiag->integer;  // (re)arm
+            ri.Cvar_Set("r_skeldiag", "0");
+        } else if (g_skeldiagFramesLeft > 0) {
+            g_skeldiagFramesLeft--;
+        }
+    }
+    return (qboolean)(g_skeldiagFramesLeft > 0);
+}
+
+// Should RB_SkelMesh emit a SKELDRAW for the current entity? True if the verbose trace is armed OR
+// this model handle has not yet been draw-logged (deterministic one-shot). Does NOT mark seen.
+static qboolean R_SkelDiag_DrawWanted(void)
+{
+    int hm;
+    if (g_skeldiagFramesLeft > 0) {
+        return qtrue;
+    }
+    hm = backEnd.currentEntity->e.hModel;
+    return (qboolean)(hm > 0 && hm < MAX_MOD_KNOWN && !g_skelSeenDraw[hm]);
+}
+
+// Backend SKELDRAW emitter for RB_SkelMesh. Fires deterministically once per model handle, plus
+// (in the optional verbose mode) once per entity per traced frame.
+static void R_SkelDiag_Draw(int render_count, unsigned int dV, const char *bail, const vec3_t xyzMin, const vec3_t xyzMax)
+{
+    trRefEntity_t *e     = backEnd.currentEntity;
+    int            slot  = (int)(e - backEnd.refdef.entities);
+    int            hm    = e->e.hModel;
+    qboolean       armed = (qboolean)(g_skeldiagFramesLeft > 0);
+    qboolean       first = (qboolean)(hm > 0 && hm < MAX_MOD_KNOWN && !g_skelSeenDraw[hm]);
+    float          ex, ey, ez;
+
+    if (!armed && !first) {
+        return;
+    }
+    if (!first) {
+        // optional verbose mode: per-frame cap + one line per refdef slot per frame
+        if (g_skeldiagBackLines >= 40) {
+            return;
+        }
+        if (slot >= 0 && slot < MAX_REFENTITIES) {
+            if (g_skeldrawSlotSeen[slot] == g_skeldiagFrameTag) {
+                return;
+            }
+            g_skeldrawSlotSeen[slot] = g_skeldiagFrameTag;
+        }
+        g_skeldiagBackLines++;
+    } else {
+        g_skelSeenDraw[hm] = 1; // deterministic one-shot per model
+    }
+
+    ex = xyzMax ? (xyzMax[0] - xyzMin[0]) : 0.0f;
+    ey = xyzMax ? (xyzMax[1] - xyzMin[1]) : 0.0f;
+    ez = xyzMax ? (xyzMax[2] - xyzMin[2]) : 0.0f;
+
+    ri.Printf(
+        PRINT_ALL,
+        "^~^~^ SKELDRAW ent=%d slot=%d hModel=%d model=%s rc=%d dV=%u ext=[%.1f %.1f %.1f] bail=%s%s\n",
+        e->e.entityNumber,
+        slot,
+        hm,
+        (e->e.tiki && e->e.tiki->a) ? e->e.tiki->a->name : "?",
+        render_count,
+        dV,
+        ex, ey, ez,
+        bail,
+        first ? " FIRST" : "");
+}
 
 /*
 ** R_GetModelByHandle
@@ -105,6 +375,12 @@ model_t *R_AllocModel(void)
         tr.numModels++;
     } else {
         mod = tr.models[i];
+        // HZM gl2 (bug-1131 ROOT CAUSE, invisible-actor coin flip): R_FreeModel memsets the
+        // whole model_t including .index, and this reuse branch never re-stamped it - so the
+        // next model registered into a freed slot loaded fine but returned handle 0
+        // ("registration failed") to its caller and could never be drawn for the rest of the
+        // session. gl1 re-stamps index on EVERY alloc (gl1 tr_model.cpp:102); match it.
+        mod->index = i;
     }
 
     return mod;
@@ -242,8 +518,42 @@ static qhandle_t R_RegisterModelInternal(const char *name, qboolean bBeginTiki, 
                     ri.CG_ProcessInitCommands(mod->d.tiki, NULL);
                 }
 
+                // ^~^~^ SKELREG (temporary, deterministic, load-time): one line per registered .tik.
+                {
+                    dtiki_t *dt      = mod->d.tiki;
+                    int      isChar  = (dt->a) ? (dt->a->bIsCharacter ? 1 : 0) : -1;
+                    int      m0surfs = 0, m0boxes = 0, m0bones = 0;
+                    if (dt->numMeshes > 0) {
+                        skelHeaderGame_t *sk = ri.TIKI_GetSkel(dt->mesh[0]);
+                        if (sk) {
+                            m0surfs = sk->numSurfaces;
+                            m0boxes = sk->numBoxes;
+                            m0bones = sk->numBones;
+                        }
+                    }
+                    g_skelregTotal++;
+                    if (isChar == 1) {
+                        g_skelregChar++;
+                    }
+                    if (R_SkelDiagOn())
+                    ri.Printf(PRINT_ALL,
+                        "^~^~^ SKELREG model=%s handle=%d type=TIKI char=%d tikisurfs=%d meshes=%d m0surfs=%d m0boxes=%d m0bones=%d result=ok [tot=%d char1=%d null=%d]\n",
+                        name, mod->index, isChar, dt->num_surfaces, dt->numMeshes, m0surfs, m0boxes, m0bones,
+                        g_skelregTotal, g_skelregChar, g_skelregNull);
+                }
+
                 return mod->index;
             }
+
+            // ^~^~^ SKELREG: a .tik that FAILED to load (tiki NULL) - this is exactly the "gl2 nulled
+            // registration" case the hypothesis predicts. If allied character .tiks appear here, the
+            // drop is at load; if they appear with result=ok above, the drop is downstream.
+            g_skelregTotal++;
+            g_skelregNull++;
+            if (R_SkelDiagOn())
+            ri.Printf(PRINT_ALL,
+                "^~^~^ SKELREG model=%s handle=0 type=BAD result=nulled reason=tikiload [tot=%d char1=%d null=%d]\n",
+                name, g_skelregTotal, g_skelregChar, g_skelregNull);
         }
     }
 
@@ -649,20 +959,168 @@ void R_AddSkelSurfaces(trRefEntity_t *ent)
 
     tiki = ent->e.tiki;
 
+    // ^~^~^ SKELTRACK (bug-1131): continuous low-rate tracker for the e2l2 briefing ally -
+    // proves whether the entity keeps REACHING this add path after a script teleport, and how
+    // many draw surfs each visit contributes. REMOVE with the rest of the SKEL* scaffolding.
+    int trkIsTarget  = 0;   // HZM 07-28: SKELTRACK off (was strstr per skeletal add, every frame)
+    int trkDrawBefore = tr.refdef.numDrawSurfs;
+    if (trkIsTarget) {
+        static int trkAdd = 0;
+        trkAdd++;
+        if ((trkAdd & 31) == 1) {
+            if (R_SkelDiagOn())
+            ri.Printf(PRINT_ALL,
+                "^~^~^ SKELTRACK addskel n=%d ent=%d org=[%d %d %d] vpFlags=0x%x portal=%d hModel=%d\n",
+                trkAdd, ent->e.entityNumber,
+                (int)ent->e.origin[0], (int)ent->e.origin[1], (int)ent->e.origin[2],
+                (unsigned)tr.viewParms.flags, tr.viewParms.isPortal ? 1 : 0, ent->e.hModel);
+        }
+    }
+
+    // ^~^~^ SKELDIAG (temporary): advance the OPTIONAL verbose window; compute the DETERMINISTIC
+    // one-shot-per-model gate (fires with no in-game input); per-actor capture locals.
+    qboolean diagOn      = R_SkelDiag_FrameTick();
+    qboolean diagFirst   = (qboolean)(ent->e.hModel > 0 && ent->e.hModel < MAX_MOD_KNOWN && !g_skelSeenAdd[ent->e.hModel]);
+    qboolean diagCapture = (qboolean)(diagOn || diagFirst);
+    vec3_t   diagFMin, diagFMax;
+    int      diagCullBox = -99;
+    qboolean diagDegen   = qfalse;
+    VectorClear(diagFMin);
+    VectorClear(diagFMax);
+    if (diagFirst) {
+        g_skelSeenAdd[ent->e.hModel] = 1;
+    }
+
     if (!vmEntity) {
         vmEntity = ri.Cvar_Get("viewmodelentity", "", 0);
     }
 
-    R_UpdatePoseInternal(&ent->e);
+    // ^~^~^ SKELTEST: register/poll the live bisect toggles (prints on change). No-op at default 0.
+    R_SkelTest_Poll();
+
+    {
+        qboolean isChar = (qboolean)(tiki->a && tiki->a->bIsCharacter);
+
+        // r_test_noprepass: keep char models OUT of gl2's shadow / sun pre-passes (gl1 has none), so
+        // the main view poses fresh and no pre-pass side effect touches the shared skeletor.
+        if (isChar && r_test_noprepass && r_test_noprepass->integer
+            && (tr.viewParms.flags & (VPF_DEPTHSHADOW | VPF_SHADOWMAP))) {
+            return;
+        }
+
+        // ------------------------------------------------------------------------------
+        // HZM gl2 REAL CHARACTER SHADOWS (r_charShadows) - frontend caster budget.
+        //
+        // Runs ONLY when the master cvar is on. With r_charShadows 0 this whole block is
+        // skipped and the frontend behaves exactly as it does today (characters are still
+        // added to every cascade and still dropped in the backend) - so the feature cannot
+        // perturb the tr.skel_index pose-cache ordering that caused three separate
+        // invisible-actor bugs in this fork.
+        //
+        // Placed BEFORE the RE_ForceUpdatePose call below on purpose: a rejection here also
+        // saves the pose, the bone-pool allocation and the drawsurf emission, so cascades
+        // above r_charShadowCascade become CHEAPER than they are today, not more expensive.
+        //
+        // WHY cascade 3 is excluded by default: it is the WHOLE-MAP cascade (tens of world
+        // units per texel - a human is sub-texel sparkle) AND it is rendered once and cached
+        // for as long as the sun direction is unchanged (tr_scene.c). MOHAA's sun is static
+        // per map, so admitting characters there would bake frozen silhouettes at their
+        // map-load positions that persist after the actors move or die.
+        if (isChar && r_charShadows && r_charShadows->integer
+            && (tr.viewParms.flags & VPF_DEPTHSHADOW)) {
+            int lvl = tr.viewParms.shadowCascade - 1;   // 0 means "not a sun cascade view"
+
+            // honour the engine's existing per-entity opt-out (see tr_main.c pshadows);
+            // gives the fgame/script layer a free way to silence a specific caster.
+            if (ent->e.renderfx & RF_NOSHADOW) {
+                return;
+            }
+            if (lvl < 0 || lvl > r_charShadowCascade->integer) {
+                return;
+            }
+            if (r_charShadowDist->value > 0.0f) {
+                vec3_t d;
+                VectorSubtract(ent->e.origin, tr.refdef.vieworg, d);
+                if (DotProduct(d, d) > r_charShadowDist->value * r_charShadowDist->value) {
+                    return;
+                }
+            }
+        }
+        // ------------------------------------------------------------------------------
+
+        // r_test_maskrfx: strip suspect renderfx bits (RF_SHADOW_PRECISE 0x1000000 / RF_SHADOW 0x800 /
+        // RF_FRAMELERP 0x10) on char models. Transient: refents are rebuilt each frame.
+        if (isChar) {
+            int rfxMask = R_SkelTest_RfxMask();
+            if (rfxMask) {
+                ent->e.renderfx &= ~rfxMask;
+            }
+        }
+    }
+
+    // ^~^~^ pose capture + r_test_forcepose. gl2 runs shadow / sun pre-passes (VPF_DEPTHSHADOW/SHADOWMAP)
+    // that gl1 does NOT have; the first such pass this frame poses the entity's skeletor and stamps
+    // skel_index[entnum]=frame, so the main view reuses that pose (prePosed=1). r_test_forcepose makes
+    // the main view re-pose char models regardless (RE_ForceUpdatePose). Default 0 = current behavior.
+    {
+        int en = ent->e.entityNumber;
+        g_skeldiagPrePosed =
+            (en >= 0 && en < MAX_GENTITIES && tr.skel_index[en] == tr.frame_skel_index) ? 1 : 0;
+        g_skeldiagPoseFrameIdx = tr.frame_skel_index;
+        g_skeldiagPoseSkelIdx  = (en >= 0 && en < MAX_GENTITIES) ? tr.skel_index[en] : -1;
+    }
+    // PERMANENT FIX (bug-gl2-invisible-friendly-actor / bug-gl2-invisible-live-char-depthprepass).
+    // Always recompute the pose for EVERY skeletal model at the MAIN-view add so it never skins from a
+    // STALE pose left by gl2's shadow/sun PRE-PASS (which gl1 does not have - the pre-pass poses the
+    // shared skeletor first and stamps skel_index[entnum]=frame, so the default R_UpdatePoseInternal
+    // would skip and reuse it -> wrong skinned depth -> LEQUAL kill -> invisible).
+    //
+    // The gate was previously `tiki->a->bIsCharacter`, but that FAILS for the e2l2 briefing squadmate:
+    // he is dispatched as a COMPOSITE tiki ("weapon|m1 garand|...|sc_al_brit_cmd", hModel 961) whose
+    // MERGED dtikianim does NOT carry bIsCharacter=true (even though the base sc_al_brit_cmd.tik is a
+    // character via its include of new_generic_human.tik / `ischaracter`). So the force skipped him and
+    // he reused a stale pre-pass pose (pose=SKIP) while the m3l2 Ranger composite - which DID carry
+    // bIsCharacter - forced and rendered. Dropping the flag gate makes the force apply to the composite
+    // ally too. RE_ForceUpdatePose is idempotent (re-poses from the entity's own frameInfo), so this
+    // cannot regress the Ranger/enemies (still forced+visible) or non-character props/viewmodels (a
+    // redundant re-pose to their own current pose). r_test_forcepose (default 1) can disable for A/B.
+    // g_skeldiagMainPose is captured here because R_GetFrame's redundant R_UpdatePoseInternal call
+    // clobbers g_skeldiagPoseRan afterwards.
+    if (!r_test_forcepose || r_test_forcepose->integer) {
+        RE_ForceUpdatePose(&ent->e);
+        g_skeldiagMainPose = 3; // FORCED
+    } else {
+        R_UpdatePoseInternal(&ent->e);
+        g_skeldiagMainPose = g_skeldiagPrePosed ? 0 /*reused pre-pass pose*/ : 1 /*posed fresh*/;
+    }
 
     // don't add third_person objects if in a portal
+    //
+    // HZM gl2 real character shadows: the LOCAL PLAYER's own body carries RF_THIRD_PERSON in
+    // first person precisely so it is not DRAWN through the eyes - but it must still CAST.
+    // Sun cascade views set isPortal = qfalse, so without this the one actor the player looks
+    // at most is the only one on screen with no shadow.
+    // Safe: a shadow view is depth-only (the colour draw-surf list is skipped for shadow
+    // views in RB_DrawSurfs), so no first-person geometry can reach the screen; and the
+    // first-person WEAPON is excluded separately by RF_FIRST_PERSON + VPF_NOVIEWMODEL in
+    // tr_main.c, which sun views set.
     personalModel = (ent->e.renderfx & RF_THIRD_PERSON) && !tr.viewParms.isPortal;
+    if (personalModel && r_charShadows && r_charShadows->integer
+        && (tr.viewParms.flags & VPF_DEPTHSHADOW)) {
+        personalModel = qfalse;
+    }
 
     outbones = &TIKI_Skel_Bones[TIKI_Skel_Bones_Index];
 
     num_tags = ri.TIKI_GetNumChannels(tiki);
 
     if (num_tags + TIKI_Skel_Bones_Index > MAX_SKELBONES) {
+        if (diagCapture) {
+            if (R_SkelDiagOn())
+            ri.Printf(PRINT_ALL,
+                "^~^~^ SKELDIAG-DROP ent=%d slot=%d model=%s reason=bonebufferfull tags=%d idx=%d\n",
+                ent->e.entityNumber, (int)(ent - tr.refdef.entities), tiki->a->name, num_tags, TIKI_Skel_Bones_Index);
+        }
         ri.Printf(PRINT_DEVELOPER, "R_AddSkelSurfaces: too many skeleton models visible on '%s'\n", tiki->a->name);
         return;
     }
@@ -700,6 +1158,21 @@ void R_AddSkelSurfaces(trRefEntity_t *ent)
             tr.pc.c_sphere_cull_md3_out++;
             break;
         }
+
+        // HZM gl2 real character shadows: the tightest possible caster cull, for free.
+        // In a sun cascade tr.viewParms IS the light view, so the iRadiusCull just computed
+        // above already tested this entity against the cascade's own ortho box. Note
+        // R_SetupProjectionOrtho sets VPF_FARPLANEFRUSTUM, so R_CullPointAndRadius used 5
+        // planes: the four LATERAL planes plus the FAR plane, and there is deliberately NO
+        // near plane - a caster sitting between the light and the box can therefore never be
+        // wrongly discarded.
+        // Today this result only gates the bone copy further down; the mesh loop emits
+        // drawsurfs unconditionally. Returning here is what keeps each actor in ~1 cascade
+        // instead of all of them.
+        if (iRadiusCull == CULL_OUT && r_charShadows && r_charShadows->integer
+            && (tr.viewParms.flags & VPF_DEPTHSHADOW)) {
+            return;
+        }
     }
 
     if (tiki->a->bIsCharacter) {
@@ -720,6 +1193,23 @@ void R_AddSkelSurfaces(trRefEntity_t *ent)
         sizeof(skelAnimFrame_t) + ri.TIKI_GetNumChannels(tiki) * sizeof(SkelMat4)
     );
     R_GetFrame(&ent->e, newFrame);
+
+    // ^~^~^ SKELDIAG: capture the anim-frame bounds and a would-be box-cull result. R_CullSkelModel
+    // is stubbed to CULL_IN (nothing here is actually culled), so this only reveals whether the skel
+    // bounds are degenerate/empty for this actor.
+    if (diagCapture) {
+        vec3_t db[2];
+        int    dk;
+        for (dk = 0; dk < 3; dk++) {
+            db[0][dk] = newFrame->bounds[0][dk] * tiki_scale + tiki_localorigin[dk];
+            db[1][dk] = newFrame->bounds[1][dk] * tiki_scale + tiki_localorigin[dk];
+        }
+        VectorCopy(newFrame->bounds[0], diagFMin);
+        VectorCopy(newFrame->bounds[1], diagFMax);
+        diagCullBox = R_CullLocalBox(db);
+        diagDegen   = (qboolean)((diagFMax[0] - diagFMin[0] < 0.5f) && (diagFMax[1] - diagFMin[1] < 0.5f)
+                                 && (diagFMax[2] - diagFMin[2] < 0.5f));
+    }
 
     if (lod_tool->integer || iRadiusCull != CULL_CLIP
         || R_CullSkelModel(tiki, &ent->e, newFrame, tiki_scale, tiki_localorigin) != CULL_OUT) {
@@ -779,6 +1269,12 @@ void R_AddSkelSurfaces(trRefEntity_t *ent)
         skelHeaderGame_t *skelmodel = ri.TIKI_GetSkel(tiki->mesh[mesh]);
 
         if (!skelmodel) {
+            if (diagCapture) {
+                if (R_SkelDiagOn())
+                ri.Printf(PRINT_ALL,
+                    "^~^~^ SKELDIAG-DROP ent=%d slot=%d model=%s reason=noskelmodel mesh=%d\n",
+                    ent->e.entityNumber, (int)(ent - tr.refdef.entities), tiki->a->name, mesh);
+            }
             ri.Printf(PRINT_DEVELOPER, "R_AddSkelSurfaces: couldn't get skel model in '%s'\n", tiki->a->name);
             return;
         }
@@ -819,9 +1315,47 @@ void R_AddSkelSurfaces(trRefEntity_t *ent)
                 shader = R_GetShaderByHandle(ent->e.customShader);
             }
 
+            // ^~^~^ SKELSHADER (temporary, deterministic): the resolved shader for each drawn surface
+            // of a char=1 model, logged once per model. Answers "draws but invisible": passes=0 or
+            // st0img=- (stage image failed/disabled), def=1 (fell to default), a nodraw/transparent
+            // sort/blend, or an unexpected rgbGen/alphaGen. Correlate with SKELDRAW ext (geometry ok).
+            if (diagFirst && tiki->a && tiki->a->bIsCharacter && shader) {
+                int            lsn = ent->e.skinNum + (*bsurf & 3);
+                shaderStage_t *s0;
+                const char    *img;
+                if (lsn >= dsurf->numskins) {
+                    lsn = 0;
+                }
+                s0  = (shader->numUnfoggedPasses > 0) ? shader->stages[0] : NULL;
+                img = (s0 && s0->bundle[0].image[0]) ? s0->bundle[0].image[0]->imgName : "-";
+                if (R_SkelDiagOn())
+                ri.Printf(PRINT_ALL,
+                    "^~^~^ SKELSHADER model=%s surf=%d bsurf=0x%x skin=%d/%d hShader=%d shader=%s def=%d passes=%d sort=%.1f sfc=0x%x cull=%d st0img=%s st0rgb=%d st0alpha=%d st0blend=0x%x\n",
+                    tiki->a->name, i, (unsigned)*bsurf, lsn, dsurf->numskins, dsurf->hShader[lsn],
+                    shader->name, shader->defaultShader ? 1 : 0, shader->numUnfoggedPasses,
+                    shader->sort, (unsigned)shader->surfaceFlags, (int)shader->cullType,
+                    img, s0 ? (int)s0->rgbGen : -1, s0 ? (int)s0->alphaGen : -1,
+                    s0 ? (unsigned)(s0->stateBits & (GLS_SRCBLEND_BITS | GLS_DSTBLEND_BITS)) : 0u);
+            }
+
             if (!personalModel) {
                 if ((*bsurf & 0x40) && (dsurf->numskins > 1)) {
                     int iShaderNum = ent->e.skinNum + (*bsurf & 2);
+
+                    // HZM [user 07-31]: OUT-OF-BOUNDS GUARD. dsurf->hShader[] is MAX_TIKI_SHADER(4)
+                    // wide but only the first numskins entries are ever initialised by the TIKI
+                    // loader; the rest are garbage handles. The `numskins > 1` test above is NOT
+                    // sufficient because this branch reads BOTH iShaderNum and iShaderNum+1, and
+                    // iShaderNum = skinNum + (bsurf & 2) reaches 2 whenever the surface carries
+                    // SKINOFFSET_BIT1 - which the coop gore tier system now sets on every damaged
+                    // actor (Sentient::.. writes tier into SKINOFFSET_BIT0|BIT1). On a 2-skin model
+                    // that resolved hShader[2]/hShader[3] to arbitrary shaders, which is the
+                    // reported "clothes turn white / get replaced with flesh-like textures, and it
+                    // randomizes as you keep shooting the body". The non-crossfade path below has
+                    // always clamped the same way; this one just never did. Latent in gl1 too.
+                    if (iShaderNum + 1 >= dsurf->numskins) {
+                        iShaderNum = 0;
+                    }
 
                     R_AddDrawSurf((surfaceType_t *)surface, tr.shaders[dsurf->hShader[iShaderNum]], 0, 0, 0, 0);
                     R_AddDrawSurf((surfaceType_t *)surface, tr.shaders[dsurf->hShader[iShaderNum + 1]], 0, 0, 0, 0);
@@ -835,6 +1369,65 @@ void R_AddSkelSurfaces(trRefEntity_t *ent)
                 R_AddDrawSurf((surfaceType_t *)surface, shader, 0, 0, 0, 0);
             }
         }
+    }
+
+    // ^~^~^ SKELTRACK: end-of-add marker, same cadence as the entry print - drawSurfsAdded=0
+    // with the entry firing means the mesh loop contributed NOTHING (personalModel/skin bits).
+    if (trkIsTarget) {
+        static int trkEnd = 0;
+        trkEnd++;
+        if ((trkEnd & 31) == 1) {
+            if (R_SkelDiagOn())
+            ri.Printf(PRINT_ALL,
+                "^~^~^ SKELTRACK addskel-end n=%d ent=%d drawSurfsAdded=%d personal=%d\n",
+                trkEnd, ent->e.entityNumber, tr.refdef.numDrawSurfs - trkDrawBefore,
+                personalModel ? 1 : 0);
+        }
+    }
+
+    // ^~^~^ SKELDIAG: one line the FIRST time each model reaches this add path (deterministic, no
+    // input), plus once per actor per frame in the optional verbose mode. Correlate with the backend
+    // ^~^~^ SKELDRAW by ent/slot/hModel. A model in SKELREG but never here = dropped upstream.
+    if (diagFirst || (diagOn && g_skeldiagFrontLines < 40)) {
+        const char *rc = (iRadiusCull == CULL_IN) ? "IN" : (iRadiusCull == CULL_CLIP) ? "CLIP" : (iRadiusCull == CULL_OUT) ? "OUT" : "na";
+        const char *cb = (diagCullBox == CULL_IN) ? "IN" : (diagCullBox == CULL_CLIP) ? "CLIP" : (diagCullBox == CULL_OUT) ? "OUT" : "na";
+        const char *ps = (g_skeldiagMainPose == 3) ? "FORCED" : (g_skeldiagMainPose == 1) ? "RAN" : "REUSED";
+        model_t    *diagMdl = R_GetModelByHandle(ent->e.hModel);
+        const char *diagMdlName = (diagMdl && diagMdl->name[0]) ? diagMdl->name : "?";
+        // composite/attach path: the dispatched model name is "weapon|<wpn>|<base>" for a merged model
+        int         diagComposite = (diagMdlName[0] && strchr(diagMdlName, '|')) ? 1 : 0;
+        if (diagOn) {
+            g_skeldiagFrontLines++;
+        }
+        if (R_SkelDiagOn())
+        ri.Printf(PRINT_ALL,
+            "^~^~^ SKELDIAG ent=%d slot=%d hModel=%d model=%s char=%d rfx=0x%x scale=%.2f escale=%.2f rad=%.1f "
+            "bones=%d actw=%.2f frame0=%d/%.2f/%.2f composite=%d mirrored=%d isMirror=%d radcull=%s cullbox=%s "
+            "degen=%d prePosed=%d pose=%s(si=%d fi=%d) fbnds=[%.0f %.0f %.0f]-[%.0f %.0f %.0f] meshes=%d mdl=%s%s\n",
+            ent->e.entityNumber,
+            (int)(ent - tr.refdef.entities),
+            ent->e.hModel,
+            tiki->a->name,
+            tiki->a->bIsCharacter ? 1 : 0,
+            ent->e.renderfx,
+            tiki_scale,
+            ent->e.scale,
+            radius,
+            num_tags,
+            ent->e.actionWeight,
+            ent->e.frameInfo[0].index, ent->e.frameInfo[0].time, ent->e.frameInfo[0].weight,
+            diagComposite,
+            ent->mirrored ? 1 : 0,
+            tr.viewParms.isMirror ? 1 : 0,
+            rc, cb,
+            diagDegen ? 1 : 0,
+            g_skeldiagPrePosed,
+            ps, g_skeldiagPoseSkelIdx, g_skeldiagPoseFrameIdx,
+            diagFMin[0], diagFMin[1], diagFMin[2],
+            diagFMax[0], diagFMax[1], diagFMax[2],
+            tiki->numMeshes,
+            diagMdlName,
+            diagFirst ? " FIRST" : "");
     }
 
     // FIXME: setup LOD
@@ -983,12 +1576,31 @@ void RB_SkelMesh(skelSurfaceGame_t *sf)
     //
     // Process LOD
     //
-    if (skelmodel->pLOD) {
+    // ^~^~^ SKELTEST r_test_forcelod0: for char models, skip all LOD reduction (render every vert) in
+    // case the live actor selects a broken/empty LOD level that a frozen/dead actor does not.
+    qboolean tskForceLod0 = (qboolean)(r_test_forcelod0 && r_test_forcelod0->integer && tiki
+        && tiki->a && tiki->a->bIsCharacter);
+    if (skelmodel->pLOD && !tskForceLod0) {
         float lod_val;
         int   renderfx;
 
         lod_val  = backEnd.currentEntity->lodpercentage[0];
         renderfx = backEnd.currentEntity->e.renderfx;
+
+        // HZM gl2 real character shadows: coarse LOD for shadow casters. PLAY-GL2.bat forces
+        // r_uselod 0 / r_lodscale 28 (max detail at all ranges), so this override is the only
+        // LOD lever available, and CPU skinning in this function is the dominant cost of the
+        // whole feature.
+        // CRITICAL: this is a LOCAL substitution. lodpercentage[] lives on the SHARED
+        // trRefEntity_t and is written per-entity at add time, i.e. last-write-wins across
+        // views. Writing a shadow LOD back into the entity would corrupt the MAIN view's
+        // detail. Never assign to backEnd.currentEntity->lodpercentage.
+        if (r_charShadows && r_charShadows->integer
+            && (backEnd.viewParms.flags & VPF_DEPTHSHADOW)
+            && r_charShadowLod && r_charShadowLod->value > 0.0f
+            && tiki && tiki->a && tiki->a->bIsCharacter) {
+            lod_val = r_charShadowLod->value;
+        }
 
         if (sf->numVerts > 3) {
             skelIndex_t *collapseIndex;
@@ -999,11 +1611,14 @@ void RB_SkelMesh(skelSurfaceGame_t *sf)
                 && mesh == lod_mesh->integer) {
                 lod_cutoff = GetToolLodCutoff(skelmodel, backEnd.currentEntity->lodpercentage[0]);
             } else {
-                lod_cutoff = GetLodCutoff(skelmodel, backEnd.currentEntity->lodpercentage[0], renderfx);
+                lod_cutoff = GetLodCutoff(skelmodel, lod_val, renderfx);
             }
 
             collapseIndex = sf->pCollapseIndex;
             if (collapseIndex[2] < lod_cutoff) {
+                if (R_SkelDiag_DrawWanted()) {
+                    R_SkelDiag_Draw((int)sf->numVerts, 0, "lodcut", NULL, NULL);
+                }
                 return;
             }
 
@@ -1031,6 +1646,9 @@ void RB_SkelMesh(skelSurfaceGame_t *sf)
         }
 
         if (!render_count) {
+            if (R_SkelDiag_DrawWanted()) {
+                R_SkelDiag_Draw(0, 0, "lod0", NULL, NULL);
+            }
             return;
         }
     } else {
@@ -1351,6 +1969,71 @@ void RB_SkelMesh(skelSurfaceGame_t *sf)
     //	}
     //}
     //tess.numVertexes += sf->numVerts;
+
+    // HZM coop - gore tier 4 (UV wounds): this surface's CPU-skinned verts +
+    // diffuse UVs are now sitting in tess (model space, current pose). Ray-test
+    // any pending bullet impacts against exactly these triangles so a hit can
+    // be painted into the entity's wound texture at the true surface UV.
+    // Only bleedable humans: the TIKI ischaracter flag (same flag that gates
+    // the server's location-damage trace) marks players + allied AND enemy
+    // human AI, and excludes vehicles/turrets/props.
+    // (HZM gl2 re-port bug-gl2-gore, mirrors gl1 tr_model.cpp:1455-1464)
+    // ^~^~^ SKELDRAW / SKELVERTS / SKELAGG: emitted skinned-vertex bounds in MODEL and WORLD space.
+    // SKELDRAW = per-model one-shot (legacy). SKELVERTS = per-surface (per mesh/surf). SKELAGG = the
+    // per-model AGGREGATE across ALL surfaces this frame (resolves collapse-vs-full-size). For char
+    // models the aggregate is accumulated every surface for the first few frames.
+    {
+        trRefEntity_t *e      = backEnd.currentEntity;
+        qboolean       isChar = (qboolean)(e->e.tiki && e->e.tiki->a && e->e.tiki->a->bIsCharacter);
+        qboolean       wantAgg =
+            (qboolean)(isChar && e->e.hModel > 0 && e->e.hModel < MAX_MOD_KNOWN && g_aggFlushed[e->e.hModel] < 6);
+
+        if (R_SkelDiag_DrawWanted() || wantAgg) {
+            vec3_t       mmin, mmax, wmin, wmax;
+            unsigned int vn;
+            int          k;
+            mmin[0] = mmin[1] = mmin[2] = 1e9f;
+            mmax[0] = mmax[1] = mmax[2] = -1e9f;
+            wmin[0] = wmin[1] = wmin[2] = 1e9f;
+            wmax[0] = wmax[1] = wmax[2] = -1e9f;
+            for (vn = 0; vn < render_count; vn++) {
+                const float *p = tess.xyz[baseVertex + vn];
+                vec3_t       w;
+                for (k = 0; k < 3; k++) {
+                    if (p[k] < mmin[k]) mmin[k] = p[k];
+                    if (p[k] > mmax[k]) mmax[k] = p[k];
+                }
+                // model -> world (rigid): origin + p.x*axis0 + p.y*axis1 + p.z*axis2
+                w[0] = e->e.origin[0] + p[0] * e->e.axis[0][0] + p[1] * e->e.axis[1][0] + p[2] * e->e.axis[2][0];
+                w[1] = e->e.origin[1] + p[0] * e->e.axis[0][1] + p[1] * e->e.axis[1][1] + p[2] * e->e.axis[2][1];
+                w[2] = e->e.origin[2] + p[0] * e->e.axis[0][2] + p[1] * e->e.axis[1][2] + p[2] * e->e.axis[2][2];
+                for (k = 0; k < 3; k++) {
+                    if (w[k] < wmin[k]) wmin[k] = w[k];
+                    if (w[k] > wmax[k]) wmax[k] = w[k];
+                }
+            }
+
+            if (R_SkelDiag_DrawWanted()) {
+                R_SkelDiag_Draw((int)render_count, (unsigned int)render_count, "-", mmin, mmax);
+            }
+            if (wantAgg) {
+                if (g_skelVertsLines < 240) {
+                    g_skelVertsLines++;
+                    if (R_SkelDiagOn())
+                    ri.Printf(PRINT_ALL,
+                        "^~^~^ SKELVERTS ent=%d hModel=%d model=%s mesh=%d surf=%d rc=%d "
+                        "mbnds=[%.1f %.1f %.1f]-[%.1f %.1f %.1f]\n",
+                        e->e.entityNumber, e->e.hModel, e->e.tiki->a->name, mesh, surf, render_count,
+                        mmin[0], mmin[1], mmin[2], mmax[0], mmax[1], mmax[2]);
+                }
+                R_SkelAgg_Add((int)render_count, mmin, mmax, wmin, wmax);
+            }
+        }
+    }
+
+    if (tiki && tiki->a && tiki->a->bIsCharacter) {
+        R_GoreSkelSurfaceCheck((int)baseVertex, (int)baseIndex);
+    }
 }
 
 /*
@@ -1485,7 +2168,10 @@ void RB_StaticMesh(staticSurface_t *staticSurf)
 
     for (j = 0; j < render_count; j++) {
         Vector4Copy(surf->pStaticXyz[j], tess.xyz[baseVertex + j]);
-        Vector4Copy(surf->pStaticNormal[j], tess.normal[baseVertex + j]);
+        // HZM gl2 re-port (bug-gl2-modellight): pStaticNormal is float, gl2's
+        // tess.normal is int16-packed - the old Vector4Copy truncated unit
+        // normals to 0/1, breaking any per-vertex lighting on static models
+        R_VaoPackNormal(tess.normal[baseVertex + j], surf->pStaticNormal[j]);
         tess.texCoords[baseVertex + j][0]   = surf->pStaticTexCoords[j][0][0];
         tess.texCoords[baseVertex + j][1]   = surf->pStaticTexCoords[j][0][1];
         tess.lightCoords[baseVertex + j][0] = surf->pStaticTexCoords[j][1][0];
@@ -1599,10 +2285,18 @@ R_UpdatePoseInternal
 void R_UpdatePoseInternal(refEntity_t *model)
 {
     if (model->entityNumber != ENTITYNUM_NONE) {
+        // ^~^~^ SKELDIAG: record the pose decision for the frontend trace line.
+        g_skeldiagPoseFrameIdx = tr.frame_skel_index;
+        g_skeldiagPoseSkelIdx  = tr.skel_index[model->entityNumber];
         if (tr.skel_index[model->entityNumber] == tr.frame_skel_index) {
+            g_skeldiagPoseRan = 0; // early-return: pose already computed for this entity this frame
             return;
         }
         tr.skel_index[model->entityNumber] = tr.frame_skel_index;
+    } else {
+        g_skeldiagPoseFrameIdx = tr.frame_skel_index;
+        g_skeldiagPoseSkelIdx  = 0;
+        g_skeldiagPoseRan      = -1; // no entity number (won't be deduped)
     }
 
     ri.TIKI_SetPoseInternal(
@@ -1612,6 +2306,7 @@ void R_UpdatePoseInternal(refEntity_t *model)
         model->bone_quat,
         model->actionWeight
     );
+    g_skeldiagPoseRan = 1; // actually (re)computed the pose this frame
 }
 
 /*

@@ -220,17 +220,58 @@ void Actor::Think_MachineGunner_TurretGun(void)
         return;
     }
 
-    // FIXME: Add support for multiple players
+    // HZM coop [user 08-02]: this is the "MG42 gunners get up and wander off unarmed" bug.
+    // Retail hardcoded G_GetEntity(0) - the SP player, i.e. the listen HOST - and shipped the
+    // "// FIXME: Add support for multiple players" note above it. The gunner therefore decided
+    // whether to keep manning the MG purely from where ONE player stood: the moment the host
+    // stepped outside the turret's yaw/pitch arc, BecomeTurretGuy() ran and the gunner
+    // abandoned a perfectly good gun - even with three other players pinned down directly in
+    // front of it. It looked like a consequence of the overheat only because both land in the
+    // same 2-4s window of sustained fire; this file has no HZM markers at all and the overheat
+    // is not involved.
+    // Same defect class already fixed for actor_idle.cpp (bug-621) and actor.cpp:3357/3381
+    // (bug-242); this copies that idiom.
+    // Two distinct needs: (a) keep holding the gun if ANY living player is inside the arc,
+    // and (b) use the NEAREST living player for the sight-trace and grenade decisions below.
+    {
+        // Sentient, not Player: Player is an incomplete type in this TU, and this is exactly
+        // what the sibling fix in actor_idle.cpp uses. Sentient carries IsDead()/origin/centroid
+        // and the sight-trace cast below already expects a Sentient.
+        Sentient *pNearest    = NULL;
+        float     fBestDistSq = 1e30f;
+        bool      bAnyInArc   = false;
+        int       i;
 
-    player = G_GetEntity(0);
-    // Fixed in OPM
-    if (!player) {
-         return; 
-    }
+        for (i = 0; i < game.maxclients; i++) {
+            gentity_t *ed = &g_entities[i];
+            if (!ed->inuse || !ed->entity || !ed->client) {
+                continue;
+            }
+            Sentient *pl = static_cast<Sentient *>(ed->entity);
+            if (pl->IsDead()) {
+                continue;
+            }
+            if (m_pTurret->AI_CanTarget(pl->centroid)) {
+                bAnyInArc = true;
+            }
+            float fDistSq = (pl->origin - origin).lengthSquared();
+            if (fDistSq < fBestDistSq) {
+                fBestDistSq = fDistSq;
+                pNearest    = pl;
+            }
+        }
 
-    if (m_pTurret->AI_CanTarget(player->centroid)) {
-        ThinkHoldGun_TurretGun();
-        return;
+        player = pNearest;
+
+        // Fixed in OPM - no living player at all (everyone dead / still connecting)
+        if (!player) {
+            return;
+        }
+
+        if (bAnyInArc) {
+            ThinkHoldGun_TurretGun();
+            return;
+        }
     }
 
     if (m_pGrenade && rand() / 21474836.f <= m_fGrenadeAwareness) {

@@ -586,6 +586,50 @@ void CG_PredictPlayerState(void)
         cg_pmove.tracemask = MASK_PLAYERSOLID;
     }
 
+    // HZM coop bug-950: mirror the server's coop_clipStripZones strip in PREDICTION.
+    // The server pmove (player.cpp) drops PLAYERCLIP|FENCE inside per-map strip zones,
+    // but prediction kept the stock mask - the client predicted the invisible wall and
+    // fought the server about it (mushy still-there walls inside covered zones). On a
+    // listen host the cvar lives in the shared store, so read it here too.
+    {
+        static cvar_t *cz         = NULL;
+        static int     zparse     = -1;
+        static int     zcount     = 0;
+        static float   zb[16][6];
+
+        if (!cz) {
+            cz = cgi.Cvar_Get("coop_clipStripZones", "", 0);
+        }
+        if (cz->modificationCount != zparse) {
+            zparse = cz->modificationCount;
+            zcount = 0;
+            const char *s = cz->string;
+            while (s && *s && zcount < 16) {
+                float b[6];
+                if (sscanf(s, "%f %f %f %f %f %f", &b[0], &b[1], &b[2], &b[3], &b[4], &b[5]) != 6) {
+                    break;
+                }
+                memcpy(zb[zcount], b, sizeof(b));
+                zcount++;
+                s = strchr(s, ';');
+                if (s) {
+                    s++;
+                }
+            }
+        }
+        {
+            const float *o = cg_pmove.ps->origin;
+            int          zi;
+            for (zi = 0; zi < zcount; zi++) {
+                const float *b = zb[zi];
+                if (o[0] >= b[0] && o[1] >= b[1] && o[0] <= b[2] && o[1] <= b[3] && o[2] >= b[4] && o[2] <= b[5]) {
+                    cg_pmove.tracemask &= ~(CONTENTS_PLAYERCLIP | CONTENTS_FENCE);
+                    break;
+                }
+            }
+        }
+    }
+
     cg_pmove.noFootsteps = (cgs.dmflags & DF_NO_FOOTSTEPS) > 0;
     if (cg_protocol >= PROTOCOL_MOHTA_MIN) {
         // Leaning while moving is allowed in mohta and mohtt only with a specific dm flag bit set

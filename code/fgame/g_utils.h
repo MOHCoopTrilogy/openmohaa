@@ -39,6 +39,11 @@ void G_AllocDebugLines(void);
 void G_DeAllocDebugLines(void);
 
 void G_TouchTriggers(Entity *ent);
+
+// HZM coop bug-946/949: true when pos is inside a coop_clipStripZones box (per-map
+// invisible-wall strip regions). Players drop CONTENTS_PLAYERCLIP|CONTENTS_FENCE,
+// actors drop CONTENTS_MONSTERCLIP while inside.
+qboolean CoopClipStripZoneContains(const Vector& pos);
 void G_TouchSolids(Entity *ent);
 
 Entity *G_FindClass(Entity *ent, const char *classname);

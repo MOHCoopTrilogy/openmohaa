@@ -859,10 +859,44 @@ void R_AddSkelSurfaces(trRefEntity_t *ent)
     //
     // add morphs
     //
-    added = ri.SKEL_GetMorphWeightFrame(
-        skeletor, ent->e.frameInfo[0].index, ent->e.frameInfo[0].time, &skeletorMorphCache[skeletorMorphCacheIndex]
-    );
-    ent->e.morphstart = skeletorMorphCacheIndex;
+    // HZM (bug-1189): the morph pool had NO bounds check while its sibling bone pool above has one.
+    // SKEL_GetMorphWeightFrame memsets numTargets ints at skeletorMorphCache[skeletorMorphCacheIndex]
+    // unconditionally, so once the pool was full this wrote off the end of the array AND every
+    // entity added afterwards got a morphstart past the end - RB_SkelMesh then reads adjacent BSS as
+    // morph weights and applies them through VectorMA(out, weight, morph->offset, out), deforming
+    // exactly the meshes that carry morph targets (heads) with no log line at all.
+    // MAX_SKELMORPH has been raised to MAX_SKELBONES so this can no longer be reached before the
+    // guarded bone pool bails, but keep the explicit guard: skipping morphs degrades to a
+    // non-morphed (still correctly skinned) character, which is always better than reading garbage.
+    if (skeletorMorphCacheIndex < 0 || skeletorMorphCacheIndex >= MAX_SKELMORPH) {
+        ri.Printf(
+            PRINT_DEVELOPER,
+            "R_AddSkelSurfaces: morph cache exhausted on '%s' (index %d, max %d)\n",
+            tiki->a->name,
+            skeletorMorphCacheIndex,
+            MAX_SKELMORPH
+        );
+        ent->e.morphstart = 0;
+        added             = 0;
+    } else {
+        added = ri.SKEL_GetMorphWeightFrame(
+            skeletor,
+            ent->e.frameInfo[0].index,
+            ent->e.frameInfo[0].time,
+            &skeletorMorphCache[skeletorMorphCacheIndex]
+        );
+        ent->e.morphstart = skeletorMorphCacheIndex;
+
+        if (skeletorMorphCacheIndex + added > MAX_SKELMORPH) {
+            // GetMorphWeightFrame already wrote `added` ints starting at skeletorMorphCacheIndex.
+            // It cannot be un-written, but do not let this or any later entity SKIN from the
+            // out-of-range tail: drop the morphs for this one and park the index at the ceiling so
+            // the guard above rejects everything that follows this scene.
+            skeletorMorphCacheIndex = MAX_SKELMORPH;
+            ent->e.morphstart       = 0;
+            added                   = 0;
+        }
+    }
 
     if (added) {
         // found morphs
@@ -922,6 +956,14 @@ void R_AddSkelSurfaces(trRefEntity_t *ent)
             if (!personalModel) {
                 if ((*bsurf & 0x40) && (dsurf->numskins > 1)) {
                     int iShaderNum = ent->e.skinNum + (*bsurf & 2);
+
+                    // HZM [user 07-31]: same out-of-bounds guard as the gl2 twin - hShader[] is
+                    // MAX_TIKI_SHADER(4) wide but only numskins entries are initialised, and this
+                    // branch reads iShaderNum AND iShaderNum+1 with skinNum + (bsurf & 2) able to
+                    // reach 2 once the coop gore tier sets SKINOFFSET_BIT1 on a damaged actor.
+                    if (iShaderNum + 1 >= dsurf->numskins) {
+                        iShaderNum = 0;
+                    }
 
                     R_AddDrawSurf((surfaceType_t *)surface, tr.shaders[dsurf->hShader[iShaderNum]], 0);
                     R_AddDrawSurf((surfaceType_t *)surface, tr.shaders[dsurf->hShader[iShaderNum + 1]], 0);
@@ -1451,6 +1493,17 @@ void RB_SkelMesh(skelSurfaceGame_t *sf)
     //	}
     //}
     //tess.numVertexes += sf->numVerts;
+
+    // HZM coop - gore tier 4 (UV wounds): this surface's CPU-skinned verts +
+    // diffuse UVs are now sitting in tess (model space, current pose). Ray-test
+    // any pending bullet impacts against exactly these triangles so a hit can
+    // be painted into the entity's wound texture at the true surface UV.
+    // Only bleedable humans: the TIKI ischaracter flag (same flag that gates
+    // the server's location-damage trace) marks players + allied AND enemy
+    // human AI, and excludes vehicles/turrets/props.
+    if (tiki && tiki->a && tiki->a->bIsCharacter) {
+        R_GoreSkelSurfaceCheck((int)baseVertex, (int)baseIndex);
+    }
 }
 
 /*

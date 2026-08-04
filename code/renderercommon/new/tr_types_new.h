@@ -22,7 +22,15 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 
 #include "../../tiki/tiki_shared.h"
 
-#define	MAX_ENTITIES	1023		// can't be increased without changing drawsurf bit packing
+// HZM NOTE (bug-1172): this only affects renderergl1 (the shipping renderer - it's the only
+// consumer of MAX_ENTITIES, see tr_scene.c/tr_model.cpp/tr_local.h). The "can't be increased"
+// comment is stale (gl1's own sort-key packing already budgets 12 bits/4095 - tr_main.c
+// QSORT_ENTITYNUM_SHIFT=8, entity field masked "& 4095" - the array was just never sized to
+// match), and a busy multi-player coop scene could plausibly exceed 1023 simultaneous
+// refEntities. Left at the stock 1023 deliberately: gl1 is the real, shipping build and this
+// session's engine experimentation is gl2-sandbox-only per explicit instruction - revisit this
+// raise only as its own deliberate, separately-approved gl1 change, not a side effect of gl2 work.
+#define	MAX_ENTITIES	1023
 #define MAX_POINTS     32
 #define MAX_SPRITES    2048
 

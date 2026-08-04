@@ -104,6 +104,11 @@ cvar_t	*r_lodscale;
 cvar_t	*r_norefresh;
 cvar_t	*r_drawentities;
 cvar_t	*r_drawentitypoly;
+cvar_t	*r_goreUV;			// HZM coop - gore tier 4 (UV wounds)
+cvar_t	*r_goreDebug;		// HZM coop - gore tier 4 dev counters (bug-735)
+cvar_t	*coop_goreSkinWoundScale;	// HZM coop - EXPOSED-SKIN wound size multiplier (1.0 = off)
+cvar_t	*coop_goreSkinSnap;			// HZM coop - skin-snap fallback for moving enemies (0 = off)
+cvar_t	*coop_goreSkinSnapDist;		// HZM coop - skin-snap vertex tolerance (model units, clamped 8-64)
 cvar_t	*r_drawstaticmodels;
 cvar_t	*r_drawstaticmodelpoly;
 cvar_t	*r_drawbrushes;
@@ -155,6 +160,7 @@ cvar_t	*r_lightmap;
 cvar_t	*r_vertexLight;
 cvar_t	*r_shadows;
 cvar_t	*r_entlight_scale;
+cvar_t	*r_entlight_tikiScale;	// HZM bug-916
 cvar_t	*r_entlight_errbound;
 cvar_t	*r_entlight_cubelevel;
 cvar_t	*r_entlight_cubefraction;
@@ -1559,6 +1565,20 @@ void R_Register( void )
 	r_norefresh = ri.Cvar_Get("r_norefresh", "0", CVAR_CHEAT);
 	r_drawentities = ri.Cvar_Get("r_drawentities", "1", CVAR_CHEAT);
 	r_drawentitypoly = ri.Cvar_Get("r_drawentitypoly", "1", CVAR_CHEAT);
+	r_goreUV = ri.Cvar_Get("r_goreUV", "1", CVAR_ARCHIVE);	// HZM coop - gore tier 4 (UV wounds)
+	r_goreDebug = ri.Cvar_Get("r_goreDebug", "0", 0);	// HZM coop - gore tier 4 dev counters: 1 = print queue/hit/miss per impact
+	// HZM coop - bloodier wounds on EXPOSED SKIN (face/head/hands) only. 1.0 = no change; clamped to 1.0-2.5 at use. Default 1.4 = "a bit" more.
+	coop_goreSkinWoundScale = ri.Cvar_Get("coop_goreSkinWoundScale", "1.4", CVAR_ARCHIVE);
+	// HZM coop - skin-snap fallback: on a MOVING enemy the exact bullet ray misses the small
+	// exposed-skin surfaces (head/hands slid off the server segment vs the client's animated pose);
+	// when it does, stamp the nearest skin vertex within coop_goreSkinSnapDist of the bullet stop
+	// point as a skin wound.  bug-905: also relocates a wound off a GRAZED cloth surface onto a
+	// closer skin vertex.  Only skin surfaces are ever snapped. 1=on, 0=off.
+	coop_goreSkinSnap = ri.Cvar_Get("coop_goreSkinSnap", "1", CVAR_ARCHIVE);
+	// bug-905: default 18 -> 26 (clamped 8-64 at use). 18u was too tight for living face/head/hand
+	// shots - the server stop point (inflated LBD hitbox + interp/anim pose offset) sat beyond it.
+	// NOTE: CVAR_ARCHIVE - a config that already stored "18" keeps it; reset or set 26 to pick up.
+	coop_goreSkinSnapDist = ri.Cvar_Get("coop_goreSkinSnapDist", "26", CVAR_ARCHIVE);
 	r_drawstaticmodels = ri.Cvar_Get("r_drawstaticmodels", "1", CVAR_CHEAT);
 	r_drawstaticmodelpoly = ri.Cvar_Get("r_drawstaticmodelpoly", "1", CVAR_CHEAT);
 	r_drawbrushes = ri.Cvar_Get("r_drawbrushes", "1", CVAR_CHEAT);
@@ -1593,7 +1613,16 @@ void R_Register( void )
 	r_noportals = ri.Cvar_Get ("r_noportals", "0", CVAR_CHEAT);
 	r_entlightmap = ri.Cvar_Get("r_entlightmap", "0", CVAR_CHEAT);
 	r_fastentlight = ri.Cvar_Get("r_fastentlight", "1", CVAR_ARCHIVE);
+	// [user 07-19] RESTORED to stock CVAR_CHEAT (bug-918): the brief CVAR_ARCHIVE experiment let a
+	// test value (0.3) get SAVED to omconfig, silently darkening ALL entity lighting (characters,
+	// vehicles) every launch. This cvar scales global entity light - it must never persist. The
+	// placed-cover brightness dial is the separate r_entlight_tikiScale below.
 	r_entlight_scale = ri.Cvar_Get("r_entlight_scale", "1.3", CVAR_CHEAT);
+	// HZM bug-916: dedicated dial for the runtime-TIKI vertex-color fallback (script-spawned
+	// static models, e.g. baked cover placements). The flat light-grid sample lacks the direct
+	// sun that BAKED map-static vertex colors include, so these objects read darker than their
+	// map twins; this multiplies ONLY them (soldiers/other entities untouched). Live-tunable.
+	r_entlight_tikiScale = ri.Cvar_Get("r_entlight_tikiScale", "2.2", CVAR_ARCHIVE);
 	r_entlight_errbound = ri.Cvar_Get("r_entlight_errbound", "6", CVAR_ARCHIVE);
 	r_entlight_cubelevel = ri.Cvar_Get("r_entlight_cubelevel", "0", CVAR_ARCHIVE);
 	r_entlight_cubefraction = ri.Cvar_Get("r_entlight_cubefraction", "0.5", CVAR_ARCHIVE);
@@ -1836,6 +1865,7 @@ void RE_Shutdown( qboolean destroyWindow ) {
 		R_IssuePendingRenderCommands();
 		R_ShutdownPostFxGL1();	// HZM: free post-process GL resources while the context is valid
 		R_ShutdownGrass();		// HZM: clear the grass scatter set
+		R_GoreShutdown();		// HZM coop - gore tier 4 (UV wounds): forget instance images before deletion
 		R_DeleteTextures();
 	}
 
@@ -1873,6 +1903,7 @@ void RE_BeginRegistration(glconfig_t* glconfigOut) {
 
 	R_LevelMarksFree();
 	R_TerrainFree();
+	R_GoreLevelReset();		// HZM coop - gore tier 4 (UV wounds): new map = clean uniforms
 
 	ri.Hunk_Clear();
 
@@ -2066,6 +2097,11 @@ refexport_t *GetRefAPI ( int apiVersion, refimport_t *rimp ) {
 
     re.LoadRawImage = R_LoadRawImage;
     re.FreeRawImage = R_FreeRawImage;
+
+    // HZM coop - gore tier 4 (UV wounds)
+    re.GoreImpact     = RE_GoreImpact;
+    re.GoreReset      = RE_GoreReset;
+    re.GoreKillSplash = RE_GoreKillSplash; // bug-780
 
 	return &re;
 }

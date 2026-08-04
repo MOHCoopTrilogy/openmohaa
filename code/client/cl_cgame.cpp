@@ -829,6 +829,12 @@ void CL_InitCGameDLL( clientGameImport_t *cgi, clientGameExport_t **cge ) {
 
 	cgi->getConfigStringIdNormalized = CPT_NormalizeConfigstring;
 
+	// HZM coop - gore tier 4 (UV wounds): renderer bridge for per-entity
+	// UV wound painting (NULL when the active renderer lacks the feature)
+	cgi->R_GoreImpact				= re.GoreImpact;
+	cgi->R_GoreReset				= re.GoreReset;
+	cgi->R_GoreKillSplash			= re.GoreKillSplash; // bug-780
+
 	cgi->fsDebug					= fs_debug;
 	cgi->HudDrawElements			= cls.HudDrawElements;
 	cgi->anim						= &cls.anim;

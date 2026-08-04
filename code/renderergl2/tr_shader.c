@@ -29,7 +29,15 @@ static char *s_shaderText;
 // dynamically allocated memory if it is valid.
 static	shaderStage_t	stages[MAX_SHADER_STAGES];		
 static	shader_t		shader;
-static	texModInfo_t	texMods[MAX_SHADER_STAGES][TR_MAX_TEXMODS];
+// HZM gl2 re-port (bug-gl2-texmods-null): per-BUNDLE texMod backing storage.
+// The bundle-aware ParseTexMod writes through stage->bundle[cntBundle].texMods,
+// but InitShaderEx only wired bundle[0] - the first tcMod after a 'nextbundle'
+// (e.g. central_europe_winter/snowfield1 'tcMod scale 2 2') wrote through a
+// NULL texMods pointer and took the whole boot down during map shader parsing.
+// gl1 points EVERY bundle of stage i at the same texMods[i] array (gl1
+// tr_shader.c:3424), which makes bundle[1] mods stomp bundle[0]'s slots; give
+// each bundle its own array instead so both bundles keep their authored mods.
+static	texModInfo_t	texMods[MAX_SHADER_STAGES][NUM_TEXTURE_BUNDLES][TR_MAX_TEXMODS];
 static	int				shader_realLightmapIndex;
 
 #define FILE_HASH_SIZE		1024
@@ -190,6 +198,25 @@ static unsigned NameToAFunc( const char *funcname )
 	else if ( !Q_stricmp( funcname, "GE128" ) )
 	{
 		return GLS_ATEST_GE_80;
+	}
+	// HZM gl2 re-port (bug-gl2-foliage): MOHAA foliage alpha-test modes, matching
+	// gl1 tr_shader.c NameToAFunc. Used by the r_blendtrees/r_blendbushes foliage
+	// stages (e.g. TAwintershrub); without these the stage got atest 0 (no test).
+	else if ( !Q_stricmp( funcname, "LT_FOLIAGE1" ) )
+	{
+		return GLS_ATEST_LT_FOLIAGE1;
+	}
+	else if ( !Q_stricmp( funcname, "GE_FOLIAGE1" ) )
+	{
+		return GLS_ATEST_GE_FOLIAGE1;
+	}
+	else if ( !Q_stricmp( funcname, "LT_FOLIAGE2" ) )
+	{
+		return GLS_ATEST_LT_FOLIAGE2;
+	}
+	else if ( !Q_stricmp( funcname, "GE_FOLIAGE2" ) )
+	{
+		return GLS_ATEST_GE_FOLIAGE2;
 	}
 
 	ri.Printf( PRINT_WARNING, "WARNING: invalid alphaFunc name '%s' in shader '%s'\n", funcname, shader.name );
@@ -395,19 +422,19 @@ static void ParseWaveForm( char **text, waveForm_t *wave )
 ParseTexMod
 ===================
 */
-static void ParseTexMod( char *_text, shaderStage_t *stage )
+static void ParseTexMod( char *_text, shaderStage_t *stage, int cntBundle ) // HZM gl2 re-port: bundle-aware (gl1 parity) - multi-bundle water/ocean shaders overflowed bundle[0]
 {
 	const char *token;
 	char **text = &_text;
 	texModInfo_t *tmi;
 
-	if ( stage->bundle[0].numTexMods == TR_MAX_TEXMODS ) {
+	if ( stage->bundle[cntBundle].numTexMods == TR_MAX_TEXMODS ) {
 		ri.Error( ERR_DROP, "ERROR: too many tcMod stages in shader '%s'", shader.name );
 		return;
 	}
 
-	tmi = &stage->bundle[0].texMods[stage->bundle[0].numTexMods];
-	stage->bundle[0].numTexMods++;
+	tmi = &stage->bundle[cntBundle].texMods[stage->bundle[cntBundle].numTexMods];
+	stage->bundle[cntBundle].numTexMods++;
 
 	token = COM_ParseExt( text, qfalse );
 
@@ -607,6 +634,22 @@ static void ParseTexMod( char *_text, shaderStage_t *stage )
 		tmi->type = TMOD_ROTATE;
 	}
 	//
+	// wavetrans / wavetrant - HZM gl2 parity (bug-1242), mirrors renderergl1 tr_shader.c:595-604.
+	// Without these two branches the token falls through to the unknown-tcMod warning below and the
+	// texMod is left as TMOD_NONE: no crash, but the animation silently never happens. That is
+	// exactly what makes gl2 shorelines look dead next to gl1.
+	//
+	else if ( !Q_stricmp( token, "wavetrans" ) )
+	{
+		ParseWaveForm( text, &tmi->wave );
+		tmi->type = TMOD_WAVETRANS;
+	}
+	else if ( !Q_stricmp( token, "wavetrant" ) )
+	{
+		ParseWaveForm( text, &tmi->wave );
+		tmi->type = TMOD_WAVETRANT;
+	}
+	//
 	// entityTranslate
 	//
 	else if ( !Q_stricmp( token, "entityTranslate" ) )
@@ -638,6 +681,10 @@ static qboolean ParseStage( shaderStage_t *stage, char **text )
 	int depthTestBits = 0;
 	int fogBits = 0;
 	qboolean shouldProcess = qtrue;
+	// HZM gl2 re-port (bug-gl2-nopicmip): per-stage image flags, seeded from the
+	// shader-level flags like gl1 ParseStage (gl1 tr_shader.c:851-852)
+	qboolean stageNoMipMaps = shader.noMipMaps;
+	qboolean stageNoPicMip = shader.noPicMip;
 	//=========================
 
 	stage->active = qtrue;
@@ -654,6 +701,21 @@ static qboolean ParseStage( shaderStage_t *stage, char **text )
 		if ( token[0] == '}' )
 		{
 			break;
+		}
+		// HZM gl2 re-port (bug-gl2-nopicmip): stage-level nomipmaps/nopicmip used
+		// to fall into the unknown-parameter branch below and kill the WHOLE
+		// shader -> default texture (misc_outside.shader deepbluesea* animated
+		// ocean on the D-Day/N-Africa beaches, Tanks.shader US_V_Chains). gl1
+		// treats them as per-stage flags (gl1 tr_shader.c:869-878).
+		else if ( !Q_stricmp( token, "nomipmaps" ) )
+		{
+			stageNoMipMaps = qtrue;
+			continue;
+		}
+		else if ( !Q_stricmp( token, "nopicmip" ) )
+		{
+			stageNoPicMip = qtrue;
+			continue;
 		}
 		//
 		// map <name>
@@ -703,10 +765,11 @@ static qboolean ParseStage( shaderStage_t *stage, char **text )
 				imgType_t type = IMGTYPE_COLORALPHA;
 				imgFlags_t flags = IMGFLAG_NONE;
 
-				if (!shader.noMipMaps)
+				// HZM gl2 re-port (bug-gl2-nopicmip): per-stage flags
+				if (!stageNoMipMaps)
 					flags |= IMGFLAG_MIPMAP;
 
-				if (!shader.noPicMip)
+				if (!stageNoPicMip)
 					flags |= IMGFLAG_PICMIP;
 
 				if (stage->type == ST_NORMALMAP || stage->type == ST_NORMALPARALLAXMAP)
@@ -719,7 +782,11 @@ static qboolean ParseStage( shaderStage_t *stage, char **text )
 				}
 				else
 				{
-					if (r_genNormalMaps->integer)
+					// HZM gl2 (r_hzmGenNormals): the path filter is a pure function of the
+					// image path, so the same texture reached through two different shaders
+					// always gets the same answer - which matters, because R_FindImageFile
+					// caches by name and warns on mixed flags.
+					if (r_genNormalMaps->integer || R_HZM_GenNormalsWanted( token ))
 						flags |= IMGFLAG_GENNORMALMAP;
 				}
 
@@ -759,10 +826,11 @@ static qboolean ParseStage( shaderStage_t *stage, char **text )
 				return qfalse;
 			}
 
-			if (!shader.noMipMaps)
+			// HZM gl2 re-port (bug-gl2-nopicmip): per-stage flags
+			if (!stageNoMipMaps)
 				flags |= IMGFLAG_MIPMAP;
 
-			if (!shader.noPicMip)
+			if (!stageNoPicMip)
 				flags |= IMGFLAG_PICMIP;
 
 			if (stage->type == ST_NORMALMAP || stage->type == ST_NORMALPARALLAXMAP)
@@ -775,7 +843,8 @@ static qboolean ParseStage( shaderStage_t *stage, char **text )
 			}
 			else
 			{
-				if (r_genNormalMaps->integer)
+				// HZM gl2 (r_hzmGenNormals) - see the 'map' keyword above
+				if (r_genNormalMaps->integer || R_HZM_GenNormalsWanted( token ))
 					flags |= IMGFLAG_GENNORMALMAP;
 			}
 
@@ -814,10 +883,11 @@ static qboolean ParseStage( shaderStage_t *stage, char **text )
 				if ( num < MAX_IMAGE_ANIMATIONS ) {
 					imgFlags_t flags = IMGFLAG_NONE;
 
-					if (!shader.noMipMaps)
+					// HZM gl2 re-port (bug-gl2-nopicmip): per-stage flags
+					if (!stageNoMipMaps)
 						flags |= IMGFLAG_MIPMAP;
 
-					if (!shader.noPicMip)
+					if (!stageNoPicMip)
 						flags |= IMGFLAG_PICMIP;
 
 					stage->bundle[cntBundle].image[num] = R_FindImageFile( token, IMGTYPE_COLORALPHA, flags );
@@ -1697,6 +1767,12 @@ static qboolean ParseStage( shaderStage_t *stage, char **text )
 			{
 				stage->bundle[cntBundle].tcGen = TCGEN_ENVIRONMENT_MAPPED;
 			}
+			else if ( !Q_stricmp( token, "environmentmodel" ) )
+			{
+				// HZM gl2 re-port: MOHAA model-space env map (scope lenses, glasses, facewrap,
+				// gloves, leather coats). Was falling to the unknown-parm warning = base texcoords.
+				stage->bundle[cntBundle].tcGen = TCGEN_ENVIRONMENT_MAPPED2;
+			}
 			else if ( !Q_stricmp( token, "lightmap" ) )
 			{
 				stage->bundle[cntBundle].tcGen = TCGEN_LIGHTMAP;
@@ -1733,7 +1809,7 @@ static qboolean ParseStage( shaderStage_t *stage, char **text )
 				Q_strcat( buffer, sizeof (buffer), " " );
 			}
 
-			ParseTexMod( buffer, stage );
+			ParseTexMod( buffer, stage, cntBundle );
 
 			continue;
 		}
@@ -1792,10 +1868,11 @@ static qboolean ParseStage( shaderStage_t *stage, char **text )
 				if ( num < MAX_IMAGE_ANIMATIONS ) {
 					imgFlags_t flags = IMGFLAG_NONE;
 
-					if (!shader.noMipMaps)
+					// HZM gl2 re-port (bug-gl2-nopicmip): per-stage flags
+					if (!stageNoMipMaps)
 						flags |= IMGFLAG_MIPMAP;
 
-					if (!shader.noPicMip)
+					if (!stageNoPicMip)
 						flags |= IMGFLAG_PICMIP;
 
 					stage->bundle[cntBundle].image[num] = R_FindImageFile( token, IMGTYPE_COLORALPHA, flags );
@@ -1845,15 +1922,21 @@ static qboolean ParseStage( shaderStage_t *stage, char **text )
 			//	return qfalse;
 			//}
 
+			// HZM gl2 re-port (bug-gl2-nextbundle2): store the combine mode like
+			// gl1 (tr_shader.c:1682-1687); consumed by CreateMultistageFromBundle
+			// and the generic-program second bundle (u_Texture1Env).
 			token = COM_ParseExt(text, qfalse);
 			if (token[0] && !Q_stricmp(token, "add")) {
-				//stage->multitextureEnv = GL_ADD;
+				stage->multitextureEnv = GL_ADD;
 			} else {
-				//stage->multitextureEnv = GL_MODULATE;
+				stage->multitextureEnv = GL_MODULATE;
 			}
 
 			cntBundle++;
-			if (cntBundle > NUM_TEXTURE_BUNDLES) {
+			// HZM gl2 re-port (bug-gl2-texmods-null): was '>', which let
+			// cntBundle reach NUM_TEXTURE_BUNDLES and index bundle[] out of
+			// bounds (latent in gl1 too; retail never exceeds 2 bundles)
+			if (cntBundle >= NUM_TEXTURE_BUNDLES) {
 				ri.Printf(PRINT_WARNING, "WARNING: too many nextBundle commands in shader '%s'\n", shader.name);
 				return qfalse;
 			}
@@ -1905,11 +1988,32 @@ static qboolean ParseStage( shaderStage_t *stage, char **text )
 	}
 
 	//
+	// OPENMOHAA-specific stuff
+	//=========================
+	// HZM gl2 re-port (bug-gl2-foliage): drop stages whose ifCvar / ifCvarnot
+	// condition failed, matching gl1 tr_shader.c. shouldProcess was computed by
+	// the ifCvar handler above but never applied, so ALL conditional stages
+	// rendered at once - e.g. TAwintershrub's r_blendtrees depth-prime stage
+	// (nocolorwrite + alphaFunc GE_FOLIAGE1) drew the whole quad opaque ->
+	// snowy bushes rendered as solid black rectangles on t2l1.
+	if (!shouldProcess) {
+		stage->active = qfalse;
+		stage->rgbGen = CGEN_BAD;
+		return qtrue;
+	}
+	//=========================
+
+	//
 	// if cgen isn't explicitly specified, use either identity or identitylighting
 	//
 	if ( stage->rgbGen == CGEN_BAD ) {
-		if ( blendSrcBits == 0 ||
-			blendSrcBits == GLS_SRCBLEND_ONE || 
+		// HZM gl2 re-port Fix 1: multi-bundle / $lightmap stages with no explicit rgbGen must
+		// default to CGEN_IDENTITY (texture-as-authored), matching gl1 tr_shader.c. Without this
+		// leading branch decal/mark/bullethole stages render black/red under gl2.
+		if ( cntBundle || stage->bundle[0].isLightmap ) {
+			stage->rgbGen = CGEN_IDENTITY;
+		} else if ( blendSrcBits == 0 ||
+			blendSrcBits == GLS_SRCBLEND_ONE ||
 			blendSrcBits == GLS_SRCBLEND_SRC_ALPHA ) {
 			stage->rgbGen = CGEN_IDENTITY_LIGHTING;
 		} else {
@@ -2180,7 +2284,14 @@ static void ParseSkyParms( char **text ) {
 	static char	*suf[6] = {"rt", "bk", "lf", "ft", "up", "dn"};
 	char		pathname[MAX_QPATH];
 	int			i;
-	imgFlags_t imgFlags = IMGFLAG_MIPMAP | IMGFLAG_PICMIP;
+	// HZM gl2 [user 2026-08-02] bug-1295 - IMGFLAG_NO_COMPRESSION on sky faces, matching gl1.
+	// gl1 loads these through R_FindImageFileOld with its shader_force32bit argument
+	// (renderergl1/tr_shader.c:2033), i.e. UNCOMPRESSED 32-bit. gl2 omitted the flag, so with
+	// r_ext_compressed_textures at its default 1 the six sky faces were handed to DXT1 - and DXT1's
+	// 4x4 blocks with RGB565 endpoints are worst exactly where a sky is smoothest, which reads as
+	// "low res and pixelated" (user, on t3l1 and e2l1). The map's own 512x512 source is already
+	// coarse; compressing it on top is the part that is ours to fix. Costs VRAM, not quality.
+	imgFlags_t imgFlags = IMGFLAG_MIPMAP | IMGFLAG_PICMIP | IMGFLAG_NO_COMPRESSION;
 
 	// outerbox
 	token = COM_ParseExt( text, qfalse );
@@ -2400,6 +2511,36 @@ static qboolean ParseShader( char **text )
 			{
 				return qfalse;
 			}
+			//
+			// OPENMOHAA-specific stuff
+			//=========================
+			// HZM gl2 re-port (bug-gl2-foliage): a stage skipped by ifCvar /
+			// ifCvarnot comes back with rgbGen == CGEN_BAD (gl1 convention).
+			// gl1 leaves the slot as an inactive hole; gl2's FinishShader
+			// break-on-inactive loops would strand any stages after such a
+			// hole, so instead wipe the slot back to its InitShaderEx state
+			// and let the next stage reuse it.
+			if ( stages[s].rgbGen == CGEN_BAD ) {
+				int b;
+
+				Com_Memset( &stages[s], 0, sizeof( stages[s] ) );
+				// HZM gl2 re-port (bug-gl2-texmods-null): re-wire EVERY bundle's
+				// texMod storage, exactly like InitShaderEx
+				for ( b = 0; b < NUM_TEXTURE_BUNDLES; b++ ) {
+					stages[s].bundle[b].texMods = texMods[s][b];
+				}
+				VectorSet4( stages[s].normalScale, 0.0f, 0.0f, 0.0f, 0.0f );
+				if ( r_pbr->integer ) {
+					stages[s].specularScale[0] = r_baseGloss->value;
+				} else {
+					stages[s].specularScale[0] =
+					stages[s].specularScale[1] =
+					stages[s].specularScale[2] = r_baseSpecular->value;
+					stages[s].specularScale[3] = r_baseGloss->value;
+				}
+				continue;
+			}
+			//=========================
 			stages[s].active = qtrue;
 			s++;
 
@@ -2577,6 +2718,15 @@ static qboolean ParseShader( char **text )
 			shader.isPortal = qtrue;
 			continue;
 		}
+		// HZM gl2 re-port (bug-gl2-portalsky): portal into the 3D skybox room
+		// (textures/common/skyportal), mirrors gl1 (gl1 tr_shader.c:2378-2383).
+		// Used to fall into the unknown-parameter branch -> default shader.
+		else if ( !Q_stricmp(token, "portalsky") )
+		{
+			shader.sort = SS_PORTALSKY;
+			shader.isPortalSky = qtrue;
+			continue;
+		}
 		// skyparms <cloudheight> <outerbox> <innerbox>
 		else if ( !Q_stricmp( token, "skyparms" ) )
 		{
@@ -2606,6 +2756,14 @@ static qboolean ParseShader( char **text )
 			else if ( !Q_stricmp( token, "back" ) || !Q_stricmp( token, "backside" ) || !Q_stricmp( token, "backsided" ) )
 			{
 				shader.cullType = CT_BACK_SIDED;
+			}
+			// HZM gl2 re-port (bug-gl2-cullfront): accept 'cull front' and friends
+			// (retail textures/fx/sandstorm_sky uses it). Front-sided IS the default
+			// cull, so this only silences the spurious per-load warning; behavior is
+			// identical to gl1 (which also falls through to the warning + default).
+			else if ( !Q_stricmp( token, "front" ) || !Q_stricmp( token, "frontside" ) || !Q_stricmp( token, "frontsided" ) )
+			{
+				shader.cullType = CT_FRONT_SIDED;
 			}
 			else
 			{
@@ -2676,7 +2834,10 @@ static qboolean ParseShader( char **text )
 	//
 	// ignore shaders that don't have any stages, unless it is a sky or fog
 	//
-	if ( s == 0 && !shader.isSky && !(shader.contentFlags & CONTENTS_FOG ) ) {
+	// HZM gl2 re-port (bug-gl2-nodraw): exempt surfaceparm-nodraw shaders like
+	// gl1 (gl1 tr_shader.c:2563) - zero-stage utility shaders (e.g.
+	// textures/common/modelshader) used to fail parse -> default checkerboard.
+	if ( s == 0 && !shader.isSky && !(shader.contentFlags & CONTENTS_FOG ) && !(shader.surfaceFlags & SURF_NODRAW) ) {
 		return qfalse;
 	}
 
@@ -2826,6 +2987,7 @@ static void ComputeVertexAttribs(void)
 					shader.vertexAttribs |= ATTR_LIGHTCOORD;
 					break;
 				case TCGEN_ENVIRONMENT_MAPPED:
+				case TCGEN_ENVIRONMENT_MAPPED2:
 					shader.vertexAttribs |= ATTR_NORMAL;
 					break;
 
@@ -2848,6 +3010,17 @@ static void ComputeVertexAttribs(void)
 				shader.vertexAttribs |= ATTR_NORMAL;
 				break;
 
+			// HZM gl2 re-port (bug-gl2-modellight): CPU-computed model lighting
+			// is delivered through the color attribute (tess.color), spherical
+			// also needs normals for the per-vertex light dot products
+			case CGEN_LIGHTING_GRID:
+				shader.vertexAttribs |= ATTR_COLOR;
+				break;
+			case CGEN_LIGHTING_SPHERICAL:
+			case CGEN_STATIC:
+				shader.vertexAttribs |= ATTR_COLOR | ATTR_NORMAL;
+				break;
+
 			default:
 				break;
 		}
@@ -2860,6 +3033,15 @@ static void ComputeVertexAttribs(void)
 
 			case AGEN_VERTEX:
 			case AGEN_ONE_MINUS_VERTEX:
+			// HZM gl2 parity (bug-1300): the per-vertex distance fade is delivered
+			// through tess.color's alpha channel, so the colour attribute has to be in
+			// the upload set even when the rgbGen would not have asked for it. rgbGen
+			// lightingGrid / lightingSpherical / static already imply ATTR_COLOR, which
+			// covers the shipped foliage; this is for the rgbGen identity + alphaGen
+			// distFade combination, where attr_Color would otherwise resolve to the GL
+			// constant (0,0,0,1) and the fade would be silently dropped.
+			case AGEN_DIST_FADE:
+			case AGEN_ONE_MINUS_DIST_FADE:
 				shader.vertexAttribs |= ATTR_COLOR;
 				break;
 
@@ -2948,6 +3130,18 @@ static void CollapseStagesToLightall(shaderStage_t *diffuse,
 					defs |= LIGHTDEF_USE_PARALLAXMAP;
 
 				VectorSet4(diffuse->normalScale, r_baseNormalX->value, r_baseNormalY->value, 1.0f, r_baseParallax->value);
+
+				// HZM gl2 (r_hzmGenNormals): mark the stage IF that normal map is one we
+				// synthesised. This is the point where the decision is finally safe to make -
+				// the enclosing `else if` already established (lightmap || useLightVector ||
+				// useLightVertex), i.e. the stage really did resolve to a light type, so a
+				// generated map bound here will actually be sampled. Authored _n / _nh art
+				// deliberately does NOT get marked: it keeps r_baseNormalX/Y and gets no
+				// r_hzmSpecular, because a real normal map has no need of either.
+				if (R_HZM_IsGeneratedNormal(normalImg))
+				{
+					diffuse->hzmGenNormal = qtrue;
+				}
 			}
 		}
 	}
@@ -3064,6 +3258,7 @@ static int CollapseStagesToGLSL(void)
 				case TCGEN_TEXTURE:
 				case TCGEN_LIGHTMAP:
 				case TCGEN_ENVIRONMENT_MAPPED:
+				case TCGEN_ENVIRONMENT_MAPPED2:
 				case TCGEN_VECTOR:
 					break;
 				default:
@@ -3318,7 +3513,17 @@ sortedIndex.
 ==============
 */
 static void FixRenderCommandList( int newShader ) {
-	renderCommandList_t	*cmdList = &backEndData->commands;
+	renderCommandList_t	*cmdList;
+
+	// HZM (settings-apply crash, GeneratePermanentShader+0x487 = inlined SortNewShader ->
+	// here): during vid_restart / renderer teardown backEndData can be NULL while a late
+	// shader registration still runs. The old `if (cmdList)` guarded &backEndData->commands
+	// - a near-NULL OFFSET that is never NULL - so the walk dereferenced near-NULL
+	// deterministically. Guard the base pointer itself.
+	if ( !backEndData ) {
+		return;
+	}
+	cmdList = &backEndData->commands;
 
 	if( cmdList ) {
 		const void *curCmd = cmdList->cmds;
@@ -3340,25 +3545,24 @@ static void FixRenderCommandList( int newShader ) {
 				break;
 				}
 			case RC_DRAW_SURFS:
+			case RC_SPRITE_SURFS:
 				{
 				int i;
 				drawSurf_t	*drawSurf;
-				shader_t	*shader;
-				int			fogNum;
-				int			entityNum;
-				int			dlightMap;
-				int         pshadowMap;
 				int			sortedIndex;
 				const drawSurfsCommand_t *ds_cmd =  (const drawSurfsCommand_t *)curCmd;
-				qboolean	bStaticModel;
 
 				for( i = 0, drawSurf = ds_cmd->drawSurfs; i < ds_cmd->numDrawSurfs; i++, drawSurf++ ) {
-					R_DecomposeSort( drawSurf->sort, &entityNum, &shader, &fogNum, &dlightMap, &pshadowMap,
-						&bStaticModel );
-                    sortedIndex = (( drawSurf->sort >> QSORT_SHADERNUM_SHIFT ) & (MAX_SHADERS-1));
+					sortedIndex = (( drawSurf->sort >> QSORT_SHADERNUM_SHIFT ) & (MAX_SORTED_SHADERS-1));
 					if( sortedIndex >= newShader ) {
 						sortedIndex++;
-						drawSurf->sort = (sortedIndex << QSORT_SHADERNUM_SHIFT) | entityNum | ( fogNum << QSORT_FOGNUM_SHIFT ) | ( (int)pshadowMap << QSORT_PSHADOW_SHIFT) | (int)dlightMap;
+						// replace only the shader-index field: the bits below
+						// QSORT_SHADERNUM_SHIFT hold entity/fog/pshadow/dlight and
+						// the static-model bit for scene surfs, but a z-distance
+						// for sprite surfs, so they must be preserved verbatim
+						// rather than repacked field-by-field
+						drawSurf->sort = ( drawSurf->sort & ( ( 1u << QSORT_SHADERNUM_SHIFT ) - 1 ) )
+							| ( sortedIndex << QSORT_SHADERNUM_SHIFT );
 					}
 				}
 				curCmd = (const void *)(ds_cmd + 1);
@@ -3374,6 +3578,48 @@ static void FixRenderCommandList( int newShader ) {
 				{
 				const swapBuffersCommand_t *sb_cmd = (const swapBuffersCommand_t *)curCmd;
 				curCmd = (const void *)(sb_cmd + 1);
+				break;
+				}
+			case RC_SCREENSHOT:
+				{
+				const screenshotCommand_t *ss_cmd = (const screenshotCommand_t *)curCmd;
+				curCmd = (const void *)(ss_cmd + 1);
+				break;
+				}
+			case RC_VIDEOFRAME:
+				{
+				const videoFrameCommand_t *vf_cmd = (const videoFrameCommand_t *)curCmd;
+				curCmd = (const void *)(vf_cmd + 1);
+				break;
+				}
+			case RC_COLORMASK:
+				{
+				const colorMaskCommand_t *cm_cmd = (const colorMaskCommand_t *)curCmd;
+				curCmd = (const void *)(cm_cmd + 1);
+				break;
+				}
+			case RC_CLEARDEPTH:
+				{
+				const clearDepthCommand_t *cd_cmd = (const clearDepthCommand_t *)curCmd;
+				curCmd = (const void *)(cd_cmd + 1);
+				break;
+				}
+			case RC_CAPSHADOWMAP:
+				{
+				const capShadowmapCommand_t *cs_cmd = (const capShadowmapCommand_t *)curCmd;
+				curCmd = (const void *)(cs_cmd + 1);
+				break;
+				}
+			case RC_POSTPROCESS:
+				{
+				const postProcessCommand_t *pp_cmd = (const postProcessCommand_t *)curCmd;
+				curCmd = (const void *)(pp_cmd + 1);
+				break;
+				}
+			case RC_EXPORT_CUBEMAPS:
+				{
+				const exportCubemapsCommand_t *ec_cmd = (const exportCubemapsCommand_t *)curCmd;
+				curCmd = (const void *)(ec_cmd + 1);
 				break;
 				}
 			case RC_END_OF_LIST:
@@ -3435,6 +3681,22 @@ static shader_t *GeneratePermanentShader( void ) {
 		return tr.defaultShader;
 	}
 
+	// HZM (engine-limits audit): tr.shaders[] can hold MAX_SHADERS entries, but a drawsurf sort
+	// key only carries QSORT_SHADERNUM_BITS of sortedIndex (see tr_local.h). Past
+	// MAX_SORTED_SHADERS the index silently aliases in R_DecomposeSort and surfaces render with
+	// an unrelated shader. gl2's layout currently makes MAX_SORTED_SHADERS == MAX_SHADERS, so
+	// this branch is unreachable today - it exists so that a future repack of the sort key
+	// cannot reintroduce the silent aliasing unnoticed.
+	// "==" makes this fire exactly once, at the moment the ceiling is crossed.
+	if ( tr.numShaders == MAX_SORTED_SHADERS ) {
+		ri.Printf( PRINT_WARNING,
+			"^1WARNING: shader count has passed MAX_SORTED_SHADERS (%d).\n"
+			"^1  The drawsurf sort key only encodes %d bits of shader index at "
+			"QSORT_SHADERNUM_SHIFT %d, so every shader from here on will be drawn with the WRONG "
+			"shader (aliased onto sortedIndex %% %d). Repack the sort key or cut shader count.\n",
+			MAX_SORTED_SHADERS, QSORT_SHADERNUM_BITS, QSORT_SHADERNUM_SHIFT, MAX_SORTED_SHADERS );
+	}
+
 	newShader = ri.Hunk_Alloc( sizeof( shader_t ), h_low );
 
 	*newShader = shader;
@@ -3462,8 +3724,15 @@ static shader_t *GeneratePermanentShader( void ) {
 
 		for ( b = 0 ; b < NUM_TEXTURE_BUNDLES ; b++ ) {
 			size = newShader->stages[i]->bundle[b].numTexMods * sizeof( texModInfo_t );
-			newShader->stages[i]->bundle[b].texMods = ri.Hunk_Alloc( size, h_low );
-			Com_Memcpy( newShader->stages[i]->bundle[b].texMods, stages[i].bundle[b].texMods, size );
+			// HZM gl2 re-port (bug-gl2-ztagmalloc): guard with if(size) like gl1
+			// GeneratePermanentShader. ri.Hunk_Alloc routes to Z_TagMalloc, which
+			// rejects zero-size allocs - every tcMod-less stage bundle (7 bundles
+			// per stage, nearly all empty) spammed "Z_TagMalloc, Negative or zero
+			// size 0 tag 12" on each shader registration.
+			if ( size ) {
+				newShader->stages[i]->bundle[b].texMods = ri.Hunk_Alloc( size, h_low );
+				Com_Memcpy( newShader->stages[i]->bundle[b].texMods, stages[i].bundle[b].texMods, size );
+			}
 		}
 	}
 
@@ -3677,12 +3946,25 @@ static void InitShaderEx( const char *name, int lightmapIndex, int realLightmapI
 	Com_Memset( &shader, 0, sizeof( shader ) );
 	Com_Memset( &stages, 0, sizeof( stages ) );
 
+	// HZM gl1-parity fix: gl1 restores the sprite scale immediately after the memsets
+	// (renderergl1/tr_shader.c:3439). gl2 never did, so any shader that declares
+	// `spritegen ...` WITHOUT an explicit `spritescale` (the scale keyword is optional -
+	// see ParseSprite, tr_shader.c:2778 vs :2789) was left at scale 0 instead of 1, i.e.
+	// a degenerate zero-size sprite. Must run AFTER the memsets and BEFORE any parsing.
+	shader.sprite.scale = 1.0f;
+
 	Q_strncpyz( shader.name, name, sizeof( shader.name ) );
 	shader.lightmapIndex = lightmapIndex;
 	shader_realLightmapIndex = realLightmapIndex;
 
 	for ( i = 0 ; i < MAX_SHADER_STAGES ; i++ ) {
-		stages[i].bundle[0].texMods = texMods[i];
+		int b;
+
+		// HZM gl2 re-port (bug-gl2-texmods-null): every bundle needs its own
+		// texMod backing - the bundle-aware ParseTexMod writes bundle[cntBundle]
+		for ( b = 0; b < NUM_TEXTURE_BUNDLES; b++ ) {
+			stages[i].bundle[b].texMods = texMods[i][b];
+		}
 
 		// default normal/specular
 		VectorSet4(stages[i].normalScale, 0.0f, 0.0f, 0.0f, 0.0f);
@@ -3729,6 +4011,11 @@ static shader_t *FinishShader( void ) {
 	//
 	// set sky stuff appropriate
 	//
+	// HZM gl2 re-port (bug-gl2-portalsky): mirrors gl1 FinishShader
+	// (gl1 tr_shader.c:3117-3119)
+	if ( shader.isPortalSky ) {
+		shader.sort = SS_PORTALSKY;
+	}
 	if ( shader.isSky ) {
 		shader.sort = SS_ENVIRONMENT;
 	}
@@ -3739,6 +4026,14 @@ static shader_t *FinishShader( void ) {
 	if ( shader.polygonOffset && !shader.sort ) {
 		shader.sort = SS_DECAL;
 	}
+
+	// HZM gl2 re-port (bug-gl2-modellight): mirrors gl1 FinishShader
+	// (gl1 tr_shader.c:3131-3132)
+	shader.needsLGrid = qfalse;
+	shader.needsLSpherical = qfalse;
+	// HZM gl2 parity (bug-1300)
+	shader.needsDistFade = qfalse;
+	shader.alphaGenWarned = qfalse;
 
 	//
 	// set appropriate stage information
@@ -3756,6 +4051,20 @@ static shader_t *FinishShader( void ) {
 			pStage->active = qfalse;
 			stage++;
 			continue;
+		}
+
+		// HZM gl2 re-port (bug-gl2-modellight): flag grid/spherical-lit shaders
+		// for the backend model-lighting setup (gl1 tr_shader.c:3152-3156)
+		if (pStage->rgbGen == CGEN_LIGHTING_GRID) {
+			shader.needsLGrid = qtrue;
+		} else if (pStage->rgbGen == CGEN_LIGHTING_SPHERICAL || pStage->rgbGen == CGEN_STATIC) {
+			shader.needsLSpherical = qtrue;
+		}
+
+		// HZM gl2 parity (bug-1300): flag the two PER-VERTEX distance-fade modes so
+		// RB_FillDistFadeAlpha can skip every shader that never asked for one.
+		if (pStage->alphaGen == AGEN_DIST_FADE || pStage->alphaGen == AGEN_ONE_MINUS_DIST_FADE) {
+			shader.needsDistFade = qtrue;
 		}
 
 		//
@@ -3889,6 +4198,23 @@ static shader_t *FinishShader( void ) {
 	// compute number of passes
 	//
 	shader.numUnfoggedPasses = stage;
+
+	// HZM gl2 re-port (bug-gl2-foliage-white): flag alpha-tested (cutout) shaders
+	// so the depth prepass can skip them (gl1 parity - gl1 has no prepass). Any
+	// active stage carrying an ATEST bit marks the whole shader.
+	shader.hasAlphaTest = qfalse;
+	{
+		int atsIdx;
+		for ( atsIdx = 0; atsIdx < MAX_SHADER_STAGES; atsIdx++ ) {
+			if ( !stages[atsIdx].active ) {
+				continue;
+			}
+			if ( stages[atsIdx].stateBits & GLS_ATEST_BITS ) {
+				shader.hasAlphaTest = qtrue;
+				break;
+			}
+		}
+	}
 
 	// fogonly shaders don't have any normal passes
 	if (stage == 0 && !shader.isSky)
@@ -4034,6 +4360,41 @@ shader_t *R_FindShader( const char *name, int lightmapIndex, qboolean mipRawImag
 	return R_FindShaderEx( name, lightmapIndex, mipRawImage, lightmapIndex );
 }
 
+/*
+===============
+R_ShaderSystemReady
+
+HZM gl2 (bug-1145, "advanced settings apply crashes"): true once R_Init has run for the
+CURRENT load of this DLL.
+
+vid_restart tears the renderer DLL down and loads it again (cl_main.cpp CL_ShutdownRef ->
+Sys_UnloadLibrary, CL_InitRef -> Sys_LoadDll), so every renderer global - including every
+cvar_t* - is back to NULL. renderergl1 calls R_Init() from GetRefAPI, i.e. at DLL load, so
+its cvars are live the moment CL_InitRef returns. rend2/gl2 calls R_Init() from
+RE_BeginRegistration instead, which does not happen until CL_StartHunkUsers.
+
+CL_Vid_Restart_f calls UI_ResolutionChange() BETWEEN those two points, and that walks the
+UI's regged-material list re-registering every menu shader. Under gl2 those calls landed in
+a completely uninitialized renderer and died on the first cvar read in InitShaderEx
+(r_pbr->integer = offset 0x30 off a NULL cvar_t; verified from the minidump).
+
+Refusing the registration is safe and complete: CL_StartHunkUsers calls UI_ResolutionChange()
+a second time immediately after CL_BeginRegistration (cl_main.cpp), so every material the
+UI asks for here is re-registered for real a few milliseconds later, against a live renderer.
+Building shaders here would be pointless anyway - RE_BeginRegistration's ri.Hunk_Clear()
+would free them again before the first frame.
+
+Sentinel is tr.defaultShader, not tr.registered: R_Init zeroes tr and CreateInternalShaders
+assigns tr.defaultShader, so it is non-NULL from partway through R_Init onwards - whereas
+tr.registered only goes true at the END of RE_BeginRegistration and would wrongly refuse
+legitimate registrations in between. CreateInternalShaders reaches InitShaderEx directly
+(not via R_FindShader), so this never blocks the renderer's own bring-up.
+===============
+*/
+static qboolean R_ShaderSystemReady( void ) {
+	return (qboolean)(tr.defaultShader != NULL);
+}
+
 shader_t *R_FindShaderEx( const char *name, int lightmapIndex, qboolean mipRawImage, int realLightmapIndex ) {
 	char		strippedName[MAX_QPATH];
 	int			hash;
@@ -4109,7 +4470,11 @@ shader_t *R_FindShaderEx( const char *name, int lightmapIndex, qboolean mipRawIm
 		{
 			flags |= IMGFLAG_MIPMAP | IMGFLAG_PICMIP;
 
-			if (r_genNormalMaps->integer)
+			// HZM gl2 (r_hzmGenNormals). This is the implicit-shader path and it matters most
+			// of the three: the majority of MOHAA BSP surfaces reference a bare texture path
+			// with no .shader entry, land here, and get the two-pass lightmap stage pair below
+			// - which CollapseStagesToGLSL folds into LIGHTDEF_USE_LIGHTMAP.
+			if (r_genNormalMaps->integer || R_HZM_GenNormalsWanted( name ))
 				flags |= IMGFLAG_GENNORMALMAP;
 		}
 		else
@@ -4143,10 +4508,12 @@ shader_t *R_FindShaderEx( const char *name, int lightmapIndex, qboolean mipRawIm
 		stages[0].stateBits = GLS_DEFAULT;
 	} else if ( shader.lightmapIndex == LIGHTMAP_2D ) {
 		// GUI elements
+		// HZM gl2 re-port Fix 2: match gl1 - default 2D pics take the current global 2D tint
+		// (RE_SetColor / backEnd.color2D), not stock-ioq3 vertex color.
 		stages[0].bundle[0].image[0] = image;
 		stages[0].active = qtrue;
-		stages[0].rgbGen = CGEN_VERTEX;
-		stages[0].alphaGen = AGEN_VERTEX;
+		stages[0].rgbGen = CGEN_GLOBAL_COLOR;
+		stages[0].alphaGen = AGEN_GLOBAL_ALPHA;
 		stages[0].stateBits = GLS_DEPTHTEST_DISABLE |
 			  GLS_SRCBLEND_SRC_ALPHA |
 			  GLS_DSTBLEND_ONE_MINUS_SRC_ALPHA;
@@ -4181,6 +4548,13 @@ shader_t *R_FindShaderEx( const char *name, int lightmapIndex, qboolean mipRawIm
 
 
 qhandle_t RE_RegisterShaderFromImage(const char *name, int lightmapIndex, image_t *image, qboolean mipRawImage) {
+	// HZM gl2 (bug-1145): refuse registration before R_Init has built the shader system.
+	// See R_ShaderSystemReady - vid_restart reloads this DLL and the UI re-registers its
+	// materials before R_Init runs, which used to fault on a NULL cvar inside InitShaderEx.
+	if ( !R_ShaderSystemReady() ) {
+		return 0;
+	}
+
 	int			hash;
 	shader_t	*sh;
 
@@ -4229,10 +4603,12 @@ qhandle_t RE_RegisterShaderFromImage(const char *name, int lightmapIndex, image_
 		stages[0].stateBits = GLS_DEFAULT;
 	} else if ( shader.lightmapIndex == LIGHTMAP_2D ) {
 		// GUI elements
+		// HZM gl2 re-port Fix 2: match gl1 - default 2D pics take the current global 2D tint
+		// (RE_SetColor / backEnd.color2D), not stock-ioq3 vertex color.
 		stages[0].bundle[0].image[0] = image;
 		stages[0].active = qtrue;
-		stages[0].rgbGen = CGEN_VERTEX;
-		stages[0].alphaGen = AGEN_VERTEX;
+		stages[0].rgbGen = CGEN_GLOBAL_COLOR;
+		stages[0].alphaGen = AGEN_GLOBAL_ALPHA;
 		stages[0].stateBits = GLS_DEPTHTEST_DISABLE |
 			  GLS_SRCBLEND_SRC_ALPHA |
 			  GLS_DSTBLEND_ONE_MINUS_SRC_ALPHA;
@@ -4279,6 +4655,13 @@ way to ask for different implicit lighting modes (vertex, lightmap, etc)
 ====================
 */
 qhandle_t RE_RegisterShaderLightMap( const char *name, int lightmapIndex ) {
+	// HZM gl2 (bug-1145): refuse registration before R_Init has built the shader system.
+	// See R_ShaderSystemReady - vid_restart reloads this DLL and the UI re-registers its
+	// materials before R_Init runs, which used to fault on a NULL cvar inside InitShaderEx.
+	if ( !R_ShaderSystemReady() ) {
+		return 0;
+	}
+
 	shader_t	*sh;
 
 	if ( strlen( name ) >= MAX_QPATH ) {
@@ -4313,6 +4696,13 @@ way to ask for different implicit lighting modes (vertex, lightmap, etc)
 ====================
 */
 qhandle_t RE_RegisterShader( const char *name ) {
+	// HZM gl2 (bug-1145): refuse registration before R_Init has built the shader system.
+	// See R_ShaderSystemReady - vid_restart reloads this DLL and the UI re-registers its
+	// materials before R_Init runs, which used to fault on a NULL cvar inside InitShaderEx.
+	if ( !R_ShaderSystemReady() ) {
+		return 0;
+	}
+
 	shader_t	*sh;
 
 	if ( strlen( name ) >= MAX_QPATH ) {
@@ -4343,6 +4733,13 @@ For menu graphics that should never be picmiped
 ====================
 */
 qhandle_t RE_RegisterShaderNoMip( const char *name ) {
+	// HZM gl2 (bug-1145): refuse registration before R_Init has built the shader system.
+	// See R_ShaderSystemReady - vid_restart reloads this DLL and the UI re-registers its
+	// materials before R_Init runs, which used to fault on a NULL cvar inside InitShaderEx.
+	if ( !R_ShaderSystemReady() ) {
+		return 0;
+	}
+
 	shader_t	*sh;
 
 	if ( strlen( name ) >= MAX_QPATH ) {
@@ -4701,12 +5098,44 @@ static void CreateMultistageFromBundle() {
 
 	for (stage = 0; stage < MAX_SHADER_STAGES; stage++ ) {
 		shaderStage_t* pStage = &stages[stage];
+		int blendBits;
 
 		if (!pStage->active) {
 			break;
 		}
 
-        if (pStage->bundle[TB_LIGHTMAP].isLightmap) {
+		if (!pStage->bundle[1].image[0]) {
+			continue;	// single-bundle stage
+		}
+
+		// HZM gl2 re-port (bug-gl2-nextbundle2): gl1 defaults tcGen for EVERY
+		// bundle (gl1 tr_shader.c:3161-3173); gl2's FinishShader loop only
+		// touches bundle[0], so default both bundles here before deciding.
+		for (bundle = 0; bundle < 2; bundle++) {
+			if (pStage->bundle[bundle].tcGen == TCGEN_BAD) {
+				pStage->bundle[bundle].tcGen =
+					pStage->bundle[bundle].isLightmap ? TCGEN_LIGHTMAP : TCGEN_TEXTURE;
+			}
+		}
+
+		// HZM gl2 re-port (bug-gl2-nextbundle2): lightmap-FIRST pair
+		// ('map $lightmap' + nextbundle texture, mohcommon window32_lightmapalpha /
+		// bordered_window_glass) - exchange bundles so the texture is the diffuse
+		// (gl1 tr_shader.c:3175-3182); previously these drew the raw lightmap.
+		if (pStage->bundle[0].isLightmap) {
+			textureBundle_t tmpBundle = pStage->bundle[0];
+			pStage->bundle[0] = pStage->bundle[1];
+			pStage->bundle[1] = tmpBundle;
+		}
+
+		blendBits = pStage->stateBits & (GLS_SRCBLEND_BITS | GLS_DSTBLEND_BITS);
+
+        if (pStage->bundle[TB_LIGHTMAP].isLightmap && !blendBits
+			&& pStage->multitextureEnv != GL_ADD) {
+			// opaque texture x lightmap: split into a separate DST_COLOR*ZERO
+			// filter pass (original gl2 path). CollapseStagesToGLSL re-merges the
+			// pair into one lightall draw; even unmerged the two passes composite
+			// correctly because the opaque base wrote depth (DEPTHFUNC_EQUAL).
 			shaderStage_t* newStage = NULL;
 
 			for (i = stage; i < MAX_SHADER_STAGES; i++) {
@@ -4723,7 +5152,23 @@ static void CreateMultistageFromBundle() {
                 newStage->bundle[TB_COLORMAP] = pStage->bundle[TB_LIGHTMAP];
                 memset(&newStage->bundle[TB_LIGHTMAP], 0, sizeof(textureBundle_t));
 				memset(&pStage->bundle[TB_LIGHTMAP], 0, sizeof(textureBundle_t));
+				newStage->multitextureEnv = 0;
+				pStage->multitextureEnv = 0;
 				stage = i;
+			}
+		} else {
+			// HZM gl2 re-port (bug-gl2-nextbundle2): every other dual-bundle stage -
+			// two-texture effects (tracers/snow/dust cones/waterfalls, modulate or
+			// add) and BLENDED tex+lightmap stages (the dark-decal-rectangle class:
+			// a split framebuffer-multiply pass would darken the whole quad outside
+			// the decal's alpha shape) - renders in ONE pass through the generic
+			// program's second bundle (u_Texture1Env), matching gl1's single-pass
+			// multitexture (DrawMultitextured). Mark the stage ST_GLSL so
+			// CollapseStagesToGLSL leaves it alone (it would repurpose
+			// bundle[TB_LIGHTMAP] as a lightall lightmap and lose the 2nd texture).
+			pStage->type = ST_GLSL;
+			if (!pStage->multitextureEnv) {
+				pStage->multitextureEnv = GL_MODULATE; // nextbundle default combine
 			}
 		}
 	}
@@ -4732,6 +5177,13 @@ static void CreateMultistageFromBundle() {
 //=========================
 
 qhandle_t RE_RefreshShaderNoMip(const char* name) {
+	// HZM gl2 (bug-1145): refuse registration before R_Init has built the shader system.
+	// See R_ShaderSystemReady - vid_restart reloads this DLL and the UI re-registers its
+	// materials before R_Init runs, which used to fault on a NULL cvar inside InitShaderEx.
+	if ( !R_ShaderSystemReady() ) {
+		return 0;
+	}
+
 	shader_t* sh;
 	char strippedName[64];
 	int hash;

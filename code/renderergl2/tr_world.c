@@ -339,6 +339,16 @@ static void R_AddWorldSurface( msurface_t *surf, int dlightBits, int pshadowBits
 		pshadowBits = ( pshadowBits != 0 );
 	}
 
+	// HZM gl2 re-port (bug-gl2-portalsky): route sky portal surfaces to the
+	// sky portal system instead of the normal draw list, mirroring gl1
+	// R_AddWorldSurface (gl1 tr_world.c:462-466). Without this the 3D skybox
+	// scene behind every retail sky never renders.
+	if (surf->shader && surf->shader->isPortalSky) {
+		// Sky portal
+		R_Sky_AddSurf(surf);
+		return;
+	}
+
 	R_AddDrawSurf( surf->data, surf->shader, surf->fogIndex, dlightBits, pshadowBits, surf->cubemapIndex );
 }
 
@@ -558,6 +568,14 @@ static void R_RecursiveWorldNode( mnode_t *node, uint32_t planeBits, uint32_t dl
 		if ( node->maxs[2] > tr.viewParms.visBounds[1][2] ) {
 			tr.viewParms.visBounds[1][2] = node->maxs[2];
 		}
+
+		// HZM gl2 re-port (bug-gl2-portalsky): track the current leaf for
+		// R_Sky_AddSurf's bounds accumulation, mirroring gl1
+		// (gl1 tr_world.c:635). Note gl2 defers the actual R_AddWorldSurface
+		// calls until after the recursion, so this holds the LAST visited
+		// leaf at add time; harmless - the accumulated bounds are only read
+		// by R_Sky_ChangeFrustum, which has no callers in gl1 either.
+		tr.portalsky.cntNode = node;
 
 		// add surfaces
 		view = tr.world->marksurfaces + node->firstmarksurface;
@@ -784,7 +802,17 @@ void R_AddWorldSurfaces (void) {
 	//
 	// OPENMOHAA-specific stuff
 	//=========================
-    if (r_drawterrain->integer && tr.refdef.render_terrain && !tr.viewParms.isPortalSky) {
+    // HZM gl2 (bug-1156): NEVER run the terrain frame prep from a depth-shadow view.
+    // R_TerrainPrepareFrame is DELTA-based - it compares the camera against g_vTerOrg/g_vTerFwd
+    // from its previous invocation (tr_terrain.c) - and the sun-shadow cascade views are added
+    // BEFORE the main view (tr_scene.c). So with cascade shadows on, a shadow view consumed the
+    // camera delta first and, because a shadow view's viewParms are zeroed (farplane_distance 0),
+    // set g_fFogDistance to 999999. The main view then saw a zero delta, skipped the update
+    // entirely, and inherited that 999999 - which is the terrain patch cull distance, so terrain
+    // distance culling silently switched off for the camera.
+    // Terrain is not needed for shadow casting resolution anyway, so skipping is free.
+    if (r_drawterrain->integer && tr.refdef.render_terrain && !tr.viewParms.isPortalSky
+        && !(tr.viewParms.flags & VPF_DEPTHSHADOW)) {
         R_TerrainPrepareFrame();
     }
     //=========================

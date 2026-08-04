@@ -407,6 +407,12 @@ qboolean Player::CondAbleToDefuse(Conditional& condition)
     if (!weapon) {
         weapon = GetActiveWeapon(WEAPON_OFFHAND);
     }
+    // HZM 07-19 (bug-915): both slots can be empty for a frame (weapon switch, DBNO/revive takeall
+    // window) while the detector statemap still evaluates ABLE_TO_DEFUSE -> NULL deref crash while
+    // "using the mine sweeper". No weapon = nothing to defuse with.
+    if (!weapon) {
+        return false;
+    }
 
     Vector vForward, vRight, vUp;
     AngleVectors(m_vViewAng, vForward, vRight, vUp);
@@ -421,6 +427,11 @@ qboolean Player::CondCanPlaceLandmine(Conditional& condition)
     Weapon *weapon = GetActiveWeapon(WEAPON_MAIN);
     if (!weapon) {
         weapon = GetActiveWeapon(WEAPON_OFFHAND);
+    }
+    // HZM 07-19 (bug-915): same guard as CondAbleToDefuse - both slots empty for a frame while the
+    // statemap evaluates CAN_PLACE_LANDMINE -> GetMuzzlePosition on NULL.
+    if (!weapon) {
+        return false;
     }
 
     Vector vPos, vForward, vRight, vUp, vBarrel;
@@ -995,6 +1006,14 @@ qboolean Player::CondAttackButtonSecondary(Conditional& condition)
 qboolean Player::CondCoopSprinting(Conditional& condition)
 {
     return m_bCoopSprinting;
+}
+
+// HZM coop [user 2026-08-02] bug-1291 - low-health limp state for the legs statemap
+// (m_bCoopLimping, computed in TickLimp: health/max_health below coop_limpStart, on the ground,
+// not downed//vehicle/turret). Drives the LIMP_* legs states in coop_mod/player_legs.st.
+qboolean Player::CondCoopLimping(Conditional& condition)
+{
+    return m_bCoopLimping;
 }
 
 qboolean Player::CondCoopAds(Conditional& condition)
@@ -2167,6 +2186,7 @@ Condition<Player> Player::m_conditions[] = {
     {"ATTACK_SECONDARY_BUTTON",         &Player::CondAttackButtonSecondary   },
     {"COOP_ADS",                        &Player::CondCoopAds                 }, // HZM coop - aim down sights (dedicated bind), see CondCoopAds
     {"COOP_SPRINTING",                  &Player::CondCoopSprinting           }, // HZM coop - sprint state for the legs statemap
+    {"COOP_LIMPING",                    &Player::CondCoopLimping             }, // HZM coop - low-health limp gait for the legs statemap
     {"COOP_COVER",                      &Player::CondCoopCover               }, // HZM coop - take cover: standing back-to-wall pose valid [214]
     {"COOP_COVER_LOW",                  &Player::CondCoopCoverLow            }, // HZM coop - take cover: crouched low-cover pose valid [214]
     {"COOP_COVER_PEEK",                 &Player::CondCoopCoverPeek           }, // HZM coop - take cover: RMB peek-aim active [215]

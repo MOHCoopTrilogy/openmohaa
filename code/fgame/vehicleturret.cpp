@@ -491,6 +491,11 @@ void VehicleTurretGun::TurretEndUsed(void)
 void VehicleTurretGun::TurretUsed(Sentient *pEnt)
 {
     if (!owner) {
+        // HZM coop [user 08-02]: same DBNO mount refusal as TurretGun::P_TurretUsed. Vehicle
+        // turrets (tank/jeep guns) are a separate code path and need their own check.
+        if (pEnt && pEnt->IsSubclassOfPlayer() && static_cast<Player *>(pEnt)->IsCoopDbno()) {
+            return;
+        }
         TurretBeginUsed(pEnt);
         return;
     }
@@ -988,9 +993,15 @@ void VehicleTurretGun::UpdateOwner(Sentient *pOwner)
         // HZM coop - third-person gunner must SEE the world gun (vanilla filters it from the
         // owner via SVF_NOTSINGLECLIENT because the 1P view uses the eyes-bone viewmodel, which
         // the cgame now skips in 3P). Toggled live off the u_view3p userinfo mirror.
-        if (player->m_bCoopView3p) {
+        // [user 07-17] bug-647: only filter when a 1P viewmodel actually REPLACES the gun
+        // (m_pViewModel, mirroring weapturret.cpp's guard). Remote-control cannons (e1l1/e3l1/
+        // t3l2 panzers, King Tiger) never get a viewmodel - filtering them left a first-person
+        // driver with an INVISIBLE turret. Also target the OWNING client: r.singleClient was
+        // never set, so the hide always hit client 0 (the listen host) regardless of who manned.
+        if (player->m_bCoopView3p || !m_pViewModel) {
             edict->r.svFlags &= ~SVF_NOTSINGLECLIENT;
         } else {
+            edict->r.singleClient = player->edict->s.number;
             edict->r.svFlags |= SVF_NOTSINGLECLIENT;
         }
     }

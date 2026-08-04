@@ -5818,6 +5818,35 @@ void Vehicle::KickSuspension(Vector vDirection, float fForce)
 
 /*
 ====================
+Vehicle::CoopZombieRescue
+
+HZM coop [user 2026-08-03] bug-1323 - "the tank/truck won't blow up". Entity::DamageEvent refuses
+to process ANY damage once health <= 0 (entity.cpp:2705), and script 'hurt' routes through the
+same path - so a vehicle that reaches health <= 0 without its death VISIBLY completing (e2l1 AB41
+at -50, starttruck2 at -150, both probe-confirmed live) is entombed: no shot, airstrike or
+scripted hurt can ever touch it again, and every 'waittill death' waiter stays blocked forever.
+
+The rescue: on the next incoming damage event, if health is already <= 0 but takedamage is still
+active, reset to health 1 + deadflag DEAD_NO so THIS event re-crosses zero and fires EV_Killed
+properly. The takedamage gate excludes every vehicle that completed DrivableVehicle::Killed's
+visible death path (it sets DAMAGE_NO), so genuine wrecks are never re-animated; the
+!m_bRemoveOnDeath "script owns the visuals" branch leaves takedamage alive, which is exactly the
+population that can entomb. The print is machine-parseable so the entry path into the state can
+finally be identified from a session log.
+====================
+*/
+void Vehicle::CoopZombieRescue(void)
+{
+    if (health <= 0.0f && takedamage != DAMAGE_NO) {
+        gi.Printf("^~^~^ VEHZOMBIE ent=%d tn='%s' hp=%.0f deadflag=%d - rescued, this hit kills properly\n",
+                  entnum, TargetName().c_str(), health, deadflag);
+        deadflag = DEAD_NO;
+        health   = 1.0f;
+    }
+}
+
+/*
+====================
 Vehicle::EventDamage
 ====================
 */
@@ -5827,6 +5856,8 @@ void Vehicle::EventDamage(Event *ev)
     Vector  vDirection;
     float   fForce;
     int     i;
+
+    CoopZombieRescue(); // HZM coop - bug-1323
 
     if (!IsDamagedBy(ev->GetEntity(3))) {
         return;
@@ -7088,10 +7119,21 @@ VehicleCollisionEntity *Vehicle::GetCollisionEntity(void)
 }
 
 CLASS_DECLARATION(Vehicle, DrivableVehicle, "script_drivablevehicle") {
-    {&EV_Damage, &Entity::DamageEvent    },
-    {&EV_Killed, &DrivableVehicle::Killed},
-    {NULL,       NULL                    }
+    {&EV_Damage, &DrivableVehicle::EventDamage}, // HZM coop - bug-1323 (was Entity::DamageEvent direct)
+    {&EV_Killed, &DrivableVehicle::Killed     },
+    {NULL,       NULL                         }
 };
+
+// HZM coop - bug-1323: the vanilla response maps EV_Damage straight to Entity::DamageEvent,
+// bypassing Vehicle::EventDamage and thus the zombie rescue. Thin wrapper keeps the vanilla
+// routing (NOT Vehicle::EventDamage - that would add the driver-exemption/knockback-zero
+// semantics drivables never had) but runs the rescue first. VehicleTank's own EventDamage
+// funnels into Vehicle::EventDamage and is covered there.
+void DrivableVehicle::EventDamage(Event *ev)
+{
+    CoopZombieRescue();
+    Entity::DamageEvent(ev);
+}
 
 /*
 ====================
@@ -7123,6 +7165,28 @@ void DrivableVehicle::Killed(Event *ev)
     int          i;
 
     deadflag = DEAD_DEAD;
+
+    // HZM coop: a PLAYER destroyed a drivable vehicle - bump the per-map counter for the
+    // "destroy vehicles" challenges + XP (consumed by coop_mod/main.scr::coop_vehKill_monitor).
+    // bug-724 (audit): moved ABOVE the !m_bRemoveOnDeath early return (persistent-hull vehicles
+    // never counted), and FRIENDLY vehicles no longer count - a vehicle whose driver is a player
+    // or an allied AI is not an "enemy vehicle" (teamkilling the escort truck / the squad's own
+    // captured King Tiger used to advance Panzerknacker). Unmanned vehicles still count (enemy
+    // tanks are often scripted/crewless drivables).
+    attacker = ev->GetEntity(1);
+    if (attacker && attacker->IsSubclassOfPlayer()) {
+        qboolean bFriendlyVeh = qfalse;
+        if (driver.ent && driver.ent->IsSubclassOfSentient()
+            && static_cast<Sentient *>(driver.ent.Pointer())->m_Team == TEAM_AMERICAN) {
+            bFriendlyVeh = qtrue;
+        }
+        if (!bFriendlyVeh) {
+            ScriptVariable *pv = level.vars->GetVariable("coop_vehKills");
+            int             n  = pv ? pv->intValue() : 0;
+            level.vars->SetVariable("coop_vehKills", n + 1);
+        }
+    }
+
     if (!m_bRemoveOnDeath) {
         Unregister(STRING_DEATH);
         return;
@@ -7145,16 +7209,7 @@ void DrivableVehicle::Killed(Event *ev)
     }
 
     attacker = ev->GetEntity(1);
-
-    // HZM coop: a PLAYER destroyed a drivable vehicle (tank / halftrack / armored car). Bump a
-    // per-map level counter; coop_mod/main.scr::coop_vehKill_monitor consumes the increments for
-    // the "destroy vehicles" campaign challenge + XP (team-wide; per-killer attribution isn't
-    // needed for these). level.vars resets each map, so the monitor's seen-count stays in sync.
-    if (attacker && attacker->IsSubclassOfPlayer()) {
-        ScriptVariable *pv = level.vars->GetVariable("coop_vehKills");
-        int             n  = pv ? pv->intValue() : 0;
-        level.vars->SetVariable("coop_vehKills", n + 1);
-    }
+    // (the coop vehicle-kill bump moved above the m_bRemoveOnDeath early return - bug-724)
 
     //
     // kill the driver.ent

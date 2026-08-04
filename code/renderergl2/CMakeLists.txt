@@ -1,7 +1,8 @@
-cmake_minimum_required(VERSION 3.12)
+﻿cmake_minimum_required(VERSION 3.12)
 
 project(omohrenderergl2)
 
+# HZM: touch to re-glob (added tr_gore.c; 2026-07-28 added glsl/tonemap_hzm_fp.glsl - gl1 parity grade)
 file(GLOB SOURCES_RENDERER "*.c" "*.cpp" "../renderercommon/tr_*.c")
 # Remove Quake III old model source
 list(REMOVE_ITEM SOURCES_RENDERER "${CMAKE_CURRENT_SOURCE_DIR}/tr_model.c")

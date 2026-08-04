@@ -692,6 +692,8 @@ void Sentient::DetachAllActiveWeapons(void)
 
 int Sentient::NumWeapons(void)
 {
+    PruneStaleInventory(); // HZM bug-924: heal before counting (cycle UIs)
+
     int   num;
     int   i;
     Item *item;
@@ -702,6 +704,9 @@ int Sentient::NumWeapons(void)
     num = inventory.NumObjects();
     for (i = 1; i <= num; i++) {
         item = (Item *)G_GetEntity(inventory.ObjectAt(i));
+        if (!item) {
+            continue; // HZM 07-20 (bug-925): stale inventory slot guard - live dump: NextWeapon crash while cycling a corrupted inventory (bug-915/919/920 family; this file was missed by the earlier sweep)
+        }
         if (checkInheritance(&Weapon::ClassInfo, item->getClassname())) {
             numweaps++;
         }
@@ -753,6 +758,9 @@ void Sentient::DeactivateWeapon(weaponhand_t hand)
     if (activeWeaponList[hand]->GetCurrentAttachToTag().length() > 0) {
         for (i = 1; i <= inventory.NumObjects(); i++) {
             Item *item = (Item *)G_GetEntity(inventory.ObjectAt(i));
+            if (!item) {
+                continue; // HZM 07-20 (bug-925): stale inventory slot guard - live dump: NextWeapon crash while cycling a corrupted inventory (bug-915/919/920 family; this file was missed by the earlier sweep)
+            }
 
             if (item->IsSubclassOfWeapon()) {
                 Weapon *weap = (Weapon *)item;
@@ -766,6 +774,9 @@ void Sentient::DeactivateWeapon(weaponhand_t hand)
     }
 
     activeWeaponList[hand] = NULL;
+
+    // HZM coop - weapons-on-back: fill any holster spot left empty by the swap above
+    UpdateCoopHolsteredWeapons();
 }
 
 void Sentient::DeactivateWeapon(Weapon *weapon)
@@ -825,6 +836,9 @@ void Sentient::ActivateWeapon(Weapon *weapon, weaponhand_t hand)
         // Check the player's inventory and detach any weapons that are currently attached to that tag.
         for (i = 1; i <= inventory.NumObjects(); i++) {
             Item *item = (Item *)G_GetEntity(inventory.ObjectAt(i));
+            if (!item) {
+                continue; // HZM 07-20 (bug-925): stale inventory slot guard - live dump: NextWeapon crash while cycling a corrupted inventory (bug-915/919/920 family; this file was missed by the earlier sweep)
+            }
 
             if (item->IsSubclassOfWeapon()) {
                 Weapon *weap = (Weapon *)item;
@@ -840,6 +854,85 @@ void Sentient::ActivateWeapon(Weapon *weapon, weaponhand_t hand)
 
     if (weapon == holsteredWeapon) {
         holsteredWeapon = NULL;
+    }
+
+    // HZM coop - refill the holster spot the clearing loop above just emptied (weapons-on-back)
+    UpdateCoopHolsteredWeapons();
+}
+
+// HZM coop - WEAPONS ON BACK persistence pass. Retail's draw path (above) clears the entire
+// holster tag when a weapon is raised, and weapons given-but-never-drawn are never holstered at
+// all - so the back/hip emptied the moment you held a long gun and stayed empty (user: "weapons
+// dont seem to stay on your back. I noticed the first time"). After every activate/deactivate/
+// give/remove, attach ONE inactive carried weapon to each free holster tag, so whatever you are
+// NOT holding is visibly stowed. One-weapon-per-tag invariant is preserved (occupancy check).
+void Sentient::UpdateCoopHolsteredWeapons(void)
+{
+    int i, j, k;
+
+    if (deadflag) {
+        return;
+    }
+
+    for (i = 1; i <= inventory.NumObjects(); i++) {
+        Item *item = (Item *)G_GetEntity(inventory.ObjectAt(i));
+        if (!item || !item->IsSubclassOfWeapon()) {
+            continue;
+        }
+        Weapon *w   = (Weapon *)item;
+        str     tag = w->GetHolsterTag();
+        if (!tag.length()) {
+            continue;
+        }
+
+        // in-hand weapons live on the hand tag, not the holster
+        bool active = false;
+        for (j = 0; j < MAX_ACTIVE_WEAPONS; j++) {
+            if (activeWeaponList[j] == w) {
+                active = true;
+                break;
+            }
+        }
+        if (active) {
+            continue;
+        }
+
+        // already holstered there
+        if (w->edict->s.parent != ENTITYNUM_NONE && !str::icmp(w->GetCurrentAttachToTag(), tag)) {
+            continue;
+        }
+
+        // spot taken by another (inactive, attached) weapon
+        bool occupied = false;
+        for (j = 1; j <= inventory.NumObjects(); j++) {
+            if (j == i) {
+                continue;
+            }
+            Item *o = (Item *)G_GetEntity(inventory.ObjectAt(j));
+            if (!o || !o->IsSubclassOfWeapon()) {
+                continue;
+            }
+            Weapon *ow = (Weapon *)o;
+            bool    oactive = false;
+            for (k = 0; k < MAX_ACTIVE_WEAPONS; k++) {
+                if (activeWeaponList[k] == ow) {
+                    oactive = true;
+                    break;
+                }
+            }
+            if (oactive) {
+                continue;
+            }
+            if (ow->edict->s.parent != ENTITYNUM_NONE && !str::icmp(ow->GetCurrentAttachToTag(), tag)) {
+                occupied = true;
+                break;
+            }
+        }
+        if (occupied) {
+            continue;
+        }
+
+        w->AttachToHolster(WEAPON_MAIN);
     }
 }
 
@@ -897,6 +990,9 @@ Weapon *Sentient::BestWeapon(Weapon *ignore, qboolean bGetItem, int iIgnoreClass
 
     for (j = 1; j <= n; j++) {
         next = (Weapon *)G_GetEntity(inventory.ObjectAt(j));
+        if (!next) {
+            continue; // HZM 07-20 (bug-925): stale inventory slot guard - live dump: NextWeapon crash while cycling a corrupted inventory (bug-915/919/920 family; this file was missed by the earlier sweep)
+        }
 
         assert(next);
         if (next == ignore) {
@@ -945,6 +1041,9 @@ Weapon *Sentient::WorstWeapon(Weapon *ignore, qboolean bGetItem, int iIgnoreClas
 
     for (j = 1; j <= n; j++) {
         next = (Weapon *)G_GetEntity(inventory.ObjectAt(j));
+        if (!next) {
+            continue; // HZM 07-20 (bug-925): stale inventory slot guard - live dump: NextWeapon crash while cycling a corrupted inventory (bug-915/919/920 family; this file was missed by the earlier sweep)
+        }
 
         assert(next);
 
@@ -1005,6 +1104,9 @@ Weapon *Sentient::NextWeapon(Weapon *weapon)
     n = inventory.NumObjects();
     for (i = 1; i <= n; i++) {
         item = (Item *)G_GetEntity(inventory.ObjectAt(i));
+        if (!item) {
+            continue; // HZM 07-20 (bug-925): stale inventory slot guard - live dump: NextWeapon crash while cycling a corrupted inventory (bug-915/919/920 family; this file was missed by the earlier sweep)
+        }
 
         assert(item);
 
@@ -1060,6 +1162,9 @@ Weapon *Sentient::PreviousWeapon(Weapon *weapon)
     n = inventory.NumObjects();
     for (i = 1; i <= n; i++) {
         item = (Item *)G_GetEntity(inventory.ObjectAt(i));
+        if (!item) {
+            continue; // HZM 07-20 (bug-925): stale inventory slot guard - live dump: NextWeapon crash while cycling a corrupted inventory (bug-915/919/920 family; this file was missed by the earlier sweep)
+        }
 
         assert(item);
 
@@ -1196,6 +1301,9 @@ void Sentient::EventUseWeaponClass(Event *ev)
 
     for (int i = 1; i <= num; i++) {
         pWeap = (Weapon *)G_GetEntity(inventory.ObjectAt(i));
+        if (!pWeap) {
+            continue; // HZM 07-20 (bug-925): stale inventory slot guard - live dump: NextWeapon crash while cycling a corrupted inventory (bug-915/919/920 family; this file was missed by the earlier sweep)
+        }
 
         if (pWeap->IsSubclassOfWeapon() && (pWeap->GetWeaponClass() & weapon_class)
             && (pWeap->HasAmmo(FIRE_PRIMARY) || pWeap->GetUseNoAmmo())) {
@@ -1242,6 +1350,15 @@ void Sentient::ActivateNewWeapon(Event *ev)
 //====================
 void Sentient::ActivateNewWeapon(void)
 {
+    // HZM 07-20 (bug-924): the state machine can fire activatenewweapon with NOTHING pending
+    // (ClearNewActiveWeapon parks hand at WEAPON_ERROR=2), which called ChangeWeapon(NULL, 2)
+    // and logged 'Weapon hand number "2" is out of bounds'. Make that a clean no-op.
+    if (!newActiveWeapon.weapon) {
+        UpdateWeapons();
+        ClearNewActiveWeapon();
+        return;
+    }
+
     // Change the weapon to the currently active weapon as specified by useWeapon
     ChangeWeapon(newActiveWeapon.weapon, newActiveWeapon.hand);
 

@@ -308,15 +308,25 @@ int CM_PointBrushNum( const vec3_t p, clipHandle_t model ) {
 		brushnum = cm.leafbrushes[ leaf->firstLeafBrush + k ];
 		b = &cm.brushes[ brushnum ];
 
+		// HZM bug-955: (a) never identify a neutralized (contents==0) brush - dead
+		// geometry shadows the LIVE blocker at the same spot (killwall kept re-killing
+		// an already-dead brush while the real wall stood); (b) TRUE containment - the
+		// old reconstruction returned on the first side the point was OUTSIDE of, i.e.
+		// effectively the first brush in the leaf list. Every caller is the HZM
+		// wall-probe family (player.cpp), so exact semantics are safe to fix.
+		if ( !b->contents ) {
+			continue;
+		}
+
 		// see if the point is in the brush
 		for( i = 0; i < b->numsides; i++ ) {
 			if( DotProduct( p, b->sides[ i ].plane->normal ) > b->sides[ i ].plane->dist ) {
-				return brushnum;
+				break;	// outside this side - not inside this brush
 			}
 		}
 
 		if( i == b->numsides ) {
-			return brushnum;
+			return brushnum;	// inside every side
 		}
 	}
 
