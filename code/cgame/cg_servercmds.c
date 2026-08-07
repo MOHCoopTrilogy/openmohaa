@@ -316,6 +316,18 @@ static void CG_ServerCommand(qboolean modelOnly)
         return;
     }
 
+    // HZM 2026-08-05 - client-side reception coverage (sweep detector rank 6): the server-side
+    // covtrace cannot see this channel at all. One line per received server command.
+    {
+        static cvar_t *cg_covtrace = NULL;
+        if (!cg_covtrace) {
+            cg_covtrace = cgi.Cvar_Get("coop_covtrace", "0", 0);
+        }
+        if (cg_covtrace->integer) {
+            cgi.Printf("^~^~^ COVC CMD %s\n", cmd);
+        }
+    }
+
     if (!strcmp(cmd, "cs")) {
         CG_ConfigStringModified(cgi.getConfigStringIdNormalized(atoi(cgi.Argv(1))), modelOnly);
         return;
@@ -377,6 +389,17 @@ static void CG_ServerCommand(qboolean modelOnly)
         if (!CG_IsStatementAllowed(cmd)) {
             // Added in OPM
             //  Don't execute filtered commands
+            // HZM 2026-08-05 - detector rank 6: a silently dropped stufftext is the bug-597/758
+            // class. Under covtrace, every drop is a visible machine line.
+            {
+                static cvar_t *cg_covtrace2 = NULL;
+                if (!cg_covtrace2) {
+                    cg_covtrace2 = cgi.Cvar_Get("coop_covtrace", "0", 0);
+                }
+                if (cg_covtrace2->integer) {
+                    cgi.Printf("^~^~^ COVC DROP %.80s\n", cmd);
+                }
+            }
             return;
         }
 

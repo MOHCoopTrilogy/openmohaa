@@ -265,6 +265,13 @@ sfx_t *S_FindName(const char *name, int sequenceNumber)
 
         sfx = &s_knownSfx[s_numSfx];
         s_numSfx++;
+
+        // HZM coop [user 08-06] bug-1508 - "Wuss.pk3" challenge: expose the live count of unique
+        // sounds registered this SESSION (not per-map - s_numSfx only resets on a full snd_restart,
+        // see S_Init's full_startup branch above) as a plain internal cvar. Cheap: local-only,
+        // NOT userinfo, so this alone causes zero network traffic no matter how often it fires.
+        // cg_view.c throttles the network-visible copy separately - see CG_SyncWussPk3Count.
+        Cvar_Set("s_sfxCount", va("%d", s_numSfx));
     }
 
     *sfx = {};

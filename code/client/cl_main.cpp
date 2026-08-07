@@ -3617,6 +3617,114 @@ static void HZM_TerminateHandler() {
 
 /*
 ====================
+CL_PinToggle_f
+
+HZM coop [user 08-06] bug-1503 - "coop_pintoggle <gi>": toggle a challenge pin from ANYWHERE,
+including the fully disconnected main menu, where there is no server and no script VM to run the
+existing (server-side) chal_pin_toggle logic in coop_mod/challenges.scr. That existing system only
+works while connected, because it works by appending a token to the "name" cvar and waiting for a
+server-side script (coop_mod/player.scr::manageNamechange) to notice - and there is no server at
+all in the disconnected Service Record screen.
+
+Source of truth here is FIVE separate client cvars, coop_pin1..coop_pin5, each holding one
+catalogue index (empty string = unused slot) - deliberately NOT one comma-joined list, because
+Morpheus script (coop_mod/challenges.scr, which must read this back on connect) has no confirmed
+string-split/substring primitives; five clean info_valueforkey lookups avoid needing any parsing at
+all server-side. Each is CVAR_ARCHIVE (persists disconnected, like the rest of Service Record's
+saved progress) AND CVAR_USERINFO - mirroring dm_playermodel's existing CVAR_ARCHIVE|CVAR_USERINFO
+pattern (below, ~3843) for exactly this "client picks something while disconnected, server needs to
+find out on connect" problem. A server-side script reads all five back via self.userinfo on connect
+and reconciles self.flags["coop_pinN"] (see coop_mod/challenges.scr::chal_pin_importUserinfo).
+
+Also flips coop_uiP<gi> locally so the Service Record marker responds INSTANTLY with no server
+round-trip (which may not exist at all right now). If a server connection IS currently active, this
+additionally fires the existing name-bus dispatch so the live Mission Objectives HUD and self.flags
+update immediately too, instead of waiting for a future reconnect to reconcile.
+====================
+*/
+#define COOP_PIN_MAX 5
+
+void CL_PinToggle_f( void )
+{
+	cvar_t     *slot[COOP_PIN_MAX];
+	int         idx[COOP_PIN_MAX];
+	int         count;
+	int         gi;
+	int         i, j;
+	qboolean    found;
+	char        cvarName[16];
+
+	if ( Cmd_Argc() < 2 ) {
+		Com_Printf( "usage: coop_pintoggle <catalogue index>\n" );
+		return;
+	}
+	gi = atoi( Cmd_Argv( 1 ) );
+	if ( gi < 0 ) {
+		return;
+	}
+
+	// read the current 5 slots (skipping any empty ones) into a compact local array
+	count = 0;
+	for ( i = 0; i < COOP_PIN_MAX; i++ ) {
+		Com_sprintf( cvarName, sizeof( cvarName ), "coop_pin%d", i + 1 );
+		slot[i] = Cvar_Get( cvarName, "", CVAR_ARCHIVE | CVAR_USERINFO );
+		if ( slot[i]->string[0] ) {
+			idx[count] = atoi( slot[i]->string );
+			count++;
+		}
+	}
+
+	// already pinned? unpin (remove + compact)
+	found = qfalse;
+	for ( i = 0; i < count; i++ ) {
+		if ( idx[i] == gi ) {
+			found = qtrue;
+			for ( j = i; j < count - 1; j++ ) {
+				idx[j] = idx[j + 1];
+			}
+			count--;
+			break;
+		}
+	}
+
+	if ( !found ) {
+		if ( count >= COOP_PIN_MAX ) {
+			Com_Printf( "coop_pintoggle: %d challenges pinned already - unpin one first\n", COOP_PIN_MAX );
+			Cvar_Set( "coop_pinResult", "full" );
+			return;
+		}
+		idx[count] = gi;
+		count++;
+	}
+
+	// rewrite all 5 slots: the first `count` get the compacted indices, the rest are cleared
+	for ( i = 0; i < COOP_PIN_MAX; i++ ) {
+		if ( i < count ) {
+			char valStr[8];
+			Com_sprintf( valStr, sizeof( valStr ), "%d", idx[i] );
+			Cvar_Set( slot[i]->name, valStr );
+		} else {
+			Cvar_Set( slot[i]->name, "" );
+		}
+	}
+
+	// instant local marker feedback - no server needed for this part
+	Cvar_Set( va( "coop_uiP%d", gi ), found ? "0" : "1" );
+	Cvar_Set( "coop_pinResult", found ? "unpinned" : "pinned" );
+
+	// connected right now? also notify the server immediately via the existing, proven name-bus
+	// dispatch (player.scr:614, arrayIndex 47) so the live Mission Objectives HUD and self.flags
+	// update in real time rather than waiting for the NEXT connect to reconcile via userinfo.
+	if ( clc.state == CA_ACTIVE ) {
+		cvar_t *nameCvar = Cvar_Get( "name", "UnnamedSoldier", CVAR_ARCHIVE | CVAR_USERINFO );
+		char    nameToken[64];
+		Com_sprintf( nameToken, sizeof( nameToken ), "%s ,cp%d", nameCvar->string, gi );
+		Cvar_Set( "name", nameToken );
+	}
+}
+
+/*
+====================
 CL_SendReport_f
 
 HZM coop - in-game "Report a Bug" -> Discord webhook. This build has NO libcurl (find_package(CURL) failed),
@@ -3762,6 +3870,19 @@ void CL_Init( void ) {
 	Cvar_Get("coop_reportText", "", 0);
 	Cvar_Get("coop_reportResult", "", 0);
 	Cmd_AddCommand("coop_sendreport", CL_SendReport_f);
+
+	// HZM coop [user 08-06] bug-1503 - disconnected-capable Service Record challenge pinning.
+	// Registered unconditionally (like coop_sendreport above) so it works from the cold main menu.
+	// coop_pin1..coop_pin5 also get Cvar_Get'd lazily inside CL_PinToggle_f itself (first click on
+	// any row registers whichever slots haven't been touched yet); registering all 5 here too just
+	// makes sure they exist (and are in userinfo) even if the player never opens Service Record.
+	Cvar_Get("coop_pin1", "", CVAR_ARCHIVE | CVAR_USERINFO);
+	Cvar_Get("coop_pin2", "", CVAR_ARCHIVE | CVAR_USERINFO);
+	Cvar_Get("coop_pin3", "", CVAR_ARCHIVE | CVAR_USERINFO);
+	Cvar_Get("coop_pin4", "", CVAR_ARCHIVE | CVAR_USERINFO);
+	Cvar_Get("coop_pin5", "", CVAR_ARCHIVE | CVAR_USERINFO);
+	Cvar_Get("coop_pinResult", "", 0);
+	Cmd_AddCommand("coop_pintoggle", CL_PinToggle_f);
 
 	cl_altbindings = Cvar_Get( "cl_altbindings", "0", CVAR_ARCHIVE );
 	cl_ctrlbindings = Cvar_Get( "cl_altbindings", "0", CVAR_ARCHIVE );

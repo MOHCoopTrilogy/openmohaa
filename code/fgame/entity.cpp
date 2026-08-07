@@ -652,6 +652,25 @@ Event EV_SetSize
     "Set the bounding box of the entity to mins and maxs.",
     EV_NORMAL
 );
+// HZM coop [user 2026-08-04] bug-1378 - PLAYER-ONLY CLIP VOLUME for the holdout arena builder.
+// Script can call "solid", which means CONTENTS_SOLID and blocks EVERYONE - including the AI the
+// arena is meant to funnel in, and the bullets the players are meant to shoot out. There is no
+// script path to any other contents value, so this exposes one.
+//   <ent> coop_playerclip 1   -> CONTENTS_PLAYERCLIP + SOLID_BBOX  (blocks human players ONLY)
+//   <ent> coop_playerclip 0   -> restore SOLID_NOT / no contents
+// Why this exact value (bg_public.h:633-646): MASK_PLAYERSOLID CONTAINS CONTENTS_PLAYERCLIP, so
+// players collide. MASK_MONSTERSOLID, MASK_SHOT and MASK_PROJECTILE all OMIT it, so AI walk
+// through, bullets pass through, and thrown grenades pass through - exactly the requested spec.
+// The caller is expected to have already set a bounding box with setsize.
+Event EV_Entity_CoopPlayerClip
+(
+    "coop_playerclip",
+    EV_DEFAULT,
+    "i",
+    "on",
+    "HZM coop: invisible barrier that blocks PLAYERS only - AI, bullets and grenades pass through.",
+    EV_NORMAL
+);
 Event EV_SetMins
 (
     "_setmins",
@@ -1553,6 +1572,7 @@ CLASS_DECLARATION(SimpleEntity, Entity, NULL) {
     {&EV_Sound,                        &Entity::Sound                    },
     {&EV_StopSound,                    &Entity::StopSound                },
     {&EV_SetSize,                      &Entity::SetSize                  },
+    {&EV_Entity_CoopPlayerClip,        &Entity::CoopPlayerClip           },
     {&EV_SetMins,                      &Entity::SetMins                  },
     {&EV_SetMaxs,                      &Entity::SetMaxs                  },
     {&EV_GetMins,                      &Entity::GetMins                  },
@@ -3468,6 +3488,22 @@ void Entity::LightStyle(Event *ev)
     G_SetConstantLight(&edict->s.constantLight, NULL, NULL, NULL, NULL, &style);
 }
 
+// HZM coop [user 2026-08-04] bug-1378 - see EV_Entity_CoopPlayerClip above.
+void Entity::CoopPlayerClip(Event *ev)
+{
+    if (ev->NumArgs() > 0 && !ev->GetInteger(1)) {
+        setContents(0);
+        setSolidType(SOLID_NOT);
+        return;
+    }
+
+    // SOLID_BBOX so the server actually links it into the collision world; the contents value
+    // is what decides WHO collides with it.
+    setContents(CONTENTS_PLAYERCLIP);
+    setSolidType(SOLID_BBOX);
+    edict->r.svFlags &= ~SVF_NOCLIENT;
+}
+
 void Entity::SetSize(Event *ev)
 {
     Vector min, max;
@@ -3658,6 +3694,16 @@ void Entity::Sound(
         // Play the sound
 
         if (name && ret) {
+            // HZM 2026-08-05 - coverage tracing (coop_covtrace 1): every alias that actually plays
+            {
+                static cvar_t *g_covtrace = NULL;
+                if (!g_covtrace) {
+                    g_covtrace = gi.Cvar_Get("coop_covtrace", "0", 0);
+                }
+                if (g_covtrace->integer) {
+                    Com_Printf("^~^~^ COV SND %s\n", sound_name.c_str());
+                }
+            }
             aliaschannel = ret->channel;
             aliasvolume = G_Random() * ret->volumeMod + ret->volume;
             aliaspitch = G_Random() * ret->pitchMod + ret->pitch;
@@ -3751,6 +3797,18 @@ void Entity::Sound(
 
             gi.Sound(&org, num, channel, name, volume, min_dist, pitch, max_dist, ret->streamed);
         } else {
+            // HZM 2026-08-05 - coverage tracing (coop_covtrace 1): a MISS is the whole point of the
+            // sweep - print it unconditionally when tracing, since the DPrintf below is gated on
+            // developer 1 and silent misses are exactly what past sweeps failed to catch.
+            {
+                static cvar_t *g_covtrace = NULL;
+                if (!g_covtrace) {
+                    g_covtrace = gi.Cvar_Get("coop_covtrace", "0", 0);
+                }
+                if (g_covtrace->integer) {
+                    Com_Printf("^~^~^ COV SNDMISS %s\n", sound_name.c_str());
+                }
+            }
             gi.DPrintf(
                 "ERROR: Entity::Sound: %s needs an alias in ubersound.scr or uberdialog.scr - Please fix.\n",
                 sound_name.c_str()

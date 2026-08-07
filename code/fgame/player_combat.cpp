@@ -106,8 +106,20 @@ Vector Player::GunTarget(bool bNoCollision, const vec3_t position, const vec3_t 
 
         vOut = trace.endpos;
     } else {
+        // HZM coop [user 08-06] bug-1504 - a turret-mounted player (e.g. e2l3's finale "mortar")
+        // was capped at the same 1024u trace distance as normal player aiming, while the m_pVehicle
+        // branch above already correctly extends to 4096u. weapturret.cpp then triangulates the
+        // barrel's aim angle as (this capped point - the turret's own pivot origin), so at range the
+        // barrel visibly diverges from the crosshair: at 1024u the point is still on the correct
+        // sightline from the player's EYE, but the pivot-to-point angle picks up real parallax error
+        // from the eye/pivot offset - error that shrinks the FARTHER out the reference point is, so
+        // capping it artificially close makes the effect worse, not better. e2l3's tank engagements
+        // run 2500-5000+u, well past the old cap. Matches the vehicle case's distance exactly (same
+        // constant, same reasoning) - only affects m_pTurret; normal player aiming keeps 1024u,
+        // unchanged.
+        float fMaxDist = m_pTurret ? 4096.0f : 1024.0f;
         AngleVectors(m_vViewAng, vForward, NULL, NULL);
-        vDest = m_vViewPos + vForward * 1024.0f;
+        vDest = m_vViewPos + vForward * fMaxDist;
 
         trace = G_Trace(m_vViewPos, vec_zero, vec_zero, vDest, this, MASK_GUNTARGET, qfalse, "Player::GunTarget");
 

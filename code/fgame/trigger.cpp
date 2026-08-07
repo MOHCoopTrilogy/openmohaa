@@ -514,6 +514,27 @@ void Trigger::TriggerStuff(Event *ev)
         trigger_time = level.time + wait;
     }
 
+    // HZM 2026-08-05 - coverage tracing for the trilogy sweep (coop_covtrace 1). One machine line
+    // per COMMITTED trigger fire (every early-out above has passed), keyed by origin so the static
+    // manifest can join even when the trigger has no targetname.
+    {
+        static cvar_t *g_covtrace = NULL;
+        if (!g_covtrace) {
+            g_covtrace = gi.Cvar_Get("coop_covtrace", "0", 0);
+        }
+        if (g_covtrace->integer) {
+            // centroid of the volume, not origin - brush triggers usually carry no origin key,
+            // while (absmin+absmax)/2 matches the BSP submodel bounds the manifest computes
+            Com_Printf(
+                "^~^~^ COV TRIG %d %d %d %s\n",
+                (int)((absmin[0] + absmax[0]) * 0.5f),
+                (int)((absmin[1] + absmax[1]) * 0.5f),
+                (int)((absmin[2] + absmax[2]) * 0.5f),
+                TargetName().c_str()
+            );
+        }
+    }
+
     if (!whatToTrigger) {
         event = new Event(EV_Trigger_Effect);
         event->AddEntity(activator);

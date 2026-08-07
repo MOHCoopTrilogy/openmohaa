@@ -2836,12 +2836,41 @@ Event EV_LadderSetup
     "Does the post spawn setup of the ladder"
 );
 
+// HZM coop [user 2026-08-05] bug-1412 - PLACEABLE LADDERS.
+//   <ent> coop_ladderbox <facing_yaw>
+// Everything needed to CLIMB already exists: PM_CLIMBWALL, VM_ANIM_LADDERSTEP, CanUseLadder,
+// PositionOnLadder and the mount/dismount conditionals. The only thing missing was a way to create
+// a ladder at runtime, because a map ladder is a BRUSH entity and build mode cannot make brushes.
+//
+// Two things make that work, and both matter:
+//   1. The volume must genuinely BE a FuncLadder. player_conditionals.cpp:1598 does
+//      ((FuncLadder *)trace.ent->entity)->CanUseLadder(this) after a MASK_LADDER trace - an
+//      unchecked downcast. Giving some other entity CONTENTS_LADDER would satisfy the trace and
+//      then invoke a member function on the wrong type. So we spawn a real func_ladder.
+//   2. LadderSetup below forces SOLID_BSP, which requires an inline brush model. A script-spawned
+//      ladder has none, so it now falls back to SOLID_BBOX and uses the box the script set with
+//      setsize - the same approach as Entity::CoopPlayerClip for the invisible barriers.
+//
+// The facing yaw is what the engine uses to decide which side you may mount from
+// (CanUseLadder dots the user's facing against m_vFacingDir), so it must point OUT from the wall.
+Event EV_FuncLadder_CoopBox
+(
+    "coop_ladderbox",
+    EV_DEFAULT,
+    "f",
+    "facing_yaw",
+    "HZM coop: finish a runtime-spawned func_ladder that has no brush model - bbox solid, ladder "
+    "contents, and the facing direction players may mount from.",
+    EV_NORMAL
+);
+
 CLASS_DECLARATION(Entity, FuncLadder, "func_ladder") {
-    {&EV_Use,         NULL                        },
-    {&EV_Touch,       NULL                        },
-    {&EV_SetAngle,    &FuncLadder::SetLadderFacing},
-    {&EV_LadderSetup, &FuncLadder::LadderSetup    },
-    {NULL,            NULL                        }
+    {&EV_Use,                  NULL                        },
+    {&EV_Touch,                NULL                        },
+    {&EV_SetAngle,             &FuncLadder::SetLadderFacing},
+    {&EV_LadderSetup,          &FuncLadder::LadderSetup    },
+    {&EV_FuncLadder_CoopBox,   &FuncLadder::CoopLadderBox  },
+    {NULL,                     NULL                        }
 };
 
 FuncLadder::FuncLadder()
@@ -2858,10 +2887,38 @@ void FuncLadder::LadderSetup(Event *ev)
     setMoveType(MOVETYPE_PUSH);
 
     setContents(CONTENTS_LADDER);
-    setSolidType(SOLID_BSP);
+
+    // HZM coop bug-1412: SOLID_BSP needs an inline brush model ("*N"). A map ladder always has one;
+    // a script-spawned one never does, and asking for SOLID_BSP without a model leaves the entity
+    // unlinked from the collision world - the MASK_LADDER trace then finds nothing and the ladder is
+    // simply inert. Fall back to the bounding box the script set. Idiom copied from entity.cpp:5890.
+    if (model.length() && model[0] == '*') {
+        setSolidType(SOLID_BSP);
+    } else {
+        setSolidType(SOLID_BBOX);
+    }
 
     // never send to clients
     edict->r.svFlags |= SVF_NOCLIENT;
+}
+
+// HZM coop [user 2026-08-05] bug-1412 - see EV_FuncLadder_CoopBox above.
+void FuncLadder::CoopLadderBox(Event *ev)
+{
+    // The script has already called setsize; re-assert the solid state in case LadderSetup ran
+    // first (it is posted at EV_POSTSPAWN, so ordering against a script call is not guaranteed).
+    setMoveType(MOVETYPE_NONE);
+    setContents(CONTENTS_LADDER);
+    setSolidType(SOLID_BBOX);
+    edict->r.svFlags |= SVF_NOCLIENT;
+
+    if (ev->NumArgs() > 0) {
+        m_vFacingAngles    = vec_zero;
+        m_vFacingAngles[1] = AngleMod(ev->GetFloat(1));
+        AngleVectorsLeft(m_vFacingAngles, m_vFacingDir, NULL, NULL);
+    }
+
+    link();
 }
 
 void FuncLadder::SetLadderFacing(Event *ev)

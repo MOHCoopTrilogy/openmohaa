@@ -797,6 +797,21 @@ void SV_SpawnServer( const char *server, qboolean loadgame, qboolean restart, qb
 		svs.areabits_warning_time = 0;
 		UI_LoadResource( "*139a" );
 
+		// HZM 2026-08-06 (bug-1478) - register sound aliases BEFORE entities spawn. The existing
+		// ge->RegisterSounds() call below (originally the only one) runs ~136 lines and 3 RunFrame
+		// ticks AFTER SpawnEntities, gated inside the separate 'if (differentmap)' block - so any
+		// Sound()/alias lookup issued from an entity's spawn-time init code (constructors, spawnflag
+		// setup, EV_Activate at spawn) found an EMPTY OR STALE alias table on every coop map load.
+		// Confirmed at source: SpawnEntities is server/sv_init.c:801(orig), RegisterSounds is :937,
+		// 937 > 801. Symptom: ~190 spawn-time sounds (snd_pickup etc.) silent on every map. Additive
+		// fix, not a reorder: this new early call does not remove or move the later one below (which
+		// still runs and is now a harmless redundant re-parse) - deliberately avoiding a deep
+		// restructure across the loadgame/differentmap/keep_scripts branches this function has, which
+		// were not fully mapped tonight. Same gametype gate as the original call.
+		if( g_gametype->integer != GT_SINGLE_PLAYER ) {
+			ge->RegisterSounds();
+		}
+
 		// tell the game dll to spawn entities
 		ge->SpawnEntities( CM_EntityString(), svs.time );
 

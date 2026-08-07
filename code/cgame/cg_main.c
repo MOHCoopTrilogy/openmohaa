@@ -184,6 +184,11 @@ void CG_RegisterCvars(void)
     developer                     = cgi.Cvar_Get("developer", "0", 0);
     dm_playermodel                = cgi.Cvar_Get("dm_playermodel", "american_army", 3);
     dm_playergermanmodel          = cgi.Cvar_Get("dm_playergermanmodel", "german_wehrmacht_soldier", CVAR_ARCHIVE | CVAR_USERINFO);
+    // HZM coop [user 08-06] bug-1508 - "Wuss.pk3" challenge marker. USERINFO only (no ARCHIVE - this
+    // is a live derived value re-synced fresh every session by CG_SyncWussPk3Count, not something to
+    // persist to disk). Registered here so it's already USERINFO-flagged before CG_SyncWussPk3Count's
+    // first Cvar_Set, rather than relying on that call to implicitly create it with the right flags.
+    cgi.Cvar_Get("coop_wussCount", "0", CVAR_USERINFO);
     cg_forceModel                 = cgi.Cvar_Get("cg_forceModel", "0", CVAR_ARCHIVE);
     cg_animationviewmodel         = cgi.Cvar_Get("cg_animationviewmodel", "0", CVAR_SYSTEMINFO);
     cg_hitmessages                = cgi.Cvar_Get("cg_hitmessages", "1", CVAR_ARCHIVE);
@@ -780,6 +785,10 @@ void CG_Init(clientGameImport_t *imported, int serverMessageNum, int serverComma
 
     cg_protocol = cgi.Cvar_Get("com_protocol", "", 0)->integer;
     cg_target_game = (target_game_e)cgi.Cvar_Get("com_target_game", "0", 0)->integer;
+
+    // HZM 2026-08-05 - deploy-truth fingerprint (sweep detector rank 4); must agree with the
+    // game module's FPRINT line or the deployed pair is mismatched.
+    cgi.Printf("^~^~^ FPRINT cgame %s %s ENTBITS=%d MAX_SOUNDS=%d\n", __DATE__, __TIME__, GENTITYNUM_BITS, MAX_SOUNDS);
 
     CG_InitCGMessageAPI(&cge);
     CG_InitScoresAPI(&cge);

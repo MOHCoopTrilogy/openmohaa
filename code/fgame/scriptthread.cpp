@@ -2081,6 +2081,26 @@ Event EV_ScriptThread_FS_ReadContent
     "Reads and returns the whole file content.",
     EV_RETURN
 );
+// HZM 2026-08-05 - coverage sweep detector rank 1: compile EVERY shipped script through the real
+// engine parser and print one machine line per file. A parse-killed file otherwise ships silently
+// (the map runs with no script at all) - the walker cannot see it because a dead file starts no
+// threads and the manifest diff reads as coverage of nothing.
+Event EV_ScriptThread_ForceAllTriggers
+(
+    "forcealltriggers",
+    EV_DEFAULT,
+    NULL,
+    NULL,
+    "Coverage sweep: activate EVERY trigger entity in the level."
+);
+Event EV_ScriptThread_CompileCensus
+(
+    "compilecensus",
+    EV_DEFAULT,
+    "s",
+    "manifestFile",
+    "Compile every .scr listed (one path per line) and print ^~^~^ COMPILE OK/FAIL per file."
+);
 Event EV_ScriptThread_FS_WriteContent
 (
     "fs_write_content",
@@ -2349,6 +2369,8 @@ CLASS_DECLARATION(Listener, ScriptThread, NULL) {
     {&EV_ScriptThread_VisionSetNaked,          &ScriptThread::VisionSetNaked          },
     {&EV_ScriptThread_IsBot,                   &ScriptThread::IsPlayerBot             },
     {&EV_ScriptThread_FS_ReadContent,          &ScriptThread::FS_ReadContent          },
+    {&EV_ScriptThread_CompileCensus,           &ScriptThread::CompileCensus           },
+    {&EV_ScriptThread_ForceAllTriggers,         &ScriptThread::ForceAllTriggers        },
     {&EV_ScriptThread_FS_WriteContent,         &ScriptThread::FS_WriteContent         },
     {&EV_ScriptThread_FS_OpenRead,             &ScriptThread::FS_OpenRead             },
     {&EV_ScriptThread_FS_OpenWrite,            &ScriptThread::FS_OpenWrite            },
@@ -3631,6 +3653,18 @@ void ScriptThread::MissionFailed(Event *ev)
 
     if (level.intermissiontime) {
         return;
+    }
+
+    // HZM 2026-08-06 (bug-1465) - sweep guard, the script-command door to the same behaviour.
+    {
+        static cvar_t *g_maptest2 = NULL;
+        if (!g_maptest2) {
+            g_maptest2 = gi.Cvar_Get("coop_maptest", "0", 0);
+        }
+        if (g_maptest2->integer == 3) {
+            Com_Printf("^~^~^ COV MISSIONFAILED_ENGINE_SUPPRESSED script %s\n", level.current_map);
+            return;
+        }
     }
 
     bNoFade = ev->NumArgs() && ev->GetInteger(1);
@@ -7368,6 +7402,121 @@ void ScriptThread::FS_WriteContent(Event *ev) {
     const str content = ev->GetString(2);
 
     gi.FS_WriteFile(path, content, content.length());
+}
+
+// HZM 2026-08-05 - coverage sweep detector rank 1: real-parser compile census.
+void ScriptThread::CompileCensus(Event *ev)
+{
+    void  *buffer;
+    size_t length;
+    int    ok = 0, fail = 0;
+
+    const str path = ev->GetString(1);
+
+    if ((length = gi.FS_ReadFile(path, &buffer, qtrue)) == -1) {
+        Com_Printf("^~^~^ COMPILE CENSUS: manifest '%s' missing\n", path.c_str());
+        return;
+    }
+
+    char *text = (char *)buffer;
+    char *line = text;
+    for (char *p = text;; p++) {
+        if (*p == '\n' || *p == '\r' || *p == '\0') {
+            char saved = *p;
+            *p = '\0';
+            if (line[0] && line[0] != '#') {
+                try {
+                    Director.GetGameScript(str(line));
+                    ok++;
+                } catch (ScriptException& e) {
+                    fail++;
+                    Com_Printf("^~^~^ COMPILE FAIL %s : %s\n", line, e.string.c_str());
+                }
+            }
+            if (saved == '\0') {
+                break;
+            }
+            line = p + 1;
+        }
+    }
+    Com_Printf("^~^~^ COMPILE CENSUS DONE ok=%d fail=%d\n", ok, fail);
+    gi.FS_FreeFile(buffer);
+}
+
+// HZM 2026-08-05 - coverage sweep (bug-1443). Teleport-touch only fires triggers the player lands
+// inside AND that accept them; most map triggers are UNNAMED brush volumes script cannot address.
+// This activates every Trigger the same way the script 'trigger' command does (EV_Activate with
+// world as activator - TriggerStuff always responds to world activates). Level-transition classes
+// are skipped so the map cannot end mid-sweep.
+void ScriptThread::ForceAllTriggers(Event *ev)
+{
+    int fired = 0, skipped = 0;
+
+    for (int i = 0; i < globals.num_entities; i++) {
+        gentity_t *ed = &g_entities[i];
+        if (!ed->inuse || !ed->entity) {
+            continue;
+        }
+        Entity *e = ed->entity;
+        if (!e->isSubclassOf(Trigger)) {
+            continue;
+        }
+        const char *cn = e->getClassID();
+        if (cn && (strstr(cn, "ChangeLevel") || strstr(cn, "changelevel") || strstr(cn, "Exit"))) {
+            skipped++;
+            continue;
+        }
+        // HZM 2026-08-06 (bug-1494) - and skip DOORS. Force-activating a func_door that has no 'speed'
+        // key makes func_door::MoveTo call ERR_DROP ("No speed is defined!"), which kills the SERVER
+        // mid-sweep. That cost 5 runs before the crash line was traced back to the '^~^~^ COV FORCEALL
+        // func_door' immediately above it - they had all been read as flaky maps. A door is scenery the
+        // walker opens by touching it anyway, so nothing is lost by not forcing them.
+        if (cn && (strstr(cn, "Door") || strstr(cn, "door"))) {
+            skipped++;
+            continue;
+        }
+        // HZM 2026-08-06 (bug-1499) - and skip VEHICLE triggers. A forced fire bypasses
+        // TriggerVehicle::respondTo (TriggerStuff always answers world activates, trigger.cpp:454) and
+        // the setthread's FIRST PARAMETER is the activator (trigger.cpp:380) - which under FORCEALL is
+        // WORLD. e1l1's end-of-level trigger_vehicle runs scene6.scr::removeEndVehicle, i.e.
+        // 'local.vehicle remove' - so the sweep DELETED WORLDSPAWN; the world SafePtr auto-nulled and
+        // the next world-> deref segfaulted (WER dumps openmohaa.exe.9516/12928.dmp, c0000005). Two
+        // e1l1 runs died this way and were misread as clean exits. In real play these triggers only
+        // ever receive an actual Vehicle, so nothing legitimate is lost by not forcing them - but
+        // coverage denominators must treat vehicle triggers like doors/exits (walker-unreachable).
+        if (cn && (strstr(cn, "Vehicle") || strstr(cn, "vehicle"))) {
+            skipped++;
+            continue;
+        }
+        Com_Printf("^~^~^ COV FORCEALL %s %s\n", cn ? cn : "?", e->TargetName().c_str());
+        // TriggerUse rejects anything that is not EV_Use (trigger.cpp:413) - on m1l1 that was 12 of
+        // the 14 triggers the sweep could not reach. Send those a real USE from a live player, the
+        // way a player pressing the key would, so use-triggers are covered too.
+        if (e->isSubclassOf(TriggerUse)) {
+            Entity *activator = NULL;
+            for (int p = 0; p < game.maxclients; p++) {
+                gentity_t *pe = &g_entities[p];
+                if (pe->inuse && pe->entity && pe->client && pe->entity->IsSubclassOfPlayer()) {
+                    activator = pe->entity;
+                    break;
+                }
+            }
+            if (!activator) {
+                skipped++;
+                continue;
+            }
+            Event *uev = new Event(EV_Use);
+            uev->AddEntity(activator);
+            e->ProcessEvent(uev);
+            fired++;
+            continue;
+        }
+        Event *event = new Event(EV_Activate);
+        event->AddEntity(world);
+        e->ProcessEvent(event);
+        fired++;
+    }
+    Com_Printf("^~^~^ COV FORCEALL DONE fired=%d skipped=%d\n", fired, skipped);
 }
 
 void ScriptThread::FS_OpenRead(Event *ev) {

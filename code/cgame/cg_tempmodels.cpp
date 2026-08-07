@@ -582,11 +582,18 @@ qboolean ClientGameCommandManager::TempModelPhysics(ctempmodel_t *p, float ftime
 
         e = cgi.R_GetRenderEntity(p->cgd.parent);
         if (!e) {
-            return false;
+            // HZM coop [user 2026-08-05] bug-1417: a RF_DONTDRAW parent is never added to the
+            // scene (cg_modelanim.c skips R_AddRefEntityToScene for it), so R_GetRenderEntity is
+            // NULL for a perfectly live entity and every parentlinked effect on it died the frame
+            // it spawned - the invisible dlight emitters lost their lights instantly. The entity
+            // is still fully valid in the snapshot, so fall back to its networked state. The kill
+            // on !currentValid above is untouched: effects still die with their parent.
+            parentOrigin = pc->currentState.origin;
+            parentAngles = pc->currentState.angles;
+        } else {
+            parentOrigin = e->origin;
+            vectoangles(e->axis[0], parentAngles);
         }
-
-        parentOrigin = e->origin;
-        vectoangles(e->axis[0], parentAngles);
     } else if (p->cgd.flags & T_SWARM) {
         p->cgd.parentOrigin = p->cgd.velocity + p->cgd.accel * ftime * scale;
     }
@@ -833,10 +840,11 @@ qboolean ClientGameCommandManager::LerpTempModel(refEntity_t *newEnt, ctempmodel
             e = cgi.R_GetRenderEntity(p->cgd.parent);
 
             if (!e) {
-                return false;
+                // HZM coop bug-1417: same RF_DONTDRAW fallback as the update path above.
+                parentOrigin = pc->currentState.origin;
+            } else {
+                parentOrigin = e->origin;
             }
-
-            parentOrigin = e->origin;
         } else {
             return false;
         }

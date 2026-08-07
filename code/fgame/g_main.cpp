@@ -261,6 +261,14 @@ void G_InitGame(int levelTime, int randomSeed)
     G_Printf("gamename: %s\n", GAMEVERSION);
     G_Printf("gamedate: %s\n", __DATE__);
 
+    // HZM 2026-08-05 - deploy-truth fingerprint (sweep detector rank 4): one line proving which
+    // build and which protocol constants THIS module carries. The sweep harness asserts every
+    // module's line agrees before trusting any coverage number (three binary states were live
+    // simultaneously when this was written).
+    G_Printf(
+        "^~^~^ FPRINT game %s %s ENTBITS=%d MAX_SOUNDS=%d\n", __DATE__, __TIME__, GENTITYNUM_BITS, MAX_SOUNDS
+    );
+
     g_protocol    = gi.Cvar_Get("com_protocol", "", 0)->integer;
     g_target_game = (target_game_e)gi.Cvar_Get("com_target_game", "0", 0)->integer;
 

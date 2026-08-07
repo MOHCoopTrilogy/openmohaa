@@ -2665,11 +2665,157 @@ CG_DrawActiveFrame
 Generates and draws a game scene and status information at the given time.
 =================
 */
+/*
+==============
+CG_UpdateScriptedAudioDucks
+
+HZM coop [user 08-06] bug-1502 - server-triggered, CLIENT-CAPTURED duck for s_musicvolume and
+s_ambientvolume, called every frame from CG_DrawActiveFrame (so it runs regardless of view/weapon
+state - the breath-hold duck above lives inside CG_OffsetFirstPersonView, which is NOT guaranteed to
+run in every game state, e.g. during a cinematic where the player has no active viewmodel).
+
+WHY: a map script (maps/m3l1a.scr's beach ramp-drop, global/RoomTransform.scr's secret-room reveal)
+cannot read a client's live cvar value back - stufftext has no $cvar substitution (confirmed: the
+tokenizer/exec pipeline has zero '$' handling anywhere) - so a script-side "restore to 0.9/0.6" is
+really "reset to the coded default", clobbering whatever the player actually set on the Music/
+Ambience sliders. This mirrors the ALREADY-CORRECT pattern used by the breath-hold duck just above
+(capture the live value client-side at duck-start, restore to that captured value at duck-end) but
+driven by a handful of whitelisted marker cvars (cg_servercmds_filter.cpp) a map script can stufftext
+instead of a per-frame gameplay state.
+
+TWO fully independent channels on purpose: m3l1a.scr threads its music duck at map start and its
+ambient duck minutes later at the ramp-drop, so a single shared "one duck active" state would make
+the second trigger's capture silently no-op against a re-entrancy guard armed by the first.
+==============
+*/
+static void CG_UpdateScriptedAudioDucks(void)
+{
+    static qboolean s_musicDuckActive = qfalse, s_musicDuckLastTrig = qfalse;
+    static float    s_musicDuckBase   = -1.0f;
+    static qboolean s_ambDuckActive = qfalse, s_ambDuckLastTrig = qfalse;
+    static float    s_ambDuckBase   = -1.0f;
+
+    cvar_t  *pMusicTrig, *pMusicTarget, *pMusicInDur, *pMusicOutDur, *pMusicCvar;
+    cvar_t  *pAmbTrig, *pAmbTarget, *pAmbInDur, *pAmbOutDur, *pAmbCvar;
+    qboolean bMusicTrig, bAmbTrig;
+    float    fDur, fStep, fCur, fTarget, fNext;
+    qboolean bDone;
+
+    // ---- music channel (s_musicvolume) ----
+    pMusicTrig = cgi.Cvar_Get("coop_duckMusicTrigger", "0", 0);
+    bMusicTrig = pMusicTrig->integer != 0;
+
+    if (bMusicTrig && !s_musicDuckLastTrig && !s_musicDuckActive) {
+        s_musicDuckBase   = cgi.Cvar_Get("s_musicvolume", "0.9", 0)->value;
+        s_musicDuckActive = qtrue;
+    }
+    s_musicDuckLastTrig = bMusicTrig;
+
+    if (s_musicDuckActive) {
+        pMusicTarget = cgi.Cvar_Get("coop_duckMusicTarget", "1", 0);
+        pMusicInDur  = cgi.Cvar_Get("coop_duckMusicInDur", "4", 0);
+        pMusicOutDur = cgi.Cvar_Get("coop_duckMusicOutDur", "12", 0);
+        pMusicCvar   = cgi.Cvar_Get("s_musicvolume", "0.9", 0);
+
+        fDur = bMusicTrig ? pMusicInDur->value : pMusicOutDur->value;
+        if (fDur < 0.05f) { fDur = 0.05f; }
+        fStep = (cg.frametime > 0) ? ((float)cg.frametime / 1000.0f) / fDur : 1.0f;
+        if (fStep > 1.0f) { fStep = 1.0f; }
+
+        fCur    = pMusicCvar->value;
+        fTarget = bMusicTrig ? pMusicTarget->value : s_musicDuckBase;
+        fNext   = fCur + (fTarget - fCur) * fStep;
+        bDone   = (fabs(fTarget - fNext) < 0.001f);
+        if (bDone) { fNext = fTarget; }
+        cgi.Cvar_Set("s_musicvolume", va("%g", fNext));
+
+        if (!bMusicTrig && bDone) {
+            s_musicDuckActive = qfalse;
+            s_musicDuckBase   = -1.0f;
+        }
+    }
+
+    // ---- ambient channel (s_ambientvolume) ----
+    pAmbTrig = cgi.Cvar_Get("coop_duckAmbientTrigger", "0", 0);
+    bAmbTrig = pAmbTrig->integer != 0;
+
+    if (bAmbTrig && !s_ambDuckLastTrig && !s_ambDuckActive) {
+        s_ambDuckBase   = cgi.Cvar_Get("s_ambientvolume", "0.6", 0)->value;
+        s_ambDuckActive = qtrue;
+    }
+    s_ambDuckLastTrig = bAmbTrig;
+
+    if (s_ambDuckActive) {
+        pAmbTarget = cgi.Cvar_Get("coop_duckAmbientTarget", "0", 0);
+        pAmbInDur  = cgi.Cvar_Get("coop_duckAmbientInDur", "4", 0);
+        pAmbOutDur = cgi.Cvar_Get("coop_duckAmbientOutDur", "12", 0);
+        pAmbCvar   = cgi.Cvar_Get("s_ambientvolume", "0.6", 0);
+
+        fDur = bAmbTrig ? pAmbInDur->value : pAmbOutDur->value;
+        if (fDur < 0.05f) { fDur = 0.05f; }
+        fStep = (cg.frametime > 0) ? ((float)cg.frametime / 1000.0f) / fDur : 1.0f;
+        if (fStep > 1.0f) { fStep = 1.0f; }
+
+        fCur    = pAmbCvar->value;
+        fTarget = bAmbTrig ? pAmbTarget->value : s_ambDuckBase;
+        fNext   = fCur + (fTarget - fCur) * fStep;
+        bDone   = (fabs(fTarget - fNext) < 0.001f);
+        if (bDone) { fNext = fTarget; }
+        cgi.Cvar_Set("s_ambientvolume", va("%g", fNext));
+
+        if (!bAmbTrig && bDone) {
+            s_ambDuckActive = qfalse;
+            s_ambDuckBase   = -1.0f;
+        }
+    }
+}
+
+/*
+==============
+CG_SyncWussPk3Count
+
+HZM coop [user 08-06] bug-1508 - "Wuss.pk3" challenge: mirror the client's session-cumulative
+unique-sound-registration count (s_sfxCount, plain internal cvar written by snd_dma_new.cpp every
+time a new sound registers - can fire many times per second during a busy load) into a SEPARATE,
+THROTTLED cvar that IS CVAR_USERINFO. Only re-Cvar_Set-ing coop_wussCount once every 10s (and only
+when the value actually changed) bounds this to at most one reliable-command resend per 10 seconds
+no matter how fast sounds register - deliberately avoiding the reliable-command-flood class of bug
+this project already hit once (bug-670, ~373 commands in one join burst overran the 512-deep ring
+and self-dropped the client). coop_mod/challenges.scr reads this back via self.userinfo.
+==============
+*/
+static void CG_SyncWussPk3Count(void)
+{
+    static int s_lastSyncTime = 0;
+    static int s_lastCount    = -1;
+    cvar_t    *pCount;
+    int        count;
+
+    if (cg.time - s_lastSyncTime < 10000) {
+        return;
+    }
+    s_lastSyncTime = cg.time;
+
+    pCount = cgi.Cvar_Get("s_sfxCount", "0", 0);
+    count  = pCount->integer;
+    if (count == s_lastCount) {
+        return;
+    }
+    s_lastCount = count;
+
+    cgi.Cvar_Set("coop_wussCount", va("%d", count));
+}
+
 void CG_DrawActiveFrame(int serverTime, int frameTime, stereoFrame_t stereoView, qboolean demoPlayback)
 {
     cg.time         = serverTime;
     cg.frametime    = frameTime;
     cg.demoPlayback = demoPlayback;
+
+    // HZM coop bug-1502 - run every frame regardless of view/weapon state (see function banner).
+    CG_UpdateScriptedAudioDucks();
+    // HZM coop bug-1508 - throttled internally, safe to call every frame (see function banner).
+    CG_SyncWussPk3Count();
 
     // any looped sounds will be respecified as entities
     // are added to the render list

@@ -52,6 +52,21 @@ static const char *whiteListedVariables[] = {
     "s_ambientvolume",
     "s_sfxduck",
 
+    // HZM coop [user 08-06] bug-1502 - marker cvars for the CLIENT-CAPTURED music/ambient duck
+    // (cg_view.c CG_UpdateScriptedAudioDucks). The server can never read a client's live cvar back
+    // (stufftext has no $cvar substitution), so instead of the server dictating a literal restore
+    // value it just stuffs "start/stop ducking" + a target - cgame captures the player's OWN live
+    // s_musicvolume/s_ambientvolume before ducking and restores to exactly that, never a hardcoded
+    // default. Two independent channels (map scripts trigger them at different times).
+    "coop_duckMusicTrigger",
+    "coop_duckMusicTarget",
+    "coop_duckMusicInDur",
+    "coop_duckMusicOutDur",
+    "coop_duckAmbientTrigger",
+    "coop_duckAmbientTarget",
+    "coop_duckAmbientInDur",
+    "coop_duckAmbientOutDur",
+
     // HZM coop - pre-mission lobby: let the server lock in each player's chosen uniform as their default
     // (dm_playermodel is CVAR_USERINFO|CVAR_ARCHIVE, so it carries into the launched mission AND persists),
     // and force the bottom-left roster / control-help ihuddraw layer on for every client (host + remote)

@@ -352,6 +352,8 @@ public:
     void UnsubscribeEvent(Event *ev);
 
     void FS_ReadContent(Event *ev);
+    void CompileCensus(Event *ev);
+    void ForceAllTriggers(Event *ev);
     void FS_WriteContent(Event *ev);
     void FS_OpenRead(Event *ev);
     void FS_OpenWrite(Event *ev);

@@ -715,6 +715,22 @@ ScriptThread *ScriptMaster::CreateScriptThread(ScriptClass *scriptClass, const_s
         );
     }
 
+    // HZM 2026-08-05 - coverage tracing (coop_covtrace 1): every labeled thread start in a MAP
+    // script. This is the single choke point for label-addressed thread creation; coop_mod and
+    // global scripts are filtered out to keep the log joinable against the per-map manifest.
+    {
+        static cvar_t *g_covtrace = NULL;
+        if (!g_covtrace) {
+            g_covtrace = gi.Cvar_Get("coop_covtrace", "0", 0);
+        }
+        if (g_covtrace->integer) {
+            str covfile = scriptClass->Filename();
+            if (!Q_stricmpn(covfile.c_str(), "maps/", 5)) {
+                Com_Printf("^~^~^ COV LBL %s::%s\n", covfile.c_str(), Director.GetString(label).c_str());
+            }
+        }
+    }
+
     return CreateScriptThread(scriptClass, m_pCodePos);
 }
 

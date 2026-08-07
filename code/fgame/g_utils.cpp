@@ -2107,6 +2107,23 @@ void G_RestartLevelWithDelay(float delaytime)
 
 void G_MissionFailed(void)
 {
+    // HZM 2026-08-06 (bug-1465) - COVERAGE SWEEP GUARD, engine level. The sweep force-fires every
+    // trigger, which inevitably hits an objective-failure path; this restarts the level, the sweep
+    // walks it again, fails again - m3l3 looped 12 times and m5l3 4 times this way. The script-side
+    // guards in coop_mod/replace.scr and global/missioncomplete.scr cannot catch this because maps
+    // reach it through the BARE ENGINE command, not the shim. Suppress the restart (and log it -
+    // "this map's failure path is reachable" is useful data) while coop_maptest 3 is running.
+    {
+        static cvar_t *g_maptest = NULL;
+        if (!g_maptest) {
+            g_maptest = gi.Cvar_Get("coop_maptest", "0", 0);
+        }
+        if (g_maptest->integer == 3) {
+            Com_Printf("^~^~^ COV MISSIONFAILED_ENGINE_SUPPRESSED %s\n", level.current_map);
+            return;
+        }
+    }
+
     G_RestartLevelWithDelay(0);
 
     level.mission_failed = true;

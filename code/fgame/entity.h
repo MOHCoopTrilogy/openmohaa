@@ -448,6 +448,7 @@ public:
     void SafeSolid(Event *ev); // new in 2.0
     void BecomeSolid(Event *ev);
     void BecomeNonSolid(Event *ev);
+    void CoopPlayerClip(Event *ev);   // HZM coop bug-1378: player-only invisible barrier
     void SetSize(Event *ev);
     void SetMins(Event *ev);
     void SetMaxs(Event *ev);

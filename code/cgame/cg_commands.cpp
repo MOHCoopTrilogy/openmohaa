@@ -4655,6 +4655,14 @@ void ClientGameCommandManager::BlockDynamicLight(Event *ev)
 
     InitializeSpawnthing(m_spawnthing);
     m_spawnthing->cgd.origin = current_entity->origin;
+    // HZM coop [user 2026-08-05] bug-1421b: record the owning entity, the way SetHardLink does.
+    // The parentlink command only sets the FLAG; cgd.parent is otherwise assigned only in the
+    // emitter spawn path (UpdateSpawnThing), which blockdlight's EndBlockDynamicLight->SpawnEffect
+    // never goes through. So a parentlinked blockdlight had T_PARENTLINK with parent unset - the
+    // death-with-parent check never ran, and the lights were immortal again (ghost cycling
+    // accumulated one per model switch, and deleting the emitter left its light burning).
+    // Harmless when parentlink is absent: cgd.parent is only read under T_PARENTLINK|T_HARDLINK.
+    m_spawnthing->cgd.parent = current_entity_number;
     m_spawnthing->cgd.flags |= T_DLIGHT;
     m_spawnthing->cgd.lightIntensity = ev->GetFloat(1);
     m_spawnthing->cgd.life           = ev->GetFloat(2);

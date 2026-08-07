@@ -555,6 +555,7 @@ public:
     void     PositionOnLadder(Entity *pUser);
 
     void SetLadderFacing(Event *ev);
+    void CoopLadderBox(Event *ev);   // HZM coop bug-1412: runtime ladder with no brush model
     void AdjustPositionOnLadder(Entity *pUser);
 
     void EnsureOverLadder(Entity *pUser);

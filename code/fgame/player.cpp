@@ -2900,7 +2900,26 @@ void Player::EndLevel(Event *ev)
 
 void Player::Respawn(Event *ev)
 {
-    if (g_gametype->integer != GT_SINGLE_PLAYER) {
+    // HZM 2026-08-06 (bug-1498) - trust the SERVER SHAPE, not the live cvar. The coop mod's
+    // changeGameType hack force-sets g_gametype to 0 (gi.cvar_set bypasses CVAR_LATCH) around
+    // SP-only engine calls - the loadout kit give and the disguise-on-spawn give both open such
+    // windows on EVERY player spawn. When 4 clients join in the same second, their queued
+    // EV_Player_Respawn events drain while another client's window is open; this function then
+    // read gametype 0 and took the else-branch below, whose gi.SendConsoleCommand("restart")
+    // SILENTLY reloads the whole map (no log line at all). Run qconsole.run.112610.log shows FIVE
+    // such hidden restarts on m2l2a, ~48s apart - every script-side restart path's mandatory
+    // print is absent, which is how the engine branch was identified. Worse, a restart issued
+    // while the cvar is live-0 LATCHES gametype 0 on the reload, so the map comes back running
+    // its single-player branches on a 4-client server: every coop gate off, all clients stuck
+    // T:spectator H:100. A multiplayer server (maxclients > 1) must NEVER take the SP
+    // restart-on-death path, whatever the cvar momentarily claims - fall through to the normal
+    // MP respawn instead (reviewer-preferred over a bare return, which would drop the event and
+    // strand the player in spectator). Genuine SP (maxclients 1) is unchanged.
+    if (g_gametype->integer == GT_SINGLE_PLAYER && game.maxclients > 1) {
+        Com_Printf("^~^~^ COV RESPAWN_SP_SUPPRESSED %s (live gametype 0 on a %d-client server)\n",
+                   client ? client->pers.netname : "?", game.maxclients);
+    }
+    if (g_gametype->integer != GT_SINGLE_PLAYER || game.maxclients > 1) {
         bool bOldVoted;
 
         if (health <= 0.0f) {
