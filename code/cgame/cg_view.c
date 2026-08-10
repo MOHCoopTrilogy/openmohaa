@@ -129,6 +129,24 @@ CG_OffsetThirdPersonView
 */
 #define CAMERA_MINIMUM_DISTANCE 40
 
+// HZM coop [user 2026-08-07] COVER CAMERA LIFT - shared by both view paths.
+// The crouched cover eye sits level with the obstacle, so the crosshair points into the cover and
+// the player has to tilt up to place shots. coop_coverView is mirrored from the server (change-only
+// stufftext, same as coop_limpView); coop_coverViewRaise is how far to lift, live and archived.
+// THIRD PERSON ONLY, per user: cover force-switches the view to 3P, so that is the only path that
+// runs while in cover. First person is deliberately left completely untouched - applying it there
+// as well is what left a stale lift behind on exit and threw the camera at the ceiling.
+float CG_CoopCoverViewLift(void)
+{
+    static cvar_t *pCoverView  = NULL;
+    static cvar_t *pCoverRaise = NULL;
+
+    if (!pCoverView)  { pCoverView  = cgi.Cvar_Get("coop_coverView",      "0",  0); }
+    if (!pCoverRaise) { pCoverRaise = cgi.Cvar_Get("coop_coverViewRaise", "16", CVAR_ARCHIVE); }
+
+    return pCoverView->integer ? pCoverRaise->value : 0.0f;
+}
+
 static void CG_OffsetThirdPersonView(void)
 {
     vec3_t        forward;
@@ -147,6 +165,10 @@ static void CG_OffsetThirdPersonView(void)
     vec3_t        camera_offset;
     float         fCamDist, fCamSide, fCamHeight, fCamVert;
     qboolean      bTurret3p;
+
+    // [user 2026-08-07] lift the eye BEFORE the chase camera is derived from it, so third person
+    // gets the same cover raise as first person.
+    cg.refdef.vieworg[2] += CG_CoopCoverViewLift();
 
     target_angles   = cg.refdefViewAngles;
     target_position = cg.refdef.vieworg;
@@ -2072,44 +2094,12 @@ static int CG_CalcFov(void)
         if (s_rainWet < 0.0f) { s_rainWet = 0.0f; }
         cgi.Cvar_Set("r_ppRainWet", va("%g", s_rainWet));
 
-        // HZM gl2 post-FX (bug-1158): SNOW's counterpart to the rain-on-lens bridge just above.
-        // Same precip system, same speed split (rain >800, snow <=800) - the rain branch above
-        // deliberately excludes snow ("snow leaves the screen dry"), so snow currently drives no
-        // lens effect at all. This publishes an eased frost fraction on the SNOW branch of the same
-        // CG_CoopPrecipType classifier, for a frost-on-lens effect that accumulates while it snows
-        // and clears once you get under cover - same target-then-ease shape as s_rainWet, just the
-        // snow condition and its own (slower - frost builds, it doesn't splash) ease rate.
-        {
-            static int   s_lastFrostTime = 0;
-            static float s_frostAmt      = 0.0f;
-            float        dtf, targetFrost = 0.0f, kf;
-
-            if (s_lastFrostTime == 0) { s_lastFrostTime = cg.time; }
-            dtf = (cg.time - s_lastFrostTime) / 1000.0f;
-            s_lastFrostTime = cg.time;
-            if (dtf < 0.0f) { dtf = 0.0f; } else if (dtf > 0.5f) { dtf = 0.5f; }
-
-            // Same TYPE gate as the rain branch (bug-1206): frost is for SNOW only. The old
-            // `speed <= 800` complement would also have claimed any slow-moving dust look.
-            if (CG_CoopPrecipType() == PRECIP_SNOW) {
-                trace_t trf;
-                vec3_t  vUpEndF, vZf = {0.0f, 0.0f, 0.0f};
-                VectorCopy(cg.refdef.vieworg, vUpEndF);
-                vUpEndF[2] += 4096.0f;
-                cgi.CM_BoxTrace(&trf, cg.refdef.vieworg, vUpEndF, vZf, vZf, 0, MASK_SOLID, qfalse);
-                if ((trf.surfaceFlags & SURF_SKY) || trf.fraction >= 0.999f) {
-                    targetFrost = cg.rain.density * 2.5f;
-                    if (targetFrost > 1.0f) { targetFrost = 1.0f; }
-                }
-            }
-
-            // frost builds slowly (~4s to fully accumulate) and thaws slowly too (~6s) - it should
-            // read as accumulation over time outdoors, not a fast in/out like beads
-            kf = (targetFrost > s_frostAmt) ? 0.28f : 0.18f;
-            s_frostAmt += (targetFrost - s_frostAmt) * (1.0f - exp(-kf * dtf));
-            if (s_frostAmt < 0.0f) { s_frostAmt = 0.0f; }
-            cgi.Cvar_Set("r_ppFrostAmt", va("%g", s_frostAmt));
-        }
+        // [user 08-07] FROST-ON-LENS REMOVED - "lets remove the frozen effect on screen for when
+        // it snows it looks really bad". The publisher that drove it (an eased r_ppFrostAmt off the
+        // PRECIP_SNOW branch + a sky trace) is deleted here, so the effect is inert on every client
+        // regardless of a stale archived r_ppFrost: tr_postprocess.c gates the draw on
+        // r_ppFrostAmt > 0.001 and nothing writes it any more. frost_fp.glsl and its shaderProgram
+        // are left in place for a future re-do; only the signal and its UI toggle are gone.
     }
 
     x = cg.refdef.width / tan(fov_x / 360 * M_PI);

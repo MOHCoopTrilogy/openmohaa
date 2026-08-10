@@ -619,6 +619,35 @@ Event EV_Player_CoopLobbyRepose
     "the per-frame statemap never ticks in between (no twitch) and the slung weapon is left alone.",
     EV_NORMAL
 );
+Event EV_Player_CoopNavRec
+(
+    "coop_navrec",
+    EV_CONSOLE,
+    NULL,
+    NULL,
+    "HZM coop: toggle NAV NODE RECORDING. Walk the ground you want AI to be able to use; a node is"
+    " dropped every coop_navRecSpacing units. Toggling off rebuilds the path graph so it is usable"
+    " immediately, and prints every node as ^~^~^ NAVNODE x y z for baking into the map script.",
+    EV_NORMAL
+);
+Event EV_Player_CoopNavNode
+(
+    "coop_navnode",
+    EV_CONSOLE,
+    "fff",
+    "x y z",
+    "HZM coop: create one AI path node at the given point (used by baked map scripts).",
+    EV_NORMAL
+);
+Event EV_Player_CoopNavBuild
+(
+    "coop_navbuild",
+    EV_CONSOLE,
+    NULL,
+    NULL,
+    "HZM coop: rebuild the AI path graph after creating nodes.",
+    EV_NORMAL
+);
 Event EV_Player_CoopLimpTest
 (
     "coop_limptest",
@@ -1977,6 +2006,9 @@ CLASS_DECLARATION(Sentient, Player, "player") {
     {&EV_Player_CoopLobbyRepose,         &Player::CoopLobbyRepose              },
     {&EV_Player_CoopLobbyCycleAnim,      &Player::CoopLobbyCycleAnim           },
     {&EV_Player_CoopLimpTest,            &Player::EventCoopLimpTest            },
+    {&EV_Player_CoopNavRec,              &Player::EventCoopNavRec              },
+    {&EV_Player_CoopNavNode,             &Player::EventCoopNavNode             },
+    {&EV_Player_CoopNavBuild,            &Player::EventCoopNavBuild            },
     {&EV_Player_CoopLobbyHoldPose,       &Player::CoopLobbyHoldPose            },
     {&EV_Player_CoopLobbyInput,          &Player::CoopLobbyInput               },
     {&EV_Player_CoopLobbyCursor,         &Player::CoopLobbyCursor              },
@@ -2329,6 +2361,12 @@ Player::Player()
     m_bCoopLimping    = false;   // HZM coop - low-health limp (bug-1291)
     m_bCoopWounded    = false;   // HZM coop - bug-1324
     m_iCoopLimpSent   = -1;      // force the first coop_limpView stuff, whatever its value
+    m_iCoopCoverSent  = -1;      // HZM coop - same for coop_coverView
+    m_iCoopBfButtons  = 0;       // HZM coop - semi-auto blindfire edge tracking
+    m_bCoopBfShotDone = false;
+    m_bCoopNavRec     = false;
+    m_bCoopNavFull    = false;
+    m_iCoopNavCount   = 0;
     m_bCoopShoulderAim = false; // HZM coop - 3P shoulder-aim stage (userinfo mirror)
     m_bCoopView3p      = false; // HZM coop - client view mode (u_view3p userinfo mirror)
     m_vCoopCoverNormal = vec_zero; // HZM coop - anchored cover OUT normal [215]
@@ -2356,6 +2394,8 @@ Player::Player()
     // HZM coop - TAKE COVER [214]: start clear (no request, no valid pose)
     m_bCoopDbno           = false;   // HZM coop [user 08-02]
     m_bCoopCoverRequested = false;
+    m_fCoopCoverAutoDwell = 0.0f; // HZM coop [user 2026-08-09] auto-cover dwell/backoff
+    m_fCoopCoverAutoRetry = 0.0f;
     m_bCoopCoverWall      = false;
     m_bCoopCoverLow       = false;
     m_bCoopBlindfire      = false;
@@ -5218,6 +5258,11 @@ void Player::ClientThink(void)
     }
 
     TickCoopCover(); // HZM coop - take cover [214]: validate the pose with this frame's traces
+    // [user 2026-08-07] Nav recorder ticks HERE, not inside TickCoopCover - that function returns
+    // early whenever cover is not requested, so hanging the recorder off its tail meant nodes only
+    // dropped while hugging a wall. Sixteen minutes of walking produced one node. Same early-return
+    // trap that broke the cover-state mirror earlier today.
+    TickCoopNavRec();
     TickCoopLobbyInput(); // HZM coop - lobby A/D/F input (no binds) -> self.coop_lobbyInput
     TickCoopLobbyCursor(); // HZM coop - lobby mouse cursor (no binds) -> self.coop_lobbyCurX/Y + coop_lobbyClick
     // HZM coop [221] - bug-309 GUNNERPROBE: once/sec truth table of every candidate manning
@@ -5431,7 +5476,18 @@ void Player::Think(void)
         g_playermodel->modified = qfalse;
     }
 
-    if (g_gametype->integer == GT_SINGLE_PLAYER) {
+    // HZM bug-1638 THE ROOT OF THE m2l2a STEALTH SAGA: this maintenance ran ONLY in SP, so in
+    // coop m_bIsDisguised froze at whatever the last changeGameType window computed - grant the
+    // disguise with a rifle in hand and you are permanently "not disguised"; holstering never
+    // helps because nothing recomputes. Run it in EVERY gametype (g_coopDisgParity 0 reverts
+    // live): holster = disguised, draw = blown, per frame per player - retail semantics. The
+    // guards' whole reaction suite (challenges, disguise levels, see-through watchers, alarm
+    // cascade) is engine-native and simply works once this flag is alive.
+    static cvar_t *s_coopDisgParity = NULL;
+    if (!s_coopDisgParity) {
+        s_coopDisgParity = gi.Cvar_Get("g_coopDisgParity", "1", 0);
+    }
+    if (g_gametype->integer == GT_SINGLE_PLAYER || s_coopDisgParity->integer) {
         m_bIsDisguised = false;
 
         if (m_bHasDisguise && !level.m_bAlarm) {
@@ -5443,14 +5499,27 @@ void Player::Think(void)
                 for (Sentient *pSent = level.m_HeadSentient[0]; pSent != NULL; pSent = pSent->m_NextSentient) {
                     Actor *act = (Actor *)pSent;
 
-                    if (pSent->m_Enemy == this && act->IsAttacking()) {
+                    // HZM bug-1631 ROOT: this veto is vanilla-correct when an actor is genuinely
+                    // engaging (shooting = blown), but in coop the actorenemy retention keeps
+                    // harmless ZERO-THREAT actors parked in attack thinkstate against a disguised
+                    // player indefinitely. Every changeGameType-0 window then ran this scan, found
+                    // one, and flipped m_bIsDisguised false until the next window - which is what
+                    // oscillated the papers-checker (CheckEnemies drops a non-disguised zero-threat
+                    // enemy before the retention clause) and made guards look suspicious. Require
+                    // real threat, which is a no-op for genuine SP attacks.
+                    if (pSent->m_Enemy == this && act->IsAttacking()
+                        && act->m_PotentialEnemies.GetCurrentThreat() > 0) {
                         m_bIsDisguised = false;
                         break;
                     }
                 }
             }
         }
+    }
 
+    // scope deliberately narrowed to the disguise flag: cover-map feed and player enemy
+    // bookkeeping stay SP-only, exactly as before
+    if (g_gametype->integer == GT_SINGLE_PLAYER) {
         PathSearch::PlayerCover(this);
         UpdateEnemies();
     }
@@ -12579,6 +12648,7 @@ void Player::EventCoopSetCover(Event *ev)
     m_fCoopCoverBadTime   = 0.0f;
 
     TickCoopCover();
+    TickCoopNavRec();
 
     if (m_bCoopCoverRequested && !m_bCoopCoverWall && !m_bCoopCoverLow) {
         m_bCoopCoverRequested = false;
@@ -13225,29 +13295,243 @@ void Player::TickSprint()
 // commands) plus the spread penalty in Weapon::Shoot and the low-cover muzzle raise in
 // Weapon::GetMuzzlePosition.
 //====
+// HZM coop [user 2026-08-07] Mirror the cover state to the OWNING client (change-only - a per-frame
+// stufftext would flood the reliable command buffer, the same rule coop_limpView follows).
+// MUST be called on EVERY exit path of TickCoopCover. It was originally only at the tail, and both
+// early returns skipped it - so releasing cover never sent 0 and the client kept the camera lift in
+// normal third person. Exactly the "make sure this cannot affect non-cover play" case.
+void Player::SendCoopCoverView()
+{
+    int coverWant = ((m_bCoopCoverLow || m_bCoopCoverWall) && !m_bCoopCoverPeek) ? 1 : 0;
+
+    if (coverWant != m_iCoopCoverSent) {
+        m_iCoopCoverSent = coverWant;
+        gi.SendServerCommand(edict - g_entities, "stufftext \"set coop_coverView %d\"", coverWant);
+    }
+}
+
+// HZM coop [user 2026-08-07] ONE CLICK, ONE SHOT for semi-auto blind fire.
+// Asked by Weapon::Shoot for every round the cover-fire animation tries to emit. Limiting the
+// STATE was not enough - the COVER_*_FIRE clips carry several "fire" frame commands each, so one
+// click still produced a G43 triple-tap and emptied a revolver. Full-auto weapons are unaffected;
+// they keep firing for as long as the trigger is held.
+bool Player::CoopBlindfireAllowShot()
+{
+    Weapon *weapon;
+
+    if (!m_bCoopBlindfire) {
+        return true;   // not blind firing - never interfere
+    }
+
+    weapon = GetActiveWeapon(WEAPON_MAIN);
+    if (!weapon || !weapon->IsSemiAuto()) {
+        return true;   // full auto holds down as normal
+    }
+
+    if (m_bCoopBfShotDone) {
+        return false;  // this press already sent one
+    }
+
+    m_bCoopBfShotDone = true;
+
+    // [user 2026-08-07] CUT THE ANIMATION SHORT. Dropping the flag here exits the COVER_*_FIRE
+    // statemap state immediately after this round, so the clip stops instead of playing out its
+    // remaining "fire" frames - one click now looks like one shot as well as being one shot.
+    // Safe only because the low-cover muzzle raise was moved off this flag onto the cover POSE:
+    // were it still gated on m_bCoopBlindfire, clearing it mid-burst would drop the raise and put
+    // the round into the cover - the exact bug reported for release and dry-clip.
+    // It cannot re-arm on its own: TickCoopCover only re-sets the flag for a semi-auto on the
+    // press EDGE, and the trigger is still held at this point.
+    m_bCoopBlindfire = false;
+
+    return true;
+}
+
+//====
+// HZM coop [user 2026-08-07] NAV NODE RECORDER.
+// Half this map's rear area has no AI path coverage, so actors spawned there cannot move at all
+// (proven by the nav probe: 12 of 44 points dead). MOHAA can create nodes at runtime - NavMaster
+// does exactly this behind ai_editmode - and PathSearch::CreatePaths() rebuilds the whole graph
+// from the current node set. This exposes that as a bindable toggle: walk the dead ground, get
+// nodes, rebuild, done.
+// Nodes are also printed so they can be baked into the map script (via coop_navnode) and recreated
+// on every load - runtime nodes themselves do not survive a map change.
+//====
+// [bug 2026-08-07] CreatePaths() opens with `if (m_bNodesloaded) return;`, and that flag is set
+// for the rest of the map once the graph is built at load. Calling it bare from here was a silent
+// no-op: nodes were allocated but never linked, and ArchiveSaveNodes() at the tail never ran, so
+// no .pth was written. The engine's own editor (NavMaster::CreatePaths) calls ClearNodes() first -
+// that clears the flag and drops the stale links while KEEPING the node objects. Do the same.
+void Player::CoopNavRebuild(void)
+{
+    // Two different teardowns, and picking the wrong one corrupts the heap either way.
+    // Nodes from a baked .pth live in one bulk block that must NOT be freed (ClearNodes would),
+    // because the map's named info_pathnode entities are bound to those objects. Nodes built at
+    // load time from BSP entities were allocated individually and ClearNodes frees what it owns.
+    //
+    // Gate on CoopBulkOwnsNodes(), NOT CoopNodesAreBulk(): by the time a bake reaches here the
+    // first coop_navnode has already run prepare, which nulls bulkNavMemory - so the allocation
+    // predicate reads "not bulk" and this would pick ClearNodes and free the block. That is
+    // exactly the crash in droptofloor.
+    if (PathSearch::CoopBulkOwnsNodes()) {
+        PathSearch::CoopPrepareRuntimeRebuild();   // no-op if a coop_navnode already prepared
+    } else {
+        PathSearch::ClearNodes();
+    }
+
+    PathSearch::CreatePaths();
+
+    // Put FreePathNode back to bulk behaviour before anything can delete a node - see
+    // PathSearch::CoopFinishRuntimeRebuild.
+    PathSearch::CoopFinishRuntimeRebuild();
+}
+
+void Player::EventCoopNavRec(Event *ev)
+{
+    m_bCoopNavRec = !m_bCoopNavRec;
+
+    if (m_bCoopNavRec) {
+        m_vCoopNavLast = origin;
+        m_iCoopNavCount = 0;
+        CoopNavDropNode(origin);   // anchor the run where you stand
+        gi.centerprintf(edict, "NAV RECORD: ON - walk the ground AI should use");
+    } else {
+        CoopNavRebuild();
+        gi.centerprintf(edict, va("NAV RECORD: OFF - %d nodes, graph rebuilt + saved", m_iCoopNavCount));
+        gi.Printf("^~^~^ NAVREC DONE %d nodes\n", m_iCoopNavCount);
+    }
+}
+
+// [user 2026-08-07] No DOOR-node command: PathSearch::CreatePaths UNLINKS every door before it
+// builds links and relinks them after, so it connects straight through doorways already. The DOOR
+// spawnflag only governs the conditional "skip this route while the door is locked" case, and the
+// QUAKED doc's bit for it collides with AI_CONCEALMENT in the header - not worth guessing at.
+void Player::CoopNavDropNode(const Vector& pos, int flags)
+{
+    // First runtime node on a map that loaded a baked .pth: detach from the archive's bulk block
+    // before allocating, or this walks the allocation pointer off the front of it. Idempotent, so
+    // it is safe to call per node - the baked cfgs create hundreds in one frame.
+    if (PathSearch::CoopNodesAreBulk()) {
+        PathSearch::CoopPrepareRuntimeRebuild();
+    }
+
+    // AI_AddNode calls gi.Error(ERR_DROP) past MAX_PATHNODES, which would kick the player
+    // mid-bake. Refuse quietly instead and say so once.
+    if (PathSearch::nodecount >= MAX_PATHNODES - 8) {
+        if (!m_bCoopNavFull) {
+            m_bCoopNavFull = true;
+            gi.Printf("^~^~^ NAVNODE refused - MAX_PATHNODES (%d) reached\n", MAX_PATHNODES);
+        }
+        return;
+    }
+
+    PathNode *node = new PathNode;
+
+    node->nodeflags = flags;
+    node->setOrigin(pos);
+
+    m_vCoopNavLast = pos;
+    m_iCoopNavCount++;
+    gi.Printf("^~^~^ NAVNODE %d %d %d %d\n", (int)pos[0], (int)pos[1], (int)pos[2], flags);
+}
+
+void Player::EventCoopNavNode(Event *ev)
+{
+    Vector pos(ev->GetFloat(1), ev->GetFloat(2), ev->GetFloat(3));
+
+    CoopNavDropNode(pos);
+}
+
+
+// Rebuild and re-save. CreatePaths() ends in ArchiveSaveNodes(), which writes the FULL node set -
+// the map's own nodes plus anything created since - to level.m_pathfile in the homepath. That file
+// is the shippable artefact: drop it in a pk3 and the engine loads it instead of the stock one,
+// because ArchiveLoadNodes reads through gi.FS_ReadFile and FS_FileNewer is a stub returning 0, so
+// the only gate is the BSP timestamp, which is identical on every install.
+void Player::EventCoopNavBuild(Event *ev)
+{
+    int before = PathSearch::nodecount;
+
+    CoopNavRebuild();
+    gi.Printf("^~^~^ NAVBUILD rebuilt %d nodes -> %s\n", before, level.m_pathfile.c_str());
+}
+
+// Called every frame from TickCoopCover's caller: drop a node once the player has walked far enough.
+void Player::TickCoopNavRec(void)
+{
+    cvar_t *pSpacing;
+    float   fSpacing;
+
+    if (!m_bCoopNavRec) {
+        return;
+    }
+
+    pSpacing = gi.Cvar_Get("coop_navRecSpacing", "96", CVAR_ARCHIVE);
+    fSpacing = pSpacing ? pSpacing->value : 96.0f;
+    if (fSpacing < 16.0f) { fSpacing = 16.0f; }
+
+    if ((origin - m_vCoopNavLast).length() >= fSpacing) {
+        CoopNavDropNode(origin);
+    }
+}
+
 void Player::TickCoopCover()
 {
     qboolean wallValid = qfalse;
     qboolean lowValid  = qfalse;
 
     if (!m_bCoopCoverRequested) {
-        m_bCoopCoverWall    = false;
-        m_bCoopCoverLow     = false;
-        m_bCoopBlindfire    = false;
-        m_bCoopCoverPeek    = false;
-        m_fCoopCoverBadTime = 0.0f;
-        return;
+        // HZM coop [user 2026-08-09] AUTO COVER. The user's ask verbatim: "crouch behind cover and
+        // after a second it will automatically put you behind cover like modern games do". While
+        // crouched, still, alive and unmounted, a dwell timer runs; when it matures we set the
+        // SAME request flag the bus-26 bind sets and fall through - the existing validation either
+        // locks the LOW pose or clears the request again, silently (the "No cover here" feedback is
+        // script-side and only fires on the manual bind). A failed attempt retries every 0.4s while
+        // the player keeps holding position; every hard-cancel below pushes a backoff so a
+        // DELIBERATE exit (moving away) does not re-grab the wall the player just left.
+        // coop_coverAuto 0 disables; coop_coverAutoDelay tunes the dwell (default 0.9s).
+        static cvar_t *s_coopCoverAuto      = NULL;
+        static cvar_t *s_coopCoverAutoDelay = NULL;
+        if (!s_coopCoverAuto) {
+            s_coopCoverAuto      = gi.Cvar_Get("coop_coverAuto", "1", 0);
+            s_coopCoverAutoDelay = gi.Cvar_Get("coop_coverAutoDelay", "0.9", 0);
+        }
+        if (s_coopCoverAuto->integer && !deadflag && !IsSpectator() && !m_pVehicle && !m_pTurret
+            && !m_pLadder && !level.playerfrozen && !m_bFrozen && !(flags & FL_IMMOBILE)
+            && (client->ps.pm_flags & PMF_DUCKED) && !last_ucmd.forwardmove && !last_ucmd.rightmove
+            && last_ucmd.upmove <= 0) {
+            m_fCoopCoverAutoDwell += level.frametime;
+            if (m_fCoopCoverAutoDwell >= s_coopCoverAutoDelay->value && level.time >= m_fCoopCoverAutoRetry) {
+                m_bCoopCoverRequested = true; // speculative - validation below is the judge
+                m_fCoopCoverAutoRetry = level.time + 0.4f;
+            }
+        } else {
+            m_fCoopCoverAutoDwell = 0.0f;
+        }
+        if (!m_bCoopCoverRequested) {
+            m_bCoopCoverWall    = false;
+            m_bCoopCoverLow     = false;
+            m_bCoopBlindfire    = false;
+            m_bCoopCoverPeek    = false;
+            m_fCoopCoverBadTime = 0.0f;
+            SendCoopCoverView();
+            return;
+        }
     }
 
     // hard cancels - things that end cover instantly (the statemap "!" exits fire this frame)
     if (deadflag || IsSpectator() || m_pVehicle || m_pTurret || m_pLadder || level.playerfrozen || m_bFrozen
         || (flags & FL_IMMOBILE) || last_ucmd.forwardmove || last_ucmd.rightmove || last_ucmd.upmove > 0) {
         m_bCoopCoverRequested = false;
+        // HZM coop [user 2026-08-09] auto-cover backoff: a deliberate exit must not re-grab
+        m_fCoopCoverAutoDwell = 0.0f;
+        m_fCoopCoverAutoRetry = level.time + 0.9f;
         m_bCoopCoverWall      = false;
         m_bCoopCoverLow       = false;
         m_bCoopBlindfire      = false;
         m_bCoopCoverPeek      = false;
         m_fCoopCoverBadTime   = 0.0f;
+        SendCoopCoverView();
         return;
     }
 
@@ -13457,15 +13741,33 @@ void Player::TickCoopCover()
 
     // BLIND FIRE: covered + fire held + a gun that makes sense poked over/around cover - but
     // NOT while peek-aiming (RMB = real aimed fire at full accuracy instead)
+    // [user 2026-08-07] FIRE MODE now follows the weapon, not the animation:
+    //   full-auto (SMG/MG/auto rifle) - blindfires for as long as the trigger is held
+    //   semi-auto, bolt, shotgun, rocket - one press, one burst; holding does nothing more
+    // and it STOPS on an empty clip so the reload can play instead of the anim dry-firing into
+    // the cover. IsSemiAuto() is the weapon's own declaration, so every gun classifies itself.
     m_bCoopBlindfire = false;
     if ((m_bCoopCoverWall || m_bCoopCoverLow) && !m_bCoopCoverPeek && (last_ucmd.buttons & BUTTON_ATTACKLEFT)) {
         Weapon *weapon = GetActiveWeapon(WEAPON_MAIN);
 
         if (weapon
             && (weapon->GetWeaponClass() & (WEAPON_CLASS_PISTOL | WEAPON_CLASS_RIFLE | WEAPON_CLASS_SMG | WEAPON_CLASS_MG))) {
-            m_bCoopBlindfire = true;
+            if (!weapon->HasAmmoInClip(FIRE_PRIMARY)) {
+                m_bCoopBlindfire = false;   // dry - drop out so the reload can run
+            } else if (weapon->IsSemiAuto()) {
+                // press EDGE only: rearming needs the trigger released first
+                if (!(m_iCoopBfButtons & BUTTON_ATTACKLEFT)) {
+                    m_bCoopBlindfire = true;
+                }
+            } else {
+                m_bCoopBlindfire = true;
+            }
         }
     }
+    if (!(last_ucmd.buttons & BUTTON_ATTACKLEFT)) {
+        m_bCoopBfShotDone = false;   // trigger released - rearm the single shot
+    }
+    m_iCoopBfButtons = last_ucmd.buttons;
 
     // HZM coop [235] - script-visible stamps for the XP system (xp.scr xp_ai_killed reads
     // self.coop_incover for the +3 covered-kill bonus and self.coop_bf_t, a level.time stamp
@@ -13480,6 +13782,9 @@ void Player::TickCoopCover()
             Vars()->SetVariable("coop_bf_t", level.time);
         }
     }
+
+
+    SendCoopCoverView();
 }
 //====
 
@@ -13605,6 +13910,15 @@ float Player::GetRunSpeed() const
 void Player::FireWeapon(int number, firemode_t mode)
 {
     if (m_pVehicle || m_pTurret) {
+        return;
+    }
+
+    // HZM coop [user 2026-08-07] ONE CLICK ONE SHOT for semi-auto blind fire.
+    // This is the path the player's shots actually take. The gate was first put in Weapon::Shoot,
+    // which is the EV_Weapon_Shoot event used by scripted/AI fire - the player's cover burst never
+    // goes through it, so the revolver still emptied and the G43 still triple-tapped. Only ONE gate
+    // may exist: two would each consume the single-shot allowance and suppress the round entirely.
+    if (!CoopBlindfireAllowShot()) {
         return;
     }
 

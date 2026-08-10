@@ -24,6 +24,44 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 
 #include "actor.h"
 
+// HZM [user 2026-08-09] bug-1631: gated disguise-state tracer (g_coopDisgDebug 1). The m2l2a
+// papers-checker froze inside the disguise think with no script-visible state (thinkstate census
+// showed disguise=1 pinned for 100+ seconds); these prints expose the engine-side machine -
+// every Begin/End/Suspend/Resume (state-clock re-arms) plus a ~2 Hz tick line per actor.
+cvar_t *g_coopDisgDebugCv = NULL;
+
+void CoopDisgTrace(Actor *self, const char *tag)
+{
+    if (!g_coopDisgDebugCv) {
+        g_coopDisgDebugCv = gi.Cvar_Get("g_coopDisgDebug", "0", 0);
+    }
+    if (!g_coopDisgDebugCv->integer) {
+        return;
+    }
+    Com_Printf(
+        "^~^~^ DISG %s ent=%i tn=%s st=%i age=%i eDisg=%i plvl=%i dlvl=%i shown=%i/%i nextT=%i enemy=%i\n",
+        tag,
+        self->entnum,
+        self->targetname.c_str(),
+        self->m_State,
+        level.inttime - self->m_iStateTime,
+        (self->m_Enemy && self->EnemyIsDisguised()) ? 1 : 0,
+        level.m_iPapersLevel,
+        self->m_iDisguiseLevel,
+        self->m_iEnemyShowPapersTime,
+        self->m_Enemy ? self->m_Enemy->m_ShowPapersTime : -1,
+        self->m_iNextDisguiseTime - level.inttime,
+        self->m_Enemy ? self->m_Enemy->entnum : -1
+    );
+}
+
+void CoopDisgTraceTick(Actor *self, const char *tag)
+{
+    if (level.inttime % 500 < 40) {
+        CoopDisgTrace(self, tag);
+    }
+}
+
 void Actor::InitDisguiseNone(GlobalFuncs_t *func)
 {
     func->IsState = &Actor::IsDisguiseState;

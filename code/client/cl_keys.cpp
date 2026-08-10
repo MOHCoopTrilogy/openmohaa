@@ -602,6 +602,40 @@ void Key_SetCtrlBinding(int keynum, const char *binding)
 Key_GetBinding
 ===================
 */
+/*
+===================
+CL_CoopObjKey_f
+
+[user 08-08] bug-1593 - publish the key the player actually has bound to the coop objectives
+toggle, so the on-screen hint can name it instead of saying "your Coop Objectives key".
+
+Only the CLIENT knows its own binds, and the hint is drawn server-side through ihuddraw - so the
+answer has to travel. It goes out as a USERINFO cvar, which the server already receives for every
+client and script already reads elsewhere (challenges.scr uses info_valueforkey on userinfo). The
+action is bound as `vstr coop_obj` (bind.scr registers it as "Coop Objectives"), so that substring
+is what identifies it; matching on the command rather than a hard-coded key is the whole point,
+since the player is free to rebind it.
+
+Empty when nothing is bound - the script side falls back to the generic wording rather than
+printing a blank key.
+===================
+*/
+void CL_CoopObjKey_f(void)
+{
+    int         i;
+    const char *b;
+
+    for (i = 0; i < MAX_KEYS; i++) {
+        b = Key_GetBinding(i);
+        if (b && *b && strstr(b, "coop_obj")) {
+            Cvar_Set("coop_objKey", Key_KeynumToString(i));
+            return;
+        }
+    }
+
+    Cvar_Set("coop_objKey", "");
+}
+
 const char *Key_GetBinding(int keynum)
 {
     if (keynum < 0 || keynum >= MAX_KEYS) {
@@ -699,6 +733,10 @@ void Key_Unbind_f(void)
     }
 
     Key_SetBinding(b, "");
+
+    // [user 08-08] bug-1593 - a rebind is exactly when the objectives key changes;
+    // refresh the userinfo cvar so the on-screen hint names the new key immediately.
+    CL_CoopObjKey_f();
 }
 
 /*
@@ -804,6 +842,10 @@ void Key_Bind_f(void)
     }
 
     Key_SetBinding(b, cmd);
+
+    // [user 08-08] bug-1593 - a rebind is exactly when the objectives key changes;
+    // refresh the userinfo cvar so the on-screen hint names the new key immediately.
+    CL_CoopObjKey_f();
 }
 
 /*
@@ -987,6 +1029,11 @@ void CL_InitKeyCommands(void)
     int i;
 
     // register our functions
+    // [user 08-08] bug-1593 - the cvar must exist and be USERINFO BEFORE anything sets it,
+    // or the value never reaches the server. Refreshed on demand by coop_objkey; also
+    // recomputed after every bind/unbind below, since rebinding is exactly when it changes.
+    Cvar_Get("coop_objKey", "", CVAR_USERINFO | CVAR_ARCHIVE);
+    Cmd_AddCommand("coop_objkey", CL_CoopObjKey_f);
     Cmd_AddCommand("bind", Key_Bind_f);
     Cmd_AddCommand("unbind", Key_Unbind_f);
     Cmd_AddCommand("altbind", Key_AltBind_f);

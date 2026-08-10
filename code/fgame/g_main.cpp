@@ -269,6 +269,28 @@ void G_InitGame(int levelTime, int randomSeed)
         "^~^~^ FPRINT game %s %s ENTBITS=%d MAX_SOUNDS=%d\n", __DATE__, __TIME__, GENTITYNUM_BITS, MAX_SOUNDS
     );
 
+    /* HZM [user 2026-08-10] bug-1669: PRE-REGISTER every engine-owned coop_* cvar that script also
+       reads, BEFORE any script runs. Script `getcvar` is implemented as
+           gi.Cvar_Get(name, "", 0)          // scriptthread.cpp:2628 - EMPTY default
+       so the first script read of a cvar the engine has not registered yet CREATES it with an empty
+       value. A later gi.Cvar_Get(name, "1", CVAR_ARCHIVE) then finds it existing, updates only the
+       reset/default string, and KEEPS the empty value - so ->integer is 0 forever.
+
+       That is exactly how player limping was disabled: coop_limpWarn is threaded during player setup
+       (player.scr:224) and calls getcvar("coop_limp") long before Player::TickLimp registers it, so
+       the warning system silently switched off the feature it exists to warn about. Verified live:
+       rcon reported coop_limp is:"" default:"1" while a genuinely unknown cvar prints nothing.
+
+       These six are the measured collision set - engine default is non-empty AND a script getcvars
+       the same name. Registering them here (G_InitGame runs before any script) makes the engine
+       default authoritative again. Any NEW engine coop_* cvar that script also reads belongs here. */
+    gi.Cvar_Get("coop_limp", "1", CVAR_ARCHIVE);
+    gi.Cvar_Get("coop_limpStart", "0.30", CVAR_ARCHIVE);
+    gi.Cvar_Get("coop_aiHideMaxMs", "15000", 0);
+    gi.Cvar_Get("coop_aiRetargetMs", "5000", 0);
+    gi.Cvar_Get("coop_goreDripCorpseTime", "12", CVAR_ARCHIVE);
+    gi.Cvar_Get("coop_tinnitusBlast", "1", CVAR_ARCHIVE);
+
     g_protocol    = gi.Cvar_Get("com_protocol", "", 0)->integer;
     g_target_game = (target_game_e)gi.Cvar_Get("com_target_game", "0", 0)->integer;
 

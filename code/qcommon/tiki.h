@@ -42,7 +42,17 @@ class Archiver;
 #define MAX_TIKI_LOAD_MODEL_BUFFER          8192
 
 #define MAX_TIKI_LOAD_FRAME_SERVER_COMMANDS 32
-#define MAX_TIKI_LOAD_FRAME_CLIENT_COMMANDS 128
+// [user 08-08] bug-1596 - raised 128 -> 256. models/emitters/mortar_snownodamage.tik (the snow
+// mortar effect on t2l3) defines ~133 client commands in one frame block; the parser dropped the
+// tail SILENTLY apart from a log line, so the effect ran without its last steps (avelocity,
+// scalemin/scalemax, fadedelay).
+//
+// NOTE THE PAIRING: this is the LOAD-time cap on how many commands one frame block may DEFINE.
+// TIKI_MAX_COMMANDS (tiki/tiki_shared.h) is the separate RUNTIME cap on how many may FIRE in a
+// single frame, and these commands all sit in one parenthesised group, so they fire together.
+// Raising only this one would have moved the overflow from parse time to run time rather than
+// fixing it - they are raised together, and TIKI_MAX_COMMANDS carries the reciprocal note.
+#define MAX_TIKI_LOAD_FRAME_CLIENT_COMMANDS 256
 
 #define MAX_TIKI_LOAD_SHADERS               4
 

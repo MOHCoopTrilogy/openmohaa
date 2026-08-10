@@ -31,7 +31,17 @@ int			cvar_modifiedFlags;
 // HZM coop: 2048 was exceeded in live play (engine registrations + a large archived user
 // config + the challenges export ~360 + armory/objectives cvar bridges) - and the overflow
 // itself crashed via the Com_Error<->Cvar_Get recursion (bug-598, now also guarded).
-#define	MAX_CVARS	4096
+//
+// [user 08-08] 4096 was exceeded too (bug-1582) - opening the Service Record was a hard
+// ERR_FATAL. This limit is not really a limit on the ENGINE, it is a limit on ARCHIVED
+// content, and that content grows on its own: the user's omconfig.cfg had reached 3019
+// archived cvars (the Service Record alone owns ~1500 of them, three per row across 303
+// rows, plus ~500 armory lock-state exports) and the SR menu binds another 942 the moment
+// it opens. Anything that adds a challenge, a skin or a helmet adds cvars permanently.
+// Doubling buys headroom; it does not change the slope. The high-water warning below is
+// the part that makes the next approach visible BEFORE it is fatal - same lesson as
+// bug-1186, where a silent-discard branch hid a capacity wall for eight days.
+#define	MAX_CVARS	8192
 cvar_t		cvar_indexes[MAX_CVARS];
 int			cvar_numIndexes;
 
@@ -508,9 +518,22 @@ cvar_t *Cvar_Get( const char *var_name, const char *var_value, int flags ) {
 	}
 	
 	var = &cvar_indexes[index];
-	
+
 	if(index >= cvar_numIndexes)
 		cvar_numIndexes = index + 1;
+
+	// [user 08-08] bug-1582 - HIGH-WATER WARNING. Exhausting this table is an ERR_FATAL with
+	// no build-up and no breadcrumb: the session that hit it had been fine for a month. Warn
+	// once at 80% so the wall is visible in qconsole.log while there is still room to act.
+	// `cvarlist` prints the live count ("%i cvar indexes") if you want to check deliberately.
+	{
+		static qboolean bWarnedHighWater = qfalse;
+		if ( !bWarnedHighWater && cvar_numIndexes > ( MAX_CVARS * 4 ) / 5 ) {
+			bWarnedHighWater = qtrue;
+			Com_Printf( "^~^~^ WARNING: cvar table %i/%i in use (creating '%s') - see bug-1582\n",
+				cvar_numIndexes, MAX_CVARS, var_name );
+		}
+	}
 		
 	var->name = CopyString (var_name);
 	var->string = CopyString (var_value);

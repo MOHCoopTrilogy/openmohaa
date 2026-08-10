@@ -60,9 +60,7 @@ static char gogPath[ MAX_OSPATH ] = { 0 };
 // Used to store the Microsoft Store Quake 3 installation path
 static char microsoftStorePath[MAX_OSPATH] = { 0 };
 
-#ifndef DEDICATED
-static UINT timerResolution = 0;
-#endif
+static UINT timerResolution = 0;   /* HZM bug-1667: dedicated needs this too */
 
 /*
 ================
@@ -816,13 +814,18 @@ Windows specific initialisation
 */
 void Sys_PlatformInit( void )
 {
-#ifndef DEDICATED
+/* HZM [user 2026-08-10] bug-1667: this block used to be #ifndef DEDICATED, so a dedicated
+   server never raised the Windows timer resolution and it stayed at the default ~15.6ms.
+   Every sleep in the frame loop then rounds UP to a multiple of that, quantising a 25ms
+   target frame (sv_fps 40) to ~31.2ms. Measured on m2l2a with 2 clients: worst=32ms every
+   single second, mean 24-25ms, ~15 of 40 frames over budget - while ping was 0-2ms and
+   unacked was 1, i.e. a perfectly healthy network. SV_Frame lights the "slow server" icon
+   at sv_fps * msec > 1100 = anything over 27.5ms, so 31.2ms tripped it permanently.
+   A dedicated server needs the fine timer MORE than a client, not less. */
 	TIMECAPS ptc;
-#endif
 
 	Sys_SetFloatEnv();
 
-#ifndef DEDICATED
 	if(timeGetDevCaps(&ptc, sizeof(ptc)) == MMSYSERR_NOERROR)
 	{
 		timerResolution = ptc.wPeriodMin;
@@ -837,7 +840,6 @@ void Sys_PlatformInit( void )
 	}
 	else
 		timerResolution = 0;
-#endif
 
 	Sys_PlatformInit_New();
 }
@@ -851,10 +853,8 @@ Windows specific initialisation
 */
 void Sys_PlatformExit( void )
 {
-#ifndef DEDICATED
 	if(timerResolution)
 		timeEndPeriod(timerResolution);
-#endif
 }
 
 /*

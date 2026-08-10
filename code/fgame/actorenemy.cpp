@@ -355,6 +355,29 @@ void ActorEnemySet::CheckEnemies(Actor *pSelf)
         if (!pActorEnemy->GetEnemy() || pActorEnemy->GetEnemy()->m_Team == pSelf->m_Team
             || pActorEnemy->GetEnemy()->IsDead() || level.inttime > pActorEnemy->m_iAddTime + 10000
             || pActorEnemy->GetEnemy()->m_iThreatBias == THREATBIAS_IGNOREME || pActorEnemy->GetEnemy()->IsDisabled()) {
+            // HZM bug-1631: the m2l2a papers-checker loses m_Enemy mid-challenge every ~1.6s and
+            // this removal loop is the only pre-retention wipe. Name the exact eviction reason
+            // when a PLAYER entry is dropped (gated, oscillation diagnosis).
+            {
+                static cvar_t *s_disgDbg3 = NULL;
+                if (!s_disgDbg3) {
+                    s_disgDbg3 = gi.Cvar_Get("g_coopDisgDebug", "0", 0);
+                }
+                Sentient *pEvicted = pActorEnemy->GetEnemy();
+                if (s_disgDbg3->integer && pEvicted && pEvicted->IsSubclassOfPlayer()) {
+                    Com_Printf(
+                        "^~^~^ DISG EVICT actor=%i player=%i team=%i/%i dead=%i age=%i ignoreme=%i disabled=%i\n",
+                        pSelf->entnum,
+                        pEvicted->entnum,
+                        (int)pEvicted->m_Team,
+                        (int)pSelf->m_Team,
+                        (int)pEvicted->IsDead(),
+                        level.inttime - pActorEnemy->m_iAddTime,
+                        (int)(pEvicted->m_iThreatBias == THREATBIAS_IGNOREME),
+                        (int)pEvicted->IsDisabled()
+                    );
+                }
+            }
             m_Enemies.RemoveObjectAt(i);
         } else {
             i++;

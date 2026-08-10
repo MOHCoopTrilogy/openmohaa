@@ -657,6 +657,15 @@ Event EV_Sentient_CoopGoreReset
 // blows up). Call `<victim> gore_gibmark` just before/with the scripted blast damage; if the victim dies
 // while the mark is fresh (default 2s window) the corpse gets the tier-3 gib skins exactly as if the
 // engine had seen MOD_EXPLOSION. Marks on survivors expire harmlessly.
+Event EV_Sentient_CoopBlastShield
+(
+    "blastshield",
+    EV_DEFAULT,
+    "i",
+    "on",
+    "HZM coop - bug-1586: 1 = this actor ignores WORLD-attributed explosion damage (mission-critical NPCs only)"
+);
+
 Event EV_Sentient_CoopGoreGibMark
 (
     "gore_gibmark",
@@ -736,6 +745,7 @@ CLASS_DECLARATION(Animate, Sentient, NULL) {
     {&EV_Sentient_CoopGorePoolGrow,       &Sentient::EventCoopGorePoolGrow        }, // HZM coop - gore tier 2
     {&EV_Sentient_CoopGoreReset,          &Sentient::EventCoopGoreReset           }, // HZM coop - gore tier 1
     {&EV_Sentient_CoopGoreGibMark,        &Sentient::EventCoopGoreGibMark         }, // HZM coop - gore tier 1e
+    {&EV_Sentient_CoopBlastShield,        &Sentient::EventCoopBlastShield         }, // HZM coop - bug-1586
     {NULL,                                NULL                                    }
 };
 
@@ -798,7 +808,8 @@ Sentient::Sentient()
     m_vLastBloodTrailOrigin = vec_zero;     // HZM coop - blood trail
     m_fCoopGoreDamage       = 0;            // HZM coop - gore tier 2 (drips + growing pool)
     m_iCoopGoreSkinTier     = 0;            // HZM coop - gore tier 1 (damage-tier blood skins)
-    m_bCoopGoreGibMark      = qfalse;       // HZM coop - gore tier 1e (extreme explosion-death skins)
+    m_bCoopGoreGibMark      = qfalse;
+    m_bCoopBlastShield      = qfalse;       // HZM coop - bug-1586: opt-in, NOT team-wide (see TakeDamage)
     m_fCoopGoreGibMarkTime  = 0;            // HZM coop - gore tier 1e
     m_vCoopPoolPos          = vec_zero;     // HZM coop - gore tier 2
     m_vCoopPoolNormal       = vec_zero;     // HZM coop - gore tier 2
@@ -1541,6 +1552,13 @@ void Sentient::ArmorDamage(Event *ev)
     // run killed the colonel"). Drop world-attributed explosion damage to AMERICAN AI actors in coop only;
     // players and german AI still take full blast damage, and weapon/grenade explosions (attributed to their
     // owner) still hurt allies.
+    // [user 08-08] bug-1586 - NARROWED from "every allied actor" to "actors that opted in". The old
+    // blanket test made the whole allied squad immune to every world-attributed blast, which is why
+    // mortars and artillery could not wound, gib or even scratch them - the damage never arrived, so
+    // no gore path ever ran. That was far broader than the defect it was written for. Mission-critical
+    // NPCs now set `blastshield 1` and keep exactly the old protection; ordinary allied AI take the
+    // blast, bleed and gib, and via coop_mod/allysquad.scr go DOWN rather than die outright - so
+    // losing them is recoverable instead of instant.
     if (g_gametype->integer != GT_SINGLE_PLAYER && meansofdeath == MOD_EXPLOSION && IsSubclassOfActor()
         && m_Team == TEAM_AMERICAN && (!attacker || (Entity *)attacker == (Entity *)world)) {
         return;
@@ -2728,6 +2746,11 @@ void Sentient::CoopGoreTryGibSkins(int meansofdeath, Entity *inflictor)
 // HZM coop - gore tier 1e: the script-side mark ("gore_gibmark"). Scripted blasts that apply damage
 // without an explosive MOD (bare `hurt`, MOD_CRUSH) call this on their victims just before the damage;
 // dying inside the window (default 2s) counts as an explosion death. Survivors' marks expire harmlessly.
+void Sentient::EventCoopBlastShield(Event *ev)
+{
+    m_bCoopBlastShield = (ev->NumArgs() > 0) ? (ev->GetInteger(1) != 0) : qtrue;
+}
+
 void Sentient::EventCoopGoreGibMark(Event *ev)
 {
     float window = 2.0f;

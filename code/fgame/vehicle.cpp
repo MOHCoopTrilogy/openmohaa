@@ -7164,6 +7164,15 @@ void DrivableVehicle::Killed(Event *ev)
     VehicleBase *last;
     int          i;
 
+    // HZM coop [user 08-07]: Killed() had no idempotency guard - if EV_Killed fires more than
+    // once on the same vehicle (multiple near-simultaneous damage events each pushing health
+    // below 0 in the same frame, or CoopZombieRescue reviving it just to have the next hit
+    // re-kill it) every field below re-runs, including the coop_vehKills bump - so one real
+    // vehicle death could award the "Vehicle Destroyed" XP to the whole team more than once.
+    // Bail out if this vehicle was already marked dead by a prior call.
+    if (deadflag == DEAD_DEAD) {
+        return;
+    }
     deadflag = DEAD_DEAD;
 
     // HZM coop: a PLAYER destroyed a drivable vehicle - bump the per-map counter for the
@@ -7184,6 +7193,11 @@ void DrivableVehicle::Killed(Event *ev)
             ScriptVariable *pv = level.vars->GetVariable("coop_vehKills");
             int             n  = pv ? pv->intValue() : 0;
             level.vars->SetVariable("coop_vehKills", n + 1);
+            // HZM coop [user 08-07]: record WHO gets XP credit - the award used to go to the
+            // whole team regardless of who dealt the kill. Last-writer-wins if two vehicles die
+            // in the exact same server frame (accepted edge case, same precision coop_vehKills
+            // itself already has as a plain counter, not a per-kill array).
+            level.vars->SetVariable("coop_vehKillerNum", attacker->entnum);
         }
     }
 

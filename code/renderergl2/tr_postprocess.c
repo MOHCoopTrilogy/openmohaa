@@ -1426,7 +1426,7 @@ void RB_HZMExtraFx(FBO_t *srcFbo, ivec4_t srcBox)
 	if (!r_ppUnderwaterFx) {
 		r_ppUnderwaterFx              = ri.Cvar_Get("r_ppUnderwaterFx",              "1",   CVAR_ARCHIVE);
 		r_ppUnderwater                = ri.Cvar_Get("r_ppUnderwater",                "0",   0);   // cgame-published
-		r_ppFrost                     = ri.Cvar_Get("r_ppFrost",                     "1",   CVAR_ARCHIVE);
+		r_ppFrost                     = ri.Cvar_Get("r_ppFrost",                     "0",   CVAR_ARCHIVE);   // [user 08-07] frost removed; cgame no longer publishes r_ppFrostAmt
 		r_ppFrostAmt                  = ri.Cvar_Get("r_ppFrostAmt",                  "0",   0);   // cgame-published
 		r_ppChromaticAberration       = ri.Cvar_Get("r_ppChromaticAberration",       "0",   CVAR_ARCHIVE);   // opt-in
 		r_ppChromaticAberrationAmount = ri.Cvar_Get("r_ppChromaticAberrationAmount", "0.35", CVAR_ARCHIVE);

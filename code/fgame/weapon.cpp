@@ -1685,8 +1685,16 @@ void Weapon::GetMuzzlePosition(vec3_t position, vec3_t vBarrelPos, vec3_t forwar
             // to match (coop_blindfireRaise units, default clears any pose-valid obstacle, whose
             // top is always below the 58u head trace). Wall blind-fire shoots away from the wall
             // and needs no offset.
-            if (player->IsCoopBlindfiring() && player->IsCoopCoverLow()) {
-                cvar_t *pRaise = gi.Cvar_Get("coop_blindfireRaise", "26", CVAR_ARCHIVE);
+            // [user 2026-08-07] Gate on the POSE, not on IsCoopBlindfiring(). The blind-fire flag
+            // clears the instant the trigger is released or the clip runs dry, but the COVER_*_FIRE
+            // ANIMATION keeps emitting its remaining "fire" frame commands - and those trailing
+            // rounds lost the raise and went straight into the cover. Both reported symptoms (the
+            // last shot on ammo-out, and a few shots after letting go of auto fire) are that.
+            // While crouched in low cover the gun is held overhead regardless, so the raise is
+            // correct for any shot from that pose. Peek is excluded: RMB stands the player up for
+            // real aimed fire and must not be offset.
+            if (player->IsCoopCoverLow() && !player->IsCoopCoverPeek()) {
+                cvar_t *pRaise = gi.Cvar_Get("coop_blindfireRaise", "32", CVAR_ARCHIVE);
 
                 position[2] += pRaise ? pRaise->value : 26.0f;
             }
@@ -1850,13 +1858,10 @@ void Weapon::Shoot(Event *ev)
 
     if (owner && owner->IsSubclassOfPlayer()) {
         const char *wg = Director.GetString(GetWeaponGroup());
-        gi.Printf("COOP_BINOC_CHECK: player fired weapon, weapongroup='%s'\n", wg ? wg : "(null)");
         if (!Q_stricmp("binoculars", wg)) {
             trace_t trace;
             Vector  vEnd = pos + forward * 16384.0f;
             trace = G_Trace(pos, vec_zero, vec_zero, vEnd, owner, MASK_SHOT, qfalse, "coop_binoculars");
-            gi.Printf("COOP_BINOC_FIRE: hit (%.0f %.0f %.0f), calling binoculars_fired\n",
-                trace.endpos[0], trace.endpos[1], trace.endpos[2]);
             Event parms(EV_Listener_ExecuteScript, 2);
             parms.AddEntity((Entity *)owner.Pointer());
             parms.AddVector(trace.endpos);
@@ -3133,6 +3138,29 @@ void Weapon::PickupWeapon(Event *ev)
     hasweapon = sen->HasItem(item_name);
     hasclass  = sen->HasWeaponClass(weapon_class);
 
+    // [user 2026-08-08] COOP LOOT ECONOMY. Two changes, both behind coop_pickupOneMag.
+    //
+    // 1) A pickup grants ONE MAGAZINE, not the deathmatch stockpile. The tik authors both
+    //    `sp startammo` and `dm startammo`; coop runs g_gametype 2, so the engine only ever sees
+    //    the dm figure - a looted Kar98 was worth 80 rounds instead of 5. The sp value cannot be
+    //    read back at runtime (the TIKI sp/dm prefix filter discards the losing line before the
+    //    engine parses it), so "one magazine" is taken from clipsize, which IS the sp figure for
+    //    every retail weapon (kar98 5, mp40 32, mp44 30, garand 8, bar 20, p38 8, springfield 5).
+    //    It deliberately differs on the imported guns, where sp startammo is many magazines
+    //    (DeLisle 70/clip 7, Breda 200/clip 20, Carcano 72/clip 6) - one mag is the intent there.
+    //    Clamped to startammo so a pickup can never exceed what the weapon authored.
+    //
+    // 2) A weapon you ALREADY carry can always be picked up for that one magazine. Retail refuses
+    //    outright when both firemodes are at max ammo, leaving the corpse's rifle un-lootable.
+    //
+    // Bullets only. Grenades, binoculars and the mine detector have no clip (clipsize 0) and keep
+    // their authored amount - a "magazine" is meaningless for a thrown or single-use item.
+    static cvar_t *coop_onemag = NULL;
+    if (!coop_onemag) {
+        coop_onemag = gi.Cvar_Get("coop_pickupOneMag", "1", 0);
+    }
+    const bool bOneMag = (coop_onemag && coop_onemag->integer && ammo_clip_size[FIRE_PRIMARY] > 0);
+
     if ((g_gametype->integer || g_realismmode->integer) && !hasclass && !IsSecondaryWeapon()
         && sen->HasPrimaryWeapon()) {
         // Make sure the sentient doesn't have a primary weapon on DM modes
@@ -3188,6 +3216,9 @@ void Weapon::PickupWeapon(Event *ev)
         sen->ReceivedItem(this);
 
         iGiveAmmo = startammo[FIRE_PRIMARY];
+        if (bOneMag && iGiveAmmo > ammo_clip_size[FIRE_PRIMARY]) {
+            iGiveAmmo = ammo_clip_size[FIRE_PRIMARY];
+        }
 
         Sound(sPickupSound);
     } else {
@@ -3206,7 +3237,10 @@ void Weapon::PickupWeapon(Event *ev)
             }
         }
 
-        if (bSameAmmo[FIRE_PRIMARY] && bSameAmmo[FIRE_SECONDARY]) {
+        // Retail refuses the pickup outright when both firemodes are already full, so a rifle you
+        // already carry cannot be taken off a corpse at all. Under coop_pickupOneMag it is always
+        // takeable - GiveAmmo still caps at the max, so a full player simply gains nothing.
+        if (bSameAmmo[FIRE_PRIMARY] && bSameAmmo[FIRE_SECONDARY] && !bOneMag) {
             return;
         }
 
@@ -3219,8 +3253,12 @@ void Weapon::PickupWeapon(Event *ev)
         }
 
         iGiveAmmo = ammo_in_clip[FIRE_PRIMARY] + startammo[FIRE_PRIMARY];
+        if (bOneMag) {
+            // one magazine, regardless of what the corpse's clip + dm stockpile added up to
+            iGiveAmmo = ammo_clip_size[FIRE_PRIMARY];
+        }
 
-        if (!iGiveAmmo && !startammo[FIRE_SECONDARY]) {
+        if (!iGiveAmmo && !startammo[FIRE_SECONDARY] && !bOneMag) {
             // Fixed in OPM
             //  Don't let the sentient pick the ammo up if it already has the weapon in inventory
             //  and the player would get no ammo.
@@ -3246,7 +3284,11 @@ void Weapon::PickupWeapon(Event *ev)
         Sound(m_sAmmoPickupSound);
     }
 
-    if (startammo[FIRE_PRIMARY] && ammo_type[FIRE_PRIMARY].length() && other->isClient()) {
+    // bOneMag can legitimately reach here with startammo zeroed - the branch above clears it when
+    // that firemode is already full - so gate on the amount actually being granted, or the weapon
+    // would be consumed while handing over nothing.
+    if ((startammo[FIRE_PRIMARY] || (bOneMag && iGiveAmmo)) && ammo_type[FIRE_PRIMARY].length()
+        && other->isClient()) {
         str        sMessage;
         const str& sAmmoType = ammo_type[FIRE_PRIMARY];
 

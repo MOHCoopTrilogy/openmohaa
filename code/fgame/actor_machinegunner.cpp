@@ -26,6 +26,26 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 #include "weapturret.h"
 #include "bg_local.h"
 
+// [user 2026-08-07] coop_mgStay 1 (default) keeps a machinegunner on his emplacement until he dies.
+// Set coop_mgStay 0 for exact retail behaviour, where he abandons it once he has seen you.
+static cvar_t *mg_stay = NULL;
+
+// True when this actor is manning a turret and must not be pulled off it.
+// Callers outside this file need it too - BecomeTurretGuy() is reachable from actor.cpp's
+// movement code, and it does not merely stand him up: it REWRITES the think map
+// (SetThink(THINKSTATE_ATTACK, THINK_TURRET)), so one call anywhere ends the machinegunner
+// behaviour permanently and no guard inside Think_MachineGunner_TurretGun will ever run again.
+bool Actor::CoopMannedTurretHold(void)
+{
+    if (!mg_stay) {
+        mg_stay = gi.Cvar_Get("coop_mgStay", "1", 0);
+    }
+    if (!mg_stay || !mg_stay->integer) {
+        return false;
+    }
+    return m_pTurret != NULL && m_pTurret->GetOwner() == this;
+}
+
 void Actor::InitMachineGunner(GlobalFuncs_t *func)
 {
     func->BeginState        = &Actor::Begin_MachineGunner;
@@ -251,7 +271,18 @@ void Actor::Think_MachineGunner_TurretGun(void)
             if (pl->IsDead()) {
                 continue;
             }
-            if (m_pTurret->AI_CanTarget(pl->centroid)) {
+            // [user 2026-08-07] "No he should never ditch the gun."
+            // Retail decides whether to KEEP the emplacement with AI_CanTarget, which is an AIMING
+            // test against the turret's pitch caps - and the shipped nests set those to about a
+            // 25-degree window (m3l1b's BSP: "pitchcaps" "-15 10 0"). A player barely off the
+            // barrel's height therefore read as unengageable and the gunner walked away from a
+            // working MG the instant he spotted anyone. Under coop_mgStay he holds it, full stop:
+            // he fires whenever the gun can bear and otherwise stays at his post. Killing a manned
+            // MG is now a shooting problem, not something you solve by standing at the wrong angle.
+            if (!mg_stay) {
+                mg_stay = gi.Cvar_Get("coop_mgStay", "1", 0);
+            }
+            if ((mg_stay && mg_stay->integer) || m_pTurret->AI_CanTarget(pl->centroid)) {
                 bAnyInArc = true;
             }
             float fDistSq = (pl->origin - origin).lengthSquared();
@@ -319,7 +350,15 @@ void Actor::Think_MachineGunner(void)
         return;
     }
 
-    if (m_pTurret && m_pTurret->GetOwner() == this && !m_bNoPlayerCollision) {
+    // [user 2026-08-07] THE actual reason "he gets off the MG42 as soon as I get close".
+    // It is not proximity and not the firing arc - it is TOUCHING him. Actor::GetMoveInfo sets
+    // m_bNoPlayerCollision and flips the actor to SOLID_NOT the moment the player overlaps him,
+    // purely so the player cannot get stuck inside an AI (actor.cpp ~3838). This think then read
+    // that same flag as "not manning the gun" and fell through to BecomeTurretGuy(), which
+    // rewrites the think map - so a momentary shoulder-barge ended his machinegunner behaviour
+    // for the rest of the map. Going briefly non-solid is unrelated to whether he is on the gun,
+    // and he is stationary anyway, so under coop_mgStay it must not knock him off.
+    if (m_pTurret && m_pTurret->GetOwner() == this && (!m_bNoPlayerCollision || CoopMannedTurretHold())) {
         UpdateEyeOrigin();
         Think_MachineGunner_TurretGun();
     } else {

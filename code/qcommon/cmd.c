@@ -174,6 +174,20 @@ void Cbuf_ExecuteText (int exec_when, const char *text)
 
 /*
 ============
+Cbuf_PeekSize
+
+HZM (bug-1664): how many bytes are still pending in the command buffer.
+Used by the dedicated server so it never parks on stdin while it still has
+queued work (such as the +map from the command line) waiting to run.
+============
+*/
+int Cbuf_PeekSize (void)
+{
+	return cmd_text.cursize;
+}
+
+/*
+============
 Cbuf_Execute
 ============
 */

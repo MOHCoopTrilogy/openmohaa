@@ -387,6 +387,12 @@ public:
     bool  m_bCoopCoverWall;      // requested + standing back-to-wall pose valid this frame
     bool  m_bCoopCoverLow;       // requested + crouched low-cover pose valid this frame
     bool  m_bCoopBlindfire;      // covered + fire held + blindfire-capable weapon this frame
+    int   m_iCoopCoverSent;      // HZM coop - last coop_coverView value sent (change-only)
+    int   m_iCoopBfButtons;      // HZM coop - last frame's buttons, for semi-auto blindfire edges
+    bool  m_bCoopBfShotDone;     // HZM coop - a semi-auto blindfire round already went out this press
+    bool   m_bCoopNavRec;        // HZM coop - nav node recording active
+    Vector m_vCoopNavLast;       // last node dropped
+    int    m_iCoopNavCount;
     Vector m_vCoopCoverNormal;   // anchored cover OUT normal (wall: away from wall; low: back at player) [215]
     int    m_iCoopCoverSide;     // 1 = opening LEFT of the pose, -1 = RIGHT [215]
     bool   m_bCoopCoverPeek;     // RMB peek-aim from cover (real aiming, cover held) [215]
@@ -418,6 +424,8 @@ public:
     Vector m_vCoopCoverBaseOrg;  // pose position at cover entry (peek slides away from it and back) [216]
     float  m_fCoopPeekFrac;      // 0..1 eased peek step-out fraction [216]
     float m_fCoopCoverBadTime;   // level.time the pose first went invalid (grace before drop)
+    float m_fCoopCoverAutoDwell; // HZM coop [user 2026-08-09] AUTO COVER: seconds spent crouched+still while uncovered
+    float m_fCoopCoverAutoRetry; // HZM coop [user 2026-08-09] AUTO COVER: earliest level.time for the next auto attempt
     bool  m_bHasJumped;
     float m_fLastInvulnerableTime;
     int   m_iInvulnerableTimeRemaining;
@@ -1004,6 +1012,14 @@ public:
     void  EventCoopLimpTest(Event *ev);   // HZM coop DEV - set health to a fraction of max
     bool  IsCoopLimping() const { return m_bCoopLimping; }
     // HZM coop - TAKE COVER: per-frame pose validation (called from ClientThink next to TickSprint)
+    void  SendCoopCoverView();   // HZM coop - mirror cover state to the owning client
+    void  EventCoopNavRec(Event *ev);
+    void  EventCoopNavNode(Event *ev);
+    void  EventCoopNavBuild(Event *ev);
+    void  CoopNavDropNode(const Vector& pos, int flags = 0);
+    void  CoopNavRebuild(void);
+    void  TickCoopNavRec(void);
+    bool  m_bCoopNavFull;   // MAX_PATHNODES hit - warn once, then drop silently
     void  TickCoopCover();
     // HZM coop - BOT COMBAT DRIVE (dev/test, coop_botInput): overwrite this frame's usercmd (aim +
     // fire + advance on the nearest visible German) so a connected client fights unattended. No-op
@@ -1014,6 +1030,11 @@ public:
     bool  IsCoopBlindfiring() const { return m_bCoopBlindfire; }
     bool  IsCoopDbno() const { return m_bCoopDbno; }   // HZM coop [user 08-02]
     bool  IsCoopCoverLow() const { return m_bCoopCoverLow; }
+    bool  IsCoopCoverPeek() const { return m_bCoopCoverPeek; }   // HZM coop - RMB aimed peek
+    // HZM coop - one-shot-per-click gate for semi-auto blind fire. The COVER_*_FIRE animation
+    // carries several "fire" frame commands, so limiting the STATE does not limit the shots -
+    // Weapon::Shoot asks this and drops the extras.
+    bool  CoopBlindfireAllowShot();
     bool  IsCoopCoverWall() const { return m_bCoopCoverWall; }
     int   GetCoopCoverSide() const { return m_iCoopCoverSide; }
     const Vector& GetCoopCoverNormal() const { return m_vCoopCoverNormal; }

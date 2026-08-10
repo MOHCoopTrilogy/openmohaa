@@ -77,7 +77,17 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 #define TIKI_MAX_VERTEXES    1000
 #define TIKI_MAX_TRIANGLES   2000
 #define TIKI_MAX_SKELCACHE   1024
-#define TIKI_MAX_COMMANDS    128
+// [user 08-08] bug-1596 - raised 128 -> 256 together with MAX_TIKI_LOAD_FRAME_CLIENT_COMMANDS
+// (qcommon/tiki.h). That one caps how many commands a frame block may DEFINE; this one caps how
+// many may FIRE in one frame, and tiki_cmd_t below is the buffer they land in. They must move
+// together or an overflow simply relocates from load time to run time.
+//
+// SHIPS AS A SET: tiki_cmd_t is passed ACROSS the cgame boundary (Frame_Commands /
+// Frame_CommandsTime in cgame/cg_public.h), and the caller supplies the buffer - cgame declares
+// it on the stack (cg_commands.cpp), fgame likewise (animate.cpp). If exe and cgame disagree on
+// this number the filler writes past the end of the callers buffer. exe + cgame + game must be
+// rebuilt and deployed together, exactly like the GENTITYNUM_BITS / MAX_SOUNDS family.
+#define TIKI_MAX_COMMANDS    256
 
 #define TIKI_MAX_ENTITIES              2048
 #define TIKI_MAX_ENTITY_CACHE_PER_ENT  2

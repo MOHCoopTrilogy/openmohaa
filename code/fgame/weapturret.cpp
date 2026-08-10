@@ -454,6 +454,9 @@ TurretGun::TurretGun()
     // HZM coop: MG overheat state
     m_fHeat                = 0;
     m_bOverheated          = false;
+    m_fAiHeatCeiling       = 0.0f;   // HZM coop - rolled lazily on first AI burst
+    m_fAiResumeAt          = 0.0f;
+    m_fOverheatLockUntil   = 0.0f;
     m_bFiringBeforeOverheat = false;   // HZM coop - AI resume-after-cooldown latch
     m_fOverheatRecoverTime = 0;
 
@@ -846,8 +849,38 @@ void TurretGun::P_ThinkActive(void)
     // more you fire and bleeds off while idle; at 100 the gun overheats (cooldown sound + lockout) and
     // the meter visibly drops while locked, becoming ready again once it cools back to 0. The value is
     // mirrored to the gunner's STAT_MGHEAT so cgame draws the red heat bar.
-    if (m_bOverheated) {
-        // locked out: ignore fire input; the meter drops as it cools
+    // [user 2026-08-07] Overheat is no longer a hard lockout. You may keep firing while the red bar
+    // drains - the gun just cooks itself far faster, so nursing it is a real choice instead of a
+    // forced wait. Cooling still runs underneath, so laying off is always the faster way back to a
+    // cold gun.
+    // [user 2026-08-07] HARD FLOOR: for the first 2s after a cook-off the gun is dead no matter
+    // what the trigger says. Firing through the cooldown (below) only becomes available after that,
+    // so overheating always costs a real beat instead of being something you can hold straight
+    // through. Cooling still runs during the lock.
+    if (m_bOverheated && level.time < m_fOverheatLockUntil) {
+        m_iFiring = TURRETFIRESTATE_NONE;
+        m_fHeat -= 25.0f * level.frametime;
+        if (m_fHeat < 0.0f) {
+            m_fHeat = 0.0f;
+        }
+    } else if (m_bOverheated && m_iFiring != TURRETFIRESTATE_NONE) {
+        // firing WHILE hot: cool at the normal rate but pour heat back in ~2.5x as fast, so a hot
+        // gun re-pegs in well under a second of held trigger.
+        m_iFiring = TURRETFIRESTATE_FIRING;
+        m_fHeat -= 25.0f * level.frametime;
+        m_fHeat += 125.0f * level.frametime;
+
+        if (ReadyToFire(FIRE_PRIMARY)) {
+            Fire(FIRE_PRIMARY);
+            m_fCurrViewJitter = m_fViewJitter;
+        }
+
+        if (m_fHeat >= 100.0f) {
+            m_fHeat = 100.0f;
+            // already overheated - re-pegging just holds it there, no second steam hiss
+        }
+    } else if (m_bOverheated) {
+        // hot but off the trigger: the meter drops until the gun is cold again
         m_iFiring = TURRETFIRESTATE_NONE;
         m_fHeat -= 25.0f * level.frametime;
         if (m_fHeat <= 0.0f) {
@@ -867,6 +900,7 @@ void TurretGun::P_ThinkActive(void)
         if (m_fHeat >= 100.0f) {
             m_fHeat       = 100.0f;
             m_bOverheated = true;
+            m_fOverheatLockUntil = level.time + 2.0f;   // [user 2026-08-07] 2s dead-gun floor
             m_iFiring     = TURRETFIRESTATE_NONE;
             Sound("coop_mg_overheat");
             // (no "OVERHEATED" centerprint - the red heat bar communicates the state)
@@ -1339,9 +1373,13 @@ void TurretGun::AI_DoFiring()
     if (m_bOverheated) {
         m_iFiring = TURRETFIRESTATE_NONE;
         m_fHeat -= 25.0f * level.frametime;
-        if (m_fHeat <= 0.0f) {
-            m_fHeat       = 0.0f;
+        // [user 2026-08-07] Resume at a RANDOM low heat rather than exactly 0. Gunners used to peg
+        // to 100, wait out the identical cooldown and peg again - a metronome. Now each one comes
+        // back on at his own point, so a nest of them drifts out of phase instead of firing in step.
+        if (m_fHeat <= m_fAiResumeAt) {
+            m_fHeat       = m_fAiResumeAt;
             m_bOverheated = false;
+            m_fAiHeatCeiling = 0.0f;   // re-roll his ceiling for the next burst
             // HZM coop [user 08-02]: RESUME FIRING after the lockout. The scripted MG42 nests
             // (global/mg42_active.scr, used on m3l1a/b, m3l3, m4l1/2/3, m6l1a/b/c, m6l2a,
             // t2l1, t2l2) issue "startfiring" exactly once and then latch self.isfiring = 1.
@@ -1359,10 +1397,18 @@ void TurretGun::AI_DoFiring()
         return;
     }
     if (m_iFiring == TURRETFIRESTATE_FIRING) {
+        // [user 2026-08-07] Each gunner cooks off at his OWN ceiling (55..95) rather than always
+        // running the barrel to a flat 100, and picks a fresh resume point (0..35) for the far side.
+        // Combined, the fire/pause rhythm stops being identical every cycle and between gunners.
+        if (m_fAiHeatCeiling <= 0.0f) {
+            m_fAiHeatCeiling = 55.0f + 40.0f * random();
+            m_fAiResumeAt    = 35.0f * random();
+        }
         m_fHeat += 50.0f * level.frametime;
-        if (m_fHeat >= 100.0f) {
+        if (m_fHeat >= m_fAiHeatCeiling) {
             m_fHeat       = 100.0f;
             m_bOverheated = true;
+            m_fOverheatLockUntil = level.time + 2.0f;   // [user 2026-08-07] 2s dead-gun floor
             m_iFiring     = TURRETFIRESTATE_NONE;
             m_bFiringBeforeOverheat = true;   // HZM coop - remember to resume, see above
             Sound("coop_mg_overheat");

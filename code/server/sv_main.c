@@ -36,6 +36,8 @@ server_t		sv;					// local server
 game_export_t	*ge = NULL;
 
 cvar_t	*sv_fps;				// time rate for running non-clients
+cvar_t	*sv_lagProbe;			// HZM [user 2026-08-10]: 1 = report server frame overruns, which are
+								// what light the blinking "slow server" icon on every client
 cvar_t	*sv_timeout;			// seconds without any message
 cvar_t	*sv_zombietime;			// seconds to sink messages after disconnect
 cvar_t	*sv_rconPassword;		// password for remote server commands
@@ -1055,8 +1057,22 @@ void SV_Frame( int msec ) {
 	{
 		// Running as a server, but no map loaded
 #ifdef DEDICATED
-		// Block until something interesting happens
-		Sys_Sleep(-1);
+		/* HZM (bug-1664): only park on stdin when there is genuinely nothing left to do.
+		   Sys_Sleep(-1) is WaitForSingleObject(stdin, INFINITE) on Win32 - it freezes the
+		   ENTIRE frame loop, including the command buffer that still holds the `map` command
+		   that would start the server. Any stall before the map loads therefore turned into a
+		   permanent, silent, 0%-CPU hang that only a console keypress could break. */
+		if( !Cbuf_PeekSize() )
+		{
+			static qboolean idleNoticed = qfalse;
+			if( !idleNoticed ) {
+				idleNoticed = qtrue;
+				Com_Printf( "Dedicated server idle: no map loaded, command buffer empty.\n"
+				            "Waiting on console input - type e.g. 'map m2l2a' to start.\n" );
+			}
+			// Block until something interesting happens
+			Sys_Sleep(-1);
+		}
 #endif
 
 		return;
@@ -1120,6 +1136,54 @@ void SV_Frame( int msec ) {
 	{
 		svs.serverLagTime = svs.time;
 		SV_SendServerCommand( NULL, "svlag" );
+
+		// HZM [user 2026-08-10] LAG PROBE (sv_lagProbe 1). This is the exact condition that lights
+		// the blinking "slow server" icon on EVERY client: one server frame overran its budget
+		// (sv_fps * msec > 1100, i.e. >~27.5ms at sv_fps 40). Report how bad the frame was and what
+		// each client looked like at that instant, so a flare-up is attributed rather than guessed.
+		if ( sv_lagProbe && sv_lagProbe->integer ) {
+			int pi;
+			Com_Printf( "^~^~^ SVLAG frame=%dms budget=%dms residual=%dms\n",
+				msec, 1000 / sv_fps->integer, sv.timeResidual );
+			for ( pi = 0 ; pi < sv_maxclients->integer ; pi++ ) {
+				client_t *cl = &svs.clients[pi];
+				if ( cl->state < CS_CONNECTED ) { continue; }
+				Com_Printf( "^~^~^   SVLAGCL %d %s ping=%d unacked=%d rate=%d\n",
+					pi, cl->name, cl->ping,
+					cl->netchan.outgoingSequence - cl->messageAcknowledge, cl->rate );
+			}
+		}
+	}
+
+	// HZM [user 2026-08-10] LAG PROBE, periodic half. The broadcast above is rate-limited to once
+	// per 2.5s, so alone it hides how OFTEN frames overrun. Once a second report the worst and mean
+	// frame time and the overrun count. That separates "one long stall" (a script doing too much in
+	// a single frame) from "chronically behind" (host starved of CPU/GPU - what two instances on one
+	// machine produce). Silent when nothing overran, so it costs nothing on a healthy server.
+	if ( sv_lagProbe && sv_lagProbe->integer ) {
+		static int s_lpWindowStart = 0;
+		static int s_lpFrames = 0;
+		static int s_lpOver = 0;
+		static int s_lpWorst = 0;
+		static int s_lpTotal = 0;
+		int budget = 1000 / sv_fps->integer;
+
+		s_lpFrames++;
+		s_lpTotal += msec;
+		if ( msec > s_lpWorst ) { s_lpWorst = msec; }
+		if ( msec > budget ) { s_lpOver++; }
+
+		if ( svs.time - s_lpWindowStart >= 1000 ) {
+			if ( s_lpFrames > 0 && s_lpOver > 0 ) {
+				Com_Printf( "^~^~^ SVFRAME worst=%dms mean=%dms over=%d/%d budget=%dms\n",
+					s_lpWorst, s_lpTotal / s_lpFrames, s_lpOver, s_lpFrames, budget );
+			}
+			s_lpWindowStart = svs.time;
+			s_lpFrames = 0;
+			s_lpOver = 0;
+			s_lpWorst = 0;
+			s_lpTotal = 0;
+		}
 	}
 
 	// update ping based on the all received frames

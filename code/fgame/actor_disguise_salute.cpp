@@ -24,6 +24,10 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 
 #include "actor.h"
 
+// HZM bug-1631 disguise tracer (defined in actor_disguise_common.cpp)
+extern void CoopDisgTrace(Actor *self, const char *tag);
+extern void CoopDisgTraceTick(Actor *self, const char *tag);
+
 void Actor::InitDisguiseSalute(GlobalFuncs_t *func)
 {
     func->ThinkState                 = &Actor::Think_DisguiseSalute;
@@ -38,6 +42,7 @@ void Actor::InitDisguiseSalute(GlobalFuncs_t *func)
 
 void Actor::Begin_DisguiseSalute(void)
 {
+    CoopDisgTrace(this, "BEGIN_SAL");
     Com_Printf("Saluting guy....\n");
 
     m_csMood = STRING_BORED;
@@ -60,16 +65,19 @@ void Actor::Begin_DisguiseSalute(void)
 
 void Actor::End_DisguiseSalute(void)
 {
+    CoopDisgTrace(this, "END_SAL");
     m_iNextDisguiseTime = level.inttime + m_iDisguisePeriod;
 }
 
 void Actor::Resume_DisguiseSalute(void)
 {
+    CoopDisgTrace(this, "RESUME_SAL");
     Begin_DisguiseSalute();
 }
 
 void Actor::Suspend_DisguiseSalute(void)
 {
+    CoopDisgTrace(this, "SUSP_SAL");
     End_DisguiseSalute();
 }
 
@@ -78,6 +86,7 @@ void Actor::Think_DisguiseSalute(void)
     NoPoint();
     ContinueAnimation();
     UpdateEnemy(2000);
+    CoopDisgTraceTick(this, "TICK_SAL");
 
     assert(m_Enemy != NULL);
 

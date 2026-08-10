@@ -83,6 +83,9 @@ protected:
     float             m_fHeat;                 // seconds of continuous fire accumulated
     bool              m_bOverheated;           // true while locked out / cooling down
     bool              m_bFiringBeforeOverheat; // HZM coop - AI was firing when it cooked; resume when cool
+    float             m_fAiHeatCeiling;        // HZM coop - this gunner's own overheat point, re-rolled per burst
+    float             m_fAiResumeAt;           // HZM coop - heat level he is willing to resume firing at
+    float             m_fOverheatLockUntil;    // HZM coop - hard no-fire floor after a cook-off
     float             m_fOverheatRecoverTime;  // level.time at which the gun becomes usable again
     int               m_iIdleHitCount;
     CameraPtr         m_pUserCamera;

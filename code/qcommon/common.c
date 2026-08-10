@@ -2351,7 +2351,21 @@ void Com_Frame( void ) {
 
 	if (com_dedicated->integer || CL_FinishedIntro())
 	{
+		/* HZM (bug-1664): on a DEDICATED server pass the real frame time, not 0.
+		   Cbuf_Execute retires a pending `wait N` by subtracting exactly this msec, so
+		   Cbuf_Execute(0) can never retire a `wait N` with N > 1 and the whole command
+		   buffer stalls forever. This is the only Cbuf_Execute in the dedicated frame loop
+		   (the msec-carrying client call further down is inside #ifndef DEDICATED), so one
+		   `wait 300` in any exec'd cfg - the auto-updater's whatsnew_pending.cfg writes
+		   exactly that, updater.ps1:335 - permanently froze the buffer that still held
+		   `exec dedicated_start.cfg` and `map <name>`, and the server booted to silence.
+		   Deliberately NOT changed for the client: the client runs Cbuf_Execute twice per
+		   frame, so passing msec here as well would make every `wait` elapse twice as fast. */
+#ifdef DEDICATED
+		Cbuf_Execute(msec);
+#else
 		Cbuf_Execute(0);
+#endif
 		SV_CheckSaveGame();
 	}
 

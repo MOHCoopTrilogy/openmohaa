@@ -154,6 +154,7 @@ protected:
     void             EventCoopGoreReset(Event *ev);          // HZM coop - gore tier 1: script heal hook
     void             CoopGoreTryGibSkins(int meansofdeath, Entity *inflictor); // HZM coop - gore tier 1e: extreme explosion-death skins (index 3)
     void             EventCoopGoreGibMark(Event *ev);        // HZM coop - gore tier 1e: script mark for scripted blasts
+    void             EventCoopBlastShield(Event *ev);        // HZM coop - bug-1586: mission-critical blast immunity
     void             CoopGoreTryWoundProp(int location, int meansofdeath, const Vector &position); // HZM coop - gore tier 3: wound prop at the hit point (bug-735: entry-point attach)
     void             CoopHeadshotKillFx(const Vector &pos, const Vector &dir); // HZM coop - guaranteed burst+wall-splat on a confirmed headshot kill
     qboolean         ShouldBleed(int meansofdeath, qboolean dead);
@@ -236,6 +237,7 @@ public:
     int               m_iCoopGoreSkinTier;     // HZM coop - gore tier 1: current blood-skin index (0/1/2;
                                                // 3 = gore tier 1e extreme explosion-death corpse, terminal)
     qboolean          m_bCoopGoreGibMark;      // HZM coop - gore tier 1e: script flagged us inside a scripted blast
+    qboolean          m_bCoopBlastShield;      // HZM coop - bug-1586: opt-in immunity to world-attributed blasts
     float             m_fCoopGoreGibMarkTime;  // HZM coop - gore tier 1e: level.time the script mark expires
     void              CoopGoreHeal(float amount); // HZM coop - gore tier 1: healed -> reduce gore, retier
     Vector            m_vCoopPoolPos;          // HZM coop - gore tier 2: floor point of the growing corpse pool

@@ -1491,6 +1491,25 @@ void CG_DrawCrosshair()
 
                 VectorCopy(cg.predicted_player_state.origin, vEye);
                 vEye[2] += cg.predicted_player_state.viewheight;
+
+                // HZM coop [user 2026-08-07] IN COVER, trace from the MUZZLE, not the eye.
+                // Weapon::GetMuzzlePosition raises the blind-fire origin by coop_blindfireRaise over
+                // low cover (the gun is held overhead), so rounds leave from higher than the eye and
+                // the crosshair was pointing somewhere they never went - the player had to tilt up to
+                // compensate. Reading the SAME cvar the server fires from means the two cannot drift:
+                // change the muzzle raise and the crosshair follows it automatically.
+                // Vertical only. Wall blind-fire also swings the DIRECTION by coop_blindfireYaw (50
+                // degrees around the corner); matching that needs the cover side and normal, which
+                // the client does not have, so it is deliberately left alone.
+                {
+                    static cvar_t *pCoverV = NULL;
+                    static cvar_t *pBfRaise = NULL;
+                    if (!pCoverV)  { pCoverV  = cgi.Cvar_Get("coop_coverView",       "0",  0); }
+                    if (!pBfRaise) { pBfRaise = cgi.Cvar_Get("coop_blindfireRaise", "26", CVAR_ARCHIVE); }
+                    if (pCoverV->integer) {
+                        vEye[2] += pBfRaise->value;
+                    }
+                }
                 AngleVectorsLeft(cg.predicted_player_state.viewangles, vFwd, NULL, NULL);
                 VectorMA(vEye, 8192, vFwd, vAimEnd);
                 CG_Trace(

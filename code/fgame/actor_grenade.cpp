@@ -345,7 +345,13 @@ void Actor::Begin_Grenade(void)
         } else if (m_Team != TEAM_GERMAN) {
             SetThinkState(THINKSTATE_IDLE, THINKLEVEL_IDLE);
         } else {
-            if (!IsTeamMate(static_cast<Sentient *>(G_GetEntity(0)))) {
+            // HZM [user 2026-08-10] B0: IsTeamMate(NULL) returns false (sentient.cpp:4015-4017),
+            // so a NULL entity 0 fell THROUGH to ForceAttackPlayer here - setting the one-way
+            // m_bForceAttackPlayer latch (cleared only in the Actor ctor) with no player present at
+            // all. Not a crash like the sight-trace site, but a permanent wrong state. Behaviour is
+            // identical whenever entity 0 exists.
+            Sentient *pClient0 = static_cast<Sentient *>(G_GetEntity(0));
+            if (pClient0 && !IsTeamMate(pClient0)) {
                 ForceAttackPlayer();
             }
         }
@@ -437,7 +443,9 @@ void Actor::Begin_Grenade(void)
     } else if (m_Team == TEAM_AMERICAN) {
         SetThinkState(THINKSTATE_IDLE, THINKLEVEL_IDLE);
     } else {
-        if (!IsTeamMate((Sentient *)G_GetEntity(0))) {
+        // HZM [user 2026-08-10] B0: same NULL fall-through as the site above.
+        Sentient *pClient0 = static_cast<Sentient *>(G_GetEntity(0));
+        if (pClient0 && !IsTeamMate(pClient0)) {
             ForceAttackPlayer();
         }
     }

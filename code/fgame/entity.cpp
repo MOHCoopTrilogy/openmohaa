@@ -4163,6 +4163,16 @@ void Entity::SVFlags(Event *ev)
                 if (!ent) {
                     ScriptError("No player specified for +singleclient!");
                 }
+
+                // HZM [user 2026-08-10] bug: `ent` was fetched, NULL-checked and then DISCARDED.
+                // `singleClient` kept its initial 0 all the way to `edict->r.singleClient =
+                // singleClient` below, so EVERY "+singleclient <player>" bound to client 0 - the
+                // host - no matter which player was passed. Measured on m2l2a: the per-player
+                // blueprint collectibles were all visible to Player1 and invisible to Player2,
+                // because all six copies (three per player) were bound to client 0.
+                // entnum IS the client number for a player entity (clients occupy entities
+                // 0..maxclients-1), which is what r.singleClient expects.
+                singleClient = ent->entnum;
             }
 
             i++;
@@ -4174,6 +4184,9 @@ void Entity::SVFlags(Event *ev)
                 if (!ent) {
                     ScriptError("No player specified for +notsingleclient!");
                 }
+
+                // same defect as +singleclient above - the resolved entity was never used
+                singleClient = ent->entnum;
             }
 
             i++;

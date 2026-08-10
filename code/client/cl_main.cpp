@@ -3644,6 +3644,127 @@ update immediately too, instead of waiting for a future reconnect to reconcile.
 */
 #define COOP_PIN_MAX 5
 
+/*
+====================
+CL_ChallengeIsDone / CL_SyncSR_f
+
+HZM coop [user 08-07] - "is challenge <gi> already complete?", answered CLIENT-SIDE with no server
+round trip. Source of truth is coop_uiN<gi>, the archived "N/T" progress string that
+challenges.scr::chal_ui_writeOne already maintains for every challenge and that persists across
+sessions for the disconnected Service Record. Parsing it here means the done-state is known the
+instant the menu opens - the earlier approach read only coop_uiD<gi>, which is pushed on the 30s
+chal_flush cycle, so nothing worked until the player had been in-game half a minute (and never at
+all while browsing disconnected).
+
+CL_SyncSR_f ("coop_srsync") walks every challenge and republishes coop_uiD<i> from that same
+parse, so the Service Record's done-checkmark Labels (enabledcvar coop_uiD<i>, which can only test
+an integer and so cannot parse "N/T" themselves) are correct too. The generated menu runs it from
+every tab button, so simply opening/switching a tab refreshes the whole page.
+====================
+*/
+static qboolean CL_ChallengeIsDone( int gi )
+{
+	char        nameBuf[16];
+	const char *progress;
+	const char *slash;
+	int         have, target;
+
+	if ( gi < 0 ) {
+		return qfalse;
+	}
+	// [user 08-07] NO coop_uiD fast path here. Reading the flag we are about to recompute made
+	// the result STICKY: once any row was set to 1 it could never go back to 0, so a stale or
+	// wrongly-set flag latched permanently and marked unfinished rows as done. coop_uiN (the
+	// "N/T" progress string) is the single source of truth; coop_uiD is purely an output.
+	Com_sprintf( nameBuf, sizeof( nameBuf ), "coop_uiN%d", gi );
+	progress = Cvar_VariableString( nameBuf );
+	if ( !progress || !progress[0] ) {
+		return qfalse;	// never tracked - treat as not done
+	}
+	slash = strchr( progress, '/' );
+	if ( !slash ) {
+		return qfalse;
+	}
+	have   = atoi( progress );
+	target = atoi( slash + 1 );
+	return ( target > 0 && have >= target ) ? qtrue : qfalse;
+}
+
+void CL_SyncSR_f( void )
+{
+	char     nameBuf[20];
+	char     doneBuf[20];
+	int      i;
+	qboolean onMedalsPage;
+
+	// [user 08-07] walk the WHOLE range and write every entry - do NOT stop at the first missing
+	// coop_uiN. An earlier revision broke out on the first gap, so any coop_uiD left at "1" by the
+	// old sticky-flag bug (they are CVAR_ARCHIVE, so they persist across sessions) was never
+	// cleared and every row rendered as completed. A row with no progress cvar is simply not done.
+	for ( i = 0; i < 1024; i++ ) {
+		Com_sprintf( doneBuf, sizeof( doneBuf ), "coop_uiD%d", i );
+		Cvar_Get( doneBuf, "0", CVAR_ARCHIVE );
+		Cvar_Set( doneBuf, CL_ChallengeIsDone( i ) ? "1" : "0" );
+	}
+
+	// [user 08-07] PIN STATE IS DERIVED, NOT TRACKED. The row markers (coop_uiP<i>) and the
+	// "n/5" summary (coop_pinCount) were each maintained independently as pins changed, so they
+	// drifted apart - the user saw "3/5 pinned" with not one box actually marked. Both are now
+	// rebuilt here from the single source of truth, the five coop_pin1..5 slots that
+	// CL_PinToggle_f writes: clear every marker, re-mark exactly the slots that are filled, and
+	// set the count to the same tally. They cannot disagree because they come from one pass.
+	{
+		char slotName[16];
+		char markName[16];
+		int  pinIdx[COOP_PIN_MAX];
+		int  pinCount = 0;
+		int  k;
+
+		for ( k = 0; k < COOP_PIN_MAX; k++ ) {
+			const char *v;
+			Com_sprintf( slotName, sizeof( slotName ), "coop_pin%d", k + 1 );
+			v = Cvar_VariableString( slotName );
+			if ( v[0] ) {
+				pinIdx[pinCount++] = atoi( v );
+			}
+		}
+		for ( i = 0; i < 1024; i++ ) {
+			Com_sprintf( markName, sizeof( markName ), "coop_uiP%d", i );
+			Cvar_Get( markName, "0", CVAR_ARCHIVE );
+			Cvar_Set( markName, "0" );
+		}
+		for ( k = 0; k < pinCount; k++ ) {
+			if ( pinIdx[k] >= 0 && pinIdx[k] < 1024 ) {
+				Com_sprintf( markName, sizeof( markName ), "coop_uiP%d", pinIdx[k] );
+				Cvar_Set( markName, "1" );
+			}
+		}
+		Cvar_Set( "coop_pinCount", va( "%d/%d", pinCount, COOP_PIN_MAX ) );
+	}
+
+	// [user 08-07] Medals lock overlays need BOTH "we are on the medals page" AND "this medal is
+	// still locked", but enabledcvar only takes one cvar - so publish the AND of the two as
+	// coop_uiMLv<i>. Without this the 12 scrims/padlocks drew over every challenge page.
+	// Recomputed here because every tab button runs coop_srsync right after flipping the page
+	// cvars, so this always reflects the page the user just switched to.
+	// A medal with NO coop_uiML<i> yet (never pushed by medals.scr - e.g. browsing disconnected, or
+	// before the first server flush) must default to LOCKED, not skipped: an unearned medal showing
+	// as unlocked is the wrong way to fail. An earlier revision `break`-ed on the first missing
+	// entry, which meant that when none had ever been pushed NO lock ever rendered at all.
+	// The 64 cap is a runaway guard; medals.scr currently defines 12.
+	onMedalsPage = !strcmp( Cvar_VariableString( "coop_srMedals" ), "1" ) ? qtrue : qfalse;
+	for ( i = 0; i < 64; i++ ) {
+		const char *lockedStr;
+		Com_sprintf( nameBuf, sizeof( nameBuf ), "coop_uiML%d", i );
+		lockedStr = Cvar_VariableString( nameBuf );
+		Com_sprintf( doneBuf, sizeof( doneBuf ), "coop_uiMLv%d", i );
+		Cvar_Get( doneBuf, "0", 0 );
+		// missing/empty => treat as locked
+		Cvar_Set( doneBuf,
+			( onMedalsPage && ( !lockedStr[0] || !strcmp( lockedStr, "1" ) ) ) ? "1" : "0" );
+	}
+}
+
 void CL_PinToggle_f( void )
 {
 	cvar_t     *slot[COOP_PIN_MAX];
@@ -3688,6 +3809,18 @@ void CL_PinToggle_f( void )
 	}
 
 	if ( !found ) {
+		// [user 08-07] failsafe - nothing left to track once a challenge is done. First draft read
+		// only coop_uiD<gi>, a flag challenges.scr::chal_ui_writeOne pushes - but that push happens
+		// on the 30s chal_flush cycle, so a player who had not yet been in-game 30s since this
+		// shipped (or who is browsing the DISCONNECTED menu) saw no block at all. Derive it from
+		// coop_uiN<gi> instead: that "N/T" progress string is already archived from previous
+		// sessions for every existing player, so this works offline and needs no server push.
+		// coop_uiD is still honoured as a fast path when present.
+		if ( CL_ChallengeIsDone( gi ) ) {
+			Com_Printf( "coop_pintoggle: challenge %d already complete - nothing to pin\n", gi );
+			Cvar_Set( "coop_pinResult", "done" );
+			return;
+		}
 		if ( count >= COOP_PIN_MAX ) {
 			Com_Printf( "coop_pintoggle: %d challenges pinned already - unpin one first\n", COOP_PIN_MAX );
 			Cvar_Set( "coop_pinResult", "full" );
@@ -3711,6 +3844,9 @@ void CL_PinToggle_f( void )
 	// instant local marker feedback - no server needed for this part
 	Cvar_Set( va( "coop_uiP%d", gi ), found ? "0" : "1" );
 	Cvar_Set( "coop_pinResult", found ? "unpinned" : "pinned" );
+	// [user 08-07] single token - an unquoted stufftext value stops at the first space, and the
+	// word PINNED is baked into the page art beside this (see gen_service_record.py).
+	Cvar_Set( "coop_pinCount", va( "%d/%d", count, COOP_PIN_MAX ) );
 
 	// connected right now? also notify the server immediately via the existing, proven name-bus
 	// dispatch (player.scr:614, arrayIndex 47) so the live Mission Objectives HUD and self.flags
@@ -3876,13 +4012,36 @@ void CL_Init( void ) {
 	// coop_pin1..coop_pin5 also get Cvar_Get'd lazily inside CL_PinToggle_f itself (first click on
 	// any row registers whichever slots haven't been touched yet); registering all 5 here too just
 	// makes sure they exist (and are in userinfo) even if the player never opens Service Record.
-	Cvar_Get("coop_pin1", "", CVAR_ARCHIVE | CVAR_USERINFO);
-	Cvar_Get("coop_pin2", "", CVAR_ARCHIVE | CVAR_USERINFO);
-	Cvar_Get("coop_pin3", "", CVAR_ARCHIVE | CVAR_USERINFO);
-	Cvar_Get("coop_pin4", "", CVAR_ARCHIVE | CVAR_USERINFO);
-	Cvar_Get("coop_pin5", "", CVAR_ARCHIVE | CVAR_USERINFO);
+	{
+		// [user 08-07] coop_pinCount - "X/5 Pinned" summary for the Service Record. Computed here too
+		// (not just in CL_PinToggle_f) so a fresh menu open shows the right count from persisted pins
+		// even before the player's first click this session.
+		cvar_t *p1 = Cvar_Get("coop_pin1", "", CVAR_ARCHIVE | CVAR_USERINFO);
+		cvar_t *p2 = Cvar_Get("coop_pin2", "", CVAR_ARCHIVE | CVAR_USERINFO);
+		cvar_t *p3 = Cvar_Get("coop_pin3", "", CVAR_ARCHIVE | CVAR_USERINFO);
+		cvar_t *p4 = Cvar_Get("coop_pin4", "", CVAR_ARCHIVE | CVAR_USERINFO);
+		cvar_t *p5 = Cvar_Get("coop_pin5", "", CVAR_ARCHIVE | CVAR_USERINFO);
+		int     initCount = 0;
+		if (p1->string[0]) initCount++;
+		if (p2->string[0]) initCount++;
+		if (p3->string[0]) initCount++;
+		if (p4->string[0]) initCount++;
+		if (p5->string[0]) initCount++;
+		// [user 08-07] value is ONE token ("3/5"): challenges.scr pushes this via stufftext, and an
+		// unquoted stufftext value stops at the first space (quoting truncates on the wire instead -
+		// bug-758), so the earlier "3/5 Pinned" silently became "3/5". The word PINNED is baked into
+		// the page texture next to this Label instead.
+		Cvar_Get("coop_pinCount", va("%d/%d", initCount, COOP_PIN_MAX), 0);
+	}
 	Cvar_Get("coop_pinResult", "", 0);
 	Cmd_AddCommand("coop_pintoggle", CL_PinToggle_f);
+	Cmd_AddCommand("coop_srsync", CL_SyncSR_f);
+
+	// [user 08-07] seed the per-row box shader paths. The Service Record box is drawn with
+	// linkcvartoshader, so an UNSET cvar means no shader at all - the row rendered with no box
+	// until something wrote one (the user had to press CLEAR PINS to make them appear). Cvar_Get
+	// only applies a default to a cvar that does not yet exist, so genuine pinned/done state
+	// already on disk is preserved.
 
 	cl_altbindings = Cvar_Get( "cl_altbindings", "0", CVAR_ARCHIVE );
 	cl_ctrlbindings = Cvar_Get( "cl_altbindings", "0", CVAR_ARCHIVE );

@@ -3318,6 +3318,41 @@ void Actor::DoFailSafeMove(vec3_t dest)
     SetThinkState(THINKSTATE_NOCLIP, THINKLEVEL_NOCLIP);
 }
 
+// HZM [user 2026-08-10] E2 (master plan v2, Phase B1) - two helpers for the obstacle-bump branches.
+//
+// CoopBumpPlayer: return the player the actor ACTUALLY collided with, instead of assuming client 0.
+// MM_AddTouchEnt (g_mmove.cpp:83-102) is what raises hit_temp_obstacle|1, and it does so having just
+// added that entity to mm->touchents - so the real bumper is in the touch list. The old code asked
+// G_GetEntity(0) and then judged the collision by the HOST's disguise state, which in 4-player is
+// simply the wrong person: a client body-blocking a corridor was judged by whether the host happened
+// to be holstered. Falls back to entity 0 when no player is in the list, so single player - where
+// the only player IS entity 0 - is provably unchanged.
+//
+// CoopSceneAnimHold: true when this actor is running a SCRIPTED ANIMATION (THINK_ANIM, set by the
+// anim / anim_scripted / anim_noclip events at :10909/:10923/:10937). BecomeTurretGuy rewrites the
+// think map permanently, so calling it on a welder or a card player destroys the scene - measured as
+// bug-1640, and the same reasoning that already exempts a manned MG42 gunner. The actor still reacts
+// (ForceAttackPlayer is left to the caller); it just keeps the think its scene depends on.
+Player *Actor::CoopBumpPlayer(mmove_t *mm)
+{
+    if (mm) {
+        for (int i = 0; i < mm->numtouch; i++) {
+            Entity *pTouched = G_GetEntity(mm->touchents[i]);
+
+            if (pTouched && pTouched->IsSubclassOfPlayer()) {
+                return static_cast<Player *>(pTouched);
+            }
+        }
+    }
+
+    return static_cast<Player *>(G_GetEntity(0));
+}
+
+bool Actor::CoopSceneAnimHold(void)
+{
+    return CurrentThink() == THINK_ANIM;
+}
+
 /*
 ===============
 Actor::GetMoveInfo
@@ -3354,7 +3389,8 @@ void Actor::GetMoveInfo(mmove_t *mm)
         } else if (mm->hit_temp_obstacle && (mm->hit_temp_obstacle & 1)) {
             Player *p;
 
-            p = static_cast<Player *>(G_GetEntity(0));
+            // [user 2026-08-10] E2: the ACTUAL bumper, not the host (see CoopBumpPlayer).
+            p = CoopBumpPlayer(mm);
 
             // HZM coop: G_GetEntity(0) is NULL while client 0 is still connecting (CS_PRIMED,
             // before ClientBegin spawns the player). Patrol AI bumping a temp obstacle in that
@@ -3366,7 +3402,15 @@ void Actor::GetMoveInfo(mmove_t *mm)
                     UpdateEnableEnemy();
                 }
 
-                BecomeTurretGuy();
+                // [user 2026-08-07] Do not convert a manned MG42 gunner. BecomeTurretGuy rewrites the
+                // think map away from machinegunner PERMANENTLY, and this branch fires merely because
+                // the player bumped into him. He should still react - but with the gun he is already
+                // on. See Actor::CoopMannedTurretHold.
+                // [user 2026-08-10] E2: also hold for an actor mid-scripted-animation - BecomeTurretGuy
+                // would rewrite its think map and end the scene (bug-1640).
+                if (!CoopMannedTurretHold() && !CoopSceneAnimHold()) {
+                    BecomeTurretGuy();
+                }
                 ForceAttackPlayer();
             }
         }
@@ -3378,7 +3422,8 @@ void Actor::GetMoveInfo(mmove_t *mm)
                 Player *p;
 
                 m_Path.Clear();
-                p = static_cast<Player *>(G_GetEntity(0));
+                // [user 2026-08-10] E2: the ACTUAL bumper, not the host (see CoopBumpPlayer).
+                p = CoopBumpPlayer(mm);
 
                 // HZM coop: NULL while client 0 is connecting - see the ANIM_MODE_NORMAL
                 // obstacle branch above (bug-242)
@@ -3388,7 +3433,14 @@ void Actor::GetMoveInfo(mmove_t *mm)
                         UpdateEnableEnemy();
                     }
 
-                    BecomeTurretGuy();
+                    // [user 2026-08-07] Do not convert a manned MG42 gunner. BecomeTurretGuy rewrites the
+                    // think map away from machinegunner PERMANENTLY, and this branch fires merely because
+                    // the player bumped into him. He should still react - but with the gun he is already
+                    // on. See Actor::CoopMannedTurretHold.
+                    // [user 2026-08-10] E2: also hold for an actor mid-scripted-animation (bug-1640).
+                    if (!CoopMannedTurretHold() && !CoopSceneAnimHold()) {
+                        BecomeTurretGuy();
+                    }
                     ForceAttackPlayer();
                 }
             }
@@ -7786,6 +7838,20 @@ Notify scripts when the actor has:
 - And/or if the enemy is visible
 ===============
 */
+// [user 08-08] bug-1591 - LD ERROR gate. These are LEVEL-DESIGN diagnostics (leash/mindist/
+// maxdist vs fog, weaponless attack) aimed at whoever authors a map, and they fire PER ACTOR:
+// on a foggy map with a full garrison that is 200+ console lines in front of a player, every
+// session, because this project runs developer 1 permanently. Keep the diagnostic, put it
+// behind a switch: coop_ldDebug 1 to get it back.
+static qboolean Actor_LDDebug(void)
+{
+    static cvar_t *pLD = NULL;
+    if (!pLD) {
+        pLD = gi.Cvar_Get("coop_ldDebug", "0", 0);
+    }
+    return pLD && pLD->integer ? qtrue : qfalse;
+}
+
 void Actor::CheckUnregister(void)
 {
     m_bBecomeRunner = false;
@@ -7898,6 +7964,28 @@ Modifies think num of current thinkstate inside m_ThinkMap.
 */
 void Actor::SetThink(eThinkState state, eThinkNum think)
 {
+    // HZM bug-1631: the disguise-slot swap is the one exit End_Disguise* can take without any
+    // SetThinkState call (ThinkStateTransitions same-level EndState+BeginState) - and a swap to
+    // THINK_DISGUISE_NONE installs NULL Begin/ThinkState functions, freezing the actor mid-anim
+    // with thinkstate pinned at DISGUISE. Print who orders it, WITH the script call trace.
+    if (state == THINKSTATE_DISGUISE && m_ThinkMap[state] != think) {
+        static cvar_t *s_disgDbg2 = NULL;
+        if (!s_disgDbg2) {
+            s_disgDbg2 = gi.Cvar_Get("g_coopDisgDebug", "0", 0);
+        }
+        if (s_disgDbg2->integer) {
+            Com_Printf(
+                "^~^~^ DISG SETTHINK ent=%i tn=%s oldthink=%i newthink=%i curstate=%i\n%s\n",
+                entnum,
+                targetname.c_str(),
+                (int)m_ThinkMap[state],
+                (int)think,
+                (int)m_ThinkState,
+                DumpCallTrace("")
+            );
+        }
+    }
+
     m_ThinkMap[state] = think;
 
     if (m_ThinkState == state) {
@@ -7975,18 +8063,44 @@ void Actor::SetThinkState(eThinkState state, eThinkLevel level)
 {
     eThinkNum map;
 
+    // HZM bug-1631: name whatever thinkstate replaces DISGUISE. The m2l2a papers-checker's
+    // disguise think ended 50ms into ACCEPT with no alarm hook, no attack and no suspend on
+    // record - this prints the actual transition. 0=VOID 1=IDLE 2=PAIN 3=KILLED 4=ATTACK
+    // 5=CURIOUS 6=DISGUISE 7=BADPLACE 8=GRENADE 9=NOCLIP.
+    {
+        static cvar_t *s_disgDbg = NULL;
+        if (!s_disgDbg) {
+            s_disgDbg = gi.Cvar_Get("g_coopDisgDebug", "0", 0);
+        }
+        if (s_disgDbg->integer && m_ThinkStates[level] != state
+            && (m_ThinkStates[level] == THINKSTATE_DISGUISE || state == THINKSTATE_DISGUISE)) {
+            Com_Printf(
+                "^~^~^ DISG SETSTATE ent=%i tn=%s lvl=%i old=%i new=%i curlvl=%i\n",
+                entnum,
+                targetname.c_str(),
+                (int)level,
+                (int)m_ThinkStates[level],
+                (int)state,
+                (int)m_ThinkLevel
+            );
+        }
+    }
+
     if (state == THINKSTATE_ATTACK) {
         m_csIdleMood = STRING_NERVOUS;
         map          = m_ThinkMap[THINKSTATE_ATTACK];
 
         if (map != THINK_ALARM && map != THINK_WEAPONLESS && map != THINK_DOG_ATTACK && !GetWeapon(WEAPON_MAIN)) {
-            Com_Printf(
-                "^~^~^ LD ERROR: (entnum %i, radnum %i, targetname '%s'):    forcing weaponless attack state.\n"
-                "^~^~^ Level designers should specify 'type_attack weaponless' for this guy.\n",
-                entnum,
-                radnum,
-                TargetName().c_str()
-            );
+            if (Actor_LDDebug())
+            {
+                Com_Printf(
+                    "^~^~^ LD ERROR: (entnum %i, radnum %i, targetname '%s'):    forcing weaponless attack state.\n"
+                    "^~^~^ Level designers should specify 'type_attack weaponless' for this guy.\n",
+                    entnum,
+                    radnum,
+                    TargetName().c_str()
+                );
+            }
 
             SetThink(THINKSTATE_ATTACK, THINK_WEAPONLESS);
         }
@@ -8629,16 +8743,19 @@ void Actor::FixAIParameters(void)
         }
 
         if (m_fLeash < fMinLeash) {
-            Com_Printf(
-                "^~^~^ LD ERROR: (entnum %i, radnum %i, targetname '%s'):    increasing leash from %g to %g.\n"
-                "^~^~^ Leash must be larger than the size of the entity to which an AI is tethered.\n"
-                "\n",
-                entnum,
-                radnum,
-                TargetName().c_str(),
-                m_fLeash,
-                fMinLeash
-            );
+            if (Actor_LDDebug())
+            {
+                Com_Printf(
+                    "^~^~^ LD ERROR: (entnum %i, radnum %i, targetname '%s'):    increasing leash from %g to %g.\n"
+                    "^~^~^ Leash must be larger than the size of the entity to which an AI is tethered.\n"
+                    "\n",
+                    entnum,
+                    radnum,
+                    TargetName().c_str(),
+                    m_fLeash,
+                    fMinLeash
+                );
+            }
 
             m_fLeash        = fMinLeash;
             m_fLeashSquared = Square(fMinLeash);
@@ -8646,69 +8763,81 @@ void Actor::FixAIParameters(void)
     }
 
     if (m_fLeash < m_fMinDistance) {
-        Com_Printf(
-            "^~^~^ LD ERROR: (entnum %i, radnum %i, targetname '%s'):    reducing mindist from %g to %g to match "
-            "leash.\n"
-            "^~^~^ Leash must be greater than mindist, or the AI will want to both run away and stay put.\n"
-            "\n",
-            entnum,
-            radnum,
-            TargetName().c_str(),
-            m_fMinDistance,
-            m_fLeash
-        );
+        if (Actor_LDDebug())
+        {
+            Com_Printf(
+                "^~^~^ LD ERROR: (entnum %i, radnum %i, targetname '%s'):    reducing mindist from %g to %g to match "
+                "leash.\n"
+                "^~^~^ Leash must be greater than mindist, or the AI will want to both run away and stay put.\n"
+                "\n",
+                entnum,
+                radnum,
+                TargetName().c_str(),
+                m_fMinDistance,
+                m_fLeash
+            );
+        }
 
         m_fMinDistance        = m_fLeash;
         m_fMinDistanceSquared = Square(m_fMinDistance);
     }
 
     if (m_fMaxDistance < m_fMinDistance + 128.0 - 1.0) {
-        Com_Printf(
-            "^~^~^ LD ERROR: (entnum %i, radnum %i, targetname '%s'):    increasing maxdist from %g to %g to exceed "
-            "mindist.\n"
-            "^~^~^ Maxdist should be %i greater than mindist, or the AI will want to both run away and charge, or just "
-            "do oscillitaroy behavior.\n"
-            "\n",
-            entnum,
-            radnum,
-            TargetName().c_str(),
-            m_fMaxDistance,
-            m_fMinDistance + 128.0,
-            128
-        );
+        if (Actor_LDDebug())
+        {
+            Com_Printf(
+                "^~^~^ LD ERROR: (entnum %i, radnum %i, targetname '%s'):    increasing maxdist from %g to %g to exceed "
+                "mindist.\n"
+                "^~^~^ Maxdist should be %i greater than mindist, or the AI will want to both run away and charge, or just "
+                "do oscillitaroy behavior.\n"
+                "\n",
+                entnum,
+                radnum,
+                TargetName().c_str(),
+                m_fMaxDistance,
+                m_fMinDistance + 128.0,
+                128
+            );
+        }
 
         m_fMaxDistance        = m_fMinDistance + 128;
         m_fMaxDistanceSquared = Square(m_fMaxDistance);
     }
 
     if (world->farplane_distance > 0 && m_fMaxDistance > world->farplane_distance * 0.828f) {
-        Com_Printf(
-            "^~^~^ LD ERROR: (entnum %i, radnum %i, targetname '%s'):    reducing maxdist from %g to %g to be %g%% "
-            "of farplane.\n"
-            "^~^~^ Maxdist should be this distance within fog, or AI will be able to see and attack through fog.\n"
-            "\n",
-            entnum,
-            radnum,
-            TargetName().c_str(),
-            m_fMaxDistance,
-            world->farplane_distance * 0.828,
-            2.0
-        );
+        if (Actor_LDDebug())
+        {
+            Com_Printf(
+                "^~^~^ LD ERROR: (entnum %i, radnum %i, targetname '%s'):    reducing maxdist from %g to %g to be %g%% "
+                "of farplane.\n"
+                "^~^~^ Maxdist should be this distance within fog, or AI will be able to see and attack through fog.\n"
+                "\n",
+                entnum,
+                radnum,
+                TargetName().c_str(),
+                m_fMaxDistance,
+                world->farplane_distance * 0.828,
+                2.0
+            );
+        }
 
         m_fMaxDistance        = world->farplane_distance * 0.828f;
         m_fMaxDistanceSquared = Square(m_fMaxDistance);
 
         if (m_fMaxDistance < m_fMinDistance + 128.0 - 1.0) {
-            Com_Printf(
-                "^~^~^ LD ERROR: (entnum %i, radnum %i, targetname '%s'):    reducing mindist from %g to %g to be less "
-                "than maxdist after fog adjustment.\n"
-                "\n",
-                entnum,
-                radnum,
-                TargetName().c_str(),
-                m_fMinDistance,
-                ((m_fMaxDistance > 128) ? (m_fMaxDistance - 128) : 0)
-            );
+            if (Actor_LDDebug())
+            {
+                Com_Printf(
+                    "^~^~^ LD ERROR: (entnum %i, radnum %i, targetname '%s'):    reducing mindist from %g to %g to be less "
+                    "than maxdist after fog adjustment.\n"
+                    "\n",
+                    entnum,
+                    radnum,
+                    TargetName().c_str(),
+                    m_fMinDistance,
+                    ((m_fMaxDistance > 128) ? (m_fMaxDistance - 128) : 0)
+                );
+            }
 
             m_fMinDistance = m_fMaxDistance - 128;
             if (m_fMinDistance < 0) {
@@ -8947,15 +9076,28 @@ bool Actor::PassesTransitionConditions_Disguise(void)
         return false;
     }
 
-    Entity *player = G_GetEntity(0);
-
+    // HZM [user 2026-08-10] E1 (master plan v2, Phase B2) - MEASURED IN A 2-PLAYER TEST.
+    // This was `Entity *player = G_GetEntity(0);` and the trace below ran against THAT entity.
+    // Every condition above is evaluated against m_Enemy - disguised, confirmed, height, distance -
+    // and then the final line-of-sight check asked about client 0, the HOST. So a checker could
+    // correctly decide that Player2 was a disguised, confirmed, in-range enemy, and then trace to
+    // Player1's chest: if the host was not visible from the guard's eyes, the transition failed and
+    // the challenge never happened. Confirmed live on m2l2a: Player2 walked past the downstairs
+    // guard and every officer untouched while Player1 was challenged normally.
+    // Now traced against the enemy actually being evaluated. m_Enemy is NULL-checked at the top of
+    // this function, so this also SUPERSEDES the B0 guard at this site - entity 0 is no longer
+    // dereferenced here at all, which makes the crash structurally impossible rather than guarded.
+    // (B0's other two guards, in actor_grenade.cpp, still stand.)
+    // SOLO IS PROVABLY UNCHANGED: m_bHasDisguise is only ever written on a Player (player.cpp:11386),
+    // so EnemyIsDisguised() above can only be true for a player enemy - and with one player, that
+    // player IS entity 0.
     return G_SightTrace(
         EyePosition(),
         vec_zero,
         vec_zero,
-        player->centroid,
+        m_Enemy->centroid,
         this,
-        player,
+        m_Enemy,
         MASK_TRANSITION,
         false,
         "Actor::PassesTransitionConditions_Disguise"

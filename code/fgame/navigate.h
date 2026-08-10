@@ -294,6 +294,17 @@ public:
     static void  ShowNodes(void);
     static void  LoadNodes(void);
     static void  CreatePaths(void);
+    // [coop] Runtime node authoring on a map that loaded a baked .pth.
+    // CoopNodesAreBulk()  - true while allocation is still coming out of the archive's bulk block,
+    //                       which AllocPathNode() slices with no bounds check.
+    // CoopPrepareRuntimeRebuild() - detach from that block so new nodes can be created safely,
+    //                       without freeing it or destroying the existing node objects.
+    // CoopFinishRuntimeRebuild()  - reattach, so teardown frees the block and not its interior.
+    // These two MUST be paired around any runtime node creation.
+    static bool  CoopNodesAreBulk(void);
+    static bool  CoopBulkOwnsNodes(void);
+    static void  CoopPrepareRuntimeRebuild(void);
+    static void  CoopFinishRuntimeRebuild(void);
     static void *AllocPathNode(void);
     static void  FreePathNode(void *);
     static void  ResetNodes(void);

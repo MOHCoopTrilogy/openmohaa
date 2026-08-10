@@ -539,6 +539,7 @@ void Cbuf_ExecuteText(int exec_when, const char *text );
 // this can be used in place of either Cbuf_AddText or Cbuf_InsertText
 
 void Cbuf_Execute (int msec);
+int  Cbuf_PeekSize (void);
 // Pulls off \n terminated lines of text from the command buffer and sends
 // them through Cmd_ExecuteString.  Stops when the buffer is empty.
 // Normally called once per frame, but may be explicitly invoked.

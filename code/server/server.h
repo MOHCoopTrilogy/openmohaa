@@ -344,6 +344,7 @@ extern	server_t		sv;					// cleared each map
 extern	game_export_t	*ge;				// game exports
 
 extern	cvar_t	*sv_fps;
+extern	cvar_t	*sv_lagProbe;	// HZM [user 2026-08-10]: server frame-overrun probe
 extern	cvar_t	*sv_timeout;
 extern	cvar_t	*sv_zombietime;
 extern	cvar_t	*sv_rconPassword;

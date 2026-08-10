@@ -1175,6 +1175,14 @@ public:
     void        Begin_MachineGunner(void);
     void        End_MachineGunner(void);
     void        BecomeTurretGuy(void);
+    // [coop] true while this actor is manning a turret and coop_mgStay says keep him there.
+    // Guards every BecomeTurretGuy() call site, because that function rewrites the think map and
+    // one call from anywhere permanently ends the machinegunner behaviour.
+    bool        CoopMannedTurretHold(void);
+    // [user 2026-08-10] E2: resolve the player actually collided with (mm->touchents), not client 0;
+    // and hold BecomeTurretGuy for an actor running a scripted animation.
+    Player     *CoopBumpPlayer(mmove_t *mm);
+    bool        CoopSceneAnimHold(void);
     void        ThinkHoldGun_TurretGun(void);        // Added in 2.0
     void        Think_MachineGunner_TurretGun(void); // Added in 2.0
     void        Think_MachineGunner(void);

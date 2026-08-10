@@ -77,6 +77,10 @@ const char *PathSearch::last_error;
 
 byte *bulkNavMemory      = NULL;
 byte *startBulkNavMemory = NULL;
+// [coop 2026-08-07] Extent of the archive block, so FreePathNode can recognise an interior
+// pointer. Nodes loaded from a .pth are slices of one allocation and must never be freed one
+// at a time; without this the guard depends on bulkNavMemory being restored in the right order.
+size_t startBulkNavMemorySize = 0;
 
 Vector PLAYER_BASE_MIN(-15.5f, -15.5f, 0);
 Vector PLAYER_BASE_MAX(15.5f, 15.5f, 0);
@@ -1103,8 +1107,9 @@ void PathSearch::ResetNodes(void)
     // Free the bulk nav' memory
     if (startBulkNavMemory) {
         gi.Free(startBulkNavMemory);
-        bulkNavMemory      = NULL;
-        startBulkNavMemory = NULL;
+        bulkNavMemory          = NULL;
+        startBulkNavMemory     = NULL;
+        startBulkNavMemorySize = 0;
     }
 }
 
@@ -1173,8 +1178,9 @@ void PathSearch::ClearNodes(void)
     // Free the bulk nav' memory
     if (startBulkNavMemory) {
         gi.Free(startBulkNavMemory);
-        bulkNavMemory      = NULL;
-        startBulkNavMemory = NULL;
+        bulkNavMemory          = NULL;
+        startBulkNavMemory     = NULL;
+        startBulkNavMemorySize = 0;
     }
 }
 
@@ -2311,8 +2317,96 @@ void *PathSearch::AllocPathNode(void)
     return bulkNavMemory;
 }
 
+// [coop 2026-08-07] Keyed on bulkNavMemory, NOT startBulkNavMemory: CoopPrepareRuntimeRebuild
+// deliberately leaves startBulkNavMemory set (teardown still has to free the block) while nulling
+// bulkNavMemory to route allocation away from it. bulkNavMemory is non-NULL exactly while
+// AllocPathNode/FreePathNode are still operating on the archive's block.
+bool PathSearch::CoopNodesAreBulk(void)
+{
+    return bulkNavMemory != NULL;
+}
+
+// [bug 2026-08-07] The question ClearNodes has to be gated on, and it is NOT the one above.
+// CoopNodesAreBulk asks "is allocation still coming out of the block", which CoopPrepareRuntimeRebuild
+// deliberately makes false. Asking it a second time, after prepare, to decide whether ClearNodes is
+// safe returned "not bulk" and freed the block out from under 258 archive-loaded node objects -
+// CreatePaths then walked the dangling pathnodes[] into droptofloor and took an access violation.
+// This one asks "do any nodes LIVE in the block", which stays true until teardown frees it.
+bool PathSearch::CoopBulkOwnsNodes(void)
+{
+    return startBulkNavMemory != NULL;
+}
+
+// Detach from a loaded .pth's bulk block so nodes can be created at runtime.
+//
+// ClearNodes() is the wrong tool here even though it looks right: it frees startBulkNavMemory,
+// and every node loaded from a .pth lives INSIDE that block - as do the PathMap cell lists and
+// each node's Child array. Worse, those node objects are not anonymous. While m_bNodesloaded is
+// set, PathNode::newInstance hands the map's own info_pathnode entities the pre-loaded nodes in
+// spawn order, so each named node in the BSP is bound to one of them. Freeing the block dangles
+// every node a script still references by targetname - m3l1b's mg42_middle_retreat, which
+// seq_mg42_retreat_run runs the retreating garrison to, is one of them.
+//
+// So: drop the connectivity, keep the objects and the block, and send further allocation to the
+// general heap. CreatePaths() then rebuilds links from scratch and re-saves.
+void PathSearch::CoopPrepareRuntimeRebuild(void)
+{
+    int i, x, y;
+
+    if (!bulkNavMemory) {
+        return; // nothing came from an archive - ClearNodes() is the correct path
+    }
+
+    for (x = 0; x < PATHMAP_GRIDSIZE; x++) {
+        for (y = 0; y < PATHMAP_GRIDSIZE; y++) {
+            PathMap[x][y] = MapCell();
+        }
+    }
+
+    for (i = 0; i < nodecount; i++) {
+        if (pathnodes[i]) {
+            pathnodes[i]->Child              = NULL;
+            pathnodes[i]->virtualNumChildren = 0;
+            pathnodes[i]->numChildren        = 0;
+            pathnodes[i]->findCount          = 0;
+        }
+    }
+
+    // The block is sized for exactly the node count the .pth carried, and AllocPathNode walks it
+    // down unchecked - one extra node runs off the front. Nulling this sends new nodes to
+    // gi.Malloc. startBulkNavMemory is left set so ResetNodes() still frees the block at map end.
+    bulkNavMemory = NULL;
+
+    m_bNodesloaded = false;
+    m_LoadIndex    = -1;
+}
+
+// Reattach after node creation is done.
+//
+// This is not cosmetic. FreePathNode() frees an individual node only when bulkNavMemory is NULL,
+// so leaving it NULL would make the map-end ResetNodes() call gi.Free on every node - including
+// the archive-loaded ones, which are interior pointers into the bulk block and were never
+// individually allocated. That is a heap corruption at map change. Restoring the pointer puts
+// FreePathNode back to its no-op behaviour; the handful of runtime nodes then leak into the
+// level's pool, which is freed wholesale on map change anyway.
+void PathSearch::CoopFinishRuntimeRebuild(void)
+{
+    if (!bulkNavMemory && startBulkNavMemory) {
+        bulkNavMemory = startBulkNavMemory;
+    }
+}
+
 void PathSearch::FreePathNode(void *ptr)
 {
+    // Interior of the archive block: the whole thing is freed as one unit by ResetNodes, so
+    // freeing a node individually here is a free of a non-allocation. This has to be a range
+    // test rather than a bulkNavMemory null-check, because runtime node authoring nulls that
+    // pointer on purpose and the teardown must stay correct whatever order things ran in.
+    if (startBulkNavMemory && (byte *)ptr >= startBulkNavMemory
+        && (byte *)ptr < startBulkNavMemory + startBulkNavMemorySize) {
+        return;
+    }
+
     if (!bulkNavMemory || ai_editmode->integer) {
         gi.Free(ptr);
     }
@@ -2683,7 +2777,8 @@ void PathSearch::ArchiveStaticLoad(Archiver& arc)
     gi.DPrintf("%d memory allocated for navigation.\n", size);
 
     if (size) {
-        startBulkNavMemory = (byte *)gi.Malloc(size);
+        startBulkNavMemory     = (byte *)gi.Malloc(size);
+        startBulkNavMemorySize = (size_t)size;
     } else {
         startBulkNavMemory = NULL;
     }

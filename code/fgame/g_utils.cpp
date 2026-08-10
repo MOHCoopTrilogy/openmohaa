@@ -1632,9 +1632,9 @@ void ChangeMusic(const char *current, const char *fallback, qboolean force)
                 client->ChangeMusic(current, fallback, force);
             }
         }
-        if (current && fallback) {
-            gi.DPrintf("music set to %s with fallback %s\n", current, fallback);
-        }
+        // [user 2026-08-07] stock per-change music DPrintf removed: it fired ~2x/second in coop and
+        // was drowning the console whenever `developer 1` is on - and developer 1 has to stay on,
+        // because build mode reports every placement through println, which developer gates.
     }
 }
 

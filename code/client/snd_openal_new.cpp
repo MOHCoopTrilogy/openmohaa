@@ -3448,6 +3448,37 @@ openal_channel::set_gain
 */
 extern cvar_t *s_dialogscale;
 
+// HZM coop [user 2026-08-07] - CUE SIDECHAIN.
+// Some coop feedback cues were getting buried: raising their alias volume alone does not help,
+// because the SFX slider scales the whole world with them, so the RELATIVE balance never moves.
+// This ducks everything else briefly while a cue plays, in two tiers set by the user:
+//   tier 2 STANDOUT (challenge typewriter, rank-up ping) - "meant to be satisfying and really
+//          stand out": music/ambience drop hard and other SFX drop noticeably.
+//   tier 1 SUBTLE   (sprint breath, DBNO breath, injury cough, MG42 overheat) - present and
+//          audible without flattening the firefight around them.
+// Tuning lives in one cvar: s_cueDuck scales the whole effect (0 = off, 1 = as designed).
+static int   s_hzmCueDuckUntil = 0;   // cls.realtime ms
+static int   s_hzmCueDuckTier  = 0;
+static cvar_t *s_cueDuck       = NULL;
+
+// 0 = not a cue, 1 = subtle, 2 = standout. Matched on the sample path because that is what the
+// channel carries (pSfx->name); alias names are not retained this far down.
+static int S_HZM_CueTier(const char *name)
+{
+    if (!name || !*name) {
+        return 0;
+    }
+    if (strstr(name, "coop_type_key") || strstr(name, "mptypekey") || strstr(name, "coop_type_return")
+        || strstr(name, "coop_rankup")) {
+        return 2;
+    }
+    if (strstr(name, "coop_sprint/") || strstr(name, "coop_injury/") || strstr(name, "gasmask")
+        || strstr(name, "Mec_SteamLoop_01")) {
+        return 1;
+    }
+    return 0;
+}
+
 void openal_channel::set_gain(float gain)
 {
     // HZM coop - CATEGORY MIXER. This is the ONE place category volume actually sticks: every sound's
@@ -3457,8 +3488,9 @@ void openal_channel::set_gain(float gain)
     //     call site -> skip.
     //   - Looping ambience (CHANNEL_FLAG_LOOPING): s_ambientVolume is already folded into its gain -> skip.
     //   - Dialogue channels (CHAN_DIALOG / _SECONDARY): follow the Dialogue slider (all VO, incl. enemy).
-    //   - Menu / UI channels (CHAN_MENU / CHAN_LOCAL / CHAN_LOCAL_SOUND): stay at master so the menus
-    //     are usable at any SFX setting.
+    //   - Menu channels (CHAN_MENU): stay at master so menus are usable at any SFX setting.
+    //     [2026-08-07] CHAN_LOCAL / CHAN_LOCAL_SOUND were in this group and are NOT any more -
+    //     they carry in-world player feedback (typewriter, injured cue, sprint breath), not chrome.
     //   - Everything else (gunfire, footsteps, explosions, reloads, vehicles, breathing, cracks, ...):
     //     follow the SFX slider. This is the user's rule: SFX = everything that isn't music, dialogue,
     //     or ambience.
@@ -3478,8 +3510,15 @@ void openal_channel::set_gain(float gain)
             if (s_dialogscale && s_dialogscale->value >= 0.f) {
                 gain *= s_dialogscale->value;
             }
-        } else if (iEntChannel == CHAN_MENU || iEntChannel == CHAN_LOCAL || iEntChannel == CHAN_LOCAL_SOUND) {
-            // menu / UI - master only
+        } else if (iEntChannel == CHAN_MENU) {
+            // [user 2026-08-07] Only true menu chrome is master-only now. CHAN_LOCAL and
+            // CHAN_LOCAL_SOUND used to sit in this branch, so every piece of in-world player
+            // feedback bypassed the SFX slider: the challenge typewriter, the injured cue,
+            // snd_gasp (sprint breathing), coop_headshot, and everything routed through
+            // Player::PlayLocalSound. With the slider at 2.0 the whole world doubled while those
+            // stayed at 1.0, so they read as "lower than they used to be even with the dial turned
+            // up" - exactly how it was reported. They follow SFX now, per the rule stated above:
+            // SFX is everything that is not music, dialogue or ambience.
         } else {
             if (s_sfxvolume && s_sfxvolume->value >= 0.f) {
                 gain *= s_sfxvolume->value;
@@ -3490,6 +3529,75 @@ void openal_channel::set_gain(float gain)
     // cinematic effects duck (music exempt so the soundtrack stays full while effects recede)
     if (s_sfxduck && s_sfxduck->value < 1.f && !bMusic) {
         gain *= s_sfxduck->value;
+    }
+
+    // --- cue sidechain (see S_HZM_CueTier above) ---
+    {
+        int   cueTier = 0;
+        float duckScale;
+
+        if (!s_cueDuck) {
+            s_cueDuck = Cvar_Get("s_cueDuck", "2", CVAR_ARCHIVE);   // [user 2026-08-07] default 2
+        }
+        duckScale = s_cueDuck->value;
+        if (duckScale < 0.0f) { duckScale = 0.0f; }
+
+        // A looping or music source is never itself a cue - that also keeps a map that uses the
+        // same sample as ambience (Mec_SteamLoop_01) from arming the duck forever.
+        if (!bMusic && !bLoop && pSfx) {
+            cueTier = S_HZM_CueTier(pSfx->name);
+        }
+
+        // [user 2026-08-07] live gain knob so the cue level can be tuned without a rebuild:
+        //   s_cueGain  - standout tier (challenge typewriter, rank-up ping)
+        //   s_cueGain2 - subtle tier (sprint breath, injury cough, MG overheat)
+        // Applied to the cue ITSELF, on top of its alias volume and the SFX slider.
+        if (cueTier > 0) {
+            static cvar_t *s_cueGain  = NULL;
+            static cvar_t *s_cueGain2 = NULL;
+            if (!s_cueGain)  { s_cueGain  = Cvar_Get("s_cueGain",  "1", CVAR_ARCHIVE); }
+            if (!s_cueGain2) { s_cueGain2 = Cvar_Get("s_cueGain2", "1", CVAR_ARCHIVE); }
+            if (cueTier == 2 && s_cueGain->value  > 0.0f) { gain *= s_cueGain->value; }
+            if (cueTier == 1 && s_cueGain2->value > 0.0f) { gain *= s_cueGain2->value; }
+        }
+
+        if (cueTier > 0 && duckScale > 0.0f) {
+            // the cue itself holds the window open while it plays, and is never ducked
+            int hold = (cueTier == 2) ? 900 : 350;
+            if (cls.realtime + hold > s_hzmCueDuckUntil) {
+                s_hzmCueDuckUntil = cls.realtime + hold;
+            }
+            if (cueTier > s_hzmCueDuckTier) {
+                s_hzmCueDuckTier = cueTier;
+            }
+        } else if (duckScale > 0.0f && cls.realtime < s_hzmCueDuckUntil && s_hzmCueDuckTier > 0) {
+            float amt = (s_hzmCueDuckTier == 2) ? 0.75f : 0.30f;
+            float w   = 1.0f;   // music + ambience take the full dip
+            int   left;
+
+            if (!bMusic && !bLoop) {
+                // other SFX give way much less, so the firefight still reads underneath
+                w = (s_hzmCueDuckTier == 2) ? 0.55f : 0.15f;
+            }
+
+            // linear release over the last 250ms so the level does not snap back audibly
+            left = s_hzmCueDuckUntil - cls.realtime;
+            if (left < 250) {
+                amt *= (float)left / 250.0f;
+            }
+
+            // [user 2026-08-07] CLAMP. s_cueDuck now defaults to 2, and 1 - (0.75 * 1.0 * 2) is
+            // -0.5 - a negative gain, which is meaningless to OpenAL and would not simply mean
+            // "very quiet". Floor it at 0.05 (~-26dB): effectively inaudible under the cue, but
+            // still a real value, so a deep duck reads as ducked rather than as a bug.
+            {
+                float duckFactor = 1.0f - amt * w * duckScale;
+                if (duckFactor < 0.05f) { duckFactor = 0.05f; }
+                gain *= duckFactor;
+            }
+        } else if (cls.realtime >= s_hzmCueDuckUntil) {
+            s_hzmCueDuckTier = 0;
+        }
     }
 
     qalSourcef(source, AL_GAIN, gain);
