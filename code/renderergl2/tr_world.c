@@ -752,7 +752,15 @@ static void R_MarkLeaves (void) {
 	}
 
 	vis = R_ClusterPVS(tr.visClusters[tr.visIndex]);
-	
+
+	// HZM coop [user 2026-08-16] bug-1849: gl2 DECLARED r_novis and never used it, so flipping
+	// its cvar flag alone changed nothing - this is the renderer the game actually loads.
+	// The loop below already treats a NULL vis as "everything is visible", so dropping the
+	// pointer IS the implementation. Same net effect as gl1's explicit mark-everything branch.
+	if ( r_novis->integer ) {
+		vis = NULL;
+	}
+
 	for (i=0,leaf=tr.world->nodes ; i<tr.world->numnodes ; i++, leaf++) {
 		cluster = leaf->cluster;
 		if ( cluster < 0 || cluster >= tr.world->numClusters ) {

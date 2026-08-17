@@ -175,6 +175,8 @@ void Actor::Cover_FindCover(bool bCheckAll)
 
     m_pCoverNode = pNode;
     m_pCoverNode->Claim(this);
+    // [HZM coop 2026-08-15, bug-1813] stamp the claim so State_Cover_Shoot can time a relocation.
+    m_iCoopCoverClaimTime = level.inttime;
     memset(m_pPotentialCoverNode, 0, sizeof(m_pPotentialCoverNode));
     m_iPotentialCoverCount = 0;
 }
@@ -484,6 +486,46 @@ void Actor::State_Cover_Hide(void)
 
 void Actor::State_Cover_Shoot(void)
 {
+    /* [HZM coop 2026-08-15, bug-1813] RELOCATE BETWEEN COVER INSTEAD OF ROOTING TO ONE PIECE.
+       Cover_FindCover returns early while the held node is still valid, and the only thing that
+       ever asked for a new one was m_bNeedReload - so a cover-think actor claims the first piece
+       of cover it reaches and fights the entire engagement from it. Measured: handing engaged
+       actors to cover think cut movement per engaged enemy from 0.199 to 0.072. The positioning
+       was right and the stillness was the problem.
+       This drops the held node on a timer and re-runs the search, reusing the SAME transition the
+       reload path already uses (RunToCover -> TAKE_COVER), so nothing new has to be proven about
+       how an actor leaves cover. If no other cover is available it simply keeps the node it just
+       re-found and carries on shooting, so a coverless map degrades to the old behaviour.
+       0 disables. */
+    static cvar_t *pCoverRelo = NULL;
+    if (!pCoverRelo) { pCoverRelo = gi.Cvar_Get("coop_aiCoverRelocateMs", "12000", CVAR_ARCHIVE); }
+    /* [HZM coop 2026-08-15, bug-1815] BOUNDING OVERWATCH GATE. With coop_aiBound on, the timer
+       above only says an actor is DUE to move; the squad still has to say it MAY. aisquad.scr
+       grants a short window to a rotating half of each engaged cluster, so somebody is always
+       firing while the others reposition. Without this the phases are unsynchronised - stamped
+       whenever each actor happened to claim cover - which can empty a whole squad out of cover at
+       once, or send a man across the player's line while everyone else is also moving.
+       Off (default) keeps the pure-timer behaviour, so this cannot regress a map nobody has
+       tuned. */
+    static cvar_t *pBound = NULL;
+    if (!pBound) { pBound = gi.Cvar_Get("coop_aiBound", "0", CVAR_ARCHIVE); }
+    bool bMayRelocate = (!pBound->integer) || (level.inttime < m_iCoopReloAllow);
+
+    if (pCoverRelo->integer > 0 && bMayRelocate && m_pCoverNode && m_Enemy
+        && level.inttime > m_iCoopCoverClaimTime + pCoverRelo->integer) {
+        m_iCoopCoverClaimTime = level.inttime;   // stamp first: a failed search must not retry every frame
+        m_pCoverNode->Relinquish();
+        m_pCoverNode = NULL;
+        Cover_FindCover(true);
+
+        if (m_pCoverNode) {
+            Anim_RunToCover(ANIM_MODE_PATH_GOAL);
+            FaceEnemyOrMotion(0);
+            TransitionState(ACTOR_STATE_COVER_TAKE_COVER, 0);
+            return;
+        }
+    }
+
     if (m_bNeedReload) {
         Cover_FindCover(true);
 

@@ -1132,7 +1132,32 @@ void SV_Frame( int msec ) {
 		startTime = 0;	// quite a compiler warning
 	}
 
-	if( ( sv_fps->integer * msec > 1100 ) && ( svs.time > svs.serverLagTime + 2500 ) )
+	/* HZM [user 2026-08-10] SUSTAINED-OVERRUN GATE.
+	   The test below used to fire on ONE late frame, which cannot tell a single OS scheduling
+	   hiccup apart from a server genuinely falling behind - and it lights a "slow server" icon on
+	   EVERY client when it does. On a listen server it is worse than noisy: `msec` there is the
+	   whole main-loop iteration including client rendering (common.c:2347-2350), so the icon really
+	   reported "the host dipped below ~36fps", which is not what a remote player reads it as.
+	   Note what it is NOT: the simulation is not behind in that case. SV_Frame accumulates
+	   sv.timeResidual and runs the game in exact 1000/sv_fps chunks (:1101, :1193-1211), so at host
+	   30fps it still runs 40 ticks/sec. What degrades is DELIVERY - SV_SendClientMessages is called
+	   once per SV_Frame call (:1221). Worth keeping straight before anyone "fixes" the simulation.
+	   So: require the overrun to be SUSTAINED - a majority of the last 8 frames - before shouting.
+	   A genuinely struggling server trips this immediately and keeps tripping it; one late frame no
+	   longer does. The 2500ms rate limit on the broadcast is kept on top.
+	   Measured before this change, dedicated m2l2a 2 clients: 5% of frames over budget even when
+	   healthy (worst 26ms vs a 25ms budget) - i.e. the old test had a standing false-positive rate. */
+	{
+		static int  lagRing[8];
+		static int  lagRingPos = 0;
+		int         lagOver = 0, lagI;
+		lagRing[lagRingPos] = ( sv_fps->integer * msec > 1100 ) ? 1 : 0;
+		lagRingPos = ( lagRingPos + 1 ) & 7;
+		for ( lagI = 0; lagI < 8; lagI++ ) { lagOver += lagRing[lagI]; }
+		svs.serverLagSustained = ( lagOver >= 5 );
+	}
+
+	if( svs.serverLagSustained && ( svs.time > svs.serverLagTime + 2500 ) )
 	{
 		svs.serverLagTime = svs.time;
 		SV_SendServerCommand( NULL, "svlag" );

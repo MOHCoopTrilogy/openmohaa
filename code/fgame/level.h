@@ -152,6 +152,18 @@ public:
     // AI variables
     qboolean ai_on;
     qboolean m_bAlarm;
+    // HZM [user 2026-08-12] STEALTH-NATIVE MODE, scoped to ONE MAP by construction.
+    // Deliberately a Level member and NOT a cvar: Level::Init() runs on every map load and zeroes
+    // this (see m_iPapersLevel beside it), so the flag cannot survive a mission transition, a
+    // console `map`, a crash or a dedicated restart - all of which a cvar would outlive. It is also
+    // unreachable from console, config or autoexec; only a map script can set it, via
+    // level.stealthnative. m2l2a and m6l1c never do, so every branch guarded by it is unreachable
+    // there rather than merely disabled. NOT archived: a savegame must not restore it elsewhere.
+    qboolean m_bStealthNative;
+    // Latch for m_bAlarm. m6l2a's alarm is a TOGGLE - threat_condition_delta re-rings it every
+    // 6-10s and it can be switched back off - while m_bIsDisguised requires !m_bAlarm, so cover
+    // would flicker on and off for the rest of the mission. User decision: once blown, blown.
+    qboolean m_bAlarmLatched;
     qboolean mbNoDropHealth;
     qboolean mbNoDropWeapons; // Added in 2.0
     int      m_iPapersLevel;
@@ -316,6 +328,8 @@ public:
     void SetLoopProtection(Event *ev);
     void GetPapersLevel(Event *ev);
     void SetPapersLevel(Event *ev);
+    void GetStealthNative(Event *ev);
+    void SetStealthNative(Event *ev);
     void EventGetRoundStarted(Event *ev);
     void EventGetDMRespawning(Event *ev);
     void EventSetDMRespawning(Event *ev);

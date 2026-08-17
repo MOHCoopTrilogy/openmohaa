@@ -905,9 +905,61 @@ static void S_OPENAL_SetDevice_f(void)
     char   *p;
 
     if (Cmd_Argc() < 2) {
-        Com_Printf("usage: s_setdevice <index|-1 for default>\n%s\n", pList->string);
+        Com_Printf("usage: s_setdevice <index|-1 for default|device name>\n%s\n", pList->string);
         return;
     }
+
+    // HZM coop [user 2026-08-13, bug-1797] ACCEPT A NAME, NOT ONLY AN INDEX.
+    // The Audio menu's OUTPUT DEVICE popup was a baked snapshot of one machine's enumeration, matched
+    // by position - so the moment the real device order changed, every entry after the change point
+    // pointed at the wrong device. On the reporting machine "Arctis Nova Pro Wireless" (menu index 4)
+    // opened Steam Streaming Microphone, a CAPTURE device: sound moved somewhere inaudible, which is
+    // exactly the reported "I change my audio device and it doesn't update".
+    // A name cannot be misrouted by reordering, and on a machine that does not have that device it
+    // fails loudly instead of silently opening whatever happens to sit at that index.
+    // Names contain spaces and parens, so the whole remainder of the line is taken (Cmd_ArgsFrom) -
+    // an unquoted multi-word value passes through whole, which is why quoting was thought impossible.
+    // A pure integer still means an index, so existing binds and cfgs keep working.
+    {
+        const char *arg    = Cmd_Argv(1);
+        qboolean    isNum  = (arg[0] == '-' || (arg[0] >= '0' && arg[0] <= '9'));
+        const char *c;
+
+        for (c = arg + 1; isNum && *c; c++) {
+            if (*c < '0' || *c > '9') {
+                isNum = qfalse;
+            }
+        }
+
+        if (!isNum) {
+            // NOTE: atoi() on a name returns 0, so without this the old code silently selected
+            // device 0 for every non-numeric argument rather than reporting the mistake.
+            const char *wantName = Cmd_ArgsFrom(1);
+            char        namebuf[16384];
+            char       *np;
+            int         n = 0;
+
+            Q_strncpyz(namebuf, pList->string, sizeof(namebuf));
+            np = namebuf;
+            while (np && *np) {
+                char *nl = strchr(np, '\n');
+                if (nl) {
+                    *nl = 0;
+                }
+                if (np[0] && Q_stristr(np, wantName)) {
+                    Cvar_Set("s_openaldevice", np);
+                    Com_Printf("OpenAL: output device -> \"%s\"\n", np);
+                    Cbuf_AddText("snd_restart\n");
+                    return;
+                }
+                n++;
+                np = nl ? nl + 1 : NULL;
+            }
+            Com_Printf("s_setdevice: no device matching \"%s\" (%d enumerated)\n", wantName, n);
+            return;
+        }
+    }
+
     want = atoi(Cmd_Argv(1));
     if (want < 0) {
         Cvar_Set("s_openaldevice", "");

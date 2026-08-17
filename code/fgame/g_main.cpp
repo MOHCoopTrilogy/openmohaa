@@ -291,6 +291,36 @@ void G_InitGame(int levelTime, int randomSeed)
     gi.Cvar_Get("coop_goreDripCorpseTime", "12", CVAR_ARCHIVE);
     gi.Cvar_Get("coop_tinnitusBlast", "1", CVAR_ARCHIVE);
 
+    /* HZM [user 2026-08-15, bug-1811] The dynamic-AI switches had NO engine registration at all -
+       they existed only as `seta` lines in autoexec.cfg, and three scripts test them by string
+       (aihandler.scr:109, aimaneuver.scr:39, aisquad.scr:28 all compare getcvar(...) == "1").
+       That is worse than the bug-1669 collision above rather than merely equal to it: with no
+       engine default anywhere, ANY boot that does not run autoexec.cfg leaves them empty, every
+       comparison fails, and the entire dynamic-AI layer - personalities, the maneuver loop and the
+       whole squad brain - silently does nothing. Nothing logs, nothing errors; the AI just stands
+       still exactly as it did before the work was done.
+       That is not hypothetical. common.c:1473 skips autoexec.cfg when `safe` is on the command
+       line, which is the safe-mode prompt shown on every launch of this build, and a dedicated
+       server started against a bare homepath has no autoexec.cfg to read either - which is why
+       every headless smoke test in this repo has been measuring stand-and-shoot AI.
+       Registered here so the default is engine-owned and true even with no cfg at all. */
+    gi.Cvar_Get("coop_aiDynamic", "1", CVAR_ARCHIVE);
+    gi.Cvar_Get("coop_aiSquad", "1", CVAR_ARCHIVE);
+    /* NOT CVAR_ARCHIVE, deliberately: coop_aiBehav is a diagnostic that prints every 4s and can
+       draw on screen at 2. Archiving a dev switch is the bug-1427 trap - it rides omconfig.cfg
+       forever and silently re-fires on every later launch. Flags 0 matches the existing lazy
+       registration in actor_turret.cpp:149; this one just runs early enough to beat the scripts. */
+    gi.Cvar_Get("coop_aiBehav", "0", 0);
+    /* [user 2026-08-15, bug-1812] Hand engaged cover/flank actors to the engine's own cover AI
+       (type_attack cover) instead of script-issued runto orders, 85% of which stalled because
+       their destinations were validated for line of sight rather than for reachability. */
+    gi.Cvar_Get("coop_aiCoverThink", "1", CVAR_ARCHIVE);
+    /* [user 2026-08-15, bug-1815] Bounding overwatch. Registered here as well as at its lazy use
+       site in State_Cover_Shoot, because aisquad.scr reads it by string and the cover-shoot state
+       may not have been entered yet when it does - which is exactly how bug-1669/1811 turned a
+       script getcvar into an empty cvar that permanently defeated the engine default. */
+    gi.Cvar_Get("coop_aiBound", "0", CVAR_ARCHIVE);
+
     g_protocol    = gi.Cvar_Get("com_protocol", "", 0)->integer;
     g_target_game = (target_game_e)gi.Cvar_Get("com_target_game", "0", 0)->integer;
 

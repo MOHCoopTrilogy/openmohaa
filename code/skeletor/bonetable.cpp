@@ -287,17 +287,61 @@ int ChannelNameTable::RegisterChannel(const char *name)
     }
 
     if (m_iNumChannels >= MAX_SKELETOR_CHANNELS) {
-        Com_Printf("==========================================================================\n");
-        Com_Printf("Skeletor channel name table, contents (in order of addition):\n");
+        // [user 2026-08-14, bug-1803] DUMP THE TABLE ONCE, not on every failed registration.
+        // Once the table is full EVERY subsequent bone fails, and each failure re-printed all
+        // 2560 names. One observed overflow produced 491,630 lines and a 42 MB qconsole.log in a
+        // single map load - which buries the actual error, makes the log useless for anything
+        // else, and costs real time to write while the game is already dying. The list is
+        // identical every time, so the second copy carries no information the first did not.
+        static qboolean dumped = qfalse;
+        if (!dumped) {
+            dumped = qtrue;
+            Com_Printf("==========================================================================\n");
+            Com_Printf("Skeletor channel name table, contents (in order of addition):\n");
 
-        for (index = 0; index < MAX_SKELETOR_CHANNELS; index++) {
-            Com_Printf("%s\n", m_Channels[m_lookup[index]].name);
+            for (index = 0; index < MAX_SKELETOR_CHANNELS; index++) {
+                Com_Printf("%s\n", m_Channels[m_lookup[index]].name);
+            }
+
+            Com_Printf("==========================================================================\n");
         }
 
-        Com_Printf("==========================================================================\n");
-        SKEL_Error("Channel name table already has %i channels, can't add any more.", MAX_SKELETOR_CHANNELS);
+        // [user 2026-08-14, bug-1803] FAIL SOFT. This was SKEL_Error, i.e. ERR_DROP: one bone over
+        // the line killed the entire map load, on the loading screen, with no way forward.
+        //
+        // Returning -1 instead is safe and is NOT a new code path: -1 is already the normal,
+        // expected return for any name IsBogusChannelName() rejects, and the sole consumer,
+        // skelChannelList_c::AddChannel, tests for it explicitly (skeletor_utilities.cpp:188).
+        // The one other caller, CreatePosRotBoneFileData, assigns it to boneData->parent, where
+        // -1 is already the "worldbone" sentinel. So the worst case degrades from "the map is
+        // unplayable" to "one bone on one model does not animate" - and given the ceiling is now
+        // ~3.5x the measured whole-game requirement, reaching this at all should be impossible.
+        SKEL_Warning(
+            "Channel name table is full (%i channels); ignoring channel '%s'. This table is never "
+            "freed between maps - restart the game to reclaim it.\n",
+            MAX_SKELETOR_CHANNELS,
+            name
+        );
         return -1;
     } else {
+        // [user 2026-08-14, bug-1803] The table is never reset between maps, so its fill level is
+        // a whole-session running total. Print a milestone every 1024 so the log shows how fast a
+        // real playthrough consumes it (correlate against the map-load banners), and warn once at
+        // 75% so a session that is genuinely heading for the ceiling says so while it is still
+        // recoverable by restarting - rather than dying on an innocent map with no prior notice.
+        if (m_iNumChannels && !(m_iNumChannels % 1024)) {
+            Com_Printf("Skeletor channels: %i / %i used this session.\n", m_iNumChannels, MAX_SKELETOR_CHANNELS);
+        }
+
+        if (m_iNumChannels == SKEL_CHANNELS_WARN_AT) {
+            Com_Printf(
+                "WARNING: skeletor channel table is %i/%i full. This table is never freed between "
+                "maps; restart the game to reclaim it if map loads begin to fail.\n",
+                m_iNumChannels,
+                MAX_SKELETOR_CHANNELS
+            );
+        }
+
         SetChannelName(&m_Channels[m_iNumChannels], name);
         m_Channels[m_iNumChannels].channelNum = m_iNumChannels;
         SortIntoTable(index);

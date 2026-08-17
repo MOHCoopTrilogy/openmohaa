@@ -22,8 +22,14 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 
 #ifdef USE_INTERNAL_SDL_HEADERS
 #	include "SDL.h"
+#	include "SDL_syswm.h"
 #else
 #	include <SDL.h>
+#	include <SDL_syswm.h>
+#endif
+
+#ifdef _WIN32
+#	include <windows.h>
 #endif
 
 #include <stdarg.h>
@@ -407,6 +413,68 @@ static void GLimp_ClearProcAddresses( void ) {
 	qglUnlockArraysEXT = NULL;
 
 #undef GLE
+}
+
+/*
+===============
+GLimp_MakeCaptureSafe
+
+HZM [user 2026-08-13, bug-1795]: make a borderless window visible to screen capture.
+
+THE PROBLEM. This engine presents through legacy wglSwapBuffers. When a borderless window
+covers the screen exactly and vsync is off, the driver is free to promote it to independent
+flip / an overlay plane and scan the buffer out directly, bypassing the desktop compositor.
+Everything that captures by reading the composited desktop - OBS display capture, ShadowPlay,
+SignalRGB and every other ambient-lighting tool - then samples a surface the game is no longer
+drawing into, and records black. The giveaway is that menus and loading screens DO capture:
+they present sporadically, so the driver never sustains the promotion, and the moment gameplay
+starts presenting continuously it does.
+
+THE FIX. A layered window cannot be promoted to an overlay plane, so DWM has to compose it.
+WS_EX_LAYERED with a fully opaque alpha changes nothing the player can see - no resolution
+change, no windowed mode, no vsync requirement - and hands the frames back to the compositor.
+
+Deliberately ON by default. Borderless exists so that overlays, alt-tab and capture all work;
+a borderless mode that silently defeats capture is not doing its job, and "set an undocumented
+cvar" is not an answer a player will ever find. r_captureSafe 0 is the escape hatch if a driver
+ever objects.
+===============
+*/
+static void GLimp_MakeCaptureSafe( void )
+{
+#ifdef _WIN32
+	SDL_SysWMinfo	wmInfo;
+	HWND			hwnd;
+	LONG_PTR		exStyle;
+
+	if( !SDL_window ){ return; }
+	if( ri.Cvar_VariableIntegerValue( "r_captureSafe" ) == 0 ){ return; }
+
+	SDL_VERSION( &wmInfo.version );
+	if( !SDL_GetWindowWMInfo( SDL_window, &wmInfo ) )
+	{
+		ri.Printf( PRINT_DEVELOPER, "GLimp_MakeCaptureSafe: SDL_GetWindowWMInfo failed: %s\n", SDL_GetError() );
+		return;
+	}
+	if( wmInfo.subsystem != SDL_SYSWM_WINDOWS ){ return; }
+
+	hwnd = wmInfo.info.win.window;
+	exStyle = GetWindowLongPtr( hwnd, GWL_EXSTYLE );
+	if( exStyle & WS_EX_LAYERED ){ return; }		// already layered - nothing to do
+
+	SetWindowLongPtr( hwnd, GWL_EXSTYLE, exStyle | WS_EX_LAYERED );
+
+	// Opaque: alpha 255 means the window looks exactly as it did. If this fails the window is
+	// left layered-but-unconfigured, which CAN render it invisible - so put the style back.
+	if( !SetLayeredWindowAttributes( hwnd, 0, 255, LWA_ALPHA ) )
+	{
+		SetWindowLongPtr( hwnd, GWL_EXSTYLE, exStyle );
+		ri.Printf( PRINT_ALL, "Capture-safe borderless FAILED (SetLayeredWindowAttributes) - reverted\n" );
+		return;
+	}
+
+	ri.Printf( PRINT_ALL, "Capture-safe borderless enabled (compositor-visible)\n" );
+#endif
 }
 
 /*
@@ -891,6 +959,16 @@ static int GLimp_SetMode(int mode, qboolean fullscreen, qboolean noborder, qbool
 		return RSERR_INVALID_MODE;
 	}
 
+	// HZM [user 2026-08-13, bug-1795]: borderless is supposed to be the capture-friendly mode - that is
+	// the whole reason it exists - so it makes itself capture-safe rather than asking the player to
+	// discover a driver setting. Exclusive fullscreen is deliberately skipped: it bypasses the
+	// compositor by definition, and layering a window that owns a real display mode is asking for
+	// trouble for no gain.
+	if( fullscreen && ri.Cvar_VariableIntegerValue( "r_desktopfullscreen" ) )
+	{
+		GLimp_MakeCaptureSafe();
+	}
+
 	GLimp_DetectAvailableModes();
 
 	glstring = (char *) qglGetString (GL_RENDERER);
@@ -1149,6 +1227,11 @@ void GLimp_Init( qboolean fixedFunction )
 	r_allowResize = ri.Cvar_Get( "r_allowResize", "0", CVAR_ARCHIVE | CVAR_LATCH );
 	r_centerWindow = ri.Cvar_Get( "r_centerWindow", "0", CVAR_ARCHIVE | CVAR_LATCH );
 	r_preferOpenGLES = ri.Cvar_Get( "r_preferOpenGLES", "-1", CVAR_ARCHIVE | CVAR_LATCH );
+	// HZM [bug-1795] registered HERE rather than in a renderer's tr_init.c because this file is the
+	// only consumer and it is linked into BOTH renderers - r_desktopfullscreen is registered by gl1
+	// alone (renderergl1/tr_init.c), which is exactly how it ended up unregistered under the gl2 build
+	// that actually ships. One registration, both renderers, no gap to rediscover later.
+	ri.Cvar_Get( "r_captureSafe", "1", CVAR_ARCHIVE | CVAR_LATCH );
 
 	if( ri.Cvar_VariableIntegerValue( "com_abnormalExit" ) )
 	{

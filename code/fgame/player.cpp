@@ -306,6 +306,34 @@ Event EV_Player_GiveWeaponCheat
     "Gives the player the specified weapon.",
     EV_NORMAL
 );
+/* HZM [user 2026-08-10] CLIENT -> SERVER PROFILE CHANNEL.
+   The hybrid progression design (server authoritative, client carries a mirror, server imports the
+   mirror when it has no record for that id) needs the client to be able to hand its saved profile
+   BACK to the server. Server->client was already solved - chal_ui_export stufftexts `seta`s, and
+   helmet.scr uses the `vstr` trick - but nothing went the other way: client console commands are
+   dispatched through a C++ table (gamecmds.cpp:189) and the mod registered none of its own.
+
+   No new plumbing was needed in the end. G_ProcessClientCommand already falls through to
+   `ent->entity->ProcessEvent(ev)` (gamecmds.cpp:231-233) for any command naming a registered event
+   that passes CheckEventFlags - and EV_CONSOLE is exactly the flag that passes it
+   (entity.cpp:5258-5263). So a console-flagged Player event IS the channel.
+
+   The handler hands the payload to script the same way coop_guid already reaches it:
+   Vars()->SetVariable (precedent at g_client.cpp:818), which makes it readable in script as
+   `local.player.coop_profdata` - the identical mechanism the profile identity already uses.
+
+   Chunked on purpose: a full profile will not fit one command, so the client sends
+   `coopprof <index> <payload>` repeatedly and script reassembles. Index 0 resets the buffer. */
+Event EV_Player_CoopProf
+(
+    "coopprof",
+    EV_CONSOLE,
+    "is",
+    "index data",
+    "HZM coop: receive one chunk of this client's profile mirror.",
+    EV_NORMAL
+);
+
 Event EV_Player_GameVersion
 (
     "gameversion",
@@ -1965,6 +1993,7 @@ CLASS_DECLARATION(Sentient, Player, "player") {
     {&EV_Player_DevNoTargetCheat,         &Player::NoTargetCheat                },
     {&EV_Player_DevNoClipCheat,           &Player::NoclipCheat                  },
     {&EV_Player_GameVersion,              &Player::GameVersion                  },
+    {&EV_Player_CoopProf,                 &Player::EventCoopProf                },
     {&EV_Player_DumpState,                &Player::DumpState                    },
     {&EV_Player_ForceTorsoState,          &Player::ForceTorsoState              },
     {&EV_Player_ForceLegsState,           &Player::ForceLegsState               },
@@ -2248,6 +2277,8 @@ Player::Player()
     buttons            = 0;
     new_buttons        = 0;
     server_new_buttons = 0;
+    m_bFireLockUntilRelease = false;
+    m_szCoopFireLast[0]     = 0;
     respawn_time       = -1.0;
 
     //
@@ -5296,6 +5327,18 @@ void Player::ClientThink(void)
         Spectator();
     }
 
+    // HZM 2026-08-11 (bug-1712): mask the spawn click out until it is genuinely released. Done
+    // HERE, above the edge computation, so every consumer downstream - new_buttons,
+    // server_new_buttons, buttons, last_ucmd and the weapon's own held-fire test - sees the same
+    // thing. One release clears it for good; it costs nothing after that.
+    if (m_bFireLockUntilRelease) {
+        if (!(current_ucmd->buttons & (BUTTON_ATTACKLEFT | BUTTON_ATTACKRIGHT))) {
+            m_bFireLockUntilRelease = false;
+        } else {
+            current_ucmd->buttons &= ~(BUTTON_ATTACKLEFT | BUTTON_ATTACKRIGHT);
+        }
+    }
+
     last_ucmd = *current_ucmd;
 
     new_buttons = current_ucmd->buttons & ~buttons;
@@ -5490,7 +5533,15 @@ void Player::Think(void)
     if (g_gametype->integer == GT_SINGLE_PLAYER || s_coopDisgParity->integer) {
         m_bIsDisguised = false;
 
-        if (m_bHasDisguise && !level.m_bAlarm) {
+        // HZM [user 2026-08-12] E3 - ONCE BLOWN, STAYS BLOWN (user decision).
+        // Vanilla asks only whether the alarm is up RIGHT NOW. m2l2a can get away with that because
+        // its alarm is one-way. m6l2a's is a TOGGLE: threat_condition_delta sets alarm_always_on
+        // with a 6-10s re-ring and the switch can be turned back off, so cover would flicker on and
+        // off for the rest of the mission - the player is disguised, then not, then is again, with
+        // nothing they did causing it. m6l2a.scr:1095 already carries a comment about that.
+        // The latch is set in Level::SetAlarm and cleared only by Level::Init, i.e. by loading a map.
+        // Guarded on m_bStealthNative so this reads exactly as vanilla everywhere else.
+        if (m_bHasDisguise && !level.m_bAlarm && !(level.m_bStealthNative && level.m_bAlarmLatched)) {
             pWeap = GetActiveWeapon(WEAPON_MAIN);
 
             if (!pWeap || pWeap->IsSubclassOfInventoryItem()) {
@@ -5522,6 +5573,38 @@ void Player::Think(void)
     if (g_gametype->integer == GT_SINGLE_PLAYER) {
         PathSearch::PlayerCover(this);
         UpdateEnemies();
+    }
+
+    // HZM [user 2026-08-12] FIRE PROBE. Six rounds of script-side patching failed to explain
+    // "pistol out, will not shoot, then the gun with papers stuck inside". Script can only see the
+    // mod's OWN bookkeeping (coop_activeWeapon and friends); it cannot see what the engine actually
+    // holds, whether that thing is an InventoryItem (papers) rather than a Weapon, whether the clip
+    // is empty, or whether the fire button is reaching the weapon at all. Those facts decide this.
+    // Off unless g_coopFireProbe is 1; prints on change, or every frame while fire is held.
+    {
+        static cvar_t *s_coopFireProbe = NULL;
+        if (!s_coopFireProbe) {
+            s_coopFireProbe = gi.Cvar_Get("g_coopFireProbe", "0", 0);
+        }
+        if (s_coopFireProbe->integer) {
+            Weapon     *pw    = GetActiveWeapon(WEAPON_MAIN);
+            // `buttons` is the Player's own per-frame button state; current_ucmd is only valid
+            // during client movement processing and is NULL here, which silently skipped the
+            // whole probe for two sessions.
+            int         held  = (buttons & (BUTTON_ATTACKLEFT | BUTTON_ATTACKRIGHT)) ? 1 : 0;
+            const char *wname = pw ? pw->getName().c_str() : "(none)";
+            int         isItm = (pw && pw->IsSubclassOfInventoryItem()) ? 1 : 0;
+            int         clip  = pw ? pw->ClipAmmo(FIRE_PRIMARY) : -1;
+            char        line[512];
+            Com_sprintf(line, sizeof(line),
+                        "^~^~^ FIREPROBE hand=%s item=%d clip=%d held=%d firelock=%d disg=%d\n",
+                        wname, isItm, clip, held, m_bFireLockUntilRelease ? 1 : 0,
+                        m_bIsDisguised ? 1 : 0);
+            if (held || Q_stricmp(line, m_szCoopFireLast)) {
+                Q_strncpyz(m_szCoopFireLast, line, sizeof(m_szCoopFireLast));
+                gi.Printf("%s", line);
+            }
+        }
     }
 
     if (movetype == MOVETYPE_NOCLIP) {
@@ -6850,6 +6933,46 @@ void Player::NoclipCheat(Event *ev)
     }
 
     gi.SendServerCommand(edict - g_entities, "print \"%s\"", msg);
+}
+
+/*
+==============
+Player::EventCoopProf
+
+HZM: one chunk of this client's stored profile mirror, arriving as a console command.
+Reassembled here and published to script as `coop_profdata`.
+
+DELIBERATELY DUMB. This only concatenates and publishes - it does not parse, validate or apply
+anything. The server stays authoritative: script decides whether to import, and only when it has no
+record of its own for that id. Treat the contents as untrusted player-supplied data, because that is
+exactly what it is - a player can type this command.
+==============
+*/
+void Player::EventCoopProf(Event *ev)
+{
+    int         idx;
+    const char *chunk;
+
+    if (ev->NumArgs() < 2) {
+        return;
+    }
+
+    idx   = ev->GetInteger(1);
+    chunk = ev->GetString(2);
+
+    if (idx <= 0) {
+        // index 0 (or anything odd) starts a fresh buffer - a reconnecting client must not append
+        // onto the tail of whatever it sent last session.
+        m_sCoopProf = "";
+    }
+
+    // Hard cap. Without one, a client could grow this without bound by spamming the command.
+    if (m_sCoopProf.length() + strlen(chunk) > 8192) {
+        return;
+    }
+
+    m_sCoopProf += chunk;
+    Vars()->SetVariable("coop_profdata", m_sCoopProf.c_str());
 }
 
 void Player::GameVersion(Event *ev)
@@ -14225,6 +14348,18 @@ bool Player::IsReady(void) const
 
 void Player::Spawned(void)
 {
+    // HZM 2026-08-11 (bug-1712) - USER: "when I click fire to spawn I also almost always fire a
+    // shot, that's been an issue for a long time".
+    // Respawn is triggered by BUTTON_ATTACKLEFT (player.cpp:5605). The player is necessarily
+    // still holding that button on the frame he spawns, and MOHAA weapons fire from the button
+    // being HELD, not only from a fresh press - so the click that asked for a spawn also pulls
+    // the trigger. On a stealth map that single shot is the difference between a clean approach
+    // and a blown one, which is how it kept costing whole runs.
+    // Latch here rather than clearing the button mask: zeroing `buttons` would make the still-held
+    // button read as a BRAND NEW press next frame (new_buttons = ucmd->buttons & ~buttons at
+    // :5330), which is the same bug wearing a different hat.
+    m_bFireLockUntilRelease = true;
+
     delegate_spawned.Execute();
 
     Event *ev = new Event;

@@ -349,6 +349,28 @@ Event EV_Turret_P_SetViewAngles
 
 static cvar_t *pTurretCameras = NULL;
 
+/* [HZM coop 2026-08-16, bug-1825] finite belt for an emplaced MG. -1 = unlimited (default). */
+Event EV_Turret_CoopAmmo
+(
+    "coopammo",
+    EV_DEFAULT,
+    "i",
+    "rounds",
+    "HZM coop: rounds left in the belt (-1 = unlimited)",
+    EV_NORMAL
+);
+
+
+/*
+===============
+TurretGun::EventCoopAmmo   [HZM coop 2026-08-16, bug-1825]
+===============
+*/
+void TurretGun::EventCoopAmmo(Event *ev)
+{
+    m_iCoopAmmo = ev->GetInteger(1);
+}
+
 CLASS_DECLARATION(Weapon, TurretGun, NULL) {
     {&EV_Trigger_Effect,              NULL                                   },
     {&EV_Item_DropToFloor,            &TurretGun::PlaceTurret                },
@@ -356,6 +378,7 @@ CLASS_DECLARATION(Weapon, TurretGun, NULL) {
     {&EV_Weapon_Shoot,                &TurretGun::Shoot                      },
     {&EV_Use,                         &TurretGun::TurretUsed                 },
     {&EV_Turret_P_SetPlayerUsable,    &TurretGun::P_SetPlayerUsable          },
+    {&EV_Turret_CoopAmmo,             &TurretGun::EventCoopAmmo              },
     {&EV_Turret_SetUsable,            &TurretGun::EventSetUsable             },
     {&EV_Turret_IdleCheckOffset,      &TurretGun::SetIdleCheckOffset         },
     {&EV_Turret_P_ViewOffset,         &TurretGun::P_SetViewOffset            },
@@ -451,6 +474,10 @@ TurretGun::TurretGun()
     m_iFiring         = TURRETFIRESTATE_NONE;
     m_iTargetType     = 0;
 
+    m_iCoopAmmo = -1;   // [HZM coop bug-1825] unlimited unless a script sets a belt
+    m_bAiBurstAuto = false;   // HZM coop bug-1843
+    m_iAiAimOffTime = 0;      // HZM coop bug-1851
+    m_vAiAimOff     = vec_zero;
     // HZM coop: MG overheat state
     m_fHeat                = 0;
     m_bOverheated          = false;
@@ -871,8 +898,20 @@ void TurretGun::P_ThinkActive(void)
         m_fHeat += 125.0f * level.frametime;
 
         if (ReadyToFire(FIRE_PRIMARY)) {
-            Fire(FIRE_PRIMARY);
-            m_fCurrViewJitter = m_fViewJitter;
+            // [HZM coop bug-1825] finite belt. -1 keeps the retail unlimited behaviour.
+            if (m_iCoopAmmo == 0) {
+                m_iFiring = TURRETFIRESTATE_NONE;
+                if (owner && owner->IsSubclassOfPlayer()) {
+                    Player *pOwner = static_cast<Player *>(owner.Pointer());
+                    gi.centerprintf(pOwner->edict, "BELT EMPTY - resupply from an ammo box");
+                }
+            } else {
+                Fire(FIRE_PRIMARY);
+                m_fCurrViewJitter = m_fViewJitter;
+                if (m_iCoopAmmo > 0) {
+                    m_iCoopAmmo--;
+                }
+            }
         }
 
         if (m_fHeat >= 100.0f) {
@@ -893,8 +932,20 @@ void TurretGun::P_ThinkActive(void)
         m_fHeat += 50.0f * level.frametime; // ~2.0s of sustained fire to reach full (overheats readily)
 
         if (ReadyToFire(FIRE_PRIMARY)) {
-            Fire(FIRE_PRIMARY);
-            m_fCurrViewJitter = m_fViewJitter;
+            // [HZM coop bug-1825] finite belt. -1 keeps the retail unlimited behaviour.
+            if (m_iCoopAmmo == 0) {
+                m_iFiring = TURRETFIRESTATE_NONE;
+                if (owner && owner->IsSubclassOfPlayer()) {
+                    Player *pOwner = static_cast<Player *>(owner.Pointer());
+                    gi.centerprintf(pOwner->edict, "BELT EMPTY - resupply from an ammo box");
+                }
+            } else {
+                Fire(FIRE_PRIMARY);
+                m_fCurrViewJitter = m_fViewJitter;
+                if (m_iCoopAmmo > 0) {
+                    m_iCoopAmmo--;
+                }
+            }
         }
 
         if (m_fHeat >= 100.0f) {
@@ -1068,6 +1119,9 @@ void TurretGun::AI_StartTrack()
     m_iAIState = TURRETAISTATE_TRACK;
 }
 
+// HZM coop bug-1851 - defined further down, next to its sibling AI turret cvars
+static float HZM_AiTurretAimOffset();
+
 void TurretGun::AI_DoTargetAutoTrack()
 {
     Actor *actor;
@@ -1111,6 +1165,27 @@ void TurretGun::AI_DoTargetAutoTrack()
             "TurretGun::AI_DoTargetAutoTrack"
         )) {
         end = owner->m_Enemy->EyePosition();
+    }
+
+    // HZM coop bug-1851: aim WANDER. Re-rolled every 0.7-1.6s so a burst walks across the target
+    // instead of being nailed to its centre, and the gunner corrects between bursts like a person.
+    // Only for an actor-held gun - a player aims for himself.
+    if (owner && owner->IsSubclassOfActor()) {
+        float fOff = HZM_AiTurretAimOffset();
+        if (fOff > 0.0f) {
+            if (level.inttime >= m_iAiAimOffTime) {
+                float fRange = (end - origin).length() / 1000.0f;
+                if (fRange < 0.35f) {
+                    fRange = 0.35f;
+                }
+                m_iAiAimOffTime = level.inttime + 700 + (rand() % 900);
+                m_vAiAimOff[0]  = (random() * 2.0f - 1.0f) * fOff * fRange;
+                m_vAiAimOff[1]  = (random() * 2.0f - 1.0f) * fOff * fRange;
+                // less vertical than lateral - a nest walks its fire sideways, it does not spray at the sky
+                m_vAiAimOff[2]  = (random() * 2.0f - 1.0f) * fOff * fRange * 0.4f;
+            }
+            end += m_vAiAimOff;
+        }
     }
 
     VectorCopy(end, m_vAIDesiredTargetPosition);
@@ -1341,6 +1416,42 @@ static float HZM_AiTurretSpreadBonus()
     return f;
 }
 
+// HZM coop [user 2026-08-16] bug-1851: AI turret AIM ERROR, in world units per 1000u of range.
+// SPREAD AND ACCURACY ARE NOT THE SAME THING, which is why widening the cone barely helped: spread
+// scatters bullets around wherever the gun points, but AI_DoTargetAutoTrack points it at the
+// enemy's centroid EXACTLY, every frame, so a wider cone is still centred on the player's chest.
+// Real MG42 nests miss because they are aimed slightly wrong - global/mg42_active.scr models that
+// for scripted nests with randomint aim offsets and nothing did it for AI-manned turrets.
+// Scaled by range so the ANGULAR error is constant: 120 means +-120u at 1000u out.
+static float HZM_AiTurretAimOffset()
+{
+    static cvar_t *cv = NULL;
+    if (!cv) {
+        cv = gi.Cvar_Get("coop_mg42AiAimOff", "100", 0);   // 100 = the value the user tuned to in play
+    }
+    if (!cv) {
+        return 0.0f;
+    }
+    if (cv->value < 0.0f) {
+        return 0.0f;
+    }
+    if (cv->value > 600.0f) {
+        return 600.0f;
+    }
+    return cv->value;
+}
+
+// HZM coop [user 2026-08-16] bug-1843: master switch for sporadic AI burst fire.
+// 1 = on, 0 = the old behaviour (continuous fire, broken only by the overheat cycle).
+static bool HZM_AiTurretBurstEnabled()
+{
+    static cvar_t *cv = NULL;
+    if (!cv) {
+        cv = gi.Cvar_Get("coop_mg42AiBurst", "1", 0);
+    }
+    return !cv || cv->integer != 0;
+}
+
 // HZM coop [user 08-02]: master switch for the AI turret heat cycle. 1 = on (shipping
 // behaviour), 0 = AI turrets never overheat. Exists mainly so the heat cycle can be
 // bisected away in one console command when diagnosing MG42 gunner behaviour.
@@ -1447,6 +1558,42 @@ void TurretGun::AI_DoFiring()
         }
 
         return;
+    }
+
+    // HZM coop [user 2026-08-16] bug-1843: SPORADIC AI FIRE. Retail leaves the burst params at 0
+    // for these nests, which collapses the state machine below to continuous fire - so the ONLY
+    // thing that ever stopped an AI gun was the overheat cycle. That is a metronome: the ceiling
+    // rolls 55..95 and heat climbs 50/s, i.e. EVERY burst is 1.1-1.9s and always runs to a cook-off,
+    // then a 2.6-4.0s cooldown, forever, with every gun in a nest doing the same thing.
+    // User: "all enemies on mg42's should be kinda sporadic with their shooting so they arent
+    // shooting until overheat... pause... over and over, it should vary greatly how they shoot it."
+    // So give an AI gunner a real cadence, RE-ROLLED at the start of every burst: the length is
+    // squared-biased, which makes most bursts short taps and only the occasional one run long
+    // enough to actually cook the barrel. Maps that set their own burst values are left alone.
+    if (owner && owner->IsSubclassOfActor() && HZM_AiTurretBurstEnabled()) {
+        qboolean bRoll = qfalse;
+
+        // [user 2026-08-16] "they still seem to just hold down fire until they cant any longer due
+        // to overheating" - the first version only rolled while in BEGIN_FIRE, which can never be
+        // reached: the FIRING case below only returns to BEGIN_FIRE `if (m_fMaxBurstTime > 0)`, and
+        // m_fMaxBurstTime is exactly what the roll was supposed to set. So the machine latched in
+        // FIRING forever and the overheat stayed the only thing that ever stopped the gun. Roll
+        // ONCE on the first AI shot to break the deadlock, then re-roll per burst as intended.
+        if (!m_bAiBurstAuto && m_fMaxBurstTime <= 0.0f) {
+            m_bAiBurstAuto = true;
+            bRoll          = qtrue;
+        }
+        if (m_bAiBurstAuto && m_iFiring == TURRETFIRESTATE_BEGIN_FIRE && m_fFireToggleTime < level.time) {
+            bRoll = qtrue;
+        }
+
+        if (bRoll) {
+            float fLong      = random();
+            m_fMinBurstTime  = 0.18f;
+            m_fMaxBurstTime  = 0.30f + 2.30f * fLong * fLong;
+            m_fMinBurstDelay = 0.25f;
+            m_fMaxBurstDelay = 0.70f + 2.80f * random();
+        }
     }
 
     minBurstTime  = m_fMinBurstTime;

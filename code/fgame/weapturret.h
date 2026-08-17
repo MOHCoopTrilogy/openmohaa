@@ -86,6 +86,15 @@ protected:
     float             m_fAiHeatCeiling;        // HZM coop - this gunner's own overheat point, re-rolled per burst
     float             m_fAiResumeAt;           // HZM coop - heat level he is willing to resume firing at
     float             m_fOverheatLockUntil;    // HZM coop - hard no-fire floor after a cook-off
+    /* [HZM coop 2026-08-16, bug-1825] BELT AMMO. -1 = unlimited (the retail behaviour and the
+       default, so nothing changes on any map that does not ask for it). Set from script with
+       `<turret> coopammo <rounds>`; the m3l3 church defense gives each MG42 a finite belt so a
+       fixed gun cannot trivialise a five-minute hold, and the deployable ammo box tops it back up.
+       Decremented per shot in the same firing branches the overheat model uses. */
+    int               m_iCoopAmmo;
+    bool              m_bAiBurstAuto;   // HZM coop - this turret's burst cadence is auto-rolled for an AI gunner
+    int               m_iAiAimOffTime;  // HZM coop - when the AI aim wander is next re-rolled
+    Vector            m_vAiAimOff;      // HZM coop - current AI aim error, world units
     float             m_fOverheatRecoverTime;  // level.time at which the gun becomes usable again
     int               m_iIdleHitCount;
     CameraPtr         m_pUserCamera;
@@ -172,6 +181,7 @@ public:
     void P_SetPlayerUsable(Event *ev);
     void EventSetUsable(Event *ev); // added in 2.0
     void P_SetViewOffset(Event *ev);
+    void EventCoopAmmo(Event *ev);   // HZM coop bug-1825
     void EventMaxIdlePitch(Event *ev); // added in 2.0
     void EventMaxIdleYaw(Event *ev);   // added in 2.0
     void SetIdleCheckOffset(Event *ev);

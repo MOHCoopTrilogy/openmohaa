@@ -96,6 +96,22 @@ void Actor::Think_DisguiseSalute(void)
     }
 
     if (!EnemyIsDisguised() && !(m_Enemy->flags & FL_NOTARGET)) {
+        // HZM 2026-08-11 PROBE (bug-1707 follow-up). A saluting guard turning on a player the
+        // engine still reports as disguised has now been measured four times on m6l1c, always
+        // from an actor named ai_alarm. EnemyIsDisguised() can return false for three unrelated
+        // reasons and static reading has not settled which one fires here, so print all three
+        // sub-conditions at the exact instant of the transition instead of guessing again.
+        {
+            Com_Printf("^~^~^ SALATK %s cacheDisg=%d liveDisg=%d force=%d think=%d threat=%d alarm=%d hasDisg=%d\n",
+                       TargetName().c_str(),
+                       m_bEnemyIsDisguised ? 1 : 0,
+                       m_Enemy->m_bIsDisguised ? 1 : 0,
+                       m_bForceAttackPlayer ? 1 : 0,
+                       (int)m_ThinkState,
+                       m_PotentialEnemies.GetCurrentThreat(),
+                       level.m_bAlarm ? 1 : 0,
+                       m_Enemy->m_bHasDisguise ? 1 : 0);
+        }
         SetThinkState(THINKSTATE_ATTACK, THINKLEVEL_IDLE);
         return;
     }

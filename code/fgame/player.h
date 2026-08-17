@@ -45,6 +45,7 @@ extern Event EV_Player_GodCheat;
 extern Event EV_Player_NoTargetCheat;
 extern Event EV_Player_NoClipCheat;
 extern Event EV_Player_GameVersion;
+extern Event EV_Player_CoopProf;   // HZM: client -> server profile mirror chunk
 extern Event EV_Player_Fov;
 extern Event EV_Player_WhatIs;
 extern Event EV_Player_Respawn;
@@ -734,6 +735,8 @@ public:
     void EventTestAnim(Event *ev);
 
     void GameVersion(Event *ev);
+    void EventCoopProf(Event *ev);   // HZM: reassemble the client profile mirror
+    str  m_sCoopProf;                // HZM: accumulated chunks, published as coop_profdata
 
     void EventSetSelectedFov(Event *ev);
     void SetSelectedFov(float newFov);
@@ -1020,6 +1023,10 @@ public:
     void  CoopNavRebuild(void);
     void  TickCoopNavRec(void);
     bool  m_bCoopNavFull;   // MAX_PATHNODES hit - warn once, then drop silently
+    // HZM 2026-08-11 (bug-1712): swallow the click that spawned you, until it is released.
+    bool  m_bFireLockUntilRelease;
+    // HZM [user 2026-08-12] last FIREPROBE line, so the probe prints on change not per frame
+    char  m_szCoopFireLast[512];
     void  TickCoopCover();
     // HZM coop - BOT COMBAT DRIVE (dev/test, coop_botInput): overwrite this frame's usercmd (aim +
     // fire + advance on the nearest visible German) so a connected client fights unattended. No-op

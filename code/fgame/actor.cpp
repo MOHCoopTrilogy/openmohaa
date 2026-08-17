@@ -1332,6 +1332,21 @@ Event EV_Actor_AttackEntity
     "Force Actor to attack the given sentient",
     EV_NORMAL
 );
+/* [HZM coop 2026-08-15, bug-1815] BOUNDING OVERWATCH permission slip.
+   Script (aisquad.scr) grants a short window in which this actor may relocate between cover.
+   The engine's cover relocation (bug-1813) is otherwise a per-actor timer with an effectively
+   random phase, so a squad can relocate all at once - leaving a lull with nobody firing - or a
+   man can break cover while the player has the angle. With coop_aiBound on, the engine relocates
+   only inside a granted window, so the SQUAD decides who moves and who keeps shooting. */
+Event EV_Actor_CoopRelocateOk
+(
+    "coop_relocateok",
+    EV_DEFAULT,
+    "f",
+    "seconds",
+    "HZM coop: permit cover relocation for the next N seconds (bounding overwatch)",
+    EV_NORMAL
+);
 Event EV_Actor_SetSoundAwareness
 (
     "sound_awareness",
@@ -2637,6 +2652,7 @@ CLASS_DECLARATION(SimpleActor, Actor, "Actor") {
     {&EV_Actor_GetDisguiseAcceptThread,       &Actor::EventGetDisguiseAcceptThread      },
     {&EV_Actor_AttackPlayer,                  &Actor::EventAttackPlayer                 },
     {&EV_Actor_AttackEntity,                  &Actor::EventAttackEntity                 },
+    {&EV_Actor_CoopRelocateOk,                &Actor::EventCoopRelocateOk                },
     {&EV_Actor_SetAlarmNode,                  &Actor::EventSetAlarmNode                 },
     {&EV_Actor_SetAlarmNode2,                 &Actor::EventSetAlarmNode                 },
     {&EV_Actor_GetAlarmNode,                  &Actor::EventGetAlarmNode                 },
@@ -3014,6 +3030,8 @@ Actor::Actor()
     memset(&m_pPotentialCoverNode, 0, sizeof(m_pPotentialCoverNode));
     m_iPotentialCoverCount = 0;
     m_pCoverNode           = NULL;
+    m_iCoopCoverClaimTime  = 0;   // [HZM coop bug-1813] cover-relocation stamp
+    m_iCoopReloAllow       = 0;   // [HZM coop bug-1815] bounding-overwatch permission expiry
 
     m_csSpecialAttack       = STRING_NULL;
     m_bNeedReload           = false;
@@ -7301,6 +7319,47 @@ Actor::SoundSayAnim
 Returns true if animation not found.
 ===============
 */
+/*
+===============
+[user 2026-08-14, bug-1807] Report each missing say-anim ONCE per (alias, model) pair.
+
+"Couldn't find animation X - trying sound alias instead" describes the DESIGNED fallback, not a
+failure: an alias with no matching dialogue animation is played as pure sound, correctly. But the
+message was an unconditional Com_Printf on that normal path, so a single frequently-said alias
+buried the log - one observed session logged 397 copies of den_alarm_12a across four German models
+while everything worked exactly as intended.
+
+Deliberately NOT solved by demoting this to Com_DPrintf: this project runs `developer 1`
+permanently (build mode reports placements through println, which developer gates), so gating it
+would have hidden nothing. Deduping keeps the whole diagnostic value - a typo'd alias still
+announces itself the first time - while costing one line per genuinely distinct problem.
+
+Bounded and allocation-free: the table caps out and then goes quiet rather than growing or
+resuming the flood.
+===============
+*/
+static bool Actor_SayAnimWarnOnce(const char *alias, const char *model)
+{
+    enum { MAX_SEEN = 64 };
+    static str seen[MAX_SEEN];
+    static int nSeen = 0;
+
+    str key = str(alias) + "@" + model;
+
+    for (int i = 0; i < nSeen; i++) {
+        if (seen[i] == key) {
+            return false;
+        }
+    }
+
+    if (nSeen >= MAX_SEEN) {
+        return false; // 64 distinct pairs is already a report, not a diagnostic - stay quiet
+    }
+
+    seen[nSeen++] = key;
+    return true;
+}
+
 bool Actor::SoundSayAnim(const_str name, byte bLevelSayAnim)
 {
     if (gi.Anim_NumForName(edict->tiki, Director.GetString(name).c_str()) != -1) {
@@ -7312,11 +7371,13 @@ bool Actor::SoundSayAnim(const_str name, byte bLevelSayAnim)
     m_bLevelSayAnim = bLevelSayAnim;
     m_iSaySlot      = -2;
 
-    Com_Printf(
-        "Couldn't find animation '%s' in '%s' - trying sound alias instead.\n",
-        Director.GetString(name).c_str(),
-        edict->tiki->a->name
-    );
+    if (Actor_SayAnimWarnOnce(Director.GetString(name).c_str(), edict->tiki->a->name)) {
+        Com_Printf(
+            "Couldn't find animation '%s' in '%s' - trying sound alias instead.\n",
+            Director.GetString(name).c_str(),
+            edict->tiki->a->name
+        );
+    }
 
     Sound(Director.GetString(name), CHAN_AUTO, 0, 0, NULL, 0, 0, 1, 1, -1);
 
@@ -7410,11 +7471,14 @@ void Actor::EventSetSayAnim(Event *ev)
         m_bSayAnimSet = true;
         m_iSaySlot    = -2;
 
-        Com_Printf(
-            "Couldn't find animation '%s' in '%s' - trying sound alias instead.\n",
-            Director.GetString(name).c_str(),
-            edict->tiki->a->name
-        );
+        // [user 2026-08-14, bug-1807] once per (alias, model) - see Actor_SayAnimWarnOnce above
+        if (Actor_SayAnimWarnOnce(Director.GetString(name).c_str(), edict->tiki->a->name)) {
+            Com_Printf(
+                "Couldn't find animation '%s' in '%s' - trying sound alias instead.\n",
+                Director.GetString(name).c_str(),
+                edict->tiki->a->name
+            );
+        }
         Sound(Director.GetString(name), CHAN_AUTO, 0, 0, NULL, 0, 0, true, true);
         return;
     }
@@ -8278,6 +8342,23 @@ void Actor::EventGetTypeIdle(Event *ev)
 Actor::EventSetTypeAttack
 ===============
 */
+/*
+===============
+Actor::EventCoopRelocateOk   [HZM coop 2026-08-15, bug-1815]
+
+Grant this actor permission to relocate between cover for the next N seconds. Consumed by the
+relocation gate in State_Cover_Shoot when coop_aiBound is on. A window rather than a boolean so a
+dropped or delayed script tick simply lets the permission lapse, instead of leaving an actor
+permanently allowed (or permanently pinned) if the granting loop dies.
+===============
+*/
+void Actor::EventCoopRelocateOk(Event *ev)
+{
+    float secs = ev->GetFloat(1);
+    if (secs < 0.0f) { secs = 0.0f; }
+    m_iCoopReloAllow = level.inttime + (int)(secs * 1000.0f);
+}
+
 void Actor::EventSetTypeAttack(Event *ev)
 {
     bool (*AllowedState)(int state);

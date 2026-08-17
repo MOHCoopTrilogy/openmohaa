@@ -881,6 +881,113 @@ static void CM_AppendPatchLine( const char *line ) {
 	}
 }
 
+/*
+================
+HZM coop [user 2026-08-16, bug-1823] cm_killshader <name>
+
+cm_killbrush works one BRUSH at a time, and that is not enough to open an obstacle line. On m3l3
+the barbed wire and hedgehogs blocking the road approach are built from THREE clip shaders
+(textures/common/clip, bspindleclip, hedgehogclip) spread over many brushes AND over patches -
+and killwall bails on anything non-brush ("non-brush collision (terrain/patch) - logged for engine
+fix"). Eleven brush kills later the road was still solid.
+
+cbrush_t, cPatch_t and cTerrain_t all carry the SAME pair - shaderNum + contents - so one pass over
+the three arrays neutralises every piece of collision belonging to a shader, whatever its type.
+
+SAFETY: refuses any shader whose name does not contain "clip". That is what makes this safe to
+expose: a clip shader is by definition invisible collision, so this can never ghost a wall the
+player can see. Visible geometry is unreachable through this command by construction.
+================
+*/
+static void CM_KillShaderContents( const char *name, qboolean quiet ) {
+	int i, killedB = 0, killedP = 0, killedT = 0, matched = 0;
+
+	if ( !name || !name[0] ) {
+		return;
+	}
+
+	for ( i = 0; i < cm.numShaders; i++ ) {
+		if ( Q_stricmp( cm.shaders[i].shader, name ) ) {
+			continue;
+		}
+		matched++;
+	}
+	if ( !matched ) {
+		if ( !quiet ) {
+			Com_Printf( "cm_killshader: no shader named '%s' in this map\n", name );
+		}
+		return;
+	}
+
+	for ( i = 0; i < cm.numBrushes; i++ ) {
+		if ( cm.brushes[i].shaderNum < 0 || cm.brushes[i].shaderNum >= cm.numShaders ) {
+			continue;
+		}
+		if ( Q_stricmp( cm.shaders[cm.brushes[i].shaderNum].shader, name ) ) {
+			continue;
+		}
+		if ( cm.brushes[i].contents ) {
+			cm.brushes[i].contents = 0;
+			killedB++;
+		}
+	}
+
+	for ( i = 0; i < cm.numSurfaces; i++ ) {
+		if ( !cm.surfaces[i] ) {
+			continue;
+		}
+		if ( cm.surfaces[i]->shaderNum < 0 || cm.surfaces[i]->shaderNum >= cm.numShaders ) {
+			continue;
+		}
+		if ( Q_stricmp( cm.shaders[cm.surfaces[i]->shaderNum].shader, name ) ) {
+			continue;
+		}
+		if ( cm.surfaces[i]->contents ) {
+			cm.surfaces[i]->contents = 0;
+			killedP++;
+		}
+	}
+
+	for ( i = 0; i < cm.numTerrain; i++ ) {
+		if ( cm.terrain[i].shaderNum < 0 || cm.terrain[i].shaderNum >= cm.numShaders ) {
+			continue;
+		}
+		if ( Q_stricmp( cm.shaders[cm.terrain[i].shaderNum].shader, name ) ) {
+			continue;
+		}
+		if ( cm.terrain[i].contents ) {
+			cm.terrain[i].contents = 0;
+			killedT++;
+		}
+	}
+
+	if ( !quiet ) {
+		Com_Printf( "^~^~^ CMPATCH killshader '%s': %d brushes, %d patches, %d terrain neutralized\n",
+					name, killedB, killedP, killedT );
+	}
+}
+
+static void CM_KillShader_f( void ) {
+	const char *name;
+	char        line[192];
+
+	if ( Cmd_Argc() < 2 ) {
+		Com_Printf( "usage: cm_killshader <shadername>   (clip shaders only)\n" );
+		return;
+	}
+	name = Cmd_Argv( 1 );
+
+	if ( !strstr( name, "clip" ) && !strstr( name, "CLIP" ) ) {
+		Com_Printf( "cm_killshader: '%s' is not a clip shader - refusing (this command only removes INVISIBLE collision)\n", name );
+		return;
+	}
+
+	CM_KillShaderContents( name, qfalse );
+
+	Com_sprintf( line, sizeof( line ), "S %s # killshader in-game\n", name );
+	CM_AppendPatchLine( line );
+}
+
 static void CM_KillBrush_f( void ) {
 	int  n;
 	char line[128];

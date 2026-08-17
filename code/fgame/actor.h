@@ -646,6 +646,17 @@ public:
     /* [HZM coop ET3] dedicated jink timer - decoupled from m_iStateTime (which the un-pin's retarget keeps
        resetting), so the dueled-enemy sidestep-while-firing fires on its own coop_aiJinkMs cadence */
     int m_iCoopJinkTime;
+    /* [HZM coop 2026-08-15, bug-1813] when the CURRENT cover node was claimed. Cover_FindCover
+       returns early whenever the held node is still valid, and State_Cover_Shoot only re-finds
+       cover on reload, so a cover-think actor parks on one node for the whole engagement. This
+       stamp drives a periodic relocation (coop_aiCoverRelocateMs) so they move BETWEEN cover
+       instead of rooting to the first piece they reach. */
+    int m_iCoopCoverClaimTime;
+    /* [HZM coop 2026-08-15, bug-1815] level.inttime until which this actor may relocate between
+       cover. Granted by aisquad.scr via `coop_relocateok <seconds>` so a squad, not an unphased
+       per-actor timer, decides who moves and who keeps firing. Only consulted when coop_aiBound
+       is on; a window (not a flag) so a missed script tick lapses safely. */
+    int m_iCoopReloAllow;
     /* should lock think state ? */
     bool m_bLockThinkState;
     /* think state changed */
@@ -1484,6 +1495,7 @@ public:
     void           EventGetDisguiseAcceptThread(Event *ev);
     void           EventAttackPlayer(Event *ev);
     void           EventAttackEntity(Event *ev); // HZM coop: attackplayer for arbitrary sentients
+    void           EventCoopRelocateOk(Event *ev); // HZM coop: bounding-overwatch permission (bug-1815)
     void           ForceAttackPlayer(void);
     void           EventSetAlarmNode(Event *ev);
     void           EventGetAlarmNode(Event *ev);
@@ -2170,7 +2182,26 @@ inline bool Actor::EnemyIsDisguised(void)
         return false;
     }
 
-    if (m_ThinkState == THINKSTATE_ATTACK) {
+    // HZM 2026-08-11 (bug-1707) ATTACK STATE WAS A ONE-WAY DOOR.
+    // This clause used to return false for ANY actor in attack thinkstate, which made attack
+    // absorbing with respect to disguises: once an actor entered attack for any reason at all -
+    // a noise, a stray shot, or a single frame in which m_bIsDisguised happened to be vetoed -
+    // it could never be fooled again for the rest of the map, because
+    // PassesTransitionConditions_Attack (actor.cpp:9026) asks this same function and would keep
+    // passing. That gate is used by the generic idle->attack transition for EVERY actor, not
+    // just the type_disguise ones, so the effect was map-wide.
+    // On a coop stealth map it ratchets: each newly hostile actor shoots the player, that
+    // shooting trips the player.cpp:5541 veto which blanks m_bIsDisguised for a frame, and that
+    // frame can flip further actors - permanently. Measured on m6l1c as guards saluting the
+    // player and then attacking seconds later with the player still disguised (engDisg=1), with
+    // no single identifiable cause from the player's side.
+    // Requiring REAL THREAT is exactly the treatment the player.cpp:5541 veto already received
+    // for the same underlying reason (bug-1631 there). UpdateThreat returns 0 for a disguised
+    // enemy (actorenemy.cpp:164), so an actor parked in attack against a re-disguised, harmless
+    // player now reports 'disguised' again, fails the attack transition and falls back to idle.
+    // A genuine firefight, where threat is real and non-zero, is unchanged - nobody is fooled
+    // mid-engagement.
+    if (m_ThinkState == THINKSTATE_ATTACK && m_PotentialEnemies.GetCurrentThreat() > 0) {
         return false;
     }
 

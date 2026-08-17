@@ -2164,6 +2164,19 @@ void Weapon::Shoot(Event *ev)
         if (!quiet[mode] && next_noise_time <= level.time) {
             if (g_gametype->integer == GT_SINGLE_PLAYER) {
                 BroadcastAIEvent(AI_EVENT_WEAPON_FIRE, 1500);
+            } else if (level.m_bStealthNative) {
+                // HZM [user 2026-08-12] E1 - SINGLE-PLAYER PARITY ON A STEALTH-NATIVE MAP.
+                // The OPM branch below scales the audible radius with the world size, up to 8000
+                // units - more than five times what this game shipped with in SP. On a map the size
+                // of m6l2a that means one shot anywhere alerts AI most of the way across the town,
+                // which makes a stealth failure unrecoverable and a firefight non-local: the whole
+                // garrison converges instead of the street you are actually in.
+                // This restores the value the game was designed and tuned around. It is NOT a nerf
+                // invented for coop - 1500 is literally the SP constant on the line above.
+                // Reachable only when a map script has set level.stealthnative, which Level::Init
+                // clears on every map load, so m2l2a, m6l1c and every other map take the OPM branch
+                // exactly as before.
+                BroadcastAIEvent(AI_EVENT_WEAPON_FIRE, 1500);
             } else {
                 //
                 // Added in OPM

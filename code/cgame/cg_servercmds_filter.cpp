@@ -32,6 +32,11 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 static const char *whiteListedVariables[] = {
     // some mods set this variable to make the sky uniform
     "r_fastsky",
+    // HZM coop [user 2026-08-16] bug-1849: r_novis, so a map whose vis was never compiled for
+    // the coop route can switch PVS culling off for the players who take it. Precedent is
+    // r_fastsky directly above - a renderer cvar the server is already trusted to set. r_novis
+    // disables CULLING only; solid geometry still draws and still occludes.
+    "r_novis",
 
     "ui_hud",
     "subtitle0",

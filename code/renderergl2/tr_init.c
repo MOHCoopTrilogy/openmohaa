@@ -1445,6 +1445,13 @@ void R_Register( void )
 	r_mode = ri.Cvar_Get( "r_mode", "-2", CVAR_ARCHIVE | CVAR_LATCH );
 	r_fullscreen = ri.Cvar_Get( "r_fullscreen", "1", CVAR_ARCHIVE );
 	r_noborder = ri.Cvar_Get("r_noborder", "0", CVAR_ARCHIVE | CVAR_LATCH);
+	// HZM [bug-1795] r_desktopfullscreen (0 = Exclusive Fullscreen, 1 = Borderless Window) was
+	// registered by renderergl1 ONLY, and gl2 is the renderer that actually ships - so under the live
+	// build it survived merely as an archived user cvar with no CVAR_LATCH. sdl_glimp.c still read it
+	// by name, which is why borderless worked at all, but the Video Options pulldown's hidden watcher
+	// keys off the latch to fire its automatic vid_restart, so changing display mode from the menu
+	// could silently not apply until a manual one. Registered here to match gl1 exactly.
+	ri.Cvar_Get("r_desktopfullscreen", "0", CVAR_ARCHIVE | CVAR_LATCH);
 	r_customwidth = ri.Cvar_Get( "r_customwidth", "1600", CVAR_ARCHIVE | CVAR_LATCH );
 	r_customheight = ri.Cvar_Get( "r_customheight", "1024", CVAR_ARCHIVE | CVAR_LATCH );
 	r_customPixelAspect = ri.Cvar_Get( "r_customPixelAspect", "1", CVAR_ARCHIVE | CVAR_LATCH );
@@ -1946,7 +1953,19 @@ void R_Register( void )
 	r_drawentities = ri.Cvar_Get ("r_drawentities", "1", CVAR_CHEAT );
 	r_ignore = ri.Cvar_Get( "r_ignore", "1", CVAR_CHEAT );
 	r_nocull = ri.Cvar_Get ("r_nocull", "0", CVAR_CHEAT);
-	r_novis = ri.Cvar_Get ("r_novis", "0", CVAR_CHEAT);
+	// HZM coop [user 2026-08-16] bug-1849: CVAR_ARCHIVE, not CVAR_CHEAT - see the gl1 copy.
+	// r_novis disables PVS CULLING only; solid geometry still draws and still occludes, so it is
+	// not an information cheat. Coop players reach places the level was never vis-compiled for
+	// (crossing m3l3's churchyard wall makes terrain chunks swap in and out), and with no .map
+	// source there is no way to re-vis - bypassing the stale PVS is the only lever.
+	// NOTE: this build loads renderer_opengl2.dll, so THIS is the copy that matters.
+	// HZM coop [user 2026-08-17] NOT ARCHIVED. CVAR_ARCHIVE let the value persist into the
+	// player's omconfig.cfg, so after m3l3 pushed it the game started EVERY session with PVS
+	// culling already off - before any world exists - and crashed at startup: two minidumps,
+	// both 0xC00000FF in ntdll dispatch with only openmohaa.exe + renderer_opengl2.dll loaded
+	// (no game.dll), and the log ending at "finished R_Init". Setting it per session is fine -
+	// a whole session was played that way - so it stays settable, it just must not be sticky.
+	r_novis = ri.Cvar_Get ("r_novis", "0", 0);
 	r_showcluster = ri.Cvar_Get ("r_showcluster", "0", CVAR_CHEAT);
 	r_speeds = ri.Cvar_Get ("r_speeds", "0", CVAR_CHEAT);
 	r_verbose = ri.Cvar_Get( "r_verbose", "0", CVAR_CHEAT );

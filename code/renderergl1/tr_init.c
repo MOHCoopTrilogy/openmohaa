@@ -1593,7 +1593,17 @@ void R_Register( void )
 	r_ignore = ri.Cvar_Get( "r_ignore", "1", CVAR_CHEAT );
 	r_nocull = ri.Cvar_Get ("r_nocull", "0", CVAR_CHEAT);
 	r_showcull = ri.Cvar_Get("r_showcull", "0", CVAR_CHEAT);
-	r_novis = ri.Cvar_Get ("r_novis", "0", CVAR_CHEAT);
+	// HZM coop [user 2026-08-16] bug-1849: CVAR_ARCHIVE, not CVAR_CHEAT. r_novis disables PVS
+	// CULLING (tr_world.c:829) - it does not let anyone see through solid geometry, since walls
+	// are still drawn and still occlude. It is a completeness/perf tradeoff, not an information
+	// advantage, and cheat-gating it is what made it unusable in a normal coop game.
+	// Coop needs it: players reach places the level designer never vis-compiled for - crossing
+	// m3l3's churchyard wall makes whole terrain chunks pop in and others vanish behind you, the
+	// classic cluster SWAP, with the overcast sky showing through the holes as flat white ground.
+	// The map has no .map source to re-vis, so bypassing the stale PVS is the only lever.
+	// HZM coop [user 2026-08-17] NOT ARCHIVED - see the gl2 copy. Persisting this crashed the
+	// game at startup once m3l3 pushed it.
+	r_novis = ri.Cvar_Get ("r_novis", "0", 0);
 	r_showcluster = ri.Cvar_Get ("r_showcluster", "0", CVAR_CHEAT);
 	r_speeds = ri.Cvar_Get ("r_speeds", "0", CVAR_CHEAT);
 	r_verbose = ri.Cvar_Get( "r_verbose", "0", CVAR_CHEAT );

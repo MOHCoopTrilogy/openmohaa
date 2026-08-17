@@ -180,6 +180,28 @@ Event EV_Level_SetPapersLevel
     EV_SETTER
 );
 
+// HZM [user 2026-08-12] Modelled exactly on "papers" above - a Level field with a getter/setter
+// pair, reset by Level::Init on every map load. See level.h for why this is not a cvar.
+Event EV_Level_GetStealthNative
+(
+    "stealthnative",
+    EV_DEFAULT,
+    NULL,
+    NULL,
+    "whether this map opts into coop stealth-native behaviour",
+    EV_GETTER
+);
+
+Event EV_Level_SetStealthNative
+(
+    "stealthnative",
+    EV_DEFAULT,
+    NULL,
+    NULL,
+    "whether this map opts into coop stealth-native behaviour",
+    EV_SETTER
+);
+
 Event EV_Level_GetDMRespawning
 (
     "dmrespawning",
@@ -658,6 +680,8 @@ CLASS_DECLARATION(Listener, Level, NULL) {
     {&EV_Level_SetLoopProtection,             &Level::SetLoopProtection            },
     {&EV_Level_GetPapersLevel,                &Level::GetPapersLevel               },
     {&EV_Level_SetPapersLevel,                &Level::SetPapersLevel               },
+    {&EV_Level_GetStealthNative,              &Level::GetStealthNative             },
+    {&EV_Level_SetStealthNative,              &Level::SetStealthNative             },
     {&EV_Level_GetDMRespawning,               &Level::EventGetDMRespawning         },
     {&EV_Level_SetDMRespawning,               &Level::EventSetDMRespawning         },
     {&EV_Level_SetDMRespawning2,              &Level::EventSetDMRespawning         },
@@ -768,6 +792,10 @@ void Level::Init(void)
 
     m_bAlarm       = false;
     m_iPapersLevel = 0;
+    // HZM [user 2026-08-12] THE MAP SCOPING. Cleared here, on every single map load, which is what
+    // makes stealth-native impossible to leak into another mission.
+    m_bStealthNative = qfalse;
+    m_bAlarmLatched  = qfalse;
 
     died_already = false;
 
@@ -2067,6 +2095,13 @@ void Level::GetAlarm(Event *ev)
 void Level::SetAlarm(Event *ev)
 {
     m_bAlarm = ev->GetInteger(1);
+
+    // HZM [user 2026-08-12] E3 - ONCE BLOWN, STAYS BLOWN. Records that the alarm has been up at
+    // least once this mission. Only READ while m_bStealthNative is set, so on every other map this
+    // is a dead store. See Player::Think for the use.
+    if (m_bAlarm) {
+        m_bAlarmLatched = qtrue;
+    }
 }
 
 void Level::SetNoDropHealth(Event *ev)
@@ -2097,6 +2132,16 @@ void Level::GetPapersLevel(Event *ev)
 void Level::SetPapersLevel(Event *ev)
 {
     m_iPapersLevel = ev->GetInteger(1);
+}
+
+void Level::GetStealthNative(Event *ev)
+{
+    ev->AddInteger(m_bStealthNative);
+}
+
+void Level::SetStealthNative(Event *ev)
+{
+    m_bStealthNative = ev->GetInteger(1);
 }
 
 void Level::EventGetRoundStarted(Event *ev)

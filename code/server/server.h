@@ -293,6 +293,8 @@ typedef struct {
 	int			startTime;
 	int			lastTime;
 	int			serverLagTime;
+	qboolean	serverLagSustained;	// HZM: set by the 8-frame overrun ring in SV_Frame, so the
+								// "slow server" broadcast needs a sustained overrun, not one late frame
 	qboolean	autosave;
 	int			mapTime;
 
