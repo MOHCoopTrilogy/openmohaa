@@ -267,8 +267,29 @@ void		NET_LeaveMulticast6(void);
 void		NET_Sleep(int msec);
 
 
-#define	MAX_MSGLEN				131072		// max length of a message, which may
+// [user 2026-08-17] 131072 -> 262144 (bug-1864), in lockstep with MAX_GAMESTATE_CHARS in
+// q_shared.h. The entire gamestate is serialised into one buffer of this size in
+// SV_SendClientGameState, so doubling the configstring text pool without doubling this would only
+// move the crash from "MAX_GAMESTATE_CHARS exceeded" to an oversized message.
+// Safe against the wire: fragmentation is packet-level (FRAGMENT_SIZE in net_chan.c) with its own
+// per-fragment 16-bit length, so nothing here is a bit-width field - the cost is buffer memory
+// (netchan holds fragmentBuffer + unsentBuffer of this size per channel).
+// PROTOCOL change: exe + cgame.dll + game.dll + omohaaded.exe ship together.
+#define	MAX_MSGLEN				262144		// max length of a message, which may
 											// be fragmented into multiple packets
+
+// HZM [user 2026-08-17] - make the coupling a BUILD BREAK, not a comment. The gamestate is the text
+// pool PLUS stringOffsets PLUS every entity baseline, so the pool must leave real headroom inside
+// the message buffer; 80% is the ratio that has held historically (98304 of 131072 = 75%).
+// The visibility check is NOT paranoia: an undefined identifier in #if evaluates to 0, so if
+// MAX_GAMESTATE_CHARS were ever not in scope here the ratio test below would quietly pass and
+// protect nothing - a guard that cannot fail is worse than no guard, because it is trusted.
+#ifndef MAX_GAMESTATE_CHARS
+	#error "qcommon.h: MAX_GAMESTATE_CHARS is not visible here, so the ratio guard below would evaluate to 0 and protect nothing. Include q_shared.h before this point or move the guard."
+#endif
+#if (MAX_GAMESTATE_CHARS * 5) > (MAX_MSGLEN * 4)
+	#error "MAX_GAMESTATE_CHARS exceeds 80% of MAX_MSGLEN - the gamestate also carries stringOffsets and entity baselines and will not fit. Raise MAX_MSGLEN too (protocol change: exe + cgame.dll + game.dll + omohaaded.exe together)."
+#endif
 
 #define MAX_DOWNLOAD_WINDOW		48	// ACK window of 48 download chunks. Cannot set this higher, or clients
 						// will overflow the reliable commands buffer

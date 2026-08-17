@@ -809,6 +809,8 @@ Sentient::Sentient()
     m_fCoopGoreDamage       = 0;            // HZM coop - gore tier 2 (drips + growing pool)
     m_iCoopGoreSkinTier     = 0;            // HZM coop - gore tier 1 (damage-tier blood skins)
     m_bCoopGoreGibMark      = qfalse;
+    m_bCoopHeadGore         = qfalse;        // HZM coop [user 2026-08-17] - headshot face disfigurement
+    m_iCoopWoundNext        = 0;            // HZM coop [user 2026-08-17] - wound-prop recycle cursor
     m_bCoopBlastShield      = qfalse;       // HZM coop - bug-1586: opt-in, NOT team-wide (see TakeDamage)
     m_fCoopGoreGibMarkTime  = 0;            // HZM coop - gore tier 1e
     m_vCoopPoolPos          = vec_zero;     // HZM coop - gore tier 2
@@ -957,6 +959,9 @@ Vector Sentient::EyePosition(void)
 
 void Sentient::SetBloodModel(Event *ev)
 {
+    // HZM coop [user 2026-08-17] - decap assets are registered HERE, on the spawn path, so the
+    // first decapitation of a map does not pay a registration spike mid-firefight (bug-856).
+    CacheResource("models/fx/coop_stump_neck.tik");
     str name;
     str cache_name;
     str models_dir = "models/";
@@ -1726,6 +1731,7 @@ void Sentient::ArmorDamage(Event *ev)
         && (location == HITLOC_HEAD || location == HITLOC_HELMET || location == HITLOC_NECK)) {
         attacker->Sound("coop_headshot", CHAN_LOCAL);
         CoopHeadshotKillFx(position, direction);
+        CoopGoreDisfigureHead(); // HZM coop [user 2026-08-17] - and leave the face unrecognisable
     }
 
     if (meansofdeath == MOD_SLIME) {
@@ -1772,6 +1778,10 @@ void Sentient::ArmorDamage(Event *ev)
         // or a fresh script gore_gibmark) upgrades the corpse from the heavy tier to the extreme
         // gib-splatter skins (index 3), with a per-corpse random coverage pattern.
         CoopGoreTryGibSkins(meansofdeath, inflictor);
+
+        // HZM coop [user 2026-08-17] - and it may take the head clean off (chance-gated,
+        // per-frame budgeted). Runs AFTER the gib skins so the severed head inherits them.
+        CoopGoreTryDecapitate(meansofdeath, inflictor);
 
         DropBloodPool(); // HZM coop - leave a persistent blood pool under the body where it dies
 
@@ -2432,10 +2442,71 @@ void Sentient::CoopGoreUpdateSkinTier(void)
     // tier IS the skin index: 0 clean, 1 = SKINOFFSET_BIT0 (light), 2 = SKINOFFSET_BIT1 (heavy).
     // Written exactly (never additive) so tier transitions and downgrades are both correct, and the
     // nodraw/crossfade bits other systems own (helmet!) are preserved.
-    for (i = 0; i < numsurfaces; i++) {
-        edict->s.surfaces[i] =
-            (edict->s.surfaces[i] & ~(MDL_SURFACE_SKINOFFSET_BIT0 | MDL_SURFACE_SKINOFFSET_BIT1)) | tier;
+    // HZM coop [user 2026-08-17] - a headshot-disfigured head is EXEMPT. This loop writes one tier
+    // across every surface, so without the exemption the next damage event on the corpse would reset
+    // the face straight back to the body's (lower) tier.
+    {
+        int headSurf = m_bCoopHeadGore ? gi.Surface_NameToNum(edict->tiki, "head") : -1;
+        for (i = 0; i < numsurfaces; i++) {
+            if (i == headSurf) {
+                continue;
+            }
+            edict->s.surfaces[i] =
+                (edict->s.surfaces[i] & ~(MDL_SURFACE_SKINOFFSET_BIT0 | MDL_SURFACE_SKINOFFSET_BIT1)) | tier;
+        }
     }
+}
+
+/*
+=================
+Sentient::CoopGoreDisfigureHead   (HZM coop [user 2026-08-17])
+
+"headshots really mutilate the face / becomes unrecognizable", after death.
+
+NO NEW ART. The disfigured face already shipped: the head TIKs declare a 4th skin
+(`surface head shader <skin>_blood3`) and 28 of those textures are in the tex pak. What
+they ALSO do - deliberately - is pad skins 1 and 2 with the CLEAN face, so ordinary
+accumulated damage never paints someone's face. That design is kept; this only opens the
+gib-tier face to a second cause, a confirmed headshot kill, instead of explosions alone.
+
+Only the HEAD surface is touched. CoopGoreUpdateSkinTier writes one tier across every
+surface in a single loop, so without the m_bCoopHeadGore latch the next damage event on
+the corpse would immediately reset the head back to the body's tier.
+
+Index 3 on a head is not new ground - CoopGoreTryGibSkins has been setting exactly that on
+every surface, heads included, since gore tier 1e shipped.
+=================
+*/
+void Sentient::CoopGoreDisfigureHead(void)
+{
+    static cvar_t *pOn = NULL;
+    int            surf;
+
+    // HZM coop - nothing is ever painted on a player body (bug-792 standing rule)
+    if (IsSubclassOfPlayer()) {
+        return;
+    }
+    if (!edict->tiki || !com_blood->integer) {
+        return;
+    }
+    if (!pOn) {
+        pOn = gi.Cvar_Get("coop_goreHeadshotFace", "1", CVAR_ARCHIVE);
+    }
+    if (!pOn->integer) {
+        return;
+    }
+    if (!GetBloodSplatName().length()) {
+        return; // non-flesh doesn't bleed
+    }
+
+    surf = gi.Surface_NameToNum(edict->tiki, "head");
+    if (surf < 0 || surf >= MAX_MODEL_SURFACES) {
+        return; // model has no separately-skinned head (helmeted/wrapped variants) - silent skip
+    }
+
+    edict->s.surfaces[surf] =
+        (edict->s.surfaces[surf] & ~(MDL_SURFACE_SKINOFFSET_BIT0 | MDL_SURFACE_SKINOFFSET_BIT1)) | 3;
+    m_bCoopHeadGore = qtrue;
 }
 
 // HZM coop - GORE TIER 3 (hit-location wound props): on a qualifying BULLET hit, attach a tiny wound-patch
@@ -2448,7 +2519,7 @@ void Sentient::CoopGoreUpdateSkinTier(void)
 // outlive the corpse. Applies to bleedable AI humans - enemy AND allied (players are skipped: HZM coop -
 // no holes on players); non-flesh (vehicles/turrets) is excluded naturally. Crash-safe by construction:
 // any missing tiki/tag/table entry = silent skip.
-#define COOP_GORE_MAX_WOUNDPROPS 4 // per body; MUST match m_pCoopWoundProp[] in sentient.h
+#define COOP_GORE_MAX_WOUNDPROPS 12 // per body; MUST match m_pCoopWoundProp[] in sentient.h
 
 void Sentient::CoopGoreTryWoundProp(int location, int meansofdeath, const Vector &position)
 {
@@ -2456,7 +2527,8 @@ void Sentient::CoopGoreTryWoundProp(int location, int meansofdeath, const Vector
     const char    *tagname;
     float          locRadius;
     vec3_t         locOffset;
-    int            i, slot, tagnum;
+    int            i, slot, tagnum, maxProps;
+    static cvar_t *pWoundMax = NULL; // HZM coop [user 2026-08-17] - per-body hole ceiling
     Animate       *prop;
     Vector         attachOfs;
 
@@ -2494,17 +2566,43 @@ void Sentient::CoopGoreTryWoundProp(int location, int meansofdeath, const Vector
         return; // non-flesh doesn't bleed (players get blood_model lazily, so they pass explicitly)
     }
 
-    // cap: first free slot or bail (SafePtr slots auto-NULL if a prop was freed with its body)
+    // [user 2026-08-17] "when I unload an SMG on someone I should see bullet holes all over their
+    // body where I hit them" - they did not. The cap was FOUR per body, and a full body SKIPPED the
+    // hit outright, so from the 5th round on nothing appeared however long you kept firing - and the
+    // four holes you did get sat wherever the first four rounds happened to land, not where you were
+    // aiming now. That is exactly the reported "only sometimes".
+    //
+    // Two changes: the ceiling is a cvar over a 12-slot array, and a FULL body now RECYCLES its
+    // oldest prop instead of skipping. The recycle is what actually fixes the complaint - holes
+    // follow your current burst - and it keeps entity cost per body strictly bounded, which matters
+    // because coop count-scales enemies up to 80 (TRAPS T4: per-hit entity spawns are a server-load
+    // multiplier on this project's hordes).
+    if (!pWoundMax) {
+        pWoundMax = gi.Cvar_Get("coop_goreWoundMax", "8", CVAR_ARCHIVE);
+    }
+    maxProps = pWoundMax->integer;
+    if (maxProps < 1) {
+        maxProps = 1;
+    } else if (maxProps > COOP_GORE_MAX_WOUNDPROPS) {
+        maxProps = COOP_GORE_MAX_WOUNDPROPS;
+    }
+
     slot = -1;
-    for (i = 0; i < COOP_GORE_MAX_WOUNDPROPS; i++) {
+    for (i = 0; i < maxProps; i++) {
         if (!m_pCoopWoundProp[i]) {
             slot = i;
             break;
         }
     }
     if (slot < 0) {
-        return; // body already carries its maximum - pure cosmetics, skip quietly
+        // full: reuse the OLDEST slot rather than dropping the hit on the floor
+        slot = m_iCoopWoundNext % maxProps;
+        if (m_pCoopWoundProp[slot]) {
+            m_pCoopWoundProp[slot]->PostEvent(EV_Remove, 0);
+            m_pCoopWoundProp[slot] = NULL;
+        }
     }
+    m_iCoopWoundNext = (slot + 1) % maxProps;
 
     tagname = gi.CM_GetHitLocationInfo(location, &locRadius, locOffset);
     if (!tagname || !*tagname) {
@@ -2596,6 +2694,7 @@ void Sentient::EventCoopGoreReset(Event *ev)
     }
 
     m_iCoopGoreSkinTier = 0;
+    m_bCoopHeadGore     = qfalse; // HZM coop [user 2026-08-17] - a revive clears the disfigured face too
     if (edict->tiki) { // force-clear the skin bits even if the cvars were toggled off mid-life
         numsurfaces = gi.TIKI_NumSurfaces(edict->tiki);
         if (numsurfaces > MAX_MODEL_SURFACES) {
@@ -2740,6 +2839,477 @@ void Sentient::CoopGoreTryGibSkins(int meansofdeath, Entity *inflictor)
         gi.Printf("^~^~^ GOREGIB ent=%d mod=%d mark=%d pattern=%d gib_surfs=%d/%d model=%s\n",
                   entnum, meansofdeath, m_bCoopGoreGibMark ? 1 : 0, pattern, nExtreme, numsurfaces,
                   model.c_str());
+    }
+}
+
+// HZM coop [user 2026-08-17] - LIVE SEVERED HEADS, bounded by COUNT not by a timer.
+//
+// Heads now persist like corpses (coop_decapLife 0), so something has to stop a long map from
+// filling the entity pool one head at a time - that is the leak the original 4-second lifetime was
+// really guarding against, and a stopwatch was a blunt way to do it. This is a ring of the live
+// heads: when the (coop_decapMax + 1)th is created, the OLDEST fades out. The player keeps a
+// battlefield littered with heads, and the entity cost has a hard ceiling either way.
+//
+// Same shape as the wound-prop recycle: SafePtr entries self-NULL if a head is freed some other way
+// (map change, fade completing), so a stale slot can never be mistaken for a live one.
+#define COOP_DECAP_MAX_HEADS 32
+static SafePtr<Entity> s_coopHeads[COOP_DECAP_MAX_HEADS];
+static int             s_coopHeadNext = 0;
+
+static void CoopDecapRegisterHead(Entity *head)
+{
+    static cvar_t *pMax = NULL;
+    int            cap, i, live;
+
+    if (!head) {
+        return;
+    }
+    if (!pMax) {
+        pMax = gi.Cvar_Get("coop_decapMax", "16", CVAR_ARCHIVE);
+    }
+    cap = pMax->integer;
+    if (cap < 1) {
+        cap = 1;
+    } else if (cap > COOP_DECAP_MAX_HEADS) {
+        cap = COOP_DECAP_MAX_HEADS;
+    }
+
+    // count what is actually still alive (SafePtr has already NULLed anything freed elsewhere)
+    live = 0;
+    for (i = 0; i < COOP_DECAP_MAX_HEADS; i++) {
+        if (s_coopHeads[i]) {
+            live++;
+        }
+    }
+
+    if (live >= cap) {
+        // retire the oldest rather than refusing to spawn the newest - the head you just took off is
+        // the one the player is looking at
+        for (i = 0; i < COOP_DECAP_MAX_HEADS; i++) {
+            int idx = (s_coopHeadNext + i) % COOP_DECAP_MAX_HEADS;
+            if (s_coopHeads[idx]) {
+                Event *fade = new Event(EV_Fade);
+                fade->AddFloat(1.0f);
+                s_coopHeads[idx]->PostEvent(fade, 0.0f);
+                s_coopHeads[idx] = NULL;
+                break;
+            }
+        }
+    }
+
+    s_coopHeads[s_coopHeadNext] = head;
+    s_coopHeadNext              = (s_coopHeadNext + 1) % COOP_DECAP_MAX_HEADS;
+}
+
+/*
+=================
+Sentient::CoopGoreTryDecapitate   (HZM coop [user 2026-08-17])
+
+Blast/shotgun decapitation. This shipped once as bug-866 and was reverted by bug-892 as a
+precaution during the MAX_MODELS rebuild; the AI-twitch that motivated the revert later resolved to
+the entity-pool stomp (bugs 914-927), which the 2048 pool fixed. This is a re-add that keeps every
+mitigation from the adversarially-reviewed safe pattern, because the FIRST attempt (bug-856) made
+all AI stutter and stop shooting - and that was server-sim LOAD, not a bad hook:
+
+  * HARD PER-FRAME BUDGET. One grenade into a count-scaled horde used to fire dozens of decaps in a
+    single server frame. coop_decapBudget (default 3) caps it; the rest of that frame is skipped.
+    This is THE key fix - without it nothing else matters.
+  * ONE short-lived rigid prop, never animated, SOLID_NOT + MASK_VIEWSOLID so it can never block a
+    player or an AI path, self-removing at coop_decapLife (4s, not the original 30).
+  * The neck cap takes a FREE m_pCoopWoundProp slot ONLY. If none is free it is skipped - an
+    untracked attachment leaves a dangling s.parent that the per-frame parent-chain walk then
+    follows, which is one of the things that made bug-856 so expensive.
+  * NO new art. The severed head is the victim's own model with every surface except "head" set to
+    NODRAW and no animation ever issued, so it renders in bind pose.
+  * Dead-gated twice, and chance-gated (coop_decapChance, default 30) - the user asked that it not
+    be guaranteed.
+=================
+*/
+void Sentient::CoopGoreTryDecapitate(int meansofdeath, Entity *inflictor)
+{
+    static cvar_t *pOn = NULL, *pChance = NULL, *pBudget = NULL, *pDbg = NULL;
+    static float   sBudgetTime  = -1.0f;
+    static int     sBudgetCount = 0;
+    HeadGibObject *gib;
+    Animate       *cap;
+    orientation_t  tagOr;
+    int            headSurf, headTag, neckTag, i, slot;
+    static Vector  sCoopLastHeadOfs = vec_zero; // reported below - if this is 0,0,0 the measurement failed
+    int            numsurfaces = 0, nHeadSurfs = 0;
+    qboolean       allowed;
+
+    // --- dead-gate #2 (the call site already tests health <= 0) ---
+    if (health > 0) {
+        return;
+    }
+    if (IsSubclassOfPlayer()) {
+        return; // never a player - extends the bug-785/792 no-gore-on-players rule
+    }
+    if (!edict->tiki || !com_blood->integer) {
+        return;
+    }
+    if (!pOn) {
+        pOn     = gi.Cvar_Get("coop_decap", "1", CVAR_ARCHIVE);
+        pChance = gi.Cvar_Get("coop_decapChance", "30", CVAR_ARCHIVE);
+        pBudget = gi.Cvar_Get("coop_decapBudget", "3", CVAR_ARCHIVE);
+        pDbg    = gi.Cvar_Get("coop_goreDebug", "0", 0);
+    }
+    if (!pOn->integer) {
+        return;
+    }
+    if (!GetBloodSplatName().length()) {
+        return; // non-flesh doesn't come apart
+    }
+
+    // [user 2026-08-17] "certain weapons should decapitate... rockets, grenades, shotguns,
+    // artillery". CoopGoreModIsExplosive already classifies the blast set and is shared with the
+    // gib skins, so it is reused rather than duplicated; shotgun is added here only.
+    allowed = CoopGoreModIsExplosive(meansofdeath, inflictor);
+    if (!allowed && meansofdeath == MOD_SHOTGUN) {
+        allowed = qtrue;
+    }
+    if (!allowed) {
+        return;
+    }
+
+    if (G_Random(100.0f) >= (float)pChance->integer) {
+        return; // deliberately not guaranteed
+    }
+
+    // --- the per-frame budget ---
+    if (sBudgetTime != level.time) {
+        sBudgetTime  = level.time;
+        sBudgetCount = 0;
+    }
+    if (sBudgetCount >= (pBudget->integer > 0 ? pBudget->integer : 3)) {
+        if (pDbg->integer) {
+            gi.Printf("^~^~^ DECAPFRAME budget hit at t=%.2f, skipping ent=%d\n", level.time, entnum);
+        }
+        return;
+    }
+
+    headSurf = gi.Surface_NameToNum(edict->tiki, "head");
+    headTag  = gi.Tag_NumForName(edict->tiki, "Bip01 Head");
+    if (headSurf < 0 || headSurf >= MAX_MODEL_SURFACES || headTag < 0) {
+        return; // helmeted/wrapped variants and non-bipeds simply do not decapitate
+    }
+    if (edict->s.surfaces[headSurf] & MDL_SURFACE_NODRAW) {
+        return; // already headless
+    }
+
+    sBudgetCount++;
+
+    // [user 2026-08-17] DECAPSURF probe. Reported symptom: "only really notice a random set of hands
+    // appearing that kinda float, not a head. Their head is still attached." Both halves of that point
+    // at the surface INDEX meaning something different than intended - but Surface_NameToNum is an
+    // exact stricmp, so it cannot be partial-matching "hand" for "head". Rather than guess a third
+    // time, dump the corpse's real surface table and the gib's, and let one run settle it.
+    if (pDbg->integer) {
+        int dn = gi.TIKI_NumSurfaces(edict->tiki);
+        gi.Printf("^~^~^ DECAPSURF corpse tiki=%s surfaces=%d headSurf=%d headTag=%d\n",
+                  gi.TIKI_NameForNum(edict->tiki), dn, headSurf, headTag);
+        for (i = 0; i < dn && i < MAX_MODEL_SURFACES; i++) {
+            gi.Printf("^~^~^ DECAPSURF   corpse[%d] = %s%s\n", i,
+                      gi.Surface_NumToName(edict->tiki, i), (i == headSurf) ? "   <== treated as HEAD" : "");
+        }
+    }
+
+    GetTagPositionAndOrientation(headTag, &tagOr);
+
+    // --- take the head off the body ---
+    // [user 2026-08-17] Hide EVERY surface named "head", not just the first. This model carries two
+    // (corpse[3] and corpse[4] in the surface dump), so nodraw-ing only headSurf left the second one
+    // drawn - the body kept a visible head while the gib flew off, which is precisely the original
+    // "their head is still attached" report. Same duplicate-surface trap as the gib side below.
+    {
+        int ci, cn = gi.TIKI_NumSurfaces(edict->tiki);
+        if (cn > MAX_MODEL_SURFACES) { cn = MAX_MODEL_SURFACES; }
+        for (ci = 0; ci < cn; ci++) {
+            const char *cname = gi.Surface_NumToName(edict->tiki, ci);
+            if (cname && !Q_stricmp(cname, "head")) {
+                edict->s.surfaces[ci] |= MDL_SURFACE_NODRAW;
+            }
+        }
+    }
+    m_bCoopHeadGore = qtrue; // the face logic must not try to re-skin a head that is gone
+
+    // --- the severed head: our own model, everything but the head hidden, never animated ---
+    gib = new HeadGibObject;
+
+    // [user 2026-08-17] The gib needs the COMPOSITE model string, not the bare path. Measured with
+    // the DECAPSURF probe: the corpse's tiki has 11 surfaces including two heads, while a plain
+    // setModel(model) produced only 4 - tunic, tunic_cull, pants, hand - with NO head at all, so
+    // every decap correctly aborted and nothing happened.
+    //
+    // The reason is that the head is not part of the base .tik: it arrives through
+    // `$include models/human/heads/*.tik` inside a `case headskin <name>` block, so the head
+    // skelmodel is only compiled into the tiki when a headskin is actually selected. Actor::setModel
+    // (actor.cpp:11302) is where the real model string gets built - "headmodel|X|headskin|Y|<path>" -
+    // and a fresh entity has none of that, so its case never fires.
+    //
+    // Rebuild the head half of that string here. The weapon|<loadout>| part is deliberately omitted:
+    // every non-head surface is nodraw'd below anyway, so pulling in the gear would only cost tiki
+    // surfaces for nothing.
+    {
+        str gibName = model;
+
+        if (IsSubclassOfActor()) {
+            Actor *act = (Actor *)this;
+            str    pre;
+
+            if (act->m_csHeadModel != STRING_EMPTY) {
+                pre += "headmodel|" + Director.GetString(act->m_csHeadModel) + "|";
+            }
+            if (act->m_csHeadSkin != STRING_EMPTY) {
+                pre += "headskin|" + Director.GetString(act->m_csHeadSkin) + "|";
+            }
+            if (pre.length()) {
+                gibName = pre + model;
+            }
+        }
+        // [user 2026-08-17] Set the model the way Actor::setModel does - gi.setmodel DIRECTLY - and
+        // NOT through Entity::setModel(str). That overload runs the name through CanonicalTikiName
+        // (g_utils.cpp:1523), which PREPENDS "models/" to anything not already starting with it. Our
+        // composite starts with "headmodel|", so it became
+        // "models/headmodel|head4|headskin|X|models/human/....tik" and could never resolve - which is
+        // exactly why the gib kept loading the bare 4-surface model with no head surface, and why
+        // Actor::setModel bypasses that path as well.
+        //
+        // Skipping Entity::setModel also skips its idle-anim start and ProcessInitCommands, which is
+        // what we want here: the head must never be animated or it leaves the bind pose the whole
+        // no-new-art trick depends on. The bbox is set explicitly in the HeadGibObject constructor.
+        gib->model = gibName;
+        level.skel_index[gib->edict->s.number] = -1;
+        gi.setmodel(gib->edict, gibName);
+        if (pDbg->integer) {
+            gi.Printf("^~^~^ DECAPSURF gib requested model=%s\n", gibName.c_str());
+        }
+    }
+    gib->setOrigin(Vector(tagOr.origin));
+    gib->setAngles(angles);
+    gib->setScale(edict->s.scale);
+    if (pDbg->integer) {
+        gi.Printf("^~^~^ DECAPSURF gib model=%s tiki=%s surfaces=%d\n",
+                  model.c_str(),
+                  gib->edict->tiki ? gi.TIKI_NameForNum(gib->edict->tiki) : "(none)",
+                  gib->edict->tiki ? gi.TIKI_NumSurfaces(gib->edict->tiki) : -1);
+        if (gib->edict->tiki) {
+            int gn = gi.TIKI_NumSurfaces(gib->edict->tiki);
+            for (i = 0; i < gn && i < MAX_MODEL_SURFACES; i++) {
+                gi.Printf("^~^~^ DECAPSURF   gib[%d] = %s%s\n", i,
+                          gi.Surface_NumToName(gib->edict->tiki, i),
+                          (i == headSurf) ? "   <== KEPT VISIBLE" : "");
+            }
+        }
+    }
+
+    if (gib->edict->tiki) {
+        // [user 2026-08-17] Resolve the head on the GIB'S OWN tiki, by NAME. Reusing headSurf - which
+        // was resolved against the CORPSE's tiki - was a real bug: the two are different composites
+        // (the corpse carries its weapon case's gear surfaces, a fresh setModel does not), so the same
+        // index is a different surface on each. That is why the user saw "a random set of hands
+        // appearing that kinda float, not a head": index N was head on the body and hand on the gib.
+        int gibHead = gi.Surface_NameToNum(gib->edict->tiki, "head");
+
+        numsurfaces = gi.TIKI_NumSurfaces(gib->edict->tiki);
+        if (numsurfaces > MAX_MODEL_SURFACES) {
+            numsurfaces = MAX_MODEL_SURFACES;
+        }
+        if (gibHead < 0 || gibHead >= numsurfaces) {
+            // no head surface on this composite - a headless gib would just be an invisible prop
+            // tumbling around, which is worse than no decap at all. Undo and bail.
+            gib->PostEvent(EV_Remove, 0);
+            {
+                int ci, cn = gi.TIKI_NumSurfaces(edict->tiki);
+                if (cn > MAX_MODEL_SURFACES) { cn = MAX_MODEL_SURFACES; }
+                for (ci = 0; ci < cn; ci++) {
+                    const char *cname = gi.Surface_NumToName(edict->tiki, ci);
+                    if (cname && !Q_stricmp(cname, "head")) {
+                        edict->s.surfaces[ci] &= ~MDL_SURFACE_NODRAW;
+                    }
+                }
+            }
+            m_bCoopHeadGore = qfalse;
+            // [user 2026-08-17] NOT gated on coop_goreDebug any more. With the probe off, this abort
+            // was silent - the user set coop_decapChance 100, took eight shotgun kills, saw no heads
+            // come off, and there was nothing in the log to say why. A decap that refuses to fire is
+            // a defect worth reporting. Deduped per model so it cannot become spam.
+            {
+                static str sLastWarned;
+                if (sLastWarned != model) {
+                    sLastWarned = model;
+                    gi.Printf("^~^~^ DECAP unavailable for %s - the gib composite has no head surface\n",
+                              model.c_str());
+                }
+            }
+            return;
+        }
+        // [user 2026-08-17] Keep EVERY surface named "head", not just the first index. The corpse
+        // surface dump showed this model carries TWO of them - corpse[3] = head and corpse[4] = head
+        // (the same shape as tunic / tunic_cull). Surface_NameToNum returns the FIRST match, so
+        // nodraw-ing "everything except gibHead" hid the second one - and if the visible geometry is
+        // that second surface, the severed head renders as nothing at all. Which is exactly the
+        // reported "no decap" with no error: it fired, and produced an invisible head.
+        nHeadSurfs = 0;
+        for (i = 0; i < numsurfaces; i++) {
+            const char *sname = gi.Surface_NumToName(gib->edict->tiki, i);
+            if (sname && !Q_stricmp(sname, "head")) {
+                nHeadSurfs++;
+                // carry the disfigured face onto every head surface
+                gib->edict->s.surfaces[i] =
+                    (gib->edict->s.surfaces[i] & ~(MDL_SURFACE_SKINOFFSET_BIT0 | MDL_SURFACE_SKINOFFSET_BIT1)) | 3;
+            } else {
+                gib->edict->s.surfaces[i] |= MDL_SURFACE_NODRAW;
+            }
+        }
+
+    }
+    // [user 2026-08-17] PUT THE COLLISION BOX ON THE HEAD, not on the entity origin.
+    //
+    // Symptoms were "it clips thru the ground" and "other times it floats in the air" - opposite
+    // complaints with ONE cause. The gib draws the whole body in bind pose with only the head
+    // visible, so the head MESH sits roughly 60 units above the entity ORIGIN. The collision box was
+    // at the origin, so physics settled the origin on the floor and the visible head hung in the air
+    // above it - or on a slope/ledge the reverse, with the head buried. Making the box bigger could
+    // never fix that, because the box and the thing you can see were in different places.
+    //
+    // mins/maxs are relative to the origin, so the box can simply be MOVED onto the head: measure
+    // where the head bone actually renders (that offset IS the bind-pose displacement), wrap the box
+    // around it, and shift the spawn origin back by the same amount so the visible head starts
+    // exactly where the real one was. Physics then moves the origin while the box tracks the head,
+    // and the head lands on the ground like an object instead of a puppet on an invisible string.
+    {
+        int gibHeadTag = gib->edict->tiki ? gi.Tag_NumForName(gib->edict->tiki, "Bip01 Head") : -1;
+        if (gibHeadTag >= 0) {
+            orientation_t gibOr;
+            Vector        headOfs;
+            float         r;
+
+            gib->GetTagPositionAndOrientation(gibHeadTag, &gibOr);
+            headOfs = Vector(gibOr.origin) - gib->origin; // bind-pose head offset
+
+            r = 6.0f;
+            gib->setSize(headOfs + Vector(-r, -r, -r), headOfs + Vector(r, r, r));
+
+            // start the VISIBLE head where the corpse's head actually was
+            gib->setOrigin(Vector(tagOr.origin) - headOfs);
+
+            // hand the offset to the settle think, which lands the head without trusting the box
+            gib->m_vCoopHeadOfs = headOfs;
+            sCoopLastHeadOfs    = headOfs;
+        }
+    }
+
+    // [user 2026-08-17] DECAP HELMET. "the helmet stays over where the enemies head used to be, so
+    // that should maybe come off too separately." It does now - and via the engine's OWN helmet pop
+    // (EV_Sentient_PopHelmet), which already hides the helmet surfaces and throws a real HelmetObject
+    // with its own physics and landing clatter. Reusing it means the helmet behaves exactly as it
+    // does when shot off, instead of a second bespoke prop that could drift out of step with it.
+    if (WearingHelmet()) {
+        ProcessEvent(EV_Sentient_PopHelmet);
+    }
+
+    // [user 2026-08-17] blood from the severed neck END of the flying head - the same drip FX the
+    // corpse bleed-out uses, so a decapitated head trails the mod's blood rather than inventing a
+    // second look. Attached to the GIB at its own neck bone (the gib carries the full bind-pose
+    // skeleton, so the tag exists), and children are removed with their parent, so it can never
+    // outlive the head.
+    {
+        int gibNeck = gib->edict->tiki ? gi.Tag_NumForName(gib->edict->tiki, "Bip01 Neck") : -1;
+        if (gibNeck >= 0) {
+            Animate *hdrip = new Animate;
+            hdrip->setModel("models/fx/coop_blooddrip.tik");
+            hdrip->setSolidType(SOLID_NOT);
+            if (!hdrip->attach(gib->entnum, gibNeck, qfalse, Vector(0, 0, 0))) {
+                delete hdrip; // parent's child table full - never leave it untracked
+            }
+        }
+    }
+
+    gib->velocity   = velocity + Vector(G_CRandom(90.0f), G_CRandom(90.0f), 130.0f + G_Random(90.0f));
+    // [user 2026-08-17] Heavier tumble (option 3). A head that turns slowly presents a clean,
+    // recognisable profile for whole seconds at a time; spinning it hard means the silhouette is
+    // never still long enough to read as an intact head.
+    gib->avelocity  = Vector(G_CRandom(1400.0f), G_CRandom(1400.0f), G_CRandom(1400.0f));
+    // [user 2026-08-17] DECAP GORE PROPS (option 1) - break the SILHOUETTE.
+    //
+    // The engine cannot deform a mesh from the game module: entityState scale is a single float
+    // (q_shared.h:2198) so there is no per-axis squash, no morph API is exposed in g_public.h at
+    // all, and bone controllers only ROTATE a bone. Real disfigurement would need re-authored
+    // geometry. What IS available is the wound-prop trick already used on bodies: hang a few
+    // crossed-quad gore meshes off the head's own bones so the outline is ragged and lumpy instead
+    // of a clean sphere. Combined with the gore skin and the spin, it reads as a ruined lump.
+    //
+    // Cost is bounded and small: at most 3 props, they are children of the head so they are freed
+    // with it, and a failed attach is deleted rather than left dangling.
+    {
+        static cvar_t *pProps = NULL;
+        const char    *bones[3] = {"Bip01 Head", "Bip01 Neck", "Bip01 Head"};
+        int            want, k;
+
+        if (!pProps) {
+            pProps = gi.Cvar_Get("coop_decapGoreProps", "3", CVAR_ARCHIVE);
+        }
+        want = pProps->integer;
+        if (want < 0) { want = 0; } else if (want > 3) { want = 3; }
+
+        for (k = 0; k < want; k++) {
+            int btag = gib->edict->tiki ? gi.Tag_NumForName(gib->edict->tiki, bones[k]) : -1;
+            if (btag < 0) {
+                continue;
+            }
+            Animate *chunk = new Animate;
+            chunk->setModel("models/fx/coop_wound1.tik");
+            chunk->setSolidType(SOLID_NOT);
+            chunk->setScale(1.6f + G_Random(1.1f)); // varied so the three do not read as copies
+            if (!chunk->attach(gib->entnum, btag, qfalse,
+                               Vector(G_CRandom(3.5f), G_CRandom(3.5f), G_CRandom(3.5f)))) {
+                delete chunk; // child table full - never leave it untracked
+            }
+        }
+    }
+
+    CoopDecapRegisterHead(gib); // bounded by count - see the ring above
+
+    // --- neck cap: a FREE tracked slot or nothing at all ---
+    neckTag = gi.Tag_NumForName(edict->tiki, "Bip01 Neck");
+    if (neckTag >= 0) {
+        slot = -1;
+        for (i = 0; i < COOP_GORE_MAX_WOUNDPROPS; i++) {
+            if (!m_pCoopWoundProp[i]) {
+                slot = i;
+                break;
+            }
+        }
+        if (slot >= 0) {
+            cap = new Animate;
+            cap->setModel("models/fx/coop_stump_neck.tik");
+            cap->setSolidType(SOLID_NOT);
+            cap->setScale(1.0f);
+            if (!cap->attach(entnum, neckTag, qfalse, Vector(0, 0, 0))) {
+                delete cap; // child table full - never leave it untracked
+            } else {
+                m_pCoopWoundProp[slot] = cap;
+            }
+        }
+    }
+
+    // [user 2026-08-17] UNGATED, rate-limited. The success line used to sit behind coop_goreDebug,
+    // so a run with the probe off could not distinguish "fired and looked wrong" from "bailed
+    // silently" - which is exactly the hole the user fell into twice. 12 lines a session is nothing.
+    {
+        static int sTold = 0;
+        if (sTold < 12) {
+            sTold++;
+            gi.Printf("^~^~^ DECAPTRY fired ent=%d mod=%d headsurfs=%d gibsurfs=%d headofs=(%.1f %.1f %.1f) model=%s\n",
+                      entnum, meansofdeath, nHeadSurfs, numsurfaces,
+                      sCoopLastHeadOfs[0], sCoopLastHeadOfs[1], sCoopLastHeadOfs[2], model.c_str());
+        }
+    }
+    if (pDbg->integer) {
+        gi.Printf("^~^~^ DECAP ent=%d mod=%d frame=%d/%d model=%s\n",
+                  entnum, meansofdeath, sBudgetCount,
+                  pBudget->integer > 0 ? pBudget->integer : 3, model.c_str());
     }
 }
 

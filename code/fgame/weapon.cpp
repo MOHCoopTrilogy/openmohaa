@@ -1927,6 +1927,43 @@ void Weapon::Shoot(Event *ev)
                         vSpread += bulletspread[mode] * fSpreadFactor;
                         vSpread *= m_fFireSpreadMult[mode] + 1.0f;
 
+                        // HZM coop [user 2026-08-17] HOLD-BREATH ACCURACY. The breath-hold already
+                        // existed but was PURELY COSMETIC: cg_view.c steadies the ADS sway on the
+                        // client and the server never knew, so where the round actually went was
+                        // unchanged. Steadying the picture without steadying the shot is the worst
+                        // of both - it looks like it should help and does not.
+                        //
+                        // No new networking needed: the condition is ADS + the run key and BOTH are
+                        // already in the usercmd the server holds (BUTTON_COOPADS is bit 13 from the
+                        // ADS rework, BUTTON_RUN is stock). Reading them off last_ucmd makes the
+                        // state inherently self-clearing - let go and the very next shot uses normal
+                        // spread, which is exactly "should be undone when you let go of breathe",
+                        // with no timer to leak and no flag to get stuck.
+                        //
+                        // SEMI-AUTO ONLY, per the request: m_bSemiAuto is the weapon's own flag, so
+                        // a held-breath Thompson or MG42 still sprays. Spread is MULTIPLIED, never
+                        // zeroed - dead-zero reads as hitscan-perfect and strips the weapon of its
+                        // character; 0.10 leaves a tenth of the cone, effectively point-of-aim at
+                        // rifle range. Live-tunable via coop_breathAccuracy.
+                        if (m_bSemiAuto) {
+                            static cvar_t *pBreathAcc = NULL;
+                            if (!pBreathAcc) {
+                                pBreathAcc = gi.Cvar_Get("coop_breathAccuracy", "0.10", CVAR_ARCHIVE);
+                            }
+                            if (pBreathAcc->value > 0.0f && pBreathAcc->value < 1.0f) {
+                                // [user 2026-08-17] Ask the PLAYER, not the raw buttons. Two bugs
+                                // in one: the old test read BUTTON_RUN as "walk key held" when the
+                                // sense is INVERTED (with always-run the bit is CLEARED while the
+                                // walk key is down), so the bonus applied when NOT holding breath;
+                                // and it ignored the hold-time budget, so it outlived the sway.
+                                // Player::TickCoopBreath now runs the same state machine the client
+                                // uses for the sway, so the two end on the same frame.
+                                if (player->IsCoopBreathSteady()) {
+                                    vSpread *= pBreathAcc->value;
+                                }
+                            }
+                        }
+
                         if (m_iZoom) {
                             if (player->IsSubclassOfPlayer() && player->IsZoomed()) {
                                 vSpread *= 1.0f + fSpreadFactor * (m_fZoomSpreadMult - 1.0f);
@@ -2073,6 +2110,43 @@ void Weapon::Shoot(Event *ev)
                         fSpreadFactor = 1.0f - fSpreadFactor;
                         vSpread += bulletspread[mode] * fSpreadFactor;
                         vSpread *= m_fFireSpreadMult[mode] + 1.0f;
+
+                        // HZM coop [user 2026-08-17] HOLD-BREATH ACCURACY. The breath-hold already
+                        // existed but was PURELY COSMETIC: cg_view.c steadies the ADS sway on the
+                        // client and the server never knew, so where the round actually went was
+                        // unchanged. Steadying the picture without steadying the shot is the worst
+                        // of both - it looks like it should help and does not.
+                        //
+                        // No new networking needed: the condition is ADS + the run key and BOTH are
+                        // already in the usercmd the server holds (BUTTON_COOPADS is bit 13 from the
+                        // ADS rework, BUTTON_RUN is stock). Reading them off last_ucmd makes the
+                        // state inherently self-clearing - let go and the very next shot uses normal
+                        // spread, which is exactly "should be undone when you let go of breathe",
+                        // with no timer to leak and no flag to get stuck.
+                        //
+                        // SEMI-AUTO ONLY, per the request: m_bSemiAuto is the weapon's own flag, so
+                        // a held-breath Thompson or MG42 still sprays. Spread is MULTIPLIED, never
+                        // zeroed - dead-zero reads as hitscan-perfect and strips the weapon of its
+                        // character; 0.10 leaves a tenth of the cone, effectively point-of-aim at
+                        // rifle range. Live-tunable via coop_breathAccuracy.
+                        if (m_bSemiAuto) {
+                            static cvar_t *pBreathAcc = NULL;
+                            if (!pBreathAcc) {
+                                pBreathAcc = gi.Cvar_Get("coop_breathAccuracy", "0.10", CVAR_ARCHIVE);
+                            }
+                            if (pBreathAcc->value > 0.0f && pBreathAcc->value < 1.0f) {
+                                // [user 2026-08-17] Ask the PLAYER, not the raw buttons. Two bugs
+                                // in one: the old test read BUTTON_RUN as "walk key held" when the
+                                // sense is INVERTED (with always-run the bit is CLEARED while the
+                                // walk key is down), so the bonus applied when NOT holding breath;
+                                // and it ignored the hold-time budget, so it outlived the sway.
+                                // Player::TickCoopBreath now runs the same state machine the client
+                                // uses for the sway, so the two end on the same frame.
+                                if (player->IsCoopBreathSteady()) {
+                                    vSpread *= pBreathAcc->value;
+                                }
+                            }
+                        }
 
                         if (m_iZoom) {
                             if (player->IsSubclassOfPlayer() && player->IsZoomed()) {

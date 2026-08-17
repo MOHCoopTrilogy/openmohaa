@@ -86,3 +86,24 @@ public:
     HelmetObject();
     void HelmetTouch(Event *ev);
 };
+
+// HZM coop [user 2026-08-17] - DECAPITATION. Mirrors HelmetObject exactly: SOLID_NOT so it can
+// never block a player or an AI's path, MASK_VIEWSOLID so it still lands on the world, EV_Stop
+// (not EV_Touch) because G_Physics_Toss delivers Stop when a SOLID_NOT toss entity settles, and a
+// SHORT self-remove. Never animated - the head renders in its bind pose, which is the whole trick
+// that lets a severed head exist without any new art.
+class HeadGibObject : public Entity
+{
+public:
+    CLASS_PROTOTYPE(HeadGibObject);
+
+    HeadGibObject();
+    void HeadGibStop(Event *ev);
+
+    // HZM coop [user 2026-08-17] - the head MESH sits this far from the entity origin (bind-pose
+    // displacement, measured by CoopGoreTryDecapitate). Everything about landing this thing depends
+    // on it, so it is carried here rather than recomputed.
+    Vector m_vCoopHeadOfs;
+    int    m_iCoopSettleTries;
+    void   CoopHeadSettle(Event *ev);
+};

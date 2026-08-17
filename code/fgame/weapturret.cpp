@@ -966,7 +966,28 @@ void TurretGun::P_ThinkActive(void)
 
     // mirror the heat (0..100) to the gunner's HUD so cgame can draw the red heat meter
     if (owner && owner->IsSubclassOfPlayer()) {
-        static_cast<Player *>(owner.Pointer())->client->ps.stats[STAT_MGHEAT] = (int)m_fHeat;
+        // [user 2026-08-17] The HUD needs the BELT COUNT next to the heat bar, and there is no stat
+        // slot left for it - STAT_LAST_STAT is index 32 and MAX_STATS is 32, so STAT_MGHEAT took the
+        // last one. Raising MAX_STATS is a protocol constant (ships four binaries, TRAPS T4), so pack
+        // both into the one short instead. Stats go over the wire as MSG_WriteShort = 16 bits, and a
+        // signed short caps at 32767:
+        //     value = beltField | (heat6 << 9)     beltField 0..511, heat6 0..63
+        //     max    = 511 + (63 << 9) = 32767      - exactly fits, sign bit stays clear
+        // Belt keeps FULL precision because it is read as a number; heat is quantised to 63 steps
+        // because it only drives a 70px bar (~1.1px per step - invisible).
+        // beltField 0 means "no belt / unlimited" so the HUD draws no number; 1..511 is ammo 0..510.
+        {
+            int heat6 = (int)(m_fHeat * 63.0f / 100.0f);
+            int beltField;
+            if (heat6 < 0) { heat6 = 0; } else if (heat6 > 63) { heat6 = 63; }
+            if (m_iCoopAmmo < 0) {
+                beltField = 0;
+            } else {
+                beltField = (m_iCoopAmmo > 510) ? 511 : m_iCoopAmmo + 1;
+            }
+            static_cast<Player *>(owner.Pointer())->client->ps.stats[STAT_MGHEAT] =
+                beltField | (heat6 << 9);
+        }
     }
 
     //

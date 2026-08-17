@@ -157,6 +157,8 @@ protected:
     void             EventCoopBlastShield(Event *ev);        // HZM coop - bug-1586: mission-critical blast immunity
     void             CoopGoreTryWoundProp(int location, int meansofdeath, const Vector &position); // HZM coop - gore tier 3: wound prop at the hit point (bug-735: entry-point attach)
     void             CoopHeadshotKillFx(const Vector &pos, const Vector &dir); // HZM coop - guaranteed burst+wall-splat on a confirmed headshot kill
+    void             CoopGoreDisfigureHead(void);             // HZM coop [user 2026-08-17] - headshot kill: force the HEAD surface to the gib-tier face
+    void             CoopGoreTryDecapitate(int meansofdeath, Entity *inflictor); // HZM coop [user 2026-08-17] - blast/shotgun decapitation
     qboolean         ShouldBleed(int meansofdeath, qboolean dead);
     qboolean         ShouldGib(int meansofdeath, float damage);
     str              GetBloodSpurtName(void);
@@ -244,9 +246,15 @@ public:
     Vector            m_vCoopPoolNormal;       // HZM coop - gore tier 2: floor normal of the growing corpse pool
     int               m_iCoopPoolGen;          // HZM coop - gore tier 2 (bug-817): this pool's start ordinal;
                                                // only the 6 newest chains keep creeping (decal-budget cap)
-    SafePtr<Entity>   m_pCoopWoundProp[4];     // HZM coop - gore tier 3: attached hit-location wound props
+    SafePtr<Entity>   m_pCoopWoundProp[12];    // HZM coop - gore tier 3: attached hit-location wound props
+                                               // [user 2026-08-17] 4 -> 12. Four meant an SMG burst left four
+                                               // holes and then nothing; see CoopGoreTryWoundProp.
+    int               m_iCoopWoundNext;        // HZM coop [user 2026-08-17] - round-robin recycle cursor
                                                // (slot count = COOP_GORE_MAX_WOUNDPROPS in sentient.cpp;
                                                // SafePtr auto-NULLs when a prop is freed with its body)
+    qboolean          m_bCoopHeadGore;         // HZM coop [user 2026-08-17] - a confirmed headshot KILL has
+                                               // disfigured this corpse's head surface; the body tier loop
+                                               // must never walk it back down
     bool              m_bForceDropHealth;
     bool              m_bForceDropWeapon;
 

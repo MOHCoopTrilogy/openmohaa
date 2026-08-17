@@ -2422,6 +2422,11 @@ Player::Player()
     m_fCoopPeekFrac    = 0.0f;     // HZM coop - eased peek step-out fraction [216]
     m_bCoopGearLoop  = false; // HZM coop - gear rattle off
     m_fCoopSprintDur  = 0.0f;
+    // HZM coop [user 2026-08-17] - breath budget; -1 means "uninitialised", filled on first tick
+    m_iCoopBreathRemainMs   = -1;
+    m_iCoopBreathCooldownMs = 0;
+    m_iCoopBreathLastMs     = 0;
+    m_bCoopBreathSteady     = qfalse;
     // HZM coop - TAKE COVER [214]: start clear (no request, no valid pose)
     m_bCoopDbno           = false;   // HZM coop [user 08-02]
     m_bCoopCoverRequested = false;
@@ -13391,6 +13396,73 @@ void Player::TickSprint()
         }
     }
     //====
+
+    TickCoopBreath(); // HZM coop [user 2026-08-17] - server-side breath budget, same tick as sprint
+}
+
+//====
+// HZM coop [user 2026-08-17] - SERVER-SIDE BREATH-HOLD BUDGET.
+//
+// The breath-hold shipped as a CLIENT-ONLY effect: cg_view.c suppresses ADS sway while the walk key
+// is held, on a cg_breathHoldTime budget with a cg_breathCooldown recharge. When the accuracy bonus
+// was added to Weapon::Fire it keyed on the raw buttons only, so the bonus outlived the breath -
+// hold the key long enough and the sway returned while the shots stayed pinpoint.
+//
+// This mirrors the client state machine exactly (same cvar names, same defaults, same order of
+// tests) so the bonus dies on the same frame the sway comes back. On a listen server these are
+// literally the same cvar objects, so the host is always in lockstep; a remote client who edits
+// their own cg_breathHoldTime would drift, which is why the SERVER copy is the authority for
+// accuracy - the client only ever owns the picture.
+//
+// NOTE the button sense, which is easy to get backwards and was: BUTTON_RUN is the run/walk SPEED
+// state, not the raw key. With default always-run it is SET while running and CLEARED while the
+// walk key is held, so "holding breath" means the bit is CLEAR.
+//====
+void Player::TickCoopBreath(void)
+{
+    static cvar_t *pHold = NULL, *pCool = NULL;
+    int            iHoldMs, iCoolMs, nowMs, dt;
+    qboolean       bWalkHeld, bAds;
+
+    if (!pHold) {
+        pHold = gi.Cvar_Get("cg_breathHoldTime", "7", CVAR_ARCHIVE);
+        pCool = gi.Cvar_Get("cg_breathCooldown", "5", CVAR_ARCHIVE);
+    }
+    iHoldMs = (int)(pHold->value * 1000.0f);
+    iCoolMs = (int)(pCool->value * 1000.0f);
+    if (iHoldMs < 100) { iHoldMs = 100; }
+    if (iCoolMs < 100) { iCoolMs = 100; }
+
+    nowMs = (int)(level.time * 1000.0f);
+    if (m_iCoopBreathRemainMs < 0) {
+        m_iCoopBreathRemainMs = iHoldMs;
+        m_iCoopBreathLastMs   = nowMs;
+    }
+    dt = nowMs - m_iCoopBreathLastMs;
+    if (dt < 0 || dt > 500) { dt = 0; } // clamp pauses / map loads, exactly as the client does
+    m_iCoopBreathLastMs = nowMs;
+
+    bAds      = (last_ucmd.buttons & BUTTON_COOPADS) ? qtrue : qfalse;
+    bWalkHeld = (last_ucmd.buttons & BUTTON_RUN) ? qfalse : qtrue;
+    m_bCoopBreathSteady = qfalse;
+
+    if (deadflag || m_bCoopWounded) {
+        return; // no steady aim while down or dying
+    }
+
+    if (m_iCoopBreathCooldownMs != 0) {
+        if (nowMs >= m_iCoopBreathCooldownMs) {
+            m_iCoopBreathCooldownMs = 0;
+            m_iCoopBreathRemainMs   = iHoldMs; // recharge complete
+        }
+    } else if (bAds && bWalkHeld && m_iCoopBreathRemainMs > 0) {
+        m_bCoopBreathSteady = qtrue;
+        m_iCoopBreathRemainMs -= dt;
+        if (m_iCoopBreathRemainMs <= 0) {
+            m_iCoopBreathRemainMs   = 0;
+            m_iCoopBreathCooldownMs = nowMs + iCoolMs; // ran out -> start recharge
+        }
+    }
 }
 
 //====

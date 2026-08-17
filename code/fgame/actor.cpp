@@ -12455,8 +12455,36 @@ void Actor::BecomeCorpse(void)
     if (groundentity) {
         setMoveType(MOVETYPE_NONE);
     } else {
-        // enable physics if on air
-        setMoveType(MOVETYPE_TOSS);
+        // HZM coop [user 2026-08-17] - "bodies sometimes falling through the map after they die".
+        //
+        // MASK_MONSTERSOLID contains the world, so a falling corpse ought to land. What defeats that
+        // is a START-SOLID trace: a death animation routinely leaves the origin a little inside the
+        // floor, and the bbox was just FLATTENED above to (-32,-32,0)..(32,32,16) with mins.z = 0, so
+        // the whole box now sits above an origin that may be embedded. CheckGround then finds nothing,
+        // the body is handed to MOVETYPE_TOSS, and physics on a box that starts solid collides with
+        // nothing - so it sinks straight through the world instead of falling onto it.
+        //
+        // Try to seat it properly before giving up: droptofloor() returns false precisely on the
+        // start-solid/all-solid cases, so a true result means we found real floor and the body can be
+        // parked. Only a genuinely airborne corpse (died on a ledge, blown off a roof) still gets
+        // TOSS, which is the case that physics handles correctly anyway.
+        if (droptofloor(64.0f)) {
+            CheckGround();
+            setMoveType(MOVETYPE_NONE);
+        } else {
+            // enable physics if on air
+            setMoveType(MOVETYPE_TOSS);
+            // Rare and worth seeing: this is the only path that can still sink a body. Not gated on
+            // a debug cvar - a corpse falling out of the world is a defect, not debug noise.
+            {
+                static int sWarned = 0;
+                if (sWarned < 20) {
+                    sWarned++;
+                    gi.Printf("^~^~^ CORPSEFALL ent=%d no ground and droptofloor failed at (%.0f %.0f %.0f) - body may sink\n",
+                              entnum, origin[0], origin[1], origin[2]);
+                }
+            }
+        }
     }
 
     // don't cast shadow

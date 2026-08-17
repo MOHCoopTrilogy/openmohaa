@@ -1642,7 +1642,8 @@ fills as you fire and drains as it cools (see fgame/weapturret.cpp). Only shown 
 */
 static void CG_DrawMGHeat(void)
 {
-    int    heat;
+    int    heat, raw, belt;
+    char   beltStr[32];
     float  bw, bh, bx, by, fillw;
     vec4_t cBg   = {0.0f, 0.0f, 0.0f, 0.55f};
     vec4_t cFill = {0.85f, 0.10f, 0.08f, 0.90f};
@@ -1654,7 +1655,12 @@ static void CG_DrawMGHeat(void)
         return; // only while mounted on a turret
     }
 
-    heat = cg.snap->ps.stats[STAT_MGHEAT];
+    // [user 2026-08-17] STAT_MGHEAT is PACKED - see fgame/weapturret.cpp. There was no free stat
+    // slot for the belt count, so one short carries both: belt in bits 0-8, quantised heat in 9-14.
+    // beltField 0 = no belt (unlimited) -> draw no number. Ship game.dll and cgame.dll TOGETHER.
+    raw  = cg.snap->ps.stats[STAT_MGHEAT];
+    belt = (raw & 511) - 1;              // -1 == unlimited / not ammo-gated
+    heat = ((raw >> 9) & 63) * 100 / 63;
     if (heat < 0) {
         heat = 0;
     } else if (heat > 100) {
@@ -1676,6 +1682,30 @@ static void CG_DrawMGHeat(void)
     if (fillw > 0.0f) {
         cgi.R_SetColor(cFill);
         cgi.R_DrawBox(bx, by, fillw, bh);
+    }
+
+    // [user 2026-08-17] "I can't tell if the mg42's have 500 rounds, it doesn't tell me down by the
+    // mag count." The belt WAS being sent - the server probe confirms 500 applied to all three
+    // church guns - but a bare unlabelled number floating over a small bar is not where anyone
+    // looks for ammo. LABEL it and make it the size of an ammo readout. Amber under 100, red under
+    // 25, so the number carries the same warning the bar does.
+    if (belt >= 0) {
+        vec4_t cTxt = {0.90f, 0.90f, 0.85f, 0.95f};
+        float  tw;
+        if (belt < 25) {
+            cTxt[1] = 0.20f; cTxt[2] = 0.15f;
+        } else if (belt < 100) {
+            cTxt[1] = 0.70f; cTxt[2] = 0.20f;
+        }
+        Com_sprintf(beltStr, sizeof(beltStr), "BELT %i", belt);
+        tw = (float)strlen(beltStr) * 10.0f * cgs.uiHiResScale[0];
+        cgi.R_SetColor(cTxt);
+        cgi.R_DrawString(cgs.media.objectiveFont,
+                         beltStr,
+                         bx + bw - tw,
+                         by - 20.0f * cgs.uiHiResScale[1],
+                         -1,
+                         cgs.uiHiResScale);
     }
 
     cgi.R_SetColor(NULL);

@@ -431,6 +431,125 @@ HelmetObject::HelmetObject()
     PostEvent(EV_Remove, g_helmetlife->value > 0 ? g_helmetlife->value : 5);
 }
 
+Event EV_CoopHeadSettle
+(
+    "_coop_head_settle",
+    EV_DEFAULT,
+    NULL,
+    NULL,
+    "HZM coop - trace the severed head down onto the floor and park it",
+    EV_NORMAL
+);
+
+CLASS_DECLARATION(Entity, HeadGibObject, "headgibobject") {
+    {&EV_Stop,           &HeadGibObject::HeadGibStop  },
+    {&EV_CoopHeadSettle, &HeadGibObject::CoopHeadSettle},
+    {NULL,               NULL                         }
+};
+
+/*
+=================
+HeadGibObject::CoopHeadSettle   (HZM coop [user 2026-08-17])
+
+"severed heads do not seem to still land."
+
+Two attempts at fixing this through the collision box failed, so this stops relying on the box at
+all. The gib draws a whole body in bind pose with only the head visible, so the head MESH is
+displaced from the entity ORIGIN by m_vCoopHeadOfs - and physics only ever knows about the origin.
+
+This traces DOWNWARD FROM THE VISIBLE HEAD, and when it finds floor within reach it places the
+entity so that the head - not the origin - rests just above that floor, then stops the physics. It
+re-posts itself a few times a second while the head is still moving, so it catches the landing
+whether the box behaved or not, and it gives up after a bounded number of tries so a head thrown
+off a cliff cannot poll forever.
+=================
+*/
+void HeadGibObject::CoopHeadSettle(Event *ev)
+{
+    Vector  headPos, start, end;
+    trace_t tr;
+
+    if (movetype == MOVETYPE_NONE) {
+        return; // already parked
+    }
+
+    m_iCoopSettleTries++;
+    if (m_iCoopSettleTries > 120) {
+        return; // ~30s of falling: it is not coming back, let the fade remove it
+    }
+
+    headPos = origin + m_vCoopHeadOfs;
+    start   = headPos + Vector(0, 0, 4);
+    end     = headPos - Vector(0, 0, 12);
+
+    tr = G_Trace(start, Vector(-4, -4, -4), Vector(4, 4, 4), end, this,
+                 MASK_VIEWSOLID, false, "HeadGibObject::CoopHeadSettle");
+
+    if (tr.fraction < 1.0f && !tr.startsolid && !tr.allsolid) {
+        // put the HEAD on the floor, then derive where the origin has to be for that to be true
+        setOrigin(Vector(tr.endpos) + Vector(0, 0, 4) - m_vCoopHeadOfs);
+        velocity  = vec_zero;
+        avelocity = vec_zero;
+        setMoveType(MOVETYPE_NONE);
+        return;
+    }
+
+    PostEvent(EV_CoopHeadSettle, 0.1f);
+}
+
+HeadGibObject::HeadGibObject()
+{
+    // HZM coop [user 2026-08-17] - lifetime is deliberately SHORT. The first decap attempt
+    // (bug-856) left 30s entities behind and, on a count-scaled horde, the survivors piled up and
+    // hitched the fixed-rate server sim - which surfaced as every AI stuttering and not shooting.
+    static cvar_t *pLife = NULL;
+
+    if (LoadingSavegame) {
+        return;
+    }
+
+    setSolidType(SOLID_NOT);
+    setMoveType(MOVETYPE_TOSS);
+    // [user 2026-08-17] "the head does come off but it clips thru the ground". The box was +/-3, so
+    // it settled with the ORIGIN only 3 units above the floor - and a head is far bigger than that,
+    // so most of the mesh ended up buried. Dropping mins.z well below the origin makes the box rest
+    // higher and lifts the whole head clear. Width is widened to match a head rather than a marble,
+    // so it also stops rolling into thin geometry. coop_decapHeadRise tunes the sit height live if
+    // it still looks buried or now floats.
+    // A provisional box only - CoopGoreTryDecapitate re-sizes this onto the head's bind-pose
+    // position the moment the model is known, which is what actually makes it land correctly.
+    setSize(Vector(-6, -6, -6), Vector(6, 6, 6));
+    edict->clipmask = MASK_VIEWSOLID;
+
+    if (!pLife) {
+        pLife = gi.Cvar_Get("coop_decapLife", "0", CVAR_ARCHIVE); // 0 = persist like a corpse
+    }
+
+    m_vCoopHeadOfs      = vec_zero; // filled in by CoopGoreTryDecapitate once the model is known
+    m_iCoopSettleTries  = 0;
+    PostEvent(EV_CoopHeadSettle, 0.15f); // start looking for the floor almost immediately
+    // [user 2026-08-17] "I think they should last way longer before they despawn" - and corpses in
+    // this mod already persist for the whole map (coop_corpseLife 0 = keep forever), so a head
+    // evaporating next to a body that does not was inconsistent anyway.
+    //
+    // coop_decapLife 0 (the new default) = NO timer at all: the head stays like the corpse does.
+    // What keeps that from becoming the entity leak that the 4-second original was guarding against
+    // is a global CAP on live heads instead - see CoopDecapRegisterHead in sentient.cpp, which fades
+    // the oldest once coop_decapMax are on the ground. Bounded either way, but bounded by COUNT
+    // rather than by a stopwatch, which is what actually matters to the entity pool.
+    if (pLife->value > 0) {
+        Event *fade = new Event(EV_Fade);
+        fade->AddFloat(1.5f); // seconds to fade out, then it removes itself
+        PostEvent(fade, pLife->value);
+    }
+}
+
+void HeadGibObject::HeadGibStop(Event *ev)
+{
+    avelocity = vec_zero;
+    setMoveType(MOVETYPE_NONE);
+}
+
 void HelmetObject::HelmetTouch(Event *ev)
 {
     avelocity = vec_zero;

@@ -240,6 +240,15 @@ private:
     qboolean music_forced;
 
     usercmd_t  last_ucmd;
+
+    // HZM coop [user 2026-08-17] - SERVER-SIDE breath-hold budget. The client already runs this
+    // state machine in cg_view.c to steady the ADS sway; this mirror exists so the ACCURACY bonus
+    // in Weapon::Fire expires at the same moment the sway comes back, instead of lasting as long
+    // as the key is held. Same cvars and same rules as the client so the two stay aligned.
+    int        m_iCoopBreathRemainMs;   // ms of breath left (-1 = uninitialised)
+    int        m_iCoopBreathCooldownMs; // level.time*1000 when the recharge ends (0 = not recharging)
+    int        m_iCoopBreathLastMs;     // last update stamp, for dt
+    qboolean   m_bCoopBreathSteady;     // is breath actively steadying THIS frame
     usereyes_t last_eyeinfo;
 
     // movement variables
@@ -817,6 +826,10 @@ public:
 
     // HZM coop - expose the last command buttons so server-side weapon code can detect aim/breath input.
     int GetLastButtons(void) const { return last_ucmd.buttons; };
+    // HZM coop [user 2026-08-17] - true only while the breath is actually steadying (ADS + walk key
+    // AND budget remaining AND not recharging). Weapon::Fire reads this for the accuracy bonus.
+    qboolean IsCoopBreathSteady(void) const { return m_bCoopBreathSteady; };
+    void     TickCoopBreath(void);
 
     void  SetFov(float newFov);
     float GetFov() const;

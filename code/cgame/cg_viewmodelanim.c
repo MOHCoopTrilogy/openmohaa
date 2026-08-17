@@ -77,7 +77,10 @@ static const char *AnimPrefixList[] = {
     "minedetectoraxis",
     "detonator",
     "kar98mortar",
-    "PIAT"
+    "PIAT",
+    // HZM coop [user 2026-08-17] appended - MUST stay index-aligned with animPrefix_e below.
+    // Appended rather than inserted so no existing prefix index shifts.
+    "type100"
 };
 
 enum animPrefix_e {
@@ -131,7 +134,8 @@ enum animPrefix_e {
     WPREFIX_MINE_DETECTOR_AXIS,
     WPREFIX_DETONATOR,
     WPREFIX_KAR98_MORTAR,
-    WPREFIX_PIAT
+    WPREFIX_PIAT,
+    WPREFIX_TYPE100        // [user 2026-08-17] matches "type100" in AnimPrefixList
 };
 
 int CG_GetVMAnimPrefixIndex()
@@ -269,7 +273,14 @@ int CG_GetVMAnimPrefixIndex()
         // (user spec), Beretta M38 (moschetto) -> Moschetto.
         //
         if (!Q_stricmp(szWeaponName, "Type 100 SMG")) {
-            return WPREFIX_STEN;
+            // HZM coop [user 2026-08-17] - was WPREFIX_STEN, per the 07-12 spec above. That spec was
+            // made on the assumption the xw pack shipped no first-person animations for this gun.
+            // It does: models/human/animation/viewmodel/type100/ carries five DISTINCT anims
+            // (verified by hash, not by size - four of them share a byte count by coincidence),
+            // including a 76-frame reload. Borrowing the Sten's threw all of that away. Same defect
+            // as the FG42's WPREFIX_MP44 mapping, found by auditing the pack for shipped-but-
+            // unreferenced content. Revert this one line to go back to Sten hands.
+            return WPREFIX_TYPE100;
         }
         if (!Q_stricmp(szWeaponName, "M3 Grease Gun") || !Q_stricmp(szWeaponName, "Silenced Grease Gun")
             || !Q_stricmp(szWeaponName, "Silenced MP40") || !Q_stricmp(szWeaponName, "Silenced PPS-43")) {
@@ -291,7 +302,14 @@ int CG_GetVMAnimPrefixIndex()
         // Team Assault and Team Tactics
         //
         if (!Q_stricmp(szWeaponName, "FG 42")) {
-            return WPREFIX_MP44;
+            // HZM coop [user 2026-08-17] - was WPREFIX_MP44, which is why the FG42 kept using StG 44
+            // hands: the engine asked for mp44_* aliases, so repointing the fg42_* ones in
+            // fps_anims_mg.txt could never take effect. WPREFIX_FG42 was declared in the enum and the
+            // "fg42" string sits at the matching index in AnimPrefixList, but it was NEVER RETURNED
+            // anywhere - a prefix wired up on both sides and left unreachable in the middle.
+            // Now that DaRKaNGeL's real fg42_stand_idle/fire/reload animations exist, this is the
+            // line that lets them be selected. cgame.dll-only change.
+            return WPREFIX_FG42;
         }
         if (!Q_stricmp(szWeaponName, "Vickers-Berthier")) {
             return WPREFIX_VICKERS;

@@ -1802,7 +1802,24 @@ typedef enum
 // 512->1024 (more sound strings), a long m1l1 officer fight overflowed 41952 ->
 // "MAX_GAMESTATE_CHARS exceeded" server crash. 98304 (96KB) stays well under the already-
 // raised MAX_MSGLEN (131072) that carries the gamestate, with room for offsets/overhead.
-#define	MAX_GAMESTATE_CHARS	98304
+// [user 2026-08-17] 98304 -> 196608 (bug-1864). MEASURED overflow, not a precaution: m3l3 crashed
+// mid-mission with "Server crashed: MAX_GAMESTATE_CHARS exceeded", and the same map's load already
+// reported "gamestate is 98968 of 131072 bytes (75%)". The trigger was bug-1858 making scene7 run
+// in coop for the FIRST time - its crews, MG nests and spawners register models and sounds that had
+// never registered before, on top of a pool already three-quarters full.
+//
+// This is exactly the raise q_shared.h:1710 said would eventually be needed and deferred until
+// there was "real measurement first, which the new gamestate-size report in SV_SendClientGameState
+// now provides". That report is the 98968 line above - the measurement arrived, so here it is.
+//
+// MAX_MSGLEN is doubled in lockstep (qcommon.h) because the WHOLE gamestate - this pool plus
+// stringOffsets plus every entity baseline - serialises into one msgBuffer[MAX_MSGLEN]. Raising the
+// pool alone would just move the crash from "pool full" to "message too long". The 2x/2x pairing
+// keeps the pool at the same ~75% of the buffer that has been safe until now, and the #error in
+// qcommon.h makes that ratio a BUILD break instead of a comment somebody has to remember.
+//
+// PROTOCOL change: openmohaa.exe + cgame.dll + game.dll + omohaaded.exe must all ship together.
+#define	MAX_GAMESTATE_CHARS	196608
 typedef struct {
 	int			stringOffsets[MAX_CONFIGSTRINGS];
 	char		stringData[MAX_GAMESTATE_CHARS];
