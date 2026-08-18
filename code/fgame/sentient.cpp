@@ -2865,7 +2865,7 @@ static void CoopDecapRegisterHead(Entity *head)
         return;
     }
     if (!pMax) {
-        pMax = gi.Cvar_Get("coop_decapMax", "16", CVAR_ARCHIVE);
+        pMax = gi.Cvar_Get("coop_decapMax", "32", CVAR_ARCHIVE); // [user 2026-08-18] 16 -> 32: "the heads disappear still". 32 is the ring array size (COOP_DECAP_MAX_HEADS), so this uses the existing ceiling rather than raising it
     }
     cap = pMax->integer;
     if (cap < 1) {
