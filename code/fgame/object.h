@@ -105,5 +105,7 @@ public:
     // on it, so it is carried here rather than recomputed.
     Vector m_vCoopHeadOfs;
     int    m_iCoopSettleTries;
+    Vector m_vCoopLastOrigin;   // to detect the allsolid freeze (bug-1915)
+    int    m_iCoopStuckFrames;
     void   CoopHeadSettle(Event *ev);
 };

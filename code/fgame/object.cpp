@@ -479,19 +479,56 @@ void HeadGibObject::CoopHeadSettle(Event *ev)
     }
 
     headPos = origin + m_vCoopHeadOfs;
-    start   = headPos + Vector(0, 0, 4);
-    end     = headPos - Vector(0, 0, 12);
 
-    tr = G_Trace(start, Vector(-4, -4, -4), Vector(4, 4, 4), end, this,
-                 MASK_VIEWSOLID, false, "HeadGibObject::CoopHeadSettle");
+    //
+    // [user 2026-08-18] THE ALLSOLID FREEZE - bug-1915, and the real reason four earlier fixes each
+    // changed nothing. g_phys.cpp already documents this for bug-923: an allsolid trace returns
+    // fraction 0 and a ZEROED plane, so the `normal[2] > 0.7` ground test can never pass and the
+    // entity's position freezes at its drop origin while avelocity keeps spinning it. That unstick
+    // was written for MOVETYPE_TOSS items and EXPLICITLY EXCLUDES gibs.
+    //
+    // Our head hits it every time, because its collision box is deliberately offset ~60 units UP
+    // onto the head mesh - which leaves the ORIGIN down at the corpse's feet, at floor level and
+    // frequently in solid. So the head froze the moment it spawned and the mesh drew a head-height
+    // above that frozen origin: "floats where the body was". The solid type, the settle think and
+    // the clipmask all governed how it FELL, which is why fixing each of them was invisible.
+    //
+    // Detect the freeze the way bug-923 does - the origin not moving - and snap the HEAD, not the
+    // origin, down onto real ground. MASK_SOLID excludes CONTENTS_BODY, so unlike the first version
+    // of this think it cannot park on the corpse it just came off.
+    //
+    if ((origin - m_vCoopLastOrigin).lengthSquared() < 1.0f) {
+        m_iCoopStuckFrames++;
+    } else {
+        m_iCoopStuckFrames = 0;
+        m_vCoopLastOrigin  = origin;
+    }
 
-    if (tr.fraction < 1.0f && !tr.startsolid && !tr.allsolid) {
-        // put the HEAD on the floor, then derive where the origin has to be for that to be true
-        setOrigin(Vector(tr.endpos) + Vector(0, 0, 4) - m_vCoopHeadOfs);
+    if (m_iCoopStuckFrames >= 3) {
+        tr = G_Trace(headPos, Vector(-2, -2, -2), Vector(2, 2, 2), headPos - Vector(0, 0, 8192),
+                     this, MASK_SOLID, qfalse, "HeadGibObject::CoopHeadSettle_stuck");
+        if (!tr.startsolid && tr.fraction < 1.0f) {
+            setOrigin(Vector(tr.endpos) + Vector(0, 0, 3) - m_vCoopHeadOfs);
+        }
         velocity  = vec_zero;
         avelocity = vec_zero;
         setMoveType(MOVETYPE_NONE);
         return;
+    }
+
+    // normal landing: once the head itself is falling onto ground, rest it there
+    if (velocity[2] <= 0.0f) {
+        start = headPos + Vector(0, 0, 2);
+        end   = headPos - Vector(0, 0, 6);
+        tr    = G_Trace(start, Vector(-2, -2, -2), Vector(2, 2, 2), end, this, MASK_SOLID, qfalse,
+                        "HeadGibObject::CoopHeadSettle");
+        if (tr.fraction < 1.0f && !tr.startsolid && !tr.allsolid && tr.plane.normal[2] > 0.7f) {
+            setOrigin(Vector(tr.endpos) + Vector(0, 0, 3) - m_vCoopHeadOfs);
+            velocity  = vec_zero;
+            avelocity = vec_zero;
+            setMoveType(MOVETYPE_NONE);
+            return;
+        }
     }
 
     PostEvent(EV_CoopHeadSettle, 0.1f);
@@ -542,14 +579,15 @@ HeadGibObject::HeadGibObject()
 
     m_vCoopHeadOfs      = vec_zero; // filled in by CoopGoreTryDecapitate once the model is known
     m_iCoopSettleTries  = 0;
-    // [user 2026-08-17] The settle think is NO LONGER SCHEDULED. It existed to stop the head
-    // sinking through the floor, but that was really the SOLID_NOT bug above - and with the
-    // head on the engine's own MOVETYPE_GIB + SOLID_BBOX the engine lands it correctly by
-    // itself. Left running it actively hurt: it traces 12 units down and parks the head the
-    // moment ANYTHING is hit, and at the instant of decapitation the thing underneath is the
-    // corpse - so the head froze in mid-air above the body ("head just floats in the air
-    // where the body was"). The handler is kept, unscheduled, because it is still the right
-    // tool if a head ever needs parking deliberately.
+    m_vCoopLastOrigin   = vec_zero;
+    m_iCoopStuckFrames  = 0;
+    // [user 2026-08-18] The settle think is SCHEDULED AGAIN. It was unscheduled on 08-17 because it
+    // parked the head on the corpse - but the real defect there was tracing with MASK_VIEWSOLID,
+    // and MASK_SOLID excludes CONTENTS_BODY so it cannot hit a corpse at all. It has to exist:
+    // MOVETYPE_GIB is excluded from the bug-923 allsolid unstick in g_phys.cpp, and our offset
+    // collision box puts the head's ORIGIN at floor level, so it hits that freeze every single
+    // time (bug-1915). The think is what detects it and snaps the head down to real ground.
+    PostEvent(EV_CoopHeadSettle, 0.1f);
     // [user 2026-08-17] "I think they should last way longer before they despawn" - and corpses in
     // this mod already persist for the whole map (coop_corpseLife 0 = keep forever), so a head
     // evaporating next to a body that does not was inconsistent anyway.
