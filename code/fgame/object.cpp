@@ -525,7 +525,16 @@ HeadGibObject::HeadGibObject()
     // A provisional box only - CoopGoreTryDecapitate re-sizes this onto the head's bind-pose
     // position the moment the model is known, which is what actually makes it land correctly.
     setSize(Vector(-6, -6, -6), Vector(6, 6, 6));
-    edict->clipmask = MASK_VIEWSOLID;
+    // [user 2026-08-17] "heads still float when they get shot off and then eventually disappear",
+    // AFTER the SOLID_BBOX + MOVETYPE_GIB fix was genuinely compiled in. The physics setup was
+    // right by then; the CLIPMASK was not. MASK_VIEWSOLID includes CONTENTS_TRIGGER
+    // (bg_public.h:642), so the head's falling trace stopped on the first TRIGGER BRUSH it touched
+    // - and maps are carpeted in trigger volumes, many of them covering the whole play area. The
+    // head hit one immediately, stopped in mid-air, and sat there until its lifetime expired.
+    // The engine's own Gib sets NO clipmask at all and so inherits Entity's default MASK_SOLID
+    // (entity.cpp:1749), which is solid + playerclip + fence and no triggers. Copy the recipe that
+    // works rather than keep a mask that was only ever meant for view traces.
+    edict->clipmask = MASK_SOLID;
 
     if (!pLife) {
         pLife = gi.Cvar_Get("coop_decapLife", "0", CVAR_ARCHIVE); // 0 = persist like a corpse
