@@ -150,8 +150,21 @@ int CG_GetVMAnimPrefixIndex()
     const char *szWeaponName;
     int         iWeaponClass;
 
+    static char szSkinBase[64];
+
     iWeaponClass = cg.snap->ps.stats[STAT_EQUIPPED_WEAPON];
     szWeaponName = CG_ConfigString(CS_WEAPONS + cg.snap->ps.activeItems[1]);
+
+    //
+    // [user 2026-08-17] A skin variant is named "<Base Gun> (<Finish>)". Resolve it to the base
+    // gun before any of the name matching below, so a re-skin inherits the right hands instead of
+    // dropping through to its weapon class default. Doing this per-variant would mean an entry
+    // here for every gun times every finish; doing it once costs nothing and covers all of them.
+    // A skin must never change how the weapon animates - that is what makes it a skin.
+    //
+    if (CoopStripSkinSuffix(szWeaponName, szSkinBase, sizeof(szSkinBase))) {
+        szWeaponName = szSkinBase;
+    }
 
     if (iWeaponClass & WEAPON_CLASS_ANY_ITEM) {
         if (!Q_stricmp(szWeaponName, "Papers")) {

@@ -1237,15 +1237,60 @@ static const adsGunTune_t s_adsGunTune[] = {
     { "Breda",                  1.5f,  2.0f, -3.0f,  0.045f, 0.035f,   2.0f,-23.0f,  1.5f, -0.38f,  0.155f },
 };
 
+/*
+====================
+CoopStripSkinSuffix
+
+HZM coop [user 2026-08-17]. A skin variant is named "<Base Gun> (<Finish>)" - "Thompson (Gold)".
+Strips the trailing parenthesised part so a cosmetic variant resolves to its base gun. Returns
+qtrue only when something was actually stripped.
+====================
+*/
+qboolean CoopStripSkinSuffix(const char *in, char *out, int outSize)
+{
+    const char *paren;
+    int         len;
+
+    if (!in || !*in || !out || outSize <= 0) {
+        return qfalse;
+    }
+    paren = strstr(in, " (");
+    if (!paren) {
+        return qfalse;
+    }
+    len = (int)(paren - in);
+    if (len <= 0 || len >= outSize) {
+        return qfalse;
+    }
+    memcpy(out, in, len);
+    out[len] = 0;
+    return qtrue;
+}
+
 const adsGunTune_t *CG_FindAdsTune(const char *wpn)
 {
-    int i;
+    int  i;
+    char base[64];
+
     if (!wpn || !*wpn) {
         return NULL;
     }
     for (i = 0; i < (int)(sizeof(s_adsGunTune) / sizeof(s_adsGunTune[0])); i++) {
         if (!Q_stricmp(wpn, s_adsGunTune[i].name)) {
             return &s_adsGunTune[i];
+        }
+    }
+    //
+    // [user 2026-08-17] No exact hit - fall back to the base gun. Without this a skin variant
+    // silently loses every hand-dialled sight value in the table above, because the lookup is an
+    // exact Q_stricmp and "Thompson (Gold)" is not "Thompson". Exact still wins, so a variant CAN
+    // be given its own tuning later simply by adding a row for it.
+    //
+    if (CoopStripSkinSuffix(wpn, base, sizeof(base))) {
+        for (i = 0; i < (int)(sizeof(s_adsGunTune) / sizeof(s_adsGunTune[0])); i++) {
+            if (!Q_stricmp(base, s_adsGunTune[i].name)) {
+                return &s_adsGunTune[i];
+            }
         }
     }
     return NULL;

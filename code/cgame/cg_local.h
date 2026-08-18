@@ -535,7 +535,11 @@ extern "C" {
         float sPitch, sYaw, sRoll, sShiftX, sShiftY;   // standing (absolute)
         float cPitch, cYaw, cRoll, cShiftX, cShiftY;   // crouch EXTRA (added on top of standing)
     } adsGunTune_t;
-    const adsGunTune_t *CG_FindAdsTune(const char *wpn);
+    // [user 2026-08-17] "<Base Gun> (<Finish>)" -> "<Base Gun>". Used by both the ADS tune
+// lookup and the first-person prefix so a skin inherits its base gun's behaviour.
+qboolean CoopStripSkinSuffix(const char *in, char *out, int outSize);
+
+const adsGunTune_t *CG_FindAdsTune(const char *wpn);
     extern cvar_t *cg_adsUp;      // HZM coop - ADS weapon raise (units)
     extern cvar_t *cg_adsForward; // HZM coop - ADS weapon forward/back (units)
     extern cvar_t *cg_adsRight;   // HZM coop - ADS weapon right/left (units)
