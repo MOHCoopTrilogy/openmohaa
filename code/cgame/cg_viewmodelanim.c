@@ -80,7 +80,9 @@ static const char *AnimPrefixList[] = {
     "PIAT",
     // HZM coop [user 2026-08-17] appended - MUST stay index-aligned with animPrefix_e below.
     // Appended rather than inserted so no existing prefix index shifts.
-    "type100"
+    "type100",
+    // [user 2026-08-17] index-aligned with animPrefix_e below; appended, never inserted.
+    "johnson"
 };
 
 enum animPrefix_e {
@@ -135,7 +137,8 @@ enum animPrefix_e {
     WPREFIX_DETONATOR,
     WPREFIX_KAR98_MORTAR,
     WPREFIX_PIAT,
-    WPREFIX_TYPE100        // [user 2026-08-17] matches "type100" in AnimPrefixList
+    WPREFIX_TYPE100,       // [user 2026-08-17] matches "type100" in AnimPrefixList
+    WPREFIX_JOHNSON        // [user 2026-08-17] matches "johnson" in AnimPrefixList
 };
 
 int CG_GetVMAnimPrefixIndex()
@@ -175,6 +178,14 @@ int CG_GetVMAnimPrefixIndex()
         }
         if (!Q_stricmp(szWeaponName, "Beretta")) {
             return WPREFIX_BERETTA;
+        }
+        //
+        // HZM coop [user 2026-08-17]: East's Mauser C96 is rigged to the P38 skeleton - that is
+        // what let his mod ship as a P38 replacement and inherit its animations. Without this the
+        // pistol-class fallback below would hand it Colt 45 hands, which is the wrong rig.
+        //
+        if (!Q_stricmp(szWeaponName, "Mauser C96")) {
+            return WPREFIX_P38;
         }
 
         return WPREFIX_COLT45;
@@ -244,6 +255,15 @@ int CG_GetVMAnimPrefixIndex()
         }
         if (!Q_stricmp(szWeaponName, "Springfield M1903")) {
             return WPREFIX_SPRINGFIELD;
+        }
+        //
+        // HZM coop [user 2026-08-17]: the Johnson gets its OWN prefix rather than borrowing the
+        // Garand's, because East shipped a real 91-frame first-person reload with it. Mapping it
+        // to WPREFIX_GARAND would have thrown that away - the same defect as the FG42 wearing StG
+        // 44 hands and the Type 100 wearing the Sten's.
+        //
+        if (!Q_stricmp(szWeaponName, "Johnson M1941")) {
+            return WPREFIX_JOHNSON;
         }
 
         return WPREFIX_GARAND;
