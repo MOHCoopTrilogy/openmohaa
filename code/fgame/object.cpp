@@ -533,7 +533,14 @@ HeadGibObject::HeadGibObject()
 
     m_vCoopHeadOfs      = vec_zero; // filled in by CoopGoreTryDecapitate once the model is known
     m_iCoopSettleTries  = 0;
-    PostEvent(EV_CoopHeadSettle, 0.15f); // start looking for the floor almost immediately
+    // [user 2026-08-17] The settle think is NO LONGER SCHEDULED. It existed to stop the head
+    // sinking through the floor, but that was really the SOLID_NOT bug above - and with the
+    // head on the engine's own MOVETYPE_GIB + SOLID_BBOX the engine lands it correctly by
+    // itself. Left running it actively hurt: it traces 12 units down and parks the head the
+    // moment ANYTHING is hit, and at the instant of decapitation the thing underneath is the
+    // corpse - so the head froze in mid-air above the body ("head just floats in the air
+    // where the body was"). The handler is kept, unscheduled, because it is still the right
+    // tool if a head ever needs parking deliberately.
     // [user 2026-08-17] "I think they should last way longer before they despawn" - and corpses in
     // this mod already persist for the whole map (coop_corpseLife 0 = keep forever), so a head
     // evaporating next to a body that does not was inconsistent anyway.
