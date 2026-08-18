@@ -83,7 +83,8 @@ static const char *AnimPrefixList[] = {
     "type100",
     // [user 2026-08-17] index-aligned with animPrefix_e below; appended, never inserted.
     "johnson",
-    "dp28"
+    "dp28",
+    "m10"
 };
 
 enum animPrefix_e {
@@ -140,7 +141,8 @@ enum animPrefix_e {
     WPREFIX_PIAT,
     WPREFIX_TYPE100,       // [user 2026-08-17] matches "type100" in AnimPrefixList
     WPREFIX_JOHNSON,       // [user 2026-08-17] matches "johnson" in AnimPrefixList
-    WPREFIX_DP28           // [user 2026-08-17] matches "dp28" in AnimPrefixList
+    WPREFIX_DP28,          // [user 2026-08-17] matches "dp28" in AnimPrefixList
+    WPREFIX_M10            // [user 2026-08-17] matches "m10" in AnimPrefixList
 };
 
 int CG_GetVMAnimPrefixIndex()
@@ -188,6 +190,14 @@ int CG_GetVMAnimPrefixIndex()
         //
         if (!Q_stricmp(szWeaponName, "Mauser C96")) {
             return WPREFIX_P38;
+        }
+        //
+        // HZM coop [user 2026-08-17]: the S&W M10 gets its own prefix because East shipped a real
+        // 141 KB first-person reload with it - a revolver reload looks nothing like a Colt's
+        // magazine swap, so borrowing the Colt's hands would have thrown the good part away.
+        //
+        if (!Q_stricmp(szWeaponName, "S&W M10 .38")) {
+            return WPREFIX_M10;
         }
 
         return WPREFIX_COLT45;
@@ -400,6 +410,14 @@ int CG_GetVMAnimPrefixIndex()
             return WPREFIX_BAZOOKA;
         }
         if (!Q_stricmp(szWeaponName, "Panzerschreck")) {
+            return WPREFIX_PANZERSCHRECK;
+        }
+        //
+        // HZM coop [user 2026-08-17]: East's Panzerfaust is a re-skin of the Panzerschreck MESH, so
+        // the Panzerschreck's hands are not a fallback here - they are the correct rig. He shipped
+        // no first-person animations of his own.
+        //
+        if (!Q_stricmp(szWeaponName, "Panzerfaust")) {
             return WPREFIX_PANZERSCHRECK;
         }
         if (!Q_stricmp(szWeaponName, "Gewehrgranate")) {
