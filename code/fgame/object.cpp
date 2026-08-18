@@ -508,8 +508,14 @@ HeadGibObject::HeadGibObject()
         return;
     }
 
-    setSolidType(SOLID_NOT);
-    setMoveType(MOVETYPE_TOSS);
+    // [user 2026-08-17] "severed heads didnt land on the ground". SOLID_NOT was the whole
+    // problem: a non-solid entity does not collide with the world, so MOVETYPE_TOSS just fell
+    // forever and no amount of tuning the settle trace could catch it - the head was never going
+    // to stop. This is the engine's OWN gib recipe from gibs.cpp:64-65 (MOVETYPE_GIB +
+    // SOLID_BBOX), which falls, lands, and does not block players. Copy the working recipe rather
+    // than invent a third physics setup.
+    setSolidType(SOLID_BBOX);
+    setMoveType(MOVETYPE_GIB);
     // [user 2026-08-17] "the head does come off but it clips thru the ground". The box was +/-3, so
     // it settled with the ORIGIN only 3 units above the floor - and a head is far bigger than that,
     // so most of the mesh ended up buried. Dropping mins.z well below the origin makes the box rest

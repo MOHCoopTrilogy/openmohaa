@@ -3207,6 +3207,38 @@ void Sentient::CoopGoreTryDecapitate(int meansofdeath, Entity *inflictor)
     // does when shot off, instead of a second bespoke prop that could drift out of step with it.
     if (WearingHelmet()) {
         ProcessEvent(EV_Sentient_PopHelmet);
+    } else {
+        //
+        // [user 2026-08-17] "helmets didnt come off". EV_Sentient_PopHelmet only does anything for
+        // a model that actually REGISTERED a helmet via sethelmet - WearingHelmet() tests
+        // m_sHelmetSurface1, which is empty otherwise. Plenty of models carry their helmet as
+        // ordinary geometry (an "outside"/"hat"/"camocover" surface) and never register it, so the
+        // pop was a no-op and the helmet stayed hanging where the head had been.
+        //
+        // For those, hide the headgear surfaces directly. Names are the ones the retail sethelmet
+        // calls use across the trilogy - us_helmet, outside/inside (German steel), hat (caps),
+        // creasecap, camocover - matched exactly, so nothing else can be caught by accident.
+        //
+        static const char *headgear[] = {"outside", "inside",  "us_helmet", "hat",
+                                         "creasecap", "camocover", "helmet"};
+        int                ns = gi.TIKI_NumSurfaces(edict->tiki);
+        int                si, gi_;
+
+        if (ns > MAX_MODEL_SURFACES) {
+            ns = MAX_MODEL_SURFACES;
+        }
+        for (si = 0; si < ns; si++) {
+            const char *sn = gi.Surface_NumToName(edict->tiki, si);
+            if (!sn || !*sn) {
+                continue;
+            }
+            for (gi_ = 0; gi_ < (int)(sizeof(headgear) / sizeof(headgear[0])); gi_++) {
+                if (!Q_stricmp(sn, headgear[gi_])) {
+                    edict->s.surfaces[si] |= MDL_SURFACE_NODRAW;
+                    break;
+                }
+            }
+        }
     }
 
     // [user 2026-08-17] blood from the severed neck END of the flying head - the same drip FX the
