@@ -82,7 +82,8 @@ static const char *AnimPrefixList[] = {
     // Appended rather than inserted so no existing prefix index shifts.
     "type100",
     // [user 2026-08-17] index-aligned with animPrefix_e below; appended, never inserted.
-    "johnson"
+    "johnson",
+    "dp28"
 };
 
 enum animPrefix_e {
@@ -138,7 +139,8 @@ enum animPrefix_e {
     WPREFIX_KAR98_MORTAR,
     WPREFIX_PIAT,
     WPREFIX_TYPE100,       // [user 2026-08-17] matches "type100" in AnimPrefixList
-    WPREFIX_JOHNSON        // [user 2026-08-17] matches "johnson" in AnimPrefixList
+    WPREFIX_JOHNSON,       // [user 2026-08-17] matches "johnson" in AnimPrefixList
+    WPREFIX_DP28           // [user 2026-08-17] matches "dp28" in AnimPrefixList
 };
 
 int CG_GetVMAnimPrefixIndex()
@@ -317,6 +319,15 @@ int CG_GetVMAnimPrefixIndex()
         }
         if (!Q_stricmp(szWeaponName, "StG 44")) {
             return WPREFIX_MP44;
+        }
+        //
+        // HZM coop [user 2026-08-17]: Lt. Pato shipped real first-person animations with the DP-28
+        // - fire, a 161 KB reload and a pullout - so it gets its own prefix. He wired them by
+        // overwriting the BAR's aliases in his own fps_anims_mg.txt; giving the DP a prefix instead
+        // is what lets both guns keep their hands.
+        //
+        if (!Q_stricmp(szWeaponName, "DP-28")) {
+            return WPREFIX_DP28;
         }
         //
         // Team Assault and Team Tactics
