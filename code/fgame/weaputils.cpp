@@ -2342,6 +2342,10 @@ float BulletAttack(
                 if (e != owner && e->IsSubclassOfActor() && e->health > 0
                     && static_cast<Sentient *>(e)->m_Team != ownTeam) {
                     static_cast<Actor *>(e)->m_fSuppressTime = level.time + pSupT->value;
+                    // [user 2026-08-18] export the moment to script (precedent g_client.cpp:818):
+                    // m_fSuppressTime itself is invisible to the script VM, and the suppression-
+                    // reactive dive/prone lives script-side where the anim machinery is proven.
+                    e->Vars()->SetVariable("coop_suppressedAt", level.time);
                 }
             }
         }
