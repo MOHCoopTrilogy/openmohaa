@@ -597,6 +597,8 @@ Projectile::Projectile()
 {
     entflags |= ECF_PROJECTILE;
 
+    m_fCoopKickOk = 0; // HZM coop: grenade kick gate
+
     if (LoadingSavegame) {
         // Archive function will setup all necessary data
         return;

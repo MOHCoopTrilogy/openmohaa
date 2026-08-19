@@ -60,6 +60,7 @@ public:
 	SafePtr<Weapon> weap;
 	Vector dlight_color;
 	Vector addvelocity;
+	float m_fCoopKickOk; // HZM coop [user 2026-08-19] grenade kick: per-projectile re-kick gate
 	meansOfDeath_t meansofdeath;
 	class FuncBeam *m_beam;
 	int projFlags;

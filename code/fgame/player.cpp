@@ -14578,6 +14578,95 @@ void Player::Postthink(void)
             TryDropBloodTrail();
         }
     }
+
+    // HZM coop [user 2026-08-19] GRENADE KICK: "we should be able to kick grenades when they
+    // get close too" - a live grenade lying or rolling at your feet gets booted the way you
+    // face. In-flight grenades (speed > 260) are not kickable; each grenade takes one kick
+    // per 0.6s so a pileup doesn't machine-gun impulses. Pairs with the AI diveongrenade /
+    // martyr behaviors. coop_grenadeKick 0 disables.
+    {
+        static cvar_t *pGK = NULL;
+        if (!pGK) {
+            pGK = gi.Cvar_Get("coop_grenadeKick", "1", CVAR_ARCHIVE);
+        }
+        if (pGK->integer && !IsDead() && !IsSpectator()) {
+            Entity *pEnt;
+            for (pEnt = findradius(NULL, origin, 64.0f); pEnt; pEnt = findradius(pEnt, origin, 64.0f)) {
+                if (!pEnt->isSubclassOf(Projectile)) {
+                    continue;
+                }
+                Projectile *pProj = static_cast<Projectile *>(pEnt);
+                if (level.time < pProj->m_fCoopKickOk) {
+                    continue;
+                }
+                if (pProj->velocity.length() > 260.0f) {
+                    continue;
+                }
+                const char *pszModel = pProj->model.c_str();
+                if (!pszModel
+                    || (!Q_stristr(pszModel, "grenade") && !Q_stristr(pszModel, "masher")
+                        && !Q_stristr(pszModel, "mills") && !Q_stristr(pszModel, "bomba"))) {
+                    continue;
+                }
+                Vector vTo = pProj->origin - origin;
+                if (fabs(vTo.z) > 56.0f) {
+                    continue;
+                }
+                vTo.z       = 0;
+                float fDist = vTo.length();
+                if (fDist > 56.0f) {
+                    continue;
+                }
+                Vector vFwd;
+                AngleVectors(GetViewAngles(), vFwd, NULL, NULL);
+                vFwd.z = 0;
+                vFwd.normalize();
+                if (fDist > 12.0f) {
+                    Vector vDir = vTo * (1.0f / fDist);
+                    if ((vDir * vFwd) < 0.35f) {
+                        continue; // it's behind/beside you - no heel flicks
+                    }
+                }
+                pProj->m_fCoopKickOk = level.time + 0.6f;
+                pProj->velocity      = vFwd * 460.0f + Vector(0, 0, 230.0f);
+                pProj->avelocity     = Vector(crandom() * 260.0f, crandom() * 260.0f, crandom() * 260.0f);
+                pProj->groundentity  = NULL;
+                break; // one boot per frame
+            }
+        }
+    }
+
+    // HZM coop [user 2026-08-19] VAULT: "can we add vault mechanic for waist high objects" -
+    // jumping into a waist-high obstacle mantles you over it instead of face-planting: knee
+    // trace blocked + chest trace clear + headroom -> a stronger, forward-carried jump (the
+    // jump-pad pattern: server-side velocity, prediction tolerates it). coop_vault 0 disables.
+    {
+        static cvar_t *pGV = NULL;
+        static float   s_fVaultOk[MAX_CLIENTS];
+        if (!pGV) {
+            pGV = gi.Cvar_Get("coop_vault", "1", CVAR_ARCHIVE);
+        }
+        if (pGV->integer && !IsDead() && !IsSpectator() && groundentity && current_ucmd
+            && current_ucmd->upmove > 0 && client->ps.clientNum < MAX_CLIENTS
+            && level.time >= s_fVaultOk[client->ps.clientNum]) {
+            Vector vFwd;
+            AngleVectors(Vector(0, GetViewAngles().y, 0), vFwd, NULL, NULL);
+            if ((velocity * vFwd) > 40.0f) {
+                trace_t trKnee = G_Trace(
+                    origin + Vector(0, 0, 20), vec_zero, vec_zero, origin + Vector(0, 0, 20) + vFwd * 46.0f, this,
+                    MASK_PLAYERSOLID, qfalse, "coop_vault_knee");
+                if (trKnee.fraction < 1.0f && trKnee.plane.normal[2] < 0.7f) {
+                    trace_t trChest = G_Trace(
+                        origin + Vector(0, 0, 56), vec_zero, vec_zero, origin + Vector(0, 0, 56) + vFwd * 52.0f,
+                        this, MASK_PLAYERSOLID, qfalse, "coop_vault_chest");
+                    if (trChest.fraction >= 1.0f) {
+                        s_fVaultOk[client->ps.clientNum] = level.time + 0.8f;
+                        velocity                         = vFwd * 150.0f + Vector(0, 0, 310.0f);
+                    }
+                }
+            }
+        }
+    }
 }
 
 void Player::AdminRights(Event *ev)
