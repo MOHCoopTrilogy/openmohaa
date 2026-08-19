@@ -1267,18 +1267,49 @@ qboolean CoopStripSkinSuffix(const char *in, char *out, int outSize)
     return qtrue;
 }
 
-const adsGunTune_t *CG_FindAdsTune(const char *wpn)
-{
-    int  i;
-    char base[64];
+// [user 2026-08-18] "I wish there was a simpler way to get these new guns ads done and accurate
+// without having to manually do it." DONOR ALIASES: a new gun that is mechanically the same
+// family as a hand-dialled one borrows that gun's tune by name - one line here instead of a
+// numpad session. Exact rows and the "(Finish)" strip still win, so any alias can be replaced
+// by a real dialled row later without touching this list. Scoped guns are absent on purpose:
+// their ADS is the scope overlay, not iron sights. Audit tool: docs/tools/ads_audit.py lists
+// every shipped weapon name that resolves to no row.
+static const char *const s_adsDonor[][2] = {
+    {"DP-28",         "Vickers-Berthier"}, // top-magazine LMG, offset irons like the VB
+    {"FG 42",         "StG 44"          }, // shoulder-fired automatic rifle
+    {"G 43",          "M1 Garand"       }, // semi-auto battle rifle
+    {"SVT 40",        "M1 Garand"       }, // semi-auto battle rifle
+    {"Johnson M1941", "M1 Garand"       }, // semi-auto battle rifle
+    {"Gewehrgranate", "Mauser KAR 98K"  }, // kar98 body with a launcher cup
+    {"Mauser C96",    "Luger P08"       }, // German pistol
+    {"S&W M10 .38",   "Webley Revolver" }, // top-break-style revolver sight picture
+};
 
-    if (!wpn || !*wpn) {
-        return NULL;
-    }
+static const adsGunTune_t *CG_AdsTuneExact(const char *wpn)
+{
+    int i;
+
     for (i = 0; i < (int)(sizeof(s_adsGunTune) / sizeof(s_adsGunTune[0])); i++) {
         if (!Q_stricmp(wpn, s_adsGunTune[i].name)) {
             return &s_adsGunTune[i];
         }
+    }
+    return NULL;
+}
+
+const adsGunTune_t *CG_FindAdsTune(const char *wpn)
+{
+    int                 i;
+    char                base[64];
+    const char         *name;
+    const adsGunTune_t *t;
+
+    if (!wpn || !*wpn) {
+        return NULL;
+    }
+    t = CG_AdsTuneExact(wpn);
+    if (t) {
+        return t;
     }
     //
     // [user 2026-08-17] No exact hit - fall back to the base gun. Without this a skin variant
@@ -1286,11 +1317,19 @@ const adsGunTune_t *CG_FindAdsTune(const char *wpn)
     // exact Q_stricmp and "Thompson (Gold)" is not "Thompson". Exact still wins, so a variant CAN
     // be given its own tuning later simply by adding a row for it.
     //
+    name = wpn;
     if (CoopStripSkinSuffix(wpn, base, sizeof(base))) {
-        for (i = 0; i < (int)(sizeof(s_adsGunTune) / sizeof(s_adsGunTune[0])); i++) {
-            if (!Q_stricmp(base, s_adsGunTune[i].name)) {
-                return &s_adsGunTune[i];
-            }
+        name = base;
+        t    = CG_AdsTuneExact(name);
+        if (t) {
+            return t;
+        }
+    }
+    // [user 2026-08-18] donor stage: runs on the finish-stripped base name, so
+    // "FG 42 (Gold)" -> "FG 42" -> StG 44's dialled values.
+    for (i = 0; i < (int)(sizeof(s_adsDonor) / sizeof(s_adsDonor[0])); i++) {
+        if (!Q_stricmp(name, s_adsDonor[i][0])) {
+            return CG_AdsTuneExact(s_adsDonor[i][1]);
         }
     }
     return NULL;
