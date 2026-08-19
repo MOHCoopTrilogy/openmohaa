@@ -158,6 +158,9 @@ protected:
     void             CoopGoreTryWoundProp(int location, int meansofdeath, const Vector &position); // HZM coop - gore tier 3: wound prop at the hit point (bug-735: entry-point attach)
     void             CoopHeadshotKillFx(const Vector &pos, const Vector &dir); // HZM coop - guaranteed burst+wall-splat on a confirmed headshot kill
     void             CoopGoreDisfigureHead(void);             // HZM coop [user 2026-08-17] - headshot kill: force the HEAD surface to the gib-tier face
+    void             CoopGoreThrowChunks(const Vector &pos, const Vector &dir, int n, const char *pszTik, float fScale); // HZM coop [user 2026-08-19] budgeted meat-chunk spray
+    void             CoopGoreHeadshotExtras(const Vector &pos, const Vector &dir); // HZM coop [user 2026-08-19] brain chunks + dangling eyeball
+    void             CoopGoreDeathKinetics(const Vector &pos, const Vector &dir, float fDamage, int mod, Entity *inflictor); // HZM coop [user 2026-08-19] corpse impulse + explosion decap/chunks
     void             CoopGoreTryDecapitate(int meansofdeath, Entity *inflictor); // HZM coop [user 2026-08-17] - blast/shotgun decapitation
     qboolean         ShouldBleed(int meansofdeath, qboolean dead);
     qboolean         ShouldGib(int meansofdeath, float damage);

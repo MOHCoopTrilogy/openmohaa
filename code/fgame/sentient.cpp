@@ -962,6 +962,9 @@ void Sentient::SetBloodModel(Event *ev)
     // HZM coop [user 2026-08-17] - decap assets are registered HERE, on the spawn path, so the
     // first decapitation of a map does not pay a registration spike mid-firefight (bug-856).
     CacheResource("models/fx/coop_stump_neck.tik");
+    CacheResource("models/fx/coop_headgib.tik");   // [user 2026-08-19] gore chunk set
+    CacheResource("models/fx/coop_gorechunk.tik");
+    CacheResource("models/fx/coop_eyegib.tik");
     str name;
     str cache_name;
     str models_dir = "models/";
@@ -1732,6 +1735,13 @@ void Sentient::ArmorDamage(Event *ev)
         attacker->Sound("coop_headshot", CHAN_LOCAL);
         CoopHeadshotKillFx(position, direction);
         CoopGoreDisfigureHead(); // HZM coop [user 2026-08-17] - and leave the face unrecognisable
+        CoopGoreHeadshotExtras(position, direction); // HZM coop [user 2026-08-19] - brain chunks + eyeball
+    }
+
+    // HZM coop [user 2026-08-19] death kinetics: corpse impulse on every kill; explosion kills
+    // spray meat and a slice decapitate (bug-866 safe pattern). Non-players, flesh only.
+    if (fCoopPrevHealth > 0 && health <= 0 && !IsSubclassOfPlayer()) {
+        CoopGoreDeathKinetics(position, direction, damage, meansofdeath, inflictor);
     }
 
     if (meansofdeath == MOD_SLIME) {
@@ -2520,6 +2530,170 @@ void Sentient::CoopGoreDisfigureHead(void)
 // no holes on players); non-flesh (vehicles/turrets) is excluded naturally. Crash-safe by construction:
 // any missing tiki/tag/table entry = silent skip.
 #define COOP_GORE_MAX_WOUNDPROPS 12 // per body; MUST match m_pCoopWoundProp[] in sentient.h
+
+static qboolean CoopGoreModIsExplosive(int meansofdeath, Entity *inflictor); // defined with CoopGoreTryGibSkins below
+
+// HZM coop [user 2026-08-19] GORE CHUNKS: budgeted, nonsolid, bouncing, self-removing meat
+// props (crossed-quad xbeam art, view-angle safe like the neck stump). ONE global per-frame
+// budget guards the count-scaled-horde lesson from bug-856: per-death entity spawns are a
+// server-load multiplier - one grenade into 80 AI must never spawn dozens of props in a frame.
+void Sentient::CoopGoreThrowChunks(const Vector &pos, const Vector &dir, int n, const char *pszTik, float fScale)
+{
+    static cvar_t *pOn = NULL, *pBud = NULL, *pLife = NULL;
+    static int     s_iFrameTime = -1, s_iThisFrame = 0;
+    int            i;
+
+    if (!pOn) {
+        pOn   = gi.Cvar_Get("coop_goreChunks", "1", CVAR_ARCHIVE);
+        pBud  = gi.Cvar_Get("coop_goreChunkBudget", "6", 0);
+        pLife = gi.Cvar_Get("coop_decapLife", "4", CVAR_ARCHIVE);
+    }
+    if (!pOn->integer || !com_blood->integer) {
+        return;
+    }
+    if (s_iFrameTime != level.inttime) {
+        s_iFrameTime = level.inttime;
+        s_iThisFrame = 0;
+    }
+    for (i = 0; i < n; i++) {
+        if (s_iThisFrame >= pBud->integer) {
+            return; // budget spent this frame - the rest of the meat stays theoretical
+        }
+        s_iThisFrame++;
+        Animate *chunk = new Animate;
+        chunk->setModel(pszTik);
+        chunk->setSolidType(SOLID_NOT);
+        chunk->setMoveType(MOVETYPE_BOUNCE);
+        chunk->setScale(fScale * (0.75f + G_Random(0.5f)));
+        chunk->setOrigin(pos);
+        chunk->velocity =
+            dir * (90.0f + G_Random(160.0f)) + Vector(G_CRandom(70.0f), G_CRandom(70.0f), 150.0f + G_Random(140.0f));
+        chunk->avelocity = Vector(G_CRandom(400.0f), G_CRandom(400.0f), G_CRandom(400.0f));
+        // coop_decapLife 0 is seeded as "persist like corpses" - honor it BOUNDED (25s), because
+        // a literal never-remove accumulates entities all map on count-scaled hordes (bug-856 class)
+        chunk->PostEvent(EV_Remove, (pLife->value > 0.5f) ? pLife->value : 25.0f);
+    }
+}
+
+// HZM coop [user 2026-08-19] "if we could have eyeballs hanging out too/brain pieces from
+// headshots that would be good additions" - rides the confirmed-headshot-kill edge: brain
+// matter sprays through the exit path, and some kills leave an eyeball dangling from the
+// socket (tracked wound-prop slot ONLY - the bug-856 lesson: never an untracked attachment).
+void Sentient::CoopGoreHeadshotExtras(const Vector &pos, const Vector &dir)
+{
+    static cvar_t *pEye = NULL;
+    int            slot = -1, i, tagnum;
+
+    if (!pEye) {
+        pEye = gi.Cvar_Get("coop_eyeGib", "1", CVAR_ARCHIVE);
+    }
+    CoopGoreThrowChunks(pos, dir, 2, "models/fx/coop_gorechunk.tik", 1.0f);
+    if (!pEye->integer || G_Random(100.0f) > 35.0f) {
+        return;
+    }
+    for (i = 0; i < 12; i++) {
+        if (!m_pCoopWoundProp[i]) {
+            slot = i;
+            break;
+        }
+    }
+    if (slot < 0 || !edict->tiki) {
+        return;
+    }
+    tagnum = gi.Tag_NumForName(edict->tiki, "Bip01 Head");
+    if (tagnum < 0) {
+        return;
+    }
+    Animate *eye = new Animate;
+    eye->setModel("models/fx/coop_eyegib.tik");
+    eye->setSolidType(SOLID_NOT);
+    if (!eye->attach(entnum, tagnum, qfalse, Vector(3.2f, G_CRandom(1.6f), -2.4f))) {
+        delete eye;
+        return;
+    }
+    m_pCoopWoundProp[slot] = eye;
+}
+
+// HZM coop [user 2026-08-19] DEATH KINETICS: (1) corpse impulse - the killing blow shoves the
+// body along the shot/blast direction so kills read physical (research verdict: the cheap win;
+// death anims tolerate entity velocity). (2) explosion deaths spray meat, and a slice of them
+// DECAPITATE - the bug-866 SAFE pattern verbatim: hard per-frame budget, one rigid prop set,
+// tracked stump slot only, precached in SetBloodModel, dead-only, players never.
+void Sentient::CoopGoreDeathKinetics(const Vector &pos, const Vector &dir, float fDamage, int mod, Entity *inflictor)
+{
+    static cvar_t *pImp = NULL, *pDec = NULL, *pChance = NULL, *pBudget = NULL;
+    static int     s_iDecFrame = -1, s_iDecaps = 0;
+    int            surf, slot = -1, i, tagnum;
+
+    if (!pImp) {
+        pImp    = gi.Cvar_Get("coop_corpseImpulse", "1", CVAR_ARCHIVE);
+        pDec    = gi.Cvar_Get("coop_decap", "1", CVAR_ARCHIVE);
+        pChance = gi.Cvar_Get("coop_decapChance", "30", CVAR_ARCHIVE);
+        pBudget = gi.Cvar_Get("coop_decapBudget", "3", 0);
+    }
+    qboolean bBoom = CoopGoreModIsExplosive(mod, inflictor);
+    if (pImp->integer) {
+        float fPush = fDamage * 3.2f;
+        if (fPush > 340.0f) {
+            fPush = 340.0f;
+        }
+        if (fPush < 90.0f) {
+            fPush = 90.0f;
+        }
+        if (bBoom) {
+            fPush *= 1.35f;
+        }
+        Vector vDir = dir;
+        vDir.z      = 0;
+        vDir.normalize();
+        velocity += vDir * fPush + Vector(0, 0, bBoom ? 130.0f : 55.0f);
+    }
+    if (!bBoom || !com_blood->integer || !GetBloodSplatName().length()) {
+        return;
+    }
+    CoopGoreThrowChunks(pos, dir, 2, "models/fx/coop_gorechunk.tik", 1.1f);
+    if (!pDec->integer || G_Random(100.0f) >= pChance->value) {
+        return;
+    }
+    if (s_iDecFrame != level.inttime) {
+        s_iDecFrame = level.inttime;
+        s_iDecaps   = 0;
+    }
+    if (s_iDecaps >= pBudget->integer) {
+        return; // horde-grenade budget: the rest die with heads on (bug-856)
+    }
+    if (!edict->tiki) {
+        return;
+    }
+    surf = gi.Surface_NameToNum(edict->tiki, "head");
+    if (surf < 0 || surf >= MAX_MODEL_SURFACES) {
+        return; // no separately-skinned head on this model - skip silently
+    }
+    s_iDecaps++;
+    edict->s.surfaces[surf] |= MDL_SURFACE_NODRAW;
+    for (i = 0; i < 12; i++) {
+        if (!m_pCoopWoundProp[i]) {
+            slot = i;
+            break;
+        }
+    }
+    if (slot >= 0) {
+        tagnum = gi.Tag_NumForName(edict->tiki, "Bip01 Neck");
+        if (tagnum >= 0) {
+            Animate *stump = new Animate;
+            stump->setModel("models/fx/coop_stump_neck.tik");
+            stump->setSolidType(SOLID_NOT);
+            if (!stump->attach(entnum, tagnum, qfalse, vec_zero)) {
+                delete stump;
+            } else {
+                m_pCoopWoundProp[slot] = stump;
+            }
+        }
+    }
+    // the head itself sails away, trailed by brain matter
+    CoopGoreThrowChunks(origin + Vector(0, 0, 68.0f), dir, 1, "models/fx/coop_headgib.tik", 1.0f);
+    CoopGoreThrowChunks(origin + Vector(0, 0, 68.0f), dir, 2, "models/fx/coop_gorechunk.tik", 0.8f);
+}
 
 void Sentient::CoopGoreTryWoundProp(int location, int meansofdeath, const Vector &position)
 {
