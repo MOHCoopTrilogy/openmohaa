@@ -5293,7 +5293,18 @@ void Actor::EventGetWeapon(Event *ev)
     Weapon *pActive = GetActiveWeapon(WEAPON_MAIN);
 
     if (pActive) {
-        ev->AddString(pActive->GetItemName());
+        // bug-1948: return the BASE name - variants are named "<Base> (<Variant>)" by
+        // convention, and every retail anim script (anim/reload.scr, aim, attack, corner)
+        // switches on lowercase display names. A variant-armed actor fell through every
+        // switch to its default ("Reload default case for weapon Thompson (Team Tactics)"
+        // spam, no reload anim). Stripping " (" keeps ALL consumers keyed on the base gun.
+        char szBase[256];
+        Q_strncpyz(szBase, pActive->GetItemName(), sizeof(szBase));
+        char *pParen = strstr(szBase, " (");
+        if (pParen) {
+            *pParen = 0;
+        }
+        ev->AddString(szBase);
         return;
     }
     ev->AddConstString(m_csWeapon);

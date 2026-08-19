@@ -95,6 +95,36 @@ static float    s_dbnoCamEnv     = 0.0f;
 static float s_dizzySev   = 0.0f;
 static int   s_dizzyStart = 0;
 
+// HZM coop [user 2026-08-19] RELOAD CAMERA SWAY - "when you reload i'd like the camera to move
+// with it... gun gets lifted up to pull out mag, cam goes up, mag goes in, cam back down".
+// State-driven, no per-gun timing tables: while ps.iViewModelAnim is any reload state the view
+// eases up (fast rise, like the gun being hefted), and eases back down once the reload anim
+// ends - so it tracks single-loaders (RELOAD_SINGLE loops) and interrupted reloads for free.
+// coop_reloadSway = peak pitch in degrees (0 disables).
+static float s_reloadLift = 0.0f;
+
+static void CG_ApplyReloadSway(vec3_t vAngles)
+{
+    static cvar_t *pRS = NULL;
+    float          fTarget, fRate, fDt;
+    int            iAnim;
+
+    if (!pRS) {
+        pRS = cgi.Cvar_Get("coop_reloadSway", "1.6", CVAR_ARCHIVE);
+    }
+    if (pRS->value <= 0.0f || !cg.snap) {
+        s_reloadLift = 0.0f;
+        return;
+    }
+    iAnim   = cg.snap->ps.iViewModelAnim;
+    fTarget = (iAnim >= 6 && iAnim <= 8) ? pRS->value : 0.0f; // VM_ANIM_RELOAD / _SINGLE / _END
+    fDt     = cg.frametime * 0.001f;
+    fRate   = (fTarget > s_reloadLift) ? 7.0f : 4.5f; // heft up quicker than it settles
+    s_reloadLift += (fTarget - s_reloadLift) * fRate * fDt;
+    vAngles[0] -= s_reloadLift;          // pitch up with the lifted gun
+    vAngles[2] += s_reloadLift * 0.3f;   // a touch of roll so it reads as body motion
+}
+
 static void CG_ApplyShellShock(vec3_t vAngles)
 {
     static cvar_t *pDz  = NULL;
@@ -2585,6 +2615,7 @@ static int CG_CalcViewValues(void)
     // HZM coop [user 2026-08-19] shell-shock dizziness sways the FINAL view angles for every
     // path (bug-1942: the first hook landed inside the PMF_CAMERA_VIEW camera_posofs branch,
     // which never runs in normal first-person play - the effect was stone dead).
+    CG_ApplyReloadSway(cg.refdefViewAngles); // HZM coop [user 2026-08-19] reload camera follow
     CG_ApplyShellShock(cg.refdefViewAngles);
     AnglesToAxis(cg.refdefViewAngles, cg.refdef.viewaxis);
 

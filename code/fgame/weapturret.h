@@ -50,6 +50,12 @@ typedef enum {
 
 #define FAKEBULLETS 1
 
+// HZM coop (bug-1950): AI turret tuning trio, shared with VehicleTurretGun - vehicle-mounted
+// AI gunners bypassed all three (own fire/aim path), leaving them laser-accurate at full damage.
+float HZM_AiTurretDamageScale();
+float HZM_AiTurretSpreadBonus();
+float HZM_AiTurretAimOffset();
+
 class TurretGun : public Weapon
 {
     friend class Vehicle;

@@ -212,6 +212,9 @@ VehicleTurretGun::VehicleTurretGun()
 {
     entflags |= ECF_VEHICLETURRET;
 
+    m_fCoopAimNext = 0; // HZM coop (bug-1950)
+    m_vCoopAimErr  = vec_zero;
+
     AddWaitTill(STRING_DEATH);
 
     if (LoadingSavegame) {
@@ -1141,6 +1144,17 @@ void VehicleTurretGun::GetMuzzlePosition(vec3_t position, vec3_t vBarrelPos, vec
                 VectorNormalize(dir);
                 VectorToAngles(dir, vAng);
                 AngleVectors(vAng, forward, right, up);
+
+                // HZM coop (bug-1950): the emplaced-turret AI spread never applied here -
+                // this branch pitch-locks the muzzle onto aim_target with ZERO scatter, so
+                // halftrack/tank AI gunners were laser-accurate ("deadly accurate mg42s on
+                // the road" while the sandbag nests missed properly). Same formula + bonus
+                // as TurretGun::GetMuzzlePosition; player gunners never take this branch.
+                if (owner && owner->IsSubclassOfActor() && bulletrange[FIRE_PRIMARY] > 0) {
+                    float fSpread = HZM_AiTurretSpreadBonus() + m_vAIBulletSpread[FIRE_PRIMARY].x;
+                    VectorMA(forward, crandom() * fSpread / bulletrange[FIRE_PRIMARY], right, forward);
+                    VectorMA(forward, crandom() * fSpread / bulletrange[FIRE_PRIMARY], up, forward);
+                }
             } else {
                 AngleVectors(angles, forward, right, up);
             }
@@ -1356,6 +1370,23 @@ void VehicleTurretGun::UpdateAndMoveOwner()
 
     VectorNormalize(dir);
     vectoangles(dir, m_vTargetAngles);
+
+    // HZM coop (bug-1950): wandering AIM error for AI gunners, mirroring the emplaced
+    // coop_mg42AiAimOff - spread scatters around the aim point but the aim point itself was
+    // the player's chest every frame. Re-rolled every 0.5-1.1s so the stream WALKS around
+    // and across the target instead of pinning it. ~57.3*off/1000 = degrees at 1000u.
+    if (owner && owner->IsSubclassOfActor()) {
+        float fOff = HZM_AiTurretAimOffset();
+        if (fOff > 0.0f) {
+            if (level.time >= m_fCoopAimNext) {
+                m_fCoopAimNext   = level.time + 0.5f + G_Random(0.6f);
+                m_vCoopAimErr[0] = crandom() * fOff * (57.3f / 1000.0f) * 0.5f;
+                m_vCoopAimErr[1] = crandom() * fOff * (57.3f / 1000.0f);
+            }
+            m_vTargetAngles[0] += m_vCoopAimErr[0];
+            m_vTargetAngles[1] += m_vCoopAimErr[1];
+        }
+    }
 }
 
 void VehicleTurretGun::UpdateTimers(float& yawTimer, float& pitchTimer)
@@ -1597,7 +1628,16 @@ void VehicleTurretGun::UpdateFireControl()
         m_iFiring = TURRETFIRESTATE_FIRING;
 
         if (ReadyToFire(FIRE_PRIMARY, false)) {
+            // HZM coop (bug-1950): AI vehicle gunners deal the scaled coop damage like
+            // emplaced AI turrets (coop_mg42AiDamage) - they were hitting at FULL TIK
+            // damage on top of perfect accuracy. Restore right after: the same gun serves
+            // player gunners at full damage.
+            float fCoopSavedDmg = bulletdamage[FIRE_PRIMARY];
+            if (owner && owner->IsSubclassOfActor()) {
+                bulletdamage[FIRE_PRIMARY] = fCoopSavedDmg * HZM_AiTurretDamageScale();
+            }
             Fire(FIRE_PRIMARY);
+            bulletdamage[FIRE_PRIMARY] = fCoopSavedDmg;
             assert(!m_pVehicleOwner || (m_pVehicleOwner && m_pVehicleOwner->IsSubclassOfVehicle()));
 
             m_fCurrViewJitter = m_fViewJitter;
@@ -1610,7 +1650,16 @@ void VehicleTurretGun::UpdateFireControl()
         }
     } else if (m_iFiring == TURRETFIRESTATE_FIRING) {
         if (ReadyToFire(FIRE_PRIMARY, false)) {
+            // HZM coop (bug-1950): AI vehicle gunners deal the scaled coop damage like
+            // emplaced AI turrets (coop_mg42AiDamage) - they were hitting at FULL TIK
+            // damage on top of perfect accuracy. Restore right after: the same gun serves
+            // player gunners at full damage.
+            float fCoopSavedDmg = bulletdamage[FIRE_PRIMARY];
+            if (owner && owner->IsSubclassOfActor()) {
+                bulletdamage[FIRE_PRIMARY] = fCoopSavedDmg * HZM_AiTurretDamageScale();
+            }
             Fire(FIRE_PRIMARY);
+            bulletdamage[FIRE_PRIMARY] = fCoopSavedDmg;
             assert(!m_pVehicleOwner || (m_pVehicleOwner && m_pVehicleOwner->IsSubclassOfVehicle()));
 
             m_fCurrViewJitter = m_fViewJitter;

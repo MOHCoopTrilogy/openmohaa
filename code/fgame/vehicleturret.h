@@ -71,6 +71,9 @@ protected:
     float       m_fReloadDelay;
     float       m_fReloadTimeRemaining;
     Vector      m_vAimTolerance;
+    // HZM coop (bug-1950): wandering aim error for AI vehicle gunners, re-rolled ~0.5-1.1s
+    float       m_fCoopAimNext;
+    Vector      m_vCoopAimErr;
     SentientPtr m_pRemoteOwner;
     //===
 

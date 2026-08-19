@@ -1141,7 +1141,7 @@ void TurretGun::AI_StartTrack()
 }
 
 // HZM coop bug-1851 - defined further down, next to its sibling AI turret cvars
-static float HZM_AiTurretAimOffset();
+float HZM_AiTurretAimOffset();
 
 void TurretGun::AI_DoTargetAutoTrack()
 {
@@ -1397,7 +1397,7 @@ void TurretGun::AI_DoAiming()
 
 // HZM coop: AI gunners hit far softer than the TIK bulletdamage - coop_mg42AiDamage is the
 // PERCENT of TIK damage an AI-manned turret deals (default 40, live-tunable, clamped 0..200).
-static float HZM_AiTurretDamageScale()
+float HZM_AiTurretDamageScale()
 {
     cvar_t *cv = gi.Cvar_Get("coop_mg42AiDamage", "40", 0);
     float   f  = cv->value / 100.0f;
@@ -1424,7 +1424,7 @@ static float HZM_AiTurretDamageScale()
 // 60 on top of the TIK's 40 roughly triples MG42 cone area (spread scales the cone edge, not area,
 // so 100 vs 40 is a much bigger practical change than the numbers alone suggest). Player-manned
 // turrets are untouched - the restore below runs on every path.
-static float HZM_AiTurretSpreadBonus()
+float HZM_AiTurretSpreadBonus()
 {
     cvar_t *cv = gi.Cvar_Get("coop_mg42AiSpread", "180", 0);
     float   f  = cv->value;
@@ -1444,7 +1444,7 @@ static float HZM_AiTurretSpreadBonus()
 // Real MG42 nests miss because they are aimed slightly wrong - global/mg42_active.scr models that
 // for scripted nests with randomint aim offsets and nothing did it for AI-manned turrets.
 // Scaled by range so the ANGULAR error is constant: 120 means +-120u at 1000u out.
-static float HZM_AiTurretAimOffset()
+float HZM_AiTurretAimOffset()
 {
     static cvar_t *cv = NULL;
     if (!cv) {
