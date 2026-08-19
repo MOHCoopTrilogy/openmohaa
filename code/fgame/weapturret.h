@@ -240,6 +240,10 @@ public:
     void AI_EventSetSuppressWidth(Event *ev);
     void AI_EventSetSuppressHeight(Event *ev);
     void AI_EventSetBulletSpread(Event *ev);
+    // HZM coop [user 2026-08-19] bug-1940 probe accessors (m_vAIBulletSpread is the ONE
+    // dispersion input an AI-manned turret has; the probe in Weapon::Shoot prints it)
+    float GetAIBulletSpreadX(void) { return m_vAIBulletSpread[FIRE_PRIMARY].x; }
+    float GetAIBulletSpreadY(void) { return m_vAIBulletSpread[FIRE_PRIMARY].y; }
     void GetMuzzlePosition(
         vec3_t position, vec3_t vBarrelPos = NULL, vec3_t forward = NULL, vec3_t right = NULL, vec3_t up = NULL
     ) override;

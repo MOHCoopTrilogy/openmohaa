@@ -2065,6 +2065,23 @@ void Weapon::Shoot(Event *ev)
                         }
                     }
 
+                    // HZM coop [user 2026-08-19] bug-1940 PROOF PROBE: coop_fireDebug 1 prints the
+                    // spread actually handed to BulletAttack. For an AI-manned turret vSpread was
+                    // provably (0,0) regardless of bulletspread[] - this line is how a playtest log
+                    // confirms the diagnosis and the fix (m_vAIBulletSpread disperses at the muzzle,
+                    // so vSpread stays 0 here BY DESIGN for AI; the probe prints both).
+                    {
+                        static cvar_t *pTurDbg = NULL;
+                        if (!pTurDbg) { pTurDbg = gi.Cvar_Get("coop_fireDebug", "0", 0); }
+                        if (pTurDbg->integer && IsSubclassOfTurretGun()) {
+                            TurretGun *pTG = static_cast<TurretGun *>(this);
+                            gi.Printf("^~^~^ TURSPREAD %s ownerclient=%d vSpread=(%.1f %.1f) aiSpread=(%.1f %.1f) dmg=%.1f\n",
+                                item_name.c_str(), (owner && owner->client) ? 1 : 0,
+                                vSpread.x, vSpread.y,
+                                pTG->GetAIBulletSpreadX(), pTG->GetAIBulletSpreadY(),
+                                bulletdamage[mode]);
+                        }
+                    }
                     BulletAttack(
                         pos,
                         vBarrel,

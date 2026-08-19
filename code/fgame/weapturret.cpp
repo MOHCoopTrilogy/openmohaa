@@ -1567,14 +1567,20 @@ void TurretGun::AI_DoFiring()
             // the same turret TIK is used player-manned, which keeps full damage)
             fSavedDamage               = bulletdamage[FIRE_PRIMARY];
             bulletdamage[FIRE_PRIMARY] = fSavedDamage * HZM_AiTurretDamageScale();
-            vSavedSpread               = bulletspread[FIRE_PRIMARY];
+            vSavedSpread               = m_vAIBulletSpread[FIRE_PRIMARY];
             {
+                // HZM coop [user 2026-08-19] bug-1940: this bonus used to add to bulletspread[] -
+                // which an ACTOR-owned turret's fire path NEVER READS (weapon.cpp FT_BULLET computes
+                // vSpread only for owner->client; the (max+base)/2 fallback is unmanned-only). The
+                // one real AI dispersion input is m_vAIBulletSpread, consumed at the muzzle
+                // (GetMuzzlePosition, crandom * spread / bulletrange). Every prior spread tune -
+                // script bulletspread 120/300x4 AND this cvar - was a provable no-op for AI fire.
                 float fBonus = HZM_AiTurretSpreadBonus();
-                bulletspread[FIRE_PRIMARY][0] += fBonus;
-                bulletspread[FIRE_PRIMARY][1] += fBonus;
+                m_vAIBulletSpread[FIRE_PRIMARY][0] += fBonus;
+                m_vAIBulletSpread[FIRE_PRIMARY][1] += fBonus;
             }
             Fire(FIRE_PRIMARY);
-            bulletspread[FIRE_PRIMARY] = vSavedSpread;
+            m_vAIBulletSpread[FIRE_PRIMARY] = vSavedSpread;
             bulletdamage[FIRE_PRIMARY] = fSavedDamage;
         }
 
@@ -1644,14 +1650,20 @@ void TurretGun::AI_DoFiring()
         // HZM coop: AI damage scale for this shot only (see TG_MOH path above)
         fSavedDamage               = bulletdamage[FIRE_PRIMARY];
         bulletdamage[FIRE_PRIMARY] = fSavedDamage * HZM_AiTurretDamageScale();
-        vSavedSpread               = bulletspread[FIRE_PRIMARY];
+        vSavedSpread               = m_vAIBulletSpread[FIRE_PRIMARY];
         {
+            // HZM coop [user 2026-08-19] bug-1940: this bonus used to add to bulletspread[] -
+            // which an ACTOR-owned turret's fire path NEVER READS (weapon.cpp FT_BULLET computes
+            // vSpread only for owner->client; the (max+base)/2 fallback is unmanned-only). The
+            // one real AI dispersion input is m_vAIBulletSpread, consumed at the muzzle
+            // (GetMuzzlePosition, crandom * spread / bulletrange). Every prior spread tune -
+            // script bulletspread 120/300x4 AND this cvar - was a provable no-op for AI fire.
             float fBonus = HZM_AiTurretSpreadBonus();
-            bulletspread[FIRE_PRIMARY][0] += fBonus;
-            bulletspread[FIRE_PRIMARY][1] += fBonus;
+            m_vAIBulletSpread[FIRE_PRIMARY][0] += fBonus;
+            m_vAIBulletSpread[FIRE_PRIMARY][1] += fBonus;
         }
         Fire(FIRE_PRIMARY);
-        bulletspread[FIRE_PRIMARY] = vSavedSpread;
+        m_vAIBulletSpread[FIRE_PRIMARY] = vSavedSpread;
         bulletdamage[FIRE_PRIMARY] = fSavedDamage;
 
         if (m_fMaxBurstTime > 0) {
