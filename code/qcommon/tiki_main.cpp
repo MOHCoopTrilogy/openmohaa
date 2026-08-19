@@ -99,7 +99,10 @@ void TIKI_Error(const char *fmt, ...)
     va_start(va, fmt);
     Q_vsnprintf(msg, sizeof(msg), fmt, va);
     va_end(va);
-    TIKI_DPrintf(msg);
+    // HZM coop (bug-1953): TIKI_Error was developer-gated via TIKI_DPrintf, so real data
+    // errors (anim cap overflow, bad includes) were invisible on player machines - a whole
+    // class of 'unknown animation' mysteries with no visible cause. Errors always print.
+    Com_Printf("TIKI: %s", msg);
 }
 
 /*
