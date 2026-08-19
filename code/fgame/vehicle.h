@@ -419,6 +419,12 @@ protected:
     void         EventModel(Event *ev);
     void         EventRemoveOnDeath(Event *ev);
     void         EventSetExplosionModel(Event *ev);
+    // HZM coop [user 2026-08-18] realistic vehicle deaths: layered fx (shake + staged
+    // cook-offs + burning wreck + smoke column). Latched so the multiple Killed/explode
+    // paths cannot double-fire it.
+    qboolean m_bCoopDeathFxDone;
+    void     CoopDeathFx(void);
+    void     EventCoopCookoff(Event *ev);
     void         EventSetCollisionModel(Event *ev);
     void         EventGetCollisionModel(Event *ev);
     void         EventSetSoundParameters(Event *ev);

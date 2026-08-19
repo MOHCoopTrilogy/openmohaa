@@ -27,6 +27,7 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 #include "g_phys.h"
 #include "scriptslave.h"
 #include "vehicle.h"
+#include "earthquake.h" // HZM coop - ViewJitter for vehicle-death camera shake
 #include "player.h"
 #include "specialfx.h"
 #include "explosion.h"
@@ -678,6 +679,16 @@ Event EV_Vehicle_RemoveOnDeath
     "If set to a non-zero value, vehicles will not be removed when they die",
     EV_NORMAL
 );
+// HZM coop [user 2026-08-18] staged fuel/ammo cook-off after a vehicle death
+Event EV_Vehicle_CoopCookoff
+(
+    "coop_vehicle_cookoff",
+    EV_DEFAULT,
+    "i",
+    "remaining",
+    "HZM coop - one secondary cook-off explosion; reschedules itself while remaining > 0."
+);
+
 Event EV_Vehicle_SetExplosionModel
 (
     "explosionmodel",
@@ -1014,6 +1025,7 @@ CLASS_DECLARATION(VehicleBase, Vehicle, "script_vehicle") {
     {&EV_Vehicle_UnlockMovement,             &Vehicle::EventUnlockMovement       },
     {&EV_Vehicle_RemoveOnDeath,              &Vehicle::EventRemoveOnDeath        },
     {&EV_Vehicle_SetExplosionModel,          &Vehicle::EventSetExplosionModel    },
+    {&EV_Vehicle_CoopCookoff,                &Vehicle::EventCoopCookoff          },
     {&EV_Vehicle_SetCollisionEntity,         &Vehicle::EventSetCollisionModel    },
     {&EV_Vehicle_SetSoundParameters,         &Vehicle::EventSetSoundParameters   },
     {&EV_Vehicle_SetVolumeParameters,        &Vehicle::EventSetVolumeParameters  },
@@ -1229,6 +1241,7 @@ Vehicle::Vehicle()
     m_bMovementLocked  = qfalse;
     m_bRemoveOnDeath   = qtrue;
     m_sExplosionModel  = "fx/fx_explosion.tik";
+    m_bCoopDeathFxDone = qfalse; // HZM coop - vehicle-death fx latch
     m_pCollisionEntity = NULL;
 
     m_fSoundMinPitch  = 0.95f;
@@ -3742,6 +3755,7 @@ void Vehicle::VehicleDestroyed(Event *ev)
         setSolidType(SOLID_NOT);
         hideModel();
         CreateExplosion(origin, edict->s.scale * 150, this, this, this, m_sExplosionModel);
+        CoopDeathFx(); // HZM coop [user 2026-08-18] layered realistic death fx (latched)
     }
 
     if (flags & FL_DIE_GIBS) {
@@ -5552,6 +5566,92 @@ void Vehicle::EventSetExplosionModel(Event *ev)
 
 /*
 ====================
+Vehicle::CoopDeathFx
+
+HZM coop [user 2026-08-18] "can we make vehicle explosions more realistic". The stock death
+is ONE generic fx_explosion. This layers, from retail's own assets: a ViewJitter so the boom
+is FELT out to ~640u; 2-4 staged fuel/ammo cook-off pops at random offsets; a burning-wreck
+fire (fireandsmoke.tik - the emitter retail maps place on scripted wrecks) and a climbing
+smoke column (linger_smoke02.tik) that outlives the fire. Pairs with coop_vehicleWrecks 1,
+which already leaves the hull visible. Latched - the several Killed/explode paths overlap.
+Tunables: coop_vehicleFx 0 disables, coop_vehicleFxTime seconds of fire (default 45).
+====================
+*/
+void Vehicle::CoopDeathFx(void)
+{
+    static cvar_t *pFx   = NULL;
+    static cvar_t *pTime = NULL;
+    Animate       *fire;
+    Animate       *smoke;
+    Event         *pop;
+    float          fxTime;
+    int            pops;
+
+    if (m_bCoopDeathFxDone) {
+        return;
+    }
+    m_bCoopDeathFxDone = qtrue;
+
+    if (!pFx) {
+        pFx = gi.Cvar_Get("coop_vehicleFx", "1", CVAR_ARCHIVE);
+    }
+    if (!pTime) {
+        pTime = gi.Cvar_Get("coop_vehicleFxTime", "45", CVAR_ARCHIVE);
+    }
+    if (!pFx->integer) {
+        return;
+    }
+
+    fxTime = pTime->value;
+    if (fxTime < 5.0f) {
+        fxTime = 5.0f;
+    }
+
+    // the boom should be felt, not just seen
+    new ViewJitter(origin, 640.0f, 0.35f, Vector(3.0f, 3.0f, 4.2f), 1.3f, Vector(0, 0, 0), 0.0f);
+
+    fire = new Animate;
+    fire->setModel("models/emitters/fireandsmoke.tik");
+    fire->setSolidType(SOLID_NOT);
+    fire->setMoveType(MOVETYPE_NONE);
+    fire->setOrigin(origin + Vector(0, 0, 12));
+    fire->NewAnim("idle");
+    fire->PostEvent(EV_Remove, fxTime);
+
+    smoke = new Animate;
+    smoke->setModel("models/emitters/linger_smoke02.tik");
+    smoke->setSolidType(SOLID_NOT);
+    smoke->setMoveType(MOVETYPE_NONE);
+    smoke->setOrigin(origin + Vector(0, 0, 52));
+    smoke->NewAnim("idle");
+    smoke->PostEvent(EV_Remove, fxTime + 18.0f);
+
+    pops = 2 + (rand() % 3);
+    pop  = new Event(EV_Vehicle_CoopCookoff);
+    pop->AddInteger(pops);
+    PostEvent(pop, 0.45f + G_Random(0.4f));
+}
+
+void Vehicle::EventCoopCookoff(Event *ev)
+{
+    int    remaining;
+    Vector pos;
+    Event *next;
+
+    remaining = ev->GetInteger(1);
+    pos       = origin + Vector(G_CRandom(46.0f), G_CRandom(46.0f), 18.0f + G_Random(38.0f));
+    // small real damage: standing on a cooking-off wreck SHOULD hurt a little
+    CreateExplosion(pos, 32.0f * edict->s.scale, this, this, this, m_sExplosionModel);
+
+    if (remaining > 1) {
+        next = new Event(EV_Vehicle_CoopCookoff);
+        next->AddInteger(remaining - 1);
+        PostEvent(next, 0.5f + G_Random(0.9f));
+    }
+}
+
+/*
+====================
 Vehicle::EventSetCollisionModel
 ====================
 */
@@ -7200,6 +7300,10 @@ void DrivableVehicle::Killed(Event *ev)
             level.vars->SetVariable("coop_vehKillerNum", attacker->entnum);
         }
     }
+
+    // HZM coop [user 2026-08-18] realistic death fx for EVERY drivable death, including
+    // script-owned wrecks (m3l3 halftrack) that early-return below.
+    CoopDeathFx();
 
     if (!m_bRemoveOnDeath) {
         Unregister(STRING_DEATH);
