@@ -892,6 +892,24 @@ static void CG_MakeBulletTracerInternal(
                 );
             }
         }
+
+        // HZM coop [user 2026-08-19] NEAR-IMPACT SNAP: "plus the impact of the bullet hitting
+        // nearby surfaces" - rounds striking within coop_impactSnapDist of the listener layer a
+        // sharp positional snap over the stock (quiet) hole sound. Rate-limited per 110ms so a
+        // burst peppering your cover reads as a hail, not a machine-gunned sample.
+        {
+            cvar_t *pSnap  = cgi.Cvar_Get("coop_impactSnap", "1", CVAR_ARCHIVE);
+            cvar_t *pSnapD = cgi.Cvar_Get("coop_impactSnapDist", "200", CVAR_ARCHIVE);
+            static int s_iNextSnapTime = 0;
+            float fBest = fImpSndDistRA;
+            int   iBest = iImpSndIndexRA;
+            if (fImpSndDistLA < fBest) { fBest = fImpSndDistLA; iBest = iImpSndIndexLA; }
+            if (pSnap->integer && fBest < pSnapD->value && cg.time >= s_iNextSnapTime) {
+                s_iNextSnapTime = cg.time + 110;
+                commandManager.PlaySound(
+                    "snd_b_impactsnap", tImpacts[iBest].endpos, -1, 1.0f, -1.0f, 1.0f + crandom() * 0.12f, 1);
+            }
+        }
     } else {
         for (iBullet = 0; iBullet < iNumImpacts; iBullet++) {
             CG_MakeBulletHole(
@@ -954,12 +972,15 @@ static void CG_MakeBulletTracerInternal(
             }
         }
 
+        // [user 2026-08-19] "should be way more prominent - we should hear cracking and
+        // zipping near us": full volume on every pass (0.8 buried the whizbys under battle
+        // din) + per-round pitch jitter so an MG burst reads as many rounds, not a loop.
         if (iLarge) {
             fVolume = 1.0f;
-            fPitch  = 0.8f;
+            fPitch  = 0.8f + crandom() * 0.06f;
         } else {
-            fVolume = 0.8f;
-            fPitch  = 1.0f;
+            fVolume = 1.0f;
+            fPitch  = 1.0f + crandom() * 0.08f;
         }
 
         // HZM coop - SUPERSONIC CRACK: a round passing VERY close (< coop_bulletCrackDist units of the head)
@@ -969,10 +990,10 @@ static void CG_MakeBulletTracerInternal(
         // MG burst does not machine-gun the crack itself. coop_bulletCrack 0 = off.
         {
             cvar_t *pBC  = cgi.Cvar_Get("coop_bulletCrack", "1", CVAR_ARCHIVE);
-            cvar_t *pBCD = cgi.Cvar_Get("coop_bulletCrackDist", "60", CVAR_ARCHIVE);
+            cvar_t *pBCD = cgi.Cvar_Get("coop_bulletCrackDist", "120", CVAR_ARCHIVE); // [user 2026-08-19] 60 was graze-only
             static int s_iNextCrackTime = 0;
             if (pBC->integer && fZingDistA < pBCD->value && cg.time >= s_iNextCrackTime) {
-                s_iNextCrackTime = cg.time + 140;
+                s_iNextCrackTime = cg.time + 110;
                 cgi.S_StartLocalSound(va("sound/coop_crack/crack_%02d.wav", (rand() % 3) + 1), qfalse);
             }
         }
@@ -1292,6 +1313,21 @@ void CG_AddBulletImpacts()
                     flesh_impact_pos[iImpSndIndexRA],
                     flesh_impact_norm[iImpSndIndexRA]
                 );
+                // HZM coop [user 2026-08-19] "make some of these blood drips shoot upwards when they
+                // get hit": chance-layer a second burst aimed skyward with jitter, so hits read as
+                // arterial spray instead of only the flat along-the-normal puff. coop_bloodSpurtUp = %.
+                {{
+                    static cvar_t *pSpurt = NULL;
+                    if (!pSpurt) {{ pSpurt = cgi.Cvar_Get("coop_bloodSpurtUp", "40", CVAR_ARCHIVE); }}
+                    if (pSpurt->integer > 0 && (rand() % 100) < pSpurt->integer) {{
+                        vec3_t vUp;
+                        vUp[0] = crandom() * 0.28f;
+                        vUp[1] = crandom() * 0.28f;
+                        vUp[2] = 1.0f;
+                        VectorNormalize(vUp);
+                        sfxManager.MakeEffect_Normal(SFX_BHIT_HUMAN_UNIFORM_HARD, flesh_impact_pos[iImpSndIndexRA], vUp);
+                    }}
+                }}
             }
 
             if (fImpSndDistRB < 9999) {
@@ -1300,6 +1336,21 @@ void CG_AddBulletImpacts()
                     flesh_impact_pos[iImpSndIndexRB],
                     flesh_impact_norm[iImpSndIndexRB]
                 );
+                // HZM coop [user 2026-08-19] "make some of these blood drips shoot upwards when they
+                // get hit": chance-layer a second burst aimed skyward with jitter, so hits read as
+                // arterial spray instead of only the flat along-the-normal puff. coop_bloodSpurtUp = %.
+                {{
+                    static cvar_t *pSpurt = NULL;
+                    if (!pSpurt) {{ pSpurt = cgi.Cvar_Get("coop_bloodSpurtUp", "40", CVAR_ARCHIVE); }}
+                    if (pSpurt->integer > 0 && (rand() % 100) < pSpurt->integer) {{
+                        vec3_t vUp;
+                        vUp[0] = crandom() * 0.28f;
+                        vUp[1] = crandom() * 0.28f;
+                        vUp[2] = 1.0f;
+                        VectorNormalize(vUp);
+                        sfxManager.MakeEffect_Normal(SFX_BHIT_HUMAN_UNIFORM_HARD, flesh_impact_pos[iImpSndIndexRB], vUp);
+                    }}
+                }}
             }
         } else {
             for (i = 0; i < flesh_impact_count; i++) {
@@ -1308,6 +1359,21 @@ void CG_AddBulletImpacts()
                     flesh_impact_pos[i],
                     flesh_impact_norm[i]
                 );
+                // HZM coop [user 2026-08-19] "make some of these blood drips shoot upwards when they
+                // get hit": chance-layer a second burst aimed skyward with jitter, so hits read as
+                // arterial spray instead of only the flat along-the-normal puff. coop_bloodSpurtUp = %.
+                {{
+                    static cvar_t *pSpurt = NULL;
+                    if (!pSpurt) {{ pSpurt = cgi.Cvar_Get("coop_bloodSpurtUp", "40", CVAR_ARCHIVE); }}
+                    if (pSpurt->integer > 0 && (rand() % 100) < pSpurt->integer) {{
+                        vec3_t vUp;
+                        vUp[0] = crandom() * 0.28f;
+                        vUp[1] = crandom() * 0.28f;
+                        vUp[2] = 1.0f;
+                        VectorNormalize(vUp);
+                        sfxManager.MakeEffect_Normal(SFX_BHIT_HUMAN_UNIFORM_HARD, flesh_impact_pos[i], vUp);
+                    }}
+                }}
             }
         }
 
