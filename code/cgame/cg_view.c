@@ -2568,7 +2568,6 @@ static int CG_CalcViewValues(void)
 
         if (ps->camera_posofs[0] || ps->camera_posofs[1] || ps->camera_posofs[2]) {
             vec3_t vAxis[3], vOrg;
-            CG_ApplyShellShock(cg.refdefViewAngles); // HZM coop [user 2026-08-19] shell-shock sway rides the final view
             AnglesToAxis(cg.refdefViewAngles, vAxis);
             MatrixTransformVector(ps->camera_posofs, vAxis, vOrg);
             VectorAdd(cg.refdef.vieworg, vOrg, cg.refdef.vieworg);
@@ -2583,6 +2582,10 @@ static int CG_CalcViewValues(void)
     }
 
     // position eye reletive to origin
+    // HZM coop [user 2026-08-19] shell-shock dizziness sways the FINAL view angles for every
+    // path (bug-1942: the first hook landed inside the PMF_CAMERA_VIEW camera_posofs branch,
+    // which never runs in normal first-person play - the effect was stone dead).
+    CG_ApplyShellShock(cg.refdefViewAngles);
     AnglesToAxis(cg.refdefViewAngles, cg.refdef.viewaxis);
 
     if (cg.hyperspace) {

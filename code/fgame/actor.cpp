@@ -5284,6 +5284,18 @@ Returns weapon path to script.
 */
 void Actor::EventGetWeapon(Event *ev)
 {
+    // HZM coop (bug-1943): return the HELD weapon's display name (the tik "name" field,
+    // e.g. "Mauser KAR 98K") the way the PLAYER weapon getter does, instead of raw
+    // m_csWeapon - which is whatever loadout string a script or tik happened to write
+    // ("mp40", a full path, any case) and STRING_EMPTY for tik-armed actors. The coop
+    // variant roll keys a host table off this read; the raw string made every lookup
+    // miss (variant=0 g43=0 on the behavior odometer across a whole session).
+    Weapon *pActive = GetActiveWeapon(WEAPON_MAIN);
+
+    if (pActive) {
+        ev->AddString(pActive->GetItemName());
+        return;
+    }
     ev->AddConstString(m_csWeapon);
 }
 
