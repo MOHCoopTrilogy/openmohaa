@@ -116,11 +116,36 @@ static void CG_ApplyReloadSway(vec3_t vAngles)
         s_reloadLift = 0.0f;
         return;
     }
-    iAnim   = cg.snap->ps.iViewModelAnim;
-    fTarget = (iAnim >= 6 && iAnim <= 8) ? pRS->value : 0.0f; // VM_ANIM_RELOAD / _SINGLE / _END
-    fDt     = cg.frametime * 0.001f;
-    fRate   = (fTarget > s_reloadLift) ? 7.0f : 4.5f; // heft up quicker than it settles
-    s_reloadLift += (fTarget - s_reloadLift) * fRate * fDt;
+    // [user 2026-08-19 v2] "follow the motions: unloading moves the camera up, mag in moves it
+    // up slightly more, cocking brings it back down to baseline" - phase-mapped to the three
+    // reload viewmodel states: RELOAD(6) ramps the lift over ~0.9s (two perceived steps: mag
+    // out, then seat), RELOAD_SINGLE(7) holds a partial lift per shell, RELOAD_END(8) - the
+    // cock/rechamber - pulls DOWN fast through baseline (slight undershoot) and settles.
+    {
+        static int s_iLastVMA     = -1;
+        static int s_iVMAStart    = 0;
+        iAnim = cg.snap->ps.iViewModelAnim;
+        if (iAnim != s_iLastVMA) {
+            s_iLastVMA  = iAnim;
+            s_iVMAStart = cg.time;
+        }
+        if (iAnim == 6) { // VM_ANIM_RELOAD: mag out -> up, mag in -> slightly more
+            float fPhase = (cg.time - s_iVMAStart) * (1.0f / 900.0f);
+            if (fPhase > 1.0f) {
+                fPhase = 1.0f;
+            }
+            fTarget = pRS->value * (0.62f + 0.38f * fPhase);
+        } else if (iAnim == 7) { // VM_ANIM_RELOAD_SINGLE: shell-by-shell partial lift
+            fTarget = pRS->value * 0.7f;
+        } else if (iAnim == 8) { // VM_ANIM_RELOAD_END: the cock - snap down past baseline
+            fTarget = pRS->value * -0.28f;
+        } else {
+            fTarget = 0.0f;
+        }
+        fDt   = cg.frametime * 0.001f;
+        fRate = (iAnim == 8) ? 11.0f : ((fTarget > s_reloadLift) ? 7.0f : 4.5f);
+        s_reloadLift += (fTarget - s_reloadLift) * fRate * fDt;
+    }
     vAngles[0] -= s_reloadLift;          // pitch up with the lifted gun
     vAngles[2] += s_reloadLift * 0.3f;   // a touch of roll so it reads as body motion
 }
