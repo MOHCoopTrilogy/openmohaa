@@ -81,6 +81,24 @@ void CG_MakeBulletHoleSound(const vec3_t i_vPos, const vec3_t i_vNorm, int iLarg
     }
 
     iSurfType = trace.surfaceFlags & MASK_SURF_TYPE;
+
+    // HZM coop [user 2026-08-19] RICOCHET WHINES "to coincide with the changes we made to
+    // zings": hard surfaces (metal/rock/grill) chance-spin a round off with a synthesized
+    // descending whine (retail ships ZERO ricochet audio - pak-verified). Positional at the
+    // impact, rate-limited so a raking burst spins one round, not ten.
+    {
+        static cvar_t *pRic = NULL;
+        static int s_iNextRicTime = 0;
+        if (!pRic) {
+            pRic = cgi.Cvar_Get("coop_ricochet", "1", CVAR_ARCHIVE);
+        }
+        if (pRic->integer && cg.time >= s_iNextRicTime && (rand() % 100) < 30
+            && (iSurfType == SURF_METAL || iSurfType == SURF_ROCK || iSurfType == SURF_GRILL)) {
+            s_iNextRicTime = cg.time + 260;
+            commandManager.PlaySound(
+                "snd_b_ricochet", i_vPos, -1, 0.9f, -1.0f, 0.92f + crandom() * 0.12f, 1);
+        }
+    }
     if (trace.contents & CONTENTS_WATER) {
         iSurfType = SURF_PUDDLE;
     }

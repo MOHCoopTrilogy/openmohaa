@@ -32,6 +32,7 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 #include "entity.h"
 #include "trigger.h"
 #include "explosion.h"
+#include "earthquake.h" // HZM coop [user 2026-08-19] ViewJitter - explosions shake cameras
 #include "weaputils.h"
 
 #define MULTI_USE     (1 << 0)
@@ -118,6 +119,34 @@ void CreateExplosion(
     explosion->edict->clipmask = MASK_PROJECTILE;
     explosion->setSize(explosion->mins, explosion->maxs);
     explosion->setOrigin(pos);
+
+    // HZM coop [user 2026-08-19] "I would like to see that (camera shake) happen from
+    // explosions": every explosion at the ONE choke point shakes cameras in range, scaled
+    // by its damage - grenades thump, artillery slams, vehicle booms rock you. Strength is
+    // in retail func_viewjitter units (retail uses jitteramount 5 2 1); decay is set so the
+    // shake FADES over its duration instead of cutting off. coop_explosionShake 0 disables.
+    {
+        static cvar_t *pShake = NULL;
+        if (!pShake) {
+            pShake = gi.Cvar_Get("coop_explosionShake", "1", CVAR_ARCHIVE);
+        }
+        if (pShake->integer && damage >= 40.0f) {
+            float fStr = 2.2f + damage / 55.0f;
+            if (fStr > 7.5f) {
+                fStr = 7.5f;
+            }
+            float fRad = 260.0f + damage * 3.0f;
+            if (fRad > 950.0f) {
+                fRad = 950.0f;
+            }
+            float fDur = 0.7f + damage / 280.0f;
+            if (fDur > 1.7f) {
+                fDur = 1.7f;
+            }
+            Vector vStr(fStr, fStr * 0.8f, fStr * 1.25f);
+            new ViewJitter(pos, fRad, 0.45f, vStr, fDur, vStr * (1.0f / fDur), 0.0f);
+        }
+    }
     explosion->origin.copyTo(explosion->edict->s.origin2);
 
     if (explosion->dlight_radius) {

@@ -88,6 +88,49 @@ static float    s_freecamEnv     = 0.0f;
 // Same eased-envelope idiom as s_adsShoulderEnv / s_freecamEnv so going down and being revived
 // glide rather than cut - a hard jump of the eye by ~30 units reads as a teleport.
 static float    s_dbnoCamEnv     = 0.0f;
+// HZM coop [user 2026-08-19] SHELL SHOCK DIZZINESS - "camera should have a dizziness effect
+// that lasts a bit longer". The server stuffs `set coop_dizzy <0..1>` on a near blast (same
+// trigger as the tinnitus ring); the view sways on decaying sinusoids for
+// coop_dizzyTime * severity seconds. Consumed-and-cleared so each blast restarts it.
+static float s_dizzySev   = 0.0f;
+static int   s_dizzyStart = 0;
+
+static void CG_ApplyShellShock(vec3_t vAngles)
+{
+    static cvar_t *pDz  = NULL;
+    static cvar_t *pDzT = NULL;
+    float          fT, fDur, fDecay, fS;
+
+    if (!pDz) {
+        pDz  = cgi.Cvar_Get("coop_dizzy", "0", 0);
+        pDzT = cgi.Cvar_Get("coop_dizzyTime", "4.2", CVAR_ARCHIVE);
+    }
+    if (pDz->value > 0.0f) {
+        if (pDz->value > s_dizzySev || cg.time > s_dizzyStart + 5000) {
+            s_dizzySev   = pDz->value;
+            s_dizzyStart = cg.time;
+        }
+        cgi.Cvar_Set("coop_dizzy", "0");
+    }
+    if (s_dizzySev <= 0.0f) {
+        return;
+    }
+    fDur = pDzT->value * s_dizzySev;
+    if (fDur < 1.2f) {
+        fDur = 1.2f;
+    }
+    fT = (cg.time - s_dizzyStart) * 0.001f;
+    if (fT >= fDur) {
+        s_dizzySev = 0.0f;
+        return;
+    }
+    fDecay = 1.0f - (fT / fDur);
+    fDecay *= fDecay;
+    fS = s_dizzySev * fDecay;
+    vAngles[2] += sin(fT * 5.3f) * 5.5f * fS;
+    vAngles[0] += sin(fT * 3.9f + 1.3f) * 2.8f * fS;
+    vAngles[1] += sin(fT * 2.9f + 2.1f) * 1.6f * fS;
+}
 
 /*
 =================
@@ -2525,6 +2568,7 @@ static int CG_CalcViewValues(void)
 
         if (ps->camera_posofs[0] || ps->camera_posofs[1] || ps->camera_posofs[2]) {
             vec3_t vAxis[3], vOrg;
+            CG_ApplyShellShock(cg.refdefViewAngles); // HZM coop [user 2026-08-19] shell-shock sway rides the final view
             AnglesToAxis(cg.refdefViewAngles, vAxis);
             MatrixTransformVector(ps->camera_posofs, vAxis, vOrg);
             VectorAdd(cg.refdef.vieworg, vOrg, cg.refdef.vieworg);

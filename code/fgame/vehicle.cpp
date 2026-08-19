@@ -5607,8 +5607,22 @@ void Vehicle::CoopDeathFx(void)
         fxTime = 5.0f;
     }
 
-    // the boom should be felt, not just seen
-    new ViewJitter(origin, 640.0f, 0.35f, Vector(3.0f, 3.0f, 4.2f), 1.3f, Vector(0, 0, 0), 0.0f);
+    // [user 2026-08-19] the dedicated jitter here retired - CreateExplosion now shakes for
+    // EVERY explosion (scaled by damage), so the main boom is covered without double-firing.
+
+    // HZM coop [user 2026-08-19] "distant relevant audio of Germans screaming inside during
+    // and after at random (very muffled because they are inside)": one scream with the boom,
+    // more riding the cook-off chain below. Muffle = pitched down + tight min_dist, so it
+    // reads as coming from INSIDE the hull. Uses the death-voice pool (334 takes).
+    {
+        static cvar_t *pScr = NULL;
+        if (!pScr) {
+            pScr = gi.Cvar_Get("coop_vehicleScreams", "1", CVAR_ARCHIVE);
+        }
+        if (pScr->integer && (rand() % 100) < 70) {
+            Sound("coop_deathvox", CHAN_BODY, 0.72f, 190.0f, NULL, 0.68f + G_Random(0.1f));
+        }
+    }
 
     fire = new Animate;
     fire->setModel("models/emitters/fireandsmoke.tik");
@@ -5640,6 +5654,16 @@ void Vehicle::EventCoopCookoff(Event *ev)
 
     remaining = ev->GetInteger(1);
     pos       = origin + Vector(G_CRandom(46.0f), G_CRandom(46.0f), 18.0f + G_Random(38.0f));
+    // [user 2026-08-19] muffled crew scream riding some cook-offs ("during and after at random")
+    {
+        static cvar_t *pScr2 = NULL;
+        if (!pScr2) {
+            pScr2 = gi.Cvar_Get("coop_vehicleScreams", "1", CVAR_ARCHIVE);
+        }
+        if (pScr2->integer && (rand() % 100) < 40) {
+            Sound("coop_deathvox", CHAN_BODY, 0.62f, 170.0f, NULL, 0.62f + G_Random(0.12f));
+        }
+    }
     // small real damage: standing on a cooking-off wreck SHOULD hurt a little
     CreateExplosion(pos, 32.0f * edict->s.scale, this, this, this, m_sExplosionModel);
 
