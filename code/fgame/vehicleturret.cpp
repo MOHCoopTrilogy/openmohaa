@@ -1498,6 +1498,68 @@ void VehicleTurretGun::IdleToRestPosition()
 
 void VehicleTurretGun::UpdateFireControl()
 {
+    // HZM coop (bug-1946): "I could literally sometimes just hold the button down and it would
+    // never really overheat at all" - the MG heat cycle lived ONLY in TurretGun::P_ThinkActive,
+    // and VehicleTurretGun overrides Think() with its own fire path, so every vehicle-mounted MG
+    // (halftrack, tank hull gun, jeep) fired forever while emplaced tripods cooked. Same numbers
+    // as the emplaced cycle: 50/s build (~2s to peg), soft overheat with 2s dead-gun floor, 2.5x
+    // re-peg while firing hot, 25/s cool locked / 8/s idle bleed, same steam hiss + red HUD bar.
+    // Scoped by fire rate so tank CANNONS never heat, and to PLAYER gunners so AI vehicle
+    // balance is untouched.
+    if (owner && owner->IsSubclassOfPlayer() && FireDelay(FIRE_PRIMARY) < 0.3f) {
+        qboolean bTrig = (m_iFiring != TURRETFIRESTATE_NONE);
+
+        if (m_bOverheated && level.time < m_fOverheatLockUntil) {
+            m_iFiring = TURRETFIRESTATE_NONE; // dead-gun floor: trigger is ignored outright
+            m_fHeat -= 25.0f * level.frametime;
+        } else if (m_bOverheated && bTrig) {
+            // firing WHILE hot: net +100/s, a hot gun re-pegs in under a second of held trigger
+            m_fHeat += 100.0f * level.frametime;
+            if (m_fHeat > 100.0f) {
+                m_fHeat = 100.0f;
+            }
+        } else if (m_bOverheated) {
+            m_fHeat -= 25.0f * level.frametime;
+            if (m_fHeat <= 0.0f) {
+                m_fHeat       = 0.0f;
+                m_bOverheated = false;
+            }
+        } else if (bTrig) {
+            m_fHeat += 50.0f * level.frametime;
+            if (m_fHeat >= 100.0f) {
+                m_fHeat              = 100.0f;
+                m_bOverheated        = true;
+                m_fOverheatLockUntil = level.time + 2.0f;
+                m_iFiring            = TURRETFIRESTATE_NONE;
+                Sound("coop_mg_overheat");
+            }
+        } else {
+            m_fHeat -= 8.0f * level.frametime; // slow idle bleed so bursts still accumulate
+        }
+        if (m_fHeat < 0.0f) {
+            m_fHeat = 0.0f;
+        }
+
+        // mirror to the gunner's red heat bar (belt field 0 = no belt count drawn; vehicle
+        // guns keep the retail unlimited belt, so only the heat six-bit field is packed)
+        {
+            int heat6 = (int)(m_fHeat * 63.0f / 100.0f);
+            int beltField;
+            if (heat6 < 0) {
+                heat6 = 0;
+            } else if (heat6 > 63) {
+                heat6 = 63;
+            }
+            if (m_iCoopAmmo < 0) {
+                beltField = 0;
+            } else {
+                beltField = (m_iCoopAmmo > 510) ? 511 : m_iCoopAmmo + 1;
+            }
+            static_cast<Player *>(owner.Pointer())->client->ps.stats[STAT_MGHEAT] =
+                beltField | (heat6 << 9);
+        }
+    }
+
     switch (m_iFiring) {
     case TURRETFIRESTATE_NONE:
         //
