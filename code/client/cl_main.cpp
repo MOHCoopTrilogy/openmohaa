@@ -3720,12 +3720,51 @@ void CL_SyncSR_f( void )
 		int  pinCount = 0;
 		int  k;
 
+		// [user 2026-08-18] slots hold CIDS now (see CL_PinToggle_f) - resolve each back to its
+		// CURRENT row through the generated map, so markers stay right through any catalogue
+		// renumber. Legacy numeric slots (pre-cid) fall back to the old direct index.
+		if ( !Cvar_VariableString( "coop_srCid0" )[0] ) {
+			Cbuf_ExecuteText( EXEC_NOW, "exec ui/coop_sr_cids.cfg\n" );
+		}
+		// [user 2026-08-18] CATALOGUE GENERATION SELF-HEAL. The archived per-row state family
+		// (coop_uiN progress, coop_uiD done) is keyed by ROW POSITION, so a catalogue renumber
+		// leaves every row showing some OTHER challenge's numbers until the next join. The
+		// generated map carries a hash of the cid list; on mismatch with the archived stamp,
+		// wipe the positional state - the menu shows blank progress instead of WRONG progress,
+		// and the next server join re-exports truth. Pins survive: they are cid-keyed.
+		{
+			const char *gen  = Cvar_VariableString( "coop_srGen" );
+			cvar_t     *seen = Cvar_Get( "coop_srGenSeen", "", CVAR_ARCHIVE );
+			if ( gen[0] && strcmp( gen, seen->string ) ) {
+				int w;
+				for ( w = 0; w < 1024; w++ ) {
+					Cvar_Set( va( "coop_uiN%d", w ), "" );
+					Cvar_Set( va( "coop_uiD%d", w ), "0" );
+				}
+				Cvar_Set( "coop_srGenSeen", gen );
+				Com_Printf( "SR: catalogue changed (gen %s) - positional row state reset\n", gen );
+			}
+		}
 		for ( k = 0; k < COOP_PIN_MAX; k++ ) {
 			const char *v;
 			Com_sprintf( slotName, sizeof( slotName ), "coop_pin%d", k + 1 );
 			v = Cvar_VariableString( slotName );
 			if ( v[0] ) {
-				pinIdx[pinCount++] = atoi( v );
+				if ( strchr( v, '_' ) ) {
+					int m;
+					for ( m = 0; m < 1024; m++ ) {
+						const char *mc = Cvar_VariableString( va( "coop_srCid%d", m ) );
+						if ( !mc[0] ) {
+							break;	// the map is dense - first gap is the end
+						}
+						if ( !strcmp( mc, v ) ) {
+							pinIdx[pinCount++] = m;
+							break;
+						}
+					}
+				} else {
+					pinIdx[pinCount++] = atoi( v );
+				}
 			}
 		}
 		for ( i = 0; i < 1024; i++ ) {
@@ -3768,7 +3807,8 @@ void CL_SyncSR_f( void )
 void CL_PinToggle_f( void )
 {
 	cvar_t     *slot[COOP_PIN_MAX];
-	int         idx[COOP_PIN_MAX];
+	char        pinCid[COOP_PIN_MAX][64];
+	char        cid[64];
 	int         count;
 	int         gi;
 	int         i, j;
@@ -3784,24 +3824,52 @@ void CL_PinToggle_f( void )
 		return;
 	}
 
-	// read the current 5 slots (skipping any empty ones) into a compact local array
+	// [user 2026-08-18] pins persist as CIDS, not catalogue indices. The archived-index store
+	// meant every catalogue renumber (a challenge added or removed) silently repointed every
+	// player's pins at DIFFERENT challenges - the server half was designed around cids from
+	// day one ("pins store cids, not indices", challenges.scr) and the client half betrayed it.
+	// The index->cid map is generated with the SR pages (ui/coop_sr_cids.cfg) and lazy-loaded
+	// here, so the disconnected main menu needs no server and no menu-flow hook.
+	{
+		const char *cidProbe = Cvar_VariableString( va( "coop_srCid%d", gi ) );
+		if ( !cidProbe[0] ) {
+			Cbuf_ExecuteText( EXEC_NOW, "exec ui/coop_sr_cids.cfg\n" );
+		}
+	}
+	Q_strncpyz( cid, Cvar_VariableString( va( "coop_srCid%d", gi ) ), sizeof( cid ) );
+	if ( !cid[0] ) {
+		Com_Printf( "coop_pintoggle: row %d has no cid (ui/coop_sr_cids.cfg missing?)\n", gi );
+		return;
+	}
+
+	// read the current 5 slots (skipping any empty ones) into a compact local array.
+	// LEGACY MIGRATION: a pre-cid slot holds a bare number - resolve it through the same map
+	// once and it is rewritten as a cid below; unresolvable legacy values are dropped.
 	count = 0;
 	for ( i = 0; i < COOP_PIN_MAX; i++ ) {
 		Com_sprintf( cvarName, sizeof( cvarName ), "coop_pin%d", i + 1 );
 		slot[i] = Cvar_Get( cvarName, "", CVAR_ARCHIVE | CVAR_USERINFO );
 		if ( slot[i]->string[0] ) {
-			idx[count] = atoi( slot[i]->string );
-			count++;
+			if ( strchr( slot[i]->string, '_' ) ) {
+				Q_strncpyz( pinCid[count], slot[i]->string, sizeof( pinCid[count] ) );
+				count++;
+			} else {
+				const char *mig = Cvar_VariableString( va( "coop_srCid%s", slot[i]->string ) );
+				if ( mig[0] ) {
+					Q_strncpyz( pinCid[count], mig, sizeof( pinCid[count] ) );
+					count++;
+				}
+			}
 		}
 	}
 
 	// already pinned? unpin (remove + compact)
 	found = qfalse;
 	for ( i = 0; i < count; i++ ) {
-		if ( idx[i] == gi ) {
+		if ( !strcmp( pinCid[i], cid ) ) {
 			found = qtrue;
 			for ( j = i; j < count - 1; j++ ) {
-				idx[j] = idx[j + 1];
+				Q_strncpyz( pinCid[j], pinCid[j + 1], sizeof( pinCid[j] ) );
 			}
 			count--;
 			break;
@@ -3826,16 +3894,14 @@ void CL_PinToggle_f( void )
 			Cvar_Set( "coop_pinResult", "full" );
 			return;
 		}
-		idx[count] = gi;
+		Q_strncpyz( pinCid[count], cid, sizeof( pinCid[count] ) );
 		count++;
 	}
 
 	// rewrite all 5 slots: the first `count` get the compacted indices, the rest are cleared
 	for ( i = 0; i < COOP_PIN_MAX; i++ ) {
 		if ( i < count ) {
-			char valStr[8];
-			Com_sprintf( valStr, sizeof( valStr ), "%d", idx[i] );
-			Cvar_Set( slot[i]->name, valStr );
+			Cvar_Set( slot[i]->name, pinCid[i] );
 		} else {
 			Cvar_Set( slot[i]->name, "" );
 		}
