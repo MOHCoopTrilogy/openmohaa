@@ -1216,11 +1216,14 @@ static const adsGunTune_t s_adsGunTune[] = {
     // [user 07-18 session 2] STANDING-ONLY tune pass (pistols + silenced variants, rifles, SMGs). The STAND
     // fields are dialled; the CROUCH fields on these NEW rows are the inherited default state the adssave
     // printed (crouch was NOT deliberately tuned this session) - fine as a starting point, refine later.
+    // [user 2026-08-18] crouch re-synced to each gun's correct FAMILY donor ("i know i missed some for
+    // crouch ads"): silenced pistols match their own base gun, PPS-43 the PPSH, Beretta M38 the Moschetto.
+    // Still family guesses, not eyeballed - the standing fields remain the hand-dialled truth.
     { "Silenced Colt .45",      0.0f, -1.0f,  1.5f, -0.015f,-0.005f,   1.5f, -8.5f,  4.0f, -0.14f,  0.04f },
-    { "Silenced Walther P38",  -2.0f,  0.0f,  1.5f, -0.005f,-0.025f,   1.5f, -8.5f,  4.0f, -0.14f,  0.04f },
-    { "Silenced TT-33",        -2.0f, -1.0f,  1.5f, -0.01f, -0.015f,   1.5f, -8.5f,  4.0f, -0.14f,  0.04f },
-    { "Silenced Beretta",      -1.0f, -1.5f,  1.5f, -0.005f, 0.01f,    1.5f, -8.5f,  4.0f, -0.14f,  0.04f },
-    { "Silenced Luger P08",    -1.5f, -1.5f,  1.5f, -0.01f, -0.025f,   1.5f, -8.5f,  4.0f, -0.14f,  0.04f },
+    { "Silenced Walther P38",  -2.0f,  0.0f,  1.5f, -0.005f,-0.025f,   0.5f, -9.5f,  1.0f, -0.145f,  0.02f },
+    { "Silenced TT-33",        -2.0f, -1.0f,  1.5f, -0.01f, -0.015f,    1.0f, -8.0f,  1.0f, -0.12f,  0.02f },
+    { "Silenced Beretta",      -1.0f, -1.5f,  1.5f, -0.005f, 0.01f, -1.0f, -8.5f, 1.0f,-0.14f, 0.02f },
+    { "Silenced Luger P08",    -1.5f, -1.5f,  1.5f, -0.01f, -0.025f,   1.0f, -8.0f,  1.0f, -0.12f,  0.02f },
     { "Walther PPK",           -3.5f, -0.5f,  3.0f, -0.01f, -0.11f,    1.0f, -8.0f,  1.0f, -0.12f,  0.02f },
     { "Luger P08",              0.0f, -1.5f,  0.0f, -0.01f, -0.035f,   1.0f, -8.0f,  1.0f, -0.12f,  0.02f },
     { "Nambu Type 14",          1.5f, -1.5f,  0.0f, -0.015f, 0.015f,   1.0f, -8.0f,  1.0f, -0.12f,  0.02f },
@@ -1230,10 +1233,10 @@ static const adsGunTune_t s_adsGunTune[] = {
     { "Arisaka Type 99",       -7.0f, -1.0f,  1.0f, -0.015f,-0.29f,    2.0f,-34.5f,  0.0f, -0.625f, 0.045f },
     { "Springfield M1903",    -18.0f,  0.5f,  1.0f,  0.01f, -0.73f,    2.0f,-34.5f,  0.0f, -0.625f, 0.045f },
     { "Thompson 50rd",          4.5f,  2.0f,  0.0f,  0.02f,  0.08f,    1.0f,-10.5f,  1.5f, -0.165f, 0.02f },
-    { "Silenced MP40",          4.5f,  4.0f,  0.0f,  0.045f, 0.095f,   1.0f,-10.5f,  1.5f, -0.165f, 0.02f },
+    { "Silenced MP40",          4.5f,  4.0f,  0.0f,  0.045f, 0.095f,   2.5f,-20.0f,  1.5f, -0.335f,  0.05f },
     { "Type 100 SMG",          18.0f, -2.0f,  0.0f,  0.0f,   0.325f,   1.0f,-10.5f,  1.5f, -0.165f, 0.02f },
-    { "Silenced PPS-43",       -2.0f,  4.0f,  0.0f,  0.065f, 0.005f,   1.0f,-10.5f,  1.5f, -0.165f, 0.02f },
-    { "Beretta M38",           -8.0f,  6.5f, -1.5f,  0.125f,-0.335f,   2.5f,-20.0f,  1.5f, -0.335f, 0.05f },
+    { "Silenced PPS-43",       -2.0f,  4.0f,  0.0f,  0.065f, 0.005f,   1.5f,-18.0f,  2.5f,  -0.26f,  0.04f },
+    { "Beretta M38",           -8.0f,  6.5f, -1.5f,  0.125f,-0.335f,   2.0f,-18.5f,  1.5f, -0.285f,-0.005f },
     { "Breda",                  1.5f,  2.0f, -3.0f,  0.045f, 0.035f,   2.0f,-23.0f,  1.5f, -0.38f,  0.155f },
 };
 
