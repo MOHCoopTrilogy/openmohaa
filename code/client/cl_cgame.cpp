@@ -833,7 +833,10 @@ void CL_InitCGameDLL( clientGameImport_t *cgi, clientGameExport_t **cge ) {
 	// UV wound painting (NULL when the active renderer lacks the feature)
 	cgi->R_GoreImpact				= re.GoreImpact;
 	cgi->R_GoreReset				= re.GoreReset;
-	cgi->R_GoreKillSplash			= re.GoreKillSplash; // bug-780
+	cgi->R_GoreKillSplash			= re.GoreKillSplash;
+	cgi->R_SetRagdollPose			= re.SetRagdollPose;	// HZM coop - ragdoll bridge
+	cgi->R_ClearRagdoll				= re.ClearRagdoll;
+	cgi->R_ClearAllRagdolls			= re.ClearAllRagdolls; // bug-780
 
 	cgi->fsDebug					= fs_debug;
 	cgi->HudDrawElements			= cls.HudDrawElements;

@@ -821,6 +821,8 @@ void R_AddSkelSurfaces(trRefEntity_t *ent)
     );
     R_GetFrame(&ent->e, newFrame);
 
+    skelBoneCache_t *coopCacheStart = outbones; // HZM coop ragdoll - Hook A writes this region
+
     if (lod_tool->integer || iRadiusCull != CULL_CLIP
         || R_CullSkelModel(tiki, &ent->e, newFrame, tiki_scale, tiki_localorigin) != CULL_OUT) {
         //
@@ -841,6 +843,20 @@ void R_AddSkelSurfaces(trRefEntity_t *ent)
             outbones->matrix[2][2] = newFrame->bones[i][2][2];
             outbones->matrix[2][3] = 0;
             outbones++;
+        }
+    }
+
+    // HZM coop - RAGDOLL Hook A (ragdoll_plan.md v3 §0, vetted insertion: outside the
+    // cull-gated copy, while newFrame is still alive). For flagged entities: write EVERY
+    // channel's cache entry from the override table unconditionally - a skipped vanilla
+    // copy (CULL_CLIP + OBB CULL_OUT) can never leak stale pool garbage under a drifted
+    // body - and stash the vanilla frame as the anim-pose block (the gore remap's producer,
+    // one producer one consumer). Pure reader of the table: no latches, no counters -
+    // portal/mirror/wrap-frame views re-fill safely.
+    {
+        struct ragdollSlot_s *coopSlot = R_RagdollSlotFor(ent->e.entityNumber, tiki);
+        if (coopSlot) {
+            R_RagdollApplyToCache(coopSlot, coopCacheStart, num_tags, newFrame);
         }
     }
 
@@ -1796,6 +1812,13 @@ RE_TIKI_Orientation
 */
 orientation_t RE_TIKI_Orientation(refEntity_t *model, int tagnum)
 {
+    // HZM coop - RAGDOLL Hook B: the single funnel for every client tag consumer
+    // (attachments: stump/eyeball/wound props/drips/holstered weapons). Flagged
+    // entities serve orientations from the override so attachments ride the ragdoll.
+    orientation_t coopOr;
+    if (R_RagdollGetOrientation(model->entityNumber, model->tiki, tagnum, model->scale, &coopOr)) {
+        return coopOr;
+    }
     R_UpdatePoseInternal(model);
     return ri.TIKI_OrientationInternal(model->tiki, model->entityNumber, tagnum, model->scale);
 }

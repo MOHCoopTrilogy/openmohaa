@@ -781,6 +781,11 @@ Called after every level change or subsystem restart
 */
 void CG_Init(clientGameImport_t *imported, int serverMessageNum, int serverCommandSequence, int clientNum)
 {
+    // HZM coop - ragdoll: renderer table must start clean (plan section-5)
+    if (imported->R_ClearAllRagdolls) {
+        imported->R_ClearAllRagdolls();
+    }
+
     cgi = *imported;
 
     cg_protocol = cgi.Cvar_Get("com_protocol", "", 0)->integer;

@@ -184,6 +184,11 @@ typedef struct {
     // CPU-skinned characters (gl1 only; NULL on renderers without support).
     void (*GoreImpact)(const vec3_t vStart, const vec3_t vEnd);
     void (*GoreReset)(int entityNumber);
+    // HZM coop - ragdoll bridge (ragdoll_plan.md v3): cgame pushes model-space per-channel
+    // 3x4s; renderer overrides the bone cache (Hook A) and tag orientations (Hook B).
+    void (*SetRagdollPose)(int entityNumber, dtiki_t *tiki, int count, const float *mat34, const vec3_t mins, const vec3_t maxs);
+    void (*ClearRagdoll)(int entityNumber);
+    void (*ClearAllRagdolls)(void);
     void (*GoreKillSplash)(int entityNumber); // bug-780: killing blow -> corpse blood splashes
 } refexport_t;
 

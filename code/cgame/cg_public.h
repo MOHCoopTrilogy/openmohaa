@@ -449,6 +449,11 @@ functions exported to the main executable
         void (*R_GoreReset)(int iEntityNumber);
         void (*R_GoreKillSplash)(int iEntityNumber); // bug-780: killing blow -> corpse splashes
 
+        // HZM coop - ragdoll bridge (appended; NULL when the renderer lacks it - gl2)
+        void (*R_SetRagdollPose)(int entityNumber, dtiki_t *tiki, int count, const float *mat34, const vec3_t mins, const vec3_t maxs);
+        void (*R_ClearRagdoll)(int entityNumber);
+        void (*R_ClearAllRagdolls)(void);
+
     } clientGameImport_t;
 
     /*
