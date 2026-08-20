@@ -55,7 +55,7 @@ static void RagArmTestPose(entityState_t *ns, dtiki_t *tiki, int count);
 #define RAG_SUBSTEP_MS 8
 #define RAG_MAX_STEPS  4
 #define RAG_GRAVITY    800.0f
-#define RAG_DAMPING    0.985f
+#define RAG_DAMPING    0.98f
 #define RAG_ITERS      6
 #define RAG_TRACE_BUDGET 240 // global per-frame trace ceiling (plan section-3)
 
@@ -81,14 +81,26 @@ static const struct {
     {"Bip01 R Calf",    13}, // 14
 };
 
-// stiffening braces beyond the 14 parent links (plan section-3)
-static const int s_ragBraces[6][2] = {
-    {5,  8}, // shoulder - shoulder
+// stiffening braces beyond the 14 parent links (plan section-3). The grandparent links are
+// fold limits: they cap how sharply any joint can hinge, measured at the DEATH pose, and
+// they rotate with the body - so corpses topple and slump but cannot collapse into a
+// bead-chain pile (the P3 live finding 2026-08-19 21:37: pure neighbor links = heap).
+#define RAG_BRACES 14
+static const int s_ragBraces[RAG_BRACES][2] = {
+    {5,  8},  // shoulder - shoulder
     {11, 13}, // thigh - thigh
-    {5,  13}, // L shoulder - R thigh
-    {8,  11}, // R shoulder - L thigh
+    {5,  13}, // L shoulder - R thigh (torso cross)
+    {8,  11}, // R shoulder - L thigh (torso cross)
     {3,  1},  // neck - spine1
     {0,  2},  // pelvis - spine2
+    {2,  4},  // spine2 - head       (neck fold limit)
+    {2,  6},  // spine2 - L forearm  (shoulder fold limit)
+    {2,  9},  // spine2 - R forearm
+    {5,  7},  // L upperarm - L hand (elbow fold limit)
+    {8,  10}, // R upperarm - R hand
+    {0,  12}, // pelvis - L calf     (knee fold limit)
+    {0,  14}, // pelvis - R calf
+    {1,  11}, // spine1 - L thigh    (hip fold limit)
 };
 
 typedef struct {
@@ -117,7 +129,7 @@ typedef struct {
     vec3_t   pt[RAG_PTS];          // world positions
     vec3_t   ptPrev[RAG_PTS];
     float    restLen[RAG_PTS];     // to parent
-    float    braceLen[6];
+    float    braceLen[RAG_BRACES];
     vec3_t   restDir[RAG_PTS];     // capture direction parent->this (world)
     float    rot0[RAG_PTS][3][3];  // capture world rotation per sim bone
 
@@ -374,7 +386,7 @@ static qboolean RagCapture(centity_t *cent, entityState_t *ns, ragSim_t *s)
             VectorSet(s->restDir[i], 0, 0, 1);
         }
     }
-    for (i = 0; i < 6; i++) {
+    for (i = 0; i < RAG_BRACES; i++) {
         vec3_t d;
         VectorSubtract(s->pt[s_ragBraces[i][0]], s->pt[s_ragBraces[i][1]], d);
         s->braceLen[i] = VectorLength(d);
@@ -449,7 +461,7 @@ static void RagStep(ragSim_t *s, float dt)
             VectorMA(s->pt[i], -corr, d, s->pt[i]);
             VectorMA(s->pt[p], corr, d, s->pt[p]);
         }
-        for (i = 0; i < 6; i++) {
+        for (i = 0; i < RAG_BRACES; i++) {
             int    a = s_ragBraces[i][0], b = s_ragBraces[i][1];
             vec3_t d;
             float  len, corr;
@@ -458,7 +470,7 @@ static void RagStep(ragSim_t *s, float dt)
             if (len < 0.001f) {
                 continue;
             }
-            corr = (len - s->braceLen[i]) * 0.35f / len; // braces are softer than links
+            corr = (len - s->braceLen[i]) * 0.5f / len; // firm: these are the anti-pile truss
             VectorMA(s->pt[a], -corr, d, s->pt[a]);
             VectorMA(s->pt[b], corr, d, s->pt[b]);
         }
@@ -478,8 +490,15 @@ static void RagResolveHit(ragSim_t *s, int i, const trace_t *tr)
     d = DotProduct(v, tr->plane.normal);
     VectorScale(tr->plane.normal, d, vn);
     VectorSubtract(v, vn, vt);
+    // resting contact: a slow point on a floor stops DEAD - this is what lets bodies
+    // speed-sleep instead of micro-skidding their whole 6s life (and off ledges)
+    if (tr->plane.normal[2] > 0.7f && VectorLength(v) < 1.2f) {
+        VectorCopy(pos, s->pt[i]);
+        VectorCopy(pos, s->ptPrev[i]);
+        return;
+    }
     VectorScale(vn, -0.1f, vn); // restitution
-    VectorScale(vt, (tr->plane.normal[2] > 0.7f) ? 0.6f : 0.75f, vt);
+    VectorScale(vt, (tr->plane.normal[2] > 0.7f) ? 0.45f : 0.75f, vt);
     VectorAdd(vn, vt, v);
     VectorCopy(pos, s->pt[i]);
     VectorSubtract(pos, v, s->ptPrev[i]);
@@ -531,9 +550,9 @@ static void RagCollide(ragSim_t *s, vec3_t frameStart[RAG_PTS])
         if (VectorLengthSquared(d) < 0.0001f) {
             continue;
         }
-        if (s_ragTraceCount >= RAG_TRACE_BUDGET) {
-            return; // glide this frame (plan section-3 degradation)
-        }
+        // world traces are budget-EXEMPT (hard-bounded at 15 x pool anyway): a corpse that
+        // skips its world clip even one frame keeps falling - that was the fall-off-the-map
+        // class. The ceiling below applies to the mover pass only.
         s_ragTraceCount++;
         cgi.CM_BoxTrace(&tr, frameStart[i], s->pt[i], s_ragPtMins, s_ragPtMaxs, 0, MASK_DEADSOLID, qfalse);
         if (tr.startsolid) {
