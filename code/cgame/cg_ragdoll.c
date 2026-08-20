@@ -350,6 +350,26 @@ static qboolean RagCapture(centity_t *cent, entityState_t *ns, ragSim_t *s)
         VectorCopy(s->pt[i], s->ptPrev[i]);
     }
 
+    // pre-lift: death poses routinely bury calves/feet slightly in the floor. A buried
+    // point starts every trace in-solid -> permanently frozen -> it PINS the body and the
+    // rest drapes onto it (the 21:47 pile). Lift buried points to the surface above them
+    // before any rest geometry is measured, so the sim starts penetration-free.
+    for (i = 0; i < RAG_PTS; i++) {
+        trace_t tr;
+        vec3_t  above;
+        if (!(cgi.CM_PointContents(s->pt[i], 0) & MASK_DEADSOLID)) {
+            continue;
+        }
+        VectorCopy(s->pt[i], above);
+        above[2] += 24;
+        cgi.CM_BoxTrace(&tr, above, s->pt[i], s_ragPtMins, s_ragPtMaxs, 0, MASK_DEADSOLID, qfalse);
+        if (!tr.startsolid && tr.fraction < 1.0f) {
+            VectorCopy(tr.endpos, s->pt[i]);
+            s->pt[i][2] += 0.25f;
+            VectorCopy(s->pt[i], s->ptPrev[i]);
+        }
+    }
+
     // capture-verified-non-bind (P2 acceptance): head must sit above pelvis for a standing
     // capture, and the skeleton must span something - a bind/zero pose fails both.
     {
@@ -536,28 +556,28 @@ static float RagMoverHash(const ragSim_t *s)
     return h;
 }
 
-static void RagCollide(ragSim_t *s, vec3_t frameStart[RAG_PTS])
+// world pass, run INSIDE every substep AFTER the constraint iterations. The 21:47 live
+// finding: per-frame collision let the solver end frames with points already below the
+// floor - the next sweep then started underground and never saw the surface (bodies sank
+// under the map), and the floor-frozen points pinned corpses into piles. Per-substep
+// ordering (integrate -> constraints -> collide) ends every substep penetration-clean.
+// World traces are budget-EXEMPT (hard-bounded at 15 x 4 x pool; short sweeps are cheap).
+static void RagCollideWorld(ragSim_t *s, vec3_t subStart[RAG_PTS])
 {
-    trace_t    tr;
-    centity_t *movers[4];
-    vec3_t     bmins, bmaxs, angles;
-    int        i, m, nMovers;
+    trace_t tr;
+    int     i;
 
-    // world pass: sweep each moved point across its whole frame path (no tunneling)
     for (i = 0; i < RAG_PTS; i++) {
         vec3_t d;
-        VectorSubtract(s->pt[i], frameStart[i], d);
+        VectorSubtract(s->pt[i], subStart[i], d);
         if (VectorLengthSquared(d) < 0.0001f) {
             continue;
         }
-        // world traces are budget-EXEMPT (hard-bounded at 15 x pool anyway): a corpse that
-        // skips its world clip even one frame keeps falling - that was the fall-off-the-map
-        // class. The ceiling below applies to the mover pass only.
         s_ragTraceCount++;
-        cgi.CM_BoxTrace(&tr, frameStart[i], s->pt[i], s_ragPtMins, s_ragPtMaxs, 0, MASK_DEADSOLID, qfalse);
+        cgi.CM_BoxTrace(&tr, subStart[i], s->pt[i], s_ragPtMins, s_ragPtMaxs, 0, MASK_DEADSOLID, qfalse);
         if (tr.startsolid) {
             // stuck inside: hold, kill velocity, let the constraint web drag it out
-            VectorCopy(frameStart[i], s->pt[i]);
+            VectorCopy(subStart[i], s->pt[i]);
             VectorCopy(s->pt[i], s->ptPrev[i]);
             continue;
         }
@@ -565,6 +585,14 @@ static void RagCollide(ragSim_t *s, vec3_t frameStart[RAG_PTS])
             RagResolveHit(s, i, &tr);
         }
     }
+}
+
+static void RagCollideMovers(ragSim_t *s, vec3_t frameStart[RAG_PTS])
+{
+    trace_t    tr;
+    centity_t *movers[4];
+    vec3_t     bmins, bmaxs, angles;
+    int        i, m, nMovers;
 
     // mover pass: one bounds query per body per frame (plan section-3)
     ClearBounds(bmins, bmaxs);
@@ -739,7 +767,12 @@ void CG_RagdollFrame(void)
         }
         steps = 0;
         while (s->accumMs >= RAG_SUBSTEP_MS && steps < RAG_MAX_STEPS) {
+            vec3_t subStart[RAG_PTS];
+            for (j = 0; j < RAG_PTS; j++) {
+                VectorCopy(s->pt[j], subStart[j]);
+            }
             RagStep(s, RAG_SUBSTEP_MS * 0.001f);
+            RagCollideWorld(s, subStart); // every substep ends penetration-clean
             s->accumMs -= RAG_SUBSTEP_MS;
             steps++;
         }
@@ -747,7 +780,7 @@ void CG_RagdollFrame(void)
             s->accumMs = RAG_SUBSTEP_MS * RAG_MAX_STEPS; // discard the hitch backlog
         }
         if (steps) {
-            RagCollide(s, frameStart); // sweep frame-start -> current, world then movers
+            RagCollideMovers(s, frameStart); // movers are slow: whole-frame sweep suffices
         }
         if (!RagSane(s)) {
             if (rag_debug->integer) {
@@ -767,7 +800,10 @@ void CG_RagdollFrame(void)
                 speed += VectorLength(v);
             }
             speed = speed / RAG_PTS / (RAG_SUBSTEP_MS * 0.001f);
-            if (speed < 4.0f) {
+            // 10 not 4: truss-supported points that never floor-contact carry ~6u/s of
+            // gravity-vs-constraint jitter (sub-pixel, invisible) - at 4 nothing ever
+            // speed-slept, every body rode to the 6s life cap (live 21:46, 3/3 kills)
+            if (speed < 10.0f) {
                 s->sleepMs += ms;
             } else {
                 s->sleepMs = 0;
