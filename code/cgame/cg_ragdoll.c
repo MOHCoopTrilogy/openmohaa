@@ -565,8 +565,10 @@ static void RagResolveHit(ragSim_t *s, int i, const trace_t *tr)
     VectorScale(tr->plane.normal, d, vn);
     VectorSubtract(v, vn, vt);
     // resting contact: a slow point on a floor stops DEAD - this is what lets bodies
-    // speed-sleep instead of micro-skidding their whole 6s life (and off ledges)
-    if (tr->plane.normal[2] > 0.7f && VectorLength(v) < 1.2f) {
+    // speed-sleep instead of micro-skidding their whole 6s life (and off ledges).
+    // 0.35/substep = ~44u/s; the old 1.2 gate was 150u/s and froze the landing slide,
+    // folding bodies vertically over their first contact (audit defect 3)
+    if (tr->plane.normal[2] > 0.7f && VectorLength(v) < 0.35f) {
         VectorCopy(pos, s->pt[i]);
         VectorCopy(pos, s->ptPrev[i]);
         return;
@@ -1002,10 +1004,12 @@ void CG_RagdollTransition(centity_t *cent)
             for (i = 0; i < RAG_PTS; i++) {
                 // Verlet seeding: prev = pos - v*dt
                 VectorMA(s->pt[i], -subDt, vel, s->ptPrev[i]);
-                // small per-point jitter so the body tumbles rather than translating rigidly
-                s->ptPrev[i][0] += crandom() * 0.4f;
-                s->ptPrev[i][1] += crandom() * 0.4f;
-                s->ptPrev[i][2] += crandom() * 0.3f;
+                // small per-point jitter so the body tumbles rather than translating
+                // rigidly. 0.08u on ptPrev = ~10u/s; the old 0.4 was a 50u/s kick that
+                // crumpled bodies the instant they seeded (audit defect 7)
+                s->ptPrev[i][0] += crandom() * 0.08f;
+                s->ptPrev[i][1] += crandom() * 0.08f;
+                s->ptPrev[i][2] += crandom() * 0.06f;
             }
             s->state = 1;
             if (rag_debug->integer) {
