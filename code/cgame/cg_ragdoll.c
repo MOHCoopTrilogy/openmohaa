@@ -198,6 +198,7 @@ struct ragSim_s {
     float    ptRadius[RAG_PTS];    // per-point collision radius, clamped to capture clearance
     float    bodyRot[3][3];        // SMOOTHED body orientation (see RagBodyRotation)
     byte     bodyRotValid;
+    byte     rotLocked;            // latched once the body rests on the world - never re-fits
     byte     buried;               // points still in solid after the capture pre-lift
     float    maxSpeed;             // peak mean point speed (acceptance evidence)
 
@@ -786,13 +787,17 @@ static qboolean RagBodyRotation(ragSim_t *s, float S[3][3])
     if (!s->bodyRotValid) {
         memcpy(s->bodyRot, raw, sizeof(raw));
         s->bodyRotValid = 1;
-    } else {
+    } else if (!s->rotLocked) {
         for (i = 0; i < RAG_PTS; i++) {
             if (s->contact[i]) {
                 nContact++;
             }
         }
-        a = (nContact >= 3) ? 0.0f : 0.12f;
+        if (nContact >= 3) {
+            s->rotLocked = 1; // LATCHED, not momentary: contact counts flicker as points settle,
+                              // and an unlatched lock lets the drift resume every time it dips
+        }
+        a = s->rotLocked ? 0.0f : 0.12f;
         if (a > 0) {
             for (r = 0; r < 3; r++) {
                 for (c = 0; c < 3; c++) {
