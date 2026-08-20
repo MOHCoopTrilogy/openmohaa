@@ -3027,6 +3027,13 @@ void R_FreeRawImage(byte *pic);
 // HZM gl2 re-port (bug-gl2-gore), mirrors gl1 tr_local.h:2294-2304
 void RE_GoreImpact(const vec3_t vStart, const vec3_t vEnd); // exported to cgame (bullet segment)
 void RE_GoreReset(int entityNumber);                        // exported to cgame (entity fresh again)
+// HZM coop - ragdoll (tr_ragdoll.cpp, gl2 lockstep)
+struct ragdollSlot_s *R_RagdollSlotFor(int entityNumber, dtiki_t *tiki);
+void R_RagdollApplyToCache(struct ragdollSlot_s *slot, skelBoneCache_t *cache, int num_tags, struct skelAnimFrame_s *newFrame);
+qboolean R_RagdollGetOrientation(int entityNumber, dtiki_t *tiki, int tagnum, float scale, orientation_t *out);
+void RE_SetRagdollPose(int entityNumber, dtiki_t *tiki, int count, const float *mat34, const vec3_t mins, const vec3_t maxs);
+void RE_ClearRagdoll(int entityNumber);
+void RE_ClearAllRagdolls(void);
 void RE_GoreKillSplash(int entityNumber);                   // exported to cgame (killing blow - bug-780)
 void R_GoreSkelSurfaceCheck(int baseVertex, int baseIndex); // RB_SkelMesh tail: ray-test skinned tris
 image_t *R_GoreOverrideImage(image_t *image);               // R_BindAnimatedImageToTMU: swap in wound copy

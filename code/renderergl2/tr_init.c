@@ -2666,6 +2666,9 @@ refexport_t *GetRefAPI ( int apiVersion, refimport_t *rimp ) {
     // HZM coop - gore tier 4 (UV wounds) - HZM gl2 re-port (bug-gl2-gore),
     // mirrors gl1 tr_init.c:2101-2104
     re.GoreImpact     = RE_GoreImpact;
+    re.SetRagdollPose = RE_SetRagdollPose; // HZM coop - ragdoll bridge (gl2 lockstep)
+    re.ClearRagdoll   = RE_ClearRagdoll;
+    re.ClearAllRagdolls = RE_ClearAllRagdolls;
     re.GoreReset      = RE_GoreReset;
     re.GoreKillSplash = RE_GoreKillSplash; // bug-780
 

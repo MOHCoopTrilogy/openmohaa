@@ -1211,6 +1211,8 @@ void R_AddSkelSurfaces(trRefEntity_t *ent)
                                  && (diagFMax[2] - diagFMin[2] < 0.5f));
     }
 
+    skelBoneCache_t *coopCacheStart = outbones; // HZM coop ragdoll - Hook A writes this region
+
     if (lod_tool->integer || iRadiusCull != CULL_CLIP
         || R_CullSkelModel(tiki, &ent->e, newFrame, tiki_scale, tiki_localorigin) != CULL_OUT) {
         //
@@ -1231,6 +1233,16 @@ void R_AddSkelSurfaces(trRefEntity_t *ent)
             outbones->matrix[2][2] = newFrame->bones[i][2][2];
             outbones->matrix[2][3] = 0;
             outbones++;
+        }
+    }
+
+    // HZM coop - RAGDOLL Hook A (gl2 lockstep of the gl1 hook; see renderergl1/tr_model.cpp):
+    // for flagged entities write EVERY channel from the override table unconditionally and
+    // stash the vanilla frame as the anim-pose block. Pure reader; per-view safe.
+    {
+        struct ragdollSlot_s *coopSlot = R_RagdollSlotFor(ent->e.entityNumber, tiki);
+        if (coopSlot) {
+            R_RagdollApplyToCache(coopSlot, coopCacheStart, num_tags, newFrame);
         }
     }
 
@@ -2336,6 +2348,11 @@ RE_TIKI_Orientation
 */
 orientation_t RE_TIKI_Orientation(refEntity_t *model, int tagnum)
 {
+    // HZM coop - RAGDOLL Hook B (gl2 lockstep): serve tag orientations from the override
+    orientation_t coopOr;
+    if (R_RagdollGetOrientation(model->entityNumber, model->tiki, tagnum, model->scale, &coopOr)) {
+        return coopOr;
+    }
     R_UpdatePoseInternal(model);
     return ri.TIKI_OrientationInternal(model->tiki, model->entityNumber, tagnum, model->scale);
 }
