@@ -160,8 +160,17 @@ typedef struct {
 static ragSim_t s_ragSims[RAG_MAX_SIMS];
 static byte     s_ragNeverArm[MAX_GENTITIES]; // failure-ladder: NaN'd corpses keep the anim pose
 static int      s_ragTraceCount;              // reset each CG_RagdollFrame
-static const vec3_t s_ragPtMins = {-2, -2, -2};
-static const vec3_t s_ragPtMaxs = {2, 2, 2};
+
+// per-bone collision radius (facts-vet FIX 4): a uniform box seated every point at the
+// same height - the whole skeleton rested in one plane (z-span 0-2 in live data) and thick
+// parts clipped the floor. Torso/head hold higher, extremities lower = natural drape.
+static const float s_ragPtRadius[RAG_PTS] = {
+    7.0f, 7.0f, 7.5f, 4.0f, 5.0f, // pelvis, spine1, spine2, neck, head
+    4.0f, 3.0f, 2.5f,             // L upperarm, forearm, hand
+    4.0f, 3.0f, 2.5f,             // R arm
+    5.0f, 4.0f,                   // L thigh, calf
+    5.0f, 4.0f,                   // R thigh, calf
+};
 
 // hierarchy anchor table (facts-vet FIX 2, table variant with its corrections applied:
 // tag_weapon_left belongs to the LEFT hand; "Bip01 Spine" parents to Pelvis). Prefix match,
@@ -463,13 +472,15 @@ static qboolean RagCapture(centity_t *cent, entityState_t *ns, ragSim_t *s)
     // before any rest geometry is measured, so the sim starts penetration-free.
     for (i = 0; i < RAG_PTS; i++) {
         trace_t tr;
-        vec3_t  above;
+        vec3_t  above, pm, px;
         if (!(cgi.CM_PointContents(s->pt[i], 0) & MASK_DEADSOLID)) {
             continue;
         }
         VectorCopy(s->pt[i], above);
         above[2] += 24;
-        cgi.CM_BoxTrace(&tr, above, s->pt[i], s_ragPtMins, s_ragPtMaxs, 0, MASK_DEADSOLID, qfalse);
+        VectorSet(pm, -s_ragPtRadius[i], -s_ragPtRadius[i], -s_ragPtRadius[i]);
+        VectorSet(px, s_ragPtRadius[i], s_ragPtRadius[i], s_ragPtRadius[i]);
+        cgi.CM_BoxTrace(&tr, above, s->pt[i], pm, px, 0, MASK_DEADSOLID, qfalse);
         if (!tr.startsolid && tr.fraction < 1.0f) {
             VectorCopy(tr.endpos, s->pt[i]);
             s->pt[i][2] += 0.25f;
@@ -710,13 +721,15 @@ static void RagCollideWorld(ragSim_t *s, vec3_t subStart[RAG_PTS])
     int     i;
 
     for (i = 0; i < RAG_PTS; i++) {
-        vec3_t d;
+        vec3_t d, pm, px;
         VectorSubtract(s->pt[i], subStart[i], d);
         if (VectorLengthSquared(d) < 0.0001f) {
             continue;
         }
+        VectorSet(pm, -s_ragPtRadius[i], -s_ragPtRadius[i], -s_ragPtRadius[i]);
+        VectorSet(px, s_ragPtRadius[i], s_ragPtRadius[i], s_ragPtRadius[i]);
         s_ragTraceCount++;
-        cgi.CM_BoxTrace(&tr, subStart[i], s->pt[i], s_ragPtMins, s_ragPtMaxs, 0, MASK_DEADSOLID, qfalse);
+        cgi.CM_BoxTrace(&tr, subStart[i], s->pt[i], pm, px, 0, MASK_DEADSOLID, qfalse);
         if (tr.startsolid) {
             // stuck inside: hold, kill velocity, let the constraint web drag it out
             VectorCopy(subStart[i], s->pt[i]);
@@ -758,11 +771,14 @@ static void RagCollideMovers(ragSim_t *s, vec3_t frameStart[RAG_PTS])
             VectorClear(angles);
         }
         for (i = 0; i < RAG_PTS; i++) {
+            vec3_t pm, px;
             if (s_ragTraceCount >= RAG_TRACE_BUDGET) {
                 return;
             }
+            VectorSet(pm, -s_ragPtRadius[i], -s_ragPtRadius[i], -s_ragPtRadius[i]);
+            VectorSet(px, s_ragPtRadius[i], s_ragPtRadius[i], s_ragPtRadius[i]);
             s_ragTraceCount++;
-            cgi.CM_TransformedBoxTrace(&tr, frameStart[i], s->pt[i], s_ragPtMins, s_ragPtMaxs, cmodel,
+            cgi.CM_TransformedBoxTrace(&tr, frameStart[i], s->pt[i], pm, px, cmodel,
                                        MASK_DEADSOLID, movers[m]->lerpOrigin, angles, qfalse);
             if (tr.startsolid) {
                 s->pt[i][2] += 2.5f; // mover rose into the body: shove up, re-settle next frame
