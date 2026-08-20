@@ -5225,11 +5225,21 @@ Called from STRING_GLOBAL_WEAPON_SCR.
 */
 void Actor::EventGiveWeaponInternal(Event *ev)
 {
+    const str weapName = ev->GetString(1);
+
+    // HZM coop bug-1959b (caught live 20:18, actor 703 scene1_ai_wave1_1): an EMPTY give
+    // used to Holster + RemoveWeapons FIRST and only then fail - so ONE "" give (weapon.scr's
+    // default for any unhandled name) permanently disarmed the actor, and the AI's re-draw
+    // then retried the empty loadout every think tick (30ms WEAPDBG spam). Empty give = no-op:
+    // the actor keeps whatever he is holding.
+    if (!weapName.length()) {
+        return;
+    }
+
     Holster();
     RemoveWeapons();
 
-    const str weapName = ev->GetString(1);
-    if (weapName.length() > 0 && giveItem(weapName)) {
+    if (giveItem(weapName)) {
         Unholster();
     } else {
         // HZM coop - WEAPDBG: a FAILED give leaves the actor holstered + weaponless (Holster/RemoveWeapons
@@ -5258,6 +5268,12 @@ void Actor::EventGiveWeapon(Event *ev)
 
     str weapName = ev->GetString(1);
     weapName.tolower();
+
+    // HZM coop bug-1959b: never clobber the loadout with an empty name - the think-side
+    // re-draw would then re-give "" forever (see EventGiveWeaponInternal).
+    if (!weapName.length()) {
+        return;
+    }
 
     m_csLoadOut = Director.AddString(weapName);
 
