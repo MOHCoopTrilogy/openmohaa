@@ -196,6 +196,8 @@ struct ragSim_s {
     byte     driveOk[RAG_PTS];
     byte     contact[RAG_PTS];     // 2-substep memory of touching the world
     float    ptRadius[RAG_PTS];    // per-point collision radius, clamped to capture clearance
+    float    bodyRot[3][3];        // SMOOTHED body orientation (see RagBodyRotation)
+    byte     bodyRotValid;
     byte     buried;               // points still in solid after the capture pre-lift
     float    maxSpeed;             // peak mean point speed (acceptance evidence)
 
@@ -757,20 +759,53 @@ static qboolean RagCapture(centity_t *cent, entityState_t *ns, ragSim_t *s)
 // The body's rigid rotation from its capture pose to its current one: an anatomical triad
 // (spine direction + hip line) at both ends. ONE producer - RagPush's pelvis orientation
 // and the settle's shape-match goal must never disagree.
-static qboolean RagBodyRotation(const ragSim_t *s, float S[3][3])
+static qboolean RagBodyRotation(ragSim_t *s, float S[3][3])
 {
-    float  T0[3][3], T1[3][3];
-    vec3_t spineNow, hipNow;
+    float    T0[3][3], T1[3][3], raw[3][3], mixed[3][3];
+    vec3_t   spineNow, hipNow;
+    qboolean ok = qtrue;
+    int      i, r, c, nContact = 0;
+    float    a;
 
     VectorSubtract(s->pt[1], s->pt[0], spineNow);
     VectorSubtract(s->pt[13], s->pt[11], hipNow);
     if (RagTriad(s->restDir[1], s->hipDir0, T0) && RagTriad(spineNow, hipNow, T1)) {
-        RagMat3TransMul(T0, T1, S); // capture basis -> current basis (row-vector: v' = v*S)
-        return qtrue;
+        RagMat3TransMul(T0, T1, raw); // capture basis -> current basis (row-vector: v' = v*S)
+    } else {
+        VectorNormalize(spineNow);
+        RagMat3FromTo(s->restDir[1], spineNow, raw); // degenerate: 1-axis fallback
+        ok = qfalse;
     }
-    VectorNormalize(spineNow);
-    RagMat3FromTo(s->restDir[1], spineNow, S); // degenerate: 1-axis fallback
-    return qfalse;
+
+    // FEEDBACK GUARD (live 2026-08-20: "bodies sorta spinning on the ground, a very slow spin").
+    // The shape-match pulls points toward a goal rotated by THIS estimate, so any error in the
+    // estimate rotates the goal, which drags the points, which re-rotates the estimate: a slow
+    // precession that never converged - every body ran to the 6s life cap instead of sleeping.
+    // Two brakes: slew toward the new fit instead of adopting it, and once the body is resting
+    // on the world, LOCK it outright - a corpse lying on the ground does not re-orient itself.
+    if (!s->bodyRotValid) {
+        memcpy(s->bodyRot, raw, sizeof(raw));
+        s->bodyRotValid = 1;
+    } else {
+        for (i = 0; i < RAG_PTS; i++) {
+            if (s->contact[i]) {
+                nContact++;
+            }
+        }
+        a = (nContact >= 3) ? 0.0f : 0.12f;
+        if (a > 0) {
+            for (r = 0; r < 3; r++) {
+                for (c = 0; c < 3; c++) {
+                    mixed[r][c] = s->bodyRot[r][c] * (1.0f - a) + raw[r][c] * a;
+                }
+            }
+            if (RagTriad(mixed[0], mixed[1], T1)) { // re-orthonormalize the blend
+                memcpy(s->bodyRot, T1, sizeof(T1));
+            }
+        }
+    }
+    memcpy(S, s->bodyRot, sizeof(s->bodyRot));
+    return ok;
 }
 
 // pull the point cloud back toward the authored pose, rigidly re-fitted to wherever the
@@ -797,6 +832,12 @@ static void RagShapeMatch(ragSim_t *s, float alpha)
             a *= RAG_CONTACT_RELAX; // where the body TOUCHES, the ground gets the last word - the
         }                           // limb stays draped where it landed instead of being reeled in
         VectorMA(s->pt[i], a, d, s->pt[i]);
+        // ... and carry ptPrev most of the way with it. In Verlet the gap between pt and ptPrev
+        // IS the velocity, so a pull that moves pt alone injects (a*|d|)/dt of speed every
+        // substep - which compounds into the "spassing and flying across the world" blowup seen
+        // live 2026-08-20. Carrying 85% leaves a little genuine settling motion and throws the
+        // rest away instead of banking it.
+        VectorMA(s->ptPrev[i], a * 0.85f, d, s->ptPrev[i]);
     }
 }
 
@@ -811,8 +852,11 @@ static void RagStep(ragSim_t *s, float dt)
         VectorSubtract(s->pt[i], s->ptPrev[i], vel);
         VectorScale(vel, RAG_DAMPING, vel);
         vlen = VectorLength(vel);
-        if (vlen > 24.0f) {
-            VectorScale(vel, 24.0f / vlen, vel); // blowup insurance: 24u/substep = 3000u/s cap
+        if (vlen > 8.0f) {
+            VectorScale(vel, 8.0f / vlen, vel); // blowup insurance: 8u/substep = 1000u/s cap.
+                                                // A corpse never legitimately moves that fast;
+                                                // 24 (3000u/s) let a launch build before the
+                                                // NaN ladder could catch it.
         }
         VectorCopy(s->pt[i], s->ptPrev[i]);
         VectorAdd(s->pt[i], vel, next);
@@ -1028,10 +1072,22 @@ static void RagCollideMovers(ragSim_t *s, vec3_t frameStart[RAG_PTS])
 
 static qboolean RagSane(const ragSim_t *s)
 {
-    int i;
+    vec3_t mn, mx;
+    int    i;
+
+    ClearBounds(mn, mx);
     for (i = 0; i < RAG_PTS; i++) {
         if (Q_isnan(s->pt[i][0]) || Q_isnan(s->pt[i][1]) || Q_isnan(s->pt[i][2])
             || fabs(s->pt[i][0]) > 65536 || fabs(s->pt[i][1]) > 65536 || fabs(s->pt[i][2]) > 65536) {
+            return qfalse;
+        }
+        AddPointToBounds(s->pt[i], mn, mx);
+    }
+    // A human skeleton spans ~76u fully extended. Anything past 200u on an axis is a solver
+    // blowup in progress, and catching it HERE - long before the 65536 test could - turns
+    // "a body spassed and flew across the world" into a silent revert to the authored pose.
+    for (i = 0; i < 3; i++) {
+        if (mx[i] - mn[i] > 200.0f) {
             return qfalse;
         }
     }
