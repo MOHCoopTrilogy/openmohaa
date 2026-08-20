@@ -1381,6 +1381,74 @@ void CG_RagdollImpulse(const vec3_t pos, const vec3_t dir, float force, float ra
         if (!s->active || s->state < 1) {
             continue; // pendings and empty slots have no points to push
         }
+        // BULLETS: find the BONE SEGMENT the round passed through, not the nearest joint. A shot
+        // through the middle of a forearm is ~12u from both the elbow and the wrist, so a
+        // point-distance falloff scored it 0.04 and the arm took 4% of the force and never went
+        // limp - live 2026-08-20, "arms arent moving at all when shot". Hitting the segment and
+        // splitting the force between its two ends is both what a bullet does and what makes the
+        // limb rotate about its joint.
+        if (dir && (dir[0] || dir[1] || dir[2])) {
+            int   bestJ = -1, bestP = -1;
+            float bestD = 99999.0f, bestT = 0;
+            for (j = 1; j < RAG_PTS; j++) {
+                vec3_t ab, ap, closest, diff;
+                float  t, len2, dseg;
+                int    p = s_ragBones[j].parent;
+                VectorSubtract(s->pt[j], s->pt[p], ab);
+                VectorSubtract(pos, s->pt[p], ap);
+                len2 = DotProduct(ab, ab);
+                t    = (len2 > 0.001f) ? DotProduct(ap, ab) / len2 : 0.0f;
+                if (t < 0) {
+                    t = 0;
+                } else if (t > 1) {
+                    t = 1;
+                }
+                VectorMA(s->pt[p], t, ab, closest);
+                VectorSubtract(pos, closest, diff);
+                dseg = VectorLength(diff);
+                if (dseg < bestD) {
+                    bestD = dseg;
+                    bestJ = j;
+                    bestP = p;
+                    bestT = t;
+                }
+            }
+            if (bestJ < 0 || bestD >= radius) {
+                continue; // the round did not pass near any bone of this corpse
+            }
+            {
+                float k2 = 1.0f - (bestD / radius); // linear: we are already ON the right bone
+                int   ends[2];
+                float w[2];
+                int   e;
+                ends[0] = bestJ;
+                w[0]    = bestT;
+                ends[1] = bestP;
+                w[1]    = 1.0f - bestT;
+                for (e = 0; e < 2; e++) {
+                    int    q = ends[e];
+                    vec3_t vv;
+                    float  vlen, vmax;
+                    if (w[e] < 0.05f) {
+                        continue;
+                    }
+                    VectorMA(s->ptPrev[q], -(force * k2 * w[e] * subDt), dir, s->ptPrev[q]);
+                    vmax = force * 1.6f;
+                    VectorSubtract(s->pt[q], s->ptPrev[q], vv);
+                    vlen = VectorLength(vv) / subDt;
+                    if (vlen > vmax && vlen > 0.001f) {
+                        VectorScale(vv, (vmax / vlen) * subDt, vv);
+                        VectorSubtract(s->pt[q], vv, s->ptPrev[q]);
+                    }
+                    s->limpMs[q] = (short)limpMs;
+                }
+                hit = qtrue;
+            }
+            if (hit) {
+                goto ragImpulseWake;
+            }
+            continue;
+        }
         for (j = 0; j < RAG_PTS; j++) {
             vec3_t d, n;
             float  dist, k;
@@ -1405,6 +1473,14 @@ void CG_RagdollImpulse(const vec3_t pos, const vec3_t dir, float force, float ra
                 if (VectorNormalize(n) < 0.001f) {
                     VectorSet(n, 0, 0, 1);
                 }
+                // per-point variation, or every point gets nearly the same push (the body is
+                // ~40u across inside a 180u blast) and the corpse translates as a rigid slab
+                // instead of flailing - live 2026-08-20, "still kind of as a whole body"
+                k *= 0.55f + 0.9f * ((j * 37) % 17) / 17.0f;
+                n[0] += crandom() * 0.25f;
+                n[1] += crandom() * 0.25f;
+                n[2] += crandom() * 0.15f;
+                VectorNormalize(n);
             }
             VectorMA(s->ptPrev[j], -(force * k * subDt), n, s->ptPrev[j]);
             // ACCUMULATION CEILING. Impulses add to whatever speed the point already had, so a
@@ -1429,6 +1505,7 @@ void CG_RagdollImpulse(const vec3_t pos, const vec3_t dir, float force, float ra
         if (!hit) {
             continue;
         }
+    ragImpulseWake:
         if (s->state == 2) { // wake: same recipe as the mover-wake, including the fresh life
             s->state   = 1;  // budget - the 6s cap is per-wake, not a retirement, so a corpse
             s->sleepMs = 0;  // shot 30 seconds after death still reacts
