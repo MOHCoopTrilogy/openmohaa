@@ -199,6 +199,19 @@ struct ragSim_s {
     float    bodyRot[3][3];        // SMOOTHED body orientation (see RagBodyRotation)
     byte     bodyRotValid;
     byte     rotLocked;            // latched once the body rests on the world - never re-fits
+    // round-10 instruments: nine rounds tuned a rotation nobody ever measured (drift= is provably
+    // blind to it - a rigid rotation cancels exactly, so a body standing on its head reads ~1.1)
+    float    rotSample[3][3];      // raw fit at the last spin sample
+    int      rotSampleMs;
+    float    spinRate;             // deg/s over the most recent window
+    float    spinMax;
+    float    spinYawFrac;          // |world-z share| of the last window's rotation, 0..1
+    int      rotLockAtMs;          // lifeMs when the latch fired (-1 = never)
+    byte     ctcMax;               // PEAK simultaneous contacts (contacts= has a ~50% duty cycle)
+    float    stretchMax;           // peak len/restLen over the 14 parent links
+    vec3_t   capSpan;              // AABB of the captured pose
+    byte     preLifted;            // points the capture pre-lift actually moved
+    short    rawBad;               // frames the anatomical triad was degenerate
     byte     buried;               // points still in solid after the capture pre-lift
     float    maxSpeed;             // peak mean point speed (acceptance evidence)
 
@@ -272,6 +285,11 @@ static cvar_t  *rag_test     = NULL;
 static cvar_t  *rag_mode     = NULL;
 static cvar_t  *rag_stiff    = NULL;
 static cvar_t  *rag_drive    = NULL;
+static cvar_t  *rag_rotlock  = NULL;
+static cvar_t  *rag_slew     = NULL;
+static cvar_t  *rag_carry    = NULL;
+static cvar_t  *rag_velcap   = NULL;
+static cvar_t  *rag_leash    = NULL;
 
 static void RagCvars(void)
 {
@@ -286,6 +304,13 @@ static void RagCvars(void)
         rag_mode  = cgi.Cvar_Get("coop_ragdollMode", "1", CVAR_TEMP);
         rag_stiff = cgi.Cvar_Get("coop_ragdollStiff", "0.25", CVAR_TEMP);
         rag_drive = cgi.Cvar_Get("coop_ragdollDrive", "1", CVAR_TEMP);
+        // Round 10: every fix made live during the 2026-08-20 playtest is a console line now, so
+        // the next A/B costs a keypress instead of a rebuild. Defaults == committed behaviour.
+        rag_rotlock = cgi.Cvar_Get("coop_ragdollRotLock", "1", CVAR_TEMP);    // latch (0 = off)
+        rag_slew    = cgi.Cvar_Get("coop_ragdollSlew", "0.12", CVAR_TEMP);    // 1 = pre-fix adopt
+        rag_carry   = cgi.Cvar_Get("coop_ragdollCarry", "0.85", CVAR_TEMP);   // 0 = pre-fix
+        rag_velcap  = cgi.Cvar_Get("coop_ragdollVelCap", "8", CVAR_TEMP);     // 24 = pre-fix
+        rag_leash   = cgi.Cvar_Get("coop_ragdollLeash", "128", CVAR_TEMP);    // 0 = off
     }
 }
 
@@ -514,6 +539,9 @@ static qboolean RagCapture(centity_t *cent, entityState_t *ns, ragSim_t *s)
         model.frameInfo[i].time   = ns->frameInfo[i].time;
     }
     if (!model.tiki) {
+        if (rag_debug->integer) {
+            cgi.Printf("^~^~^ RAGDOLL capture FAILED ent=%d reason=no-tiki\n", ns->number);
+        }
         return qfalse;
     }
 
@@ -525,6 +553,9 @@ static qboolean RagCapture(centity_t *cent, entityState_t *ns, ragSim_t *s)
         }
     }
     if (s->count <= 0) {
+        if (rag_debug->integer) {
+            cgi.Printf("^~^~^ RAGDOLL capture FAILED ent=%d reason=no-channels\n", ns->number);
+        }
         return qfalse;
     }
 
@@ -554,6 +585,10 @@ static qboolean RagCapture(centity_t *cent, entityState_t *ns, ragSim_t *s)
         vec3_t cap;
         s->simChan[i] = cgi.Tag_NumForName(model.tiki, s_ragBones[i].name);
         if (s->simChan[i] < 0 || s->simChan[i] >= s->count) {
+            if (rag_debug->integer) {
+                cgi.Printf("^~^~^ RAGDOLL capture FAILED ent=%d reason=missing-tag '%s'\n",
+                           ns->number, s_ragBones[i].name);
+            }
             return qfalse; // vet1 verified all 17 names across the roster; a miss = bail clean
         }
         cap[0] = s->mat0[s->simChan[i]][0][3];
@@ -576,13 +611,20 @@ static qboolean RagCapture(centity_t *cent, entityState_t *ns, ragSim_t *s)
         VectorCopy(s->pt[i], above);
         above[2] += 40; // 24 was too short on stepped geometry: both ends in solid = startsolid,
                         // the point stays buried, freezes, and pins the body (bug-1962's pile)
-        VectorSet(pm, -s->ptRadius[i], -s->ptRadius[i], -s->ptRadius[i]);
-        VectorSet(px, s->ptRadius[i], s->ptRadius[i], s->ptRadius[i]);
+        // s_ragPtRadius (the static table), NOT s->ptRadius: the per-sim radii are computed ~100
+        // lines BELOW this loop and the slot is memset before every capture, so this read was
+        // always 0.0f - which the collision model turns into a POINT trace. A capture-buried
+        // point was then seated flush, the clearance probe below startsolid'd, its radius kept
+        // the full anatomical value, and that point was startsolid on every sweep for the rest of
+        // its life: permanently released on settle, permanently frozen on free - bug-1962's pin.
+        VectorSet(pm, -s_ragPtRadius[i], -s_ragPtRadius[i], -s_ragPtRadius[i]);
+        VectorSet(px, s_ragPtRadius[i], s_ragPtRadius[i], s_ragPtRadius[i]);
         cgi.CM_BoxTrace(&tr, above, s->pt[i], pm, px, 0, MASK_DEADSOLID, qfalse);
         if (!tr.startsolid && tr.fraction < 1.0f) {
             VectorCopy(tr.endpos, s->pt[i]);
             s->pt[i][2] += 0.25f;
             VectorCopy(s->pt[i], s->ptPrev[i]);
+            s->preLifted++;
         }
     }
 
@@ -680,6 +722,22 @@ static qboolean RagCapture(centity_t *cent, entityState_t *ns, ragSim_t *s)
     VectorSubtract(s->pt[13], s->pt[11], s->hipDir0); // L thigh -> R thigh (world)
     VectorNormalize(s->hipDir0);
 
+    // seed the orientation filter here: RagRawFit is EXACTLY identity at capture (restDir[1] and
+    // hipDir0 are built from these very points), so this reproduces what the first RagPush used
+    // to seed - but RagPush is a pure reader now and may not seed anything.
+    RagMat3Identity(s->bodyRot);
+    s->bodyRotValid = 1;
+    s->rotLockAtMs  = -1; // memset leaves 0, which would read as "latched on frame 0"
+    {
+        vec3_t cmn, cmx;
+        int    k;
+        ClearBounds(cmn, cmx);
+        for (k = 0; k < RAG_PTS; k++) {
+            AddPointToBounds(s->pt[k], cmn, cmx);
+        }
+        VectorSubtract(cmx, cmn, s->capSpan); // was the corpse captured upright or flat?
+    }
+
     // capture the OUTGOING (bone -> child) directions the push drives each bone with
     for (i = 0; i < RAG_PTS; i++) {
         int    dch = s_ragDriveChild[i];
@@ -760,57 +818,81 @@ static qboolean RagCapture(centity_t *cent, entityState_t *ns, ragSim_t *s)
 // The body's rigid rotation from its capture pose to its current one: an anatomical triad
 // (spine direction + hip line) at both ends. ONE producer - RagPush's pelvis orientation
 // and the settle's shape-match goal must never disagree.
-static qboolean RagBodyRotation(ragSim_t *s, float S[3][3])
+// The raw anatomical fit, capture basis -> current basis. PURE: touches no state, so the debug
+// instrument and the filter can never perturb each other (before round 10, RagBodyRotation was an
+// impure mutator called from three sites - including the sleep DEBUG PRINT, which therefore
+// changed the simulation). Exactly identity at capture, because restDir[1] and hipDir0 are both
+// built from the capture pt[]: T1 == T0 and raw = T0^T*T0 = I. That is what makes the round-10
+// rot= instrument a true total-rotation-since-capture.
+static qboolean RagRawFit(const ragSim_t *s, float raw[3][3])
 {
-    float    T0[3][3], T1[3][3], raw[3][3], mixed[3][3];
-    vec3_t   spineNow, hipNow;
-    qboolean ok = qtrue;
-    int      i, r, c, nContact = 0;
-    float    a;
+    float  T0[3][3], T1[3][3];
+    vec3_t spineNow, hipNow;
 
     VectorSubtract(s->pt[1], s->pt[0], spineNow);
     VectorSubtract(s->pt[13], s->pt[11], hipNow);
     if (RagTriad(s->restDir[1], s->hipDir0, T0) && RagTriad(spineNow, hipNow, T1)) {
-        RagMat3TransMul(T0, T1, raw); // capture basis -> current basis (row-vector: v' = v*S)
-    } else {
-        VectorNormalize(spineNow);
-        RagMat3FromTo(s->restDir[1], spineNow, raw); // degenerate: 1-axis fallback
-        ok = qfalse;
+        RagMat3TransMul(T0, T1, raw); // row-vector: v' = v*S
+        return qtrue;
     }
+    VectorNormalize(spineNow);
+    RagMat3FromTo(s->restDir[1], spineNow, raw); // degenerate: 1-axis fallback, roll unconstrained
+    return qfalse;
+}
 
-    // FEEDBACK GUARD (live 2026-08-20: "bodies sorta spinning on the ground, a very slow spin").
-    // The shape-match pulls points toward a goal rotated by THIS estimate, so any error in the
-    // estimate rotates the goal, which drags the points, which re-rotates the estimate: a slow
-    // precession that never converged - every body ran to the 6s life cap instead of sleeping.
-    // Two brakes: slew toward the new fit instead of adopting it, and once the body is resting
-    // on the world, LOCK it outright - a corpse lying on the ground does not re-orient itself.
+// Pure READER - every consumer of the body orientation goes through this and none of them can
+// advance the filter.
+static void RagBodyRotation(const ragSim_t *s, float S[3][3])
+{
+    memcpy(S, s->bodyRot, sizeof(s->bodyRot));
+}
+
+// The ONE advance site (called from RagStep, once per substep, after the constraints and before
+// the shape-match - exactly where the old in-line advance happened on the settle branch).
+// Two brakes on the orientation: slew toward the new fit rather than adopting it, and once the
+// body rests on the world, LATCH it - a corpse lying on the ground does not re-orient itself.
+static void RagBodyRotationAdvance(ragSim_t *s)
+{
+    float raw[3][3], mixed[3][3], T[3][3];
+    int   i, r, c, nContact = 0;
+    float a;
+
+    if (!RagRawFit(s, raw)) {
+        s->rawBad++; // degenerate triad: KEEP the previous orientation. Blending in the roll-free
+        return;      // fallback would inject an unconstrained roll - itself a spin source.
+    }
     if (!s->bodyRotValid) {
         memcpy(s->bodyRot, raw, sizeof(raw));
         s->bodyRotValid = 1;
-    } else if (!s->rotLocked) {
-        for (i = 0; i < RAG_PTS; i++) {
-            if (s->contact[i]) {
-                nContact++;
-            }
-        }
-        if (nContact >= 3) {
-            s->rotLocked = 1; // LATCHED, not momentary: contact counts flicker as points settle,
-                              // and an unlatched lock lets the drift resume every time it dips
-        }
-        a = s->rotLocked ? 0.0f : 0.12f;
-        if (a > 0) {
-            for (r = 0; r < 3; r++) {
-                for (c = 0; c < 3; c++) {
-                    mixed[r][c] = s->bodyRot[r][c] * (1.0f - a) + raw[r][c] * a;
-                }
-            }
-            if (RagTriad(mixed[0], mixed[1], T1)) { // re-orthonormalize the blend
-                memcpy(s->bodyRot, T1, sizeof(T1));
-            }
+        return;
+    }
+    if (s->rotLocked) {
+        return;
+    }
+    for (i = 0; i < RAG_PTS; i++) {
+        if (s->contact[i]) {
+            nContact++;
         }
     }
-    memcpy(S, s->bodyRot, sizeof(s->bodyRot));
-    return ok;
+    if (nContact >= 3 && rag_rotlock->integer) {
+        s->rotLocked   = 1; // LATCHED, not momentary: contact counts flicker as points settle
+        s->rotLockAtMs = s->lifeMs;
+    }
+    a = s->rotLocked ? 0.0f : rag_slew->value;
+    if (a <= 0.0f) {
+        return;
+    }
+    if (a > 1.0f) {
+        a = 1.0f;
+    }
+    for (r = 0; r < 3; r++) {
+        for (c = 0; c < 3; c++) {
+            mixed[r][c] = s->bodyRot[r][c] * (1.0f - a) + raw[r][c] * a;
+        }
+    }
+    if (RagTriad(mixed[0], mixed[1], T)) { // re-orthonormalize the blend
+        memcpy(s->bodyRot, T, sizeof(T));
+    }
 }
 
 // pull the point cloud back toward the authored pose, rigidly re-fitted to wherever the
@@ -842,7 +924,7 @@ static void RagShapeMatch(ragSim_t *s, float alpha)
         // substep - which compounds into the "spassing and flying across the world" blowup seen
         // live 2026-08-20. Carrying 85% leaves a little genuine settling motion and throws the
         // rest away instead of banking it.
-        VectorMA(s->ptPrev[i], a * 0.85f, d, s->ptPrev[i]);
+        VectorMA(s->ptPrev[i], a * rag_carry->value, d, s->ptPrev[i]);
     }
 }
 
@@ -857,11 +939,13 @@ static void RagStep(ragSim_t *s, float dt)
         VectorSubtract(s->pt[i], s->ptPrev[i], vel);
         VectorScale(vel, RAG_DAMPING, vel);
         vlen = VectorLength(vel);
-        if (vlen > 8.0f) {
-            VectorScale(vel, 8.0f / vlen, vel); // blowup insurance: 8u/substep = 1000u/s cap.
-                                                // A corpse never legitimately moves that fast;
-                                                // 24 (3000u/s) let a launch build before the
-                                                // NaN ladder could catch it.
+        {
+            float vcap = rag_velcap->value;
+            if (vcap < 1.0f) { vcap = 1.0f; }
+            if (vcap > 64.0f) { vcap = 64.0f; }
+            if (vlen > vcap) {
+                VectorScale(vel, vcap / vlen, vel);
+            }
         }
         VectorCopy(s->pt[i], s->ptPrev[i]);
         VectorAdd(s->pt[i], vel, next);
@@ -899,6 +983,7 @@ static void RagStep(ragSim_t *s, float dt)
             VectorMA(s->pt[b], corr, d, s->pt[b]);
         }
     }
+    RagBodyRotationAdvance(s); // the ONE filter advance, after the constraints
     if (s->branch) {
         float target = rag_stiff->value;
         float alpha;
@@ -1014,8 +1099,10 @@ static void RagCollideWorld(ragSim_t *s, vec3_t subStart[RAG_PTS])
                 VectorCopy(subStart[i], s->pt[i]);
                 VectorCopy(s->pt[i], s->ptPrev[i]);
             } else {
-                s->contact[i] = 0; // full-strength pull home, not the contact-relaxed one
-            }
+                s->contact[i] = 0;                  // full-strength pull home, not the relaxed one
+                VectorCopy(s->pt[i], s->ptPrev[i]); // ... but it must not KEEP the speed it had, or
+            }                                       // it integrates freely inside solid and emerges
+                                                    // anywhere. Killed, it creeps out along the pull.
             continue;
         }
         if (tr.fraction < 1.0f) {
@@ -1093,6 +1180,17 @@ static qboolean RagSane(const ragSim_t *s)
     // "a body spassed and flew across the world" into a silent revert to the authored pose.
     for (i = 0; i < 3; i++) {
         if (mx[i] - mn[i] > 200.0f) {
+            return qfalse;
+        }
+    }
+    // PELVIS LEASH - the net that actually targets the reported symptom. Measured over the 41
+    // bodies of the 2026-08-20 session: the seven fastest hit 1087-1611 u/s while spanning only
+    // 38-58u. They were TRANSLATING coherently, not stretching, because the shape-match ties all
+    // 14 points TO the pelvis and nothing anchors the pelvis. A span gate is blind to that.
+    if (rag_leash->value > 0) {
+        vec3_t dd;
+        VectorSubtract(s->pt[0], cg_entities[s->entnum].lerpOrigin, dd);
+        if (VectorLengthSquared(dd) > rag_leash->value * rag_leash->value) {
             return qfalse;
         }
     }
@@ -1284,6 +1382,10 @@ void CG_RagdollFrame(void)
                 s->sleepMs = 0;
                 s->lifeMs  = 0; // ride the mover as long as it moves
                 s->accumMs = 0;
+                s->rotLocked = 0; // an elevator may carry a corpse AND re-orient it: without this
+                                  // the latch outlives the wake and the body rides perfectly rigid
+                s->rotLockAtMs = -1;
+                memset(s->contact, 0, sizeof(s->contact));
                 if (rag_debug->integer) {
                     cgi.Printf("^~^~^ RAGDOLL mover-wake ent=%d\n", s->entnum);
                 }
@@ -1320,6 +1422,67 @@ void CG_RagdollFrame(void)
         }
         if (steps) {
             RagCollideMovers(s, frameStart); // movers are slow: whole-frame sweep suffices
+        }
+        // SPIN INSTRUMENT: nine rounds tuned a rotation nobody measured. drift= is provably blind
+        // to it (goal[]==pt[] at capture, so a rigid rotation cancels exactly and a body standing
+        // on its head still reads ~1). Measure the POINT CLOUD, and never via s->bodyRot - the
+        // latch freezes that, so a metric reading it would print spin=0 for every latched body
+        // and score its own fix a success.
+        if (rag_debug->integer) {
+            float rawNow[3][3];
+            if (!RagRawFit(s, rawNow)) {
+                s->rawBad++;
+            } else if (s->lifeMs - s->rotSampleMs >= 500) {
+                if (s->rotSampleMs > 0) {
+                    float dR[3][3], tr3, ang, sn;
+                    float dts = (s->lifeMs - s->rotSampleMs) * 0.001f;
+                    RagMat3TransMul(s->rotSample, rawNow, dR); // sample -> now
+                    tr3 = dR[0][0] + dR[1][1] + dR[2][2];
+                    if (tr3 > 3.0f) {
+                        tr3 = 3.0f;
+                    }
+                    if (tr3 < -1.0f) {
+                        tr3 = -1.0f;
+                    }
+                    ang = (float)acos((tr3 - 1.0f) * 0.5f);
+                    sn  = (float)sin(ang);
+                    // yaw share, sign-free: a pure spin about world z reads 1.0, a pure topple 0.0
+                    s->spinYawFrac = (sn > 0.0087f) ? (float)fabs(dR[0][1] - dR[1][0]) / (2.0f * sn) : 0.0f;
+                    s->spinRate    = (dts > 0) ? ang * 180.0f / (float)M_PI / dts : 0.0f;
+                    if (s->spinRate > s->spinMax) {
+                        s->spinMax = s->spinRate;
+                    }
+                }
+                memcpy(s->rotSample, rawNow, sizeof(rawNow));
+                s->rotSampleMs = s->lifeMs;
+            }
+            { // stretch: RagShapeMatch runs LAST in RagStep and nothing re-enforces distance after
+              // it, while per-point alphas differ across a link and pt[0] is never pulled at all
+                int   k;
+                float st;
+                for (k = 1; k < RAG_PTS; k++) {
+                    vec3_t dl;
+                    if (s->restLen[k] < 0.01f) {
+                        continue;
+                    }
+                    VectorSubtract(s->pt[k], s->pt[s_ragBones[k].parent], dl);
+                    st = VectorLength(dl) / s->restLen[k];
+                    if (st > s->stretchMax) {
+                        s->stretchMax = st;
+                    }
+                }
+            }
+            {
+                int k, nc = 0;
+                for (k = 0; k < RAG_PTS; k++) {
+                    if (s->contact[k]) {
+                        nc++;
+                    }
+                }
+                if (nc > s->ctcMax) {
+                    s->ctcMax = (byte)nc; // contacts= has a ~50% duty cycle; the PEAK is the truth
+                }
+            }
         }
         if (!RagSane(s)) {
             if (rag_debug->integer) {
@@ -1387,11 +1550,30 @@ void CG_RagdollFrame(void)
                         }
                         // life= is NOT an acceptance metric on the settle branch: the body starts
                         // at rest so sleepMs accrues from frame 1. Judge drift/span/maxspd.
+                        float rawNow[3][3], tr3, rotDeg = 0;
                         cgi.Printf("^~^~^ RAGDOLL sleep ent=%d life=%dms span=(%.0f %.0f %.0f) branch=%s "
                                    "drift=%.1f maxspd=%.0f contacts=%d alpha=%.2f drive=%d worldtr=%d\n",
                                    s->entnum, s->lifeMs, bmx[0] - bmn[0], bmx[1] - bmn[1], bmx[2] - bmn[2],
                                    s->branch ? "settle" : "free", drift, s->maxSpeed, nContacts,
                                    rag_stiff->value, rag_drive->integer, s_ragWorldTraces);
+                        // total rotation since capture: valid because RagRawFit is exactly I there
+                        if (RagRawFit(s, rawNow)) {
+                            tr3 = rawNow[0][0] + rawNow[1][1] + rawNow[2][2];
+                            if (tr3 > 3.0f) {
+                                tr3 = 3.0f;
+                            }
+                            if (tr3 < -1.0f) {
+                                tr3 = -1.0f;
+                            }
+                            rotDeg = (float)acos((tr3 - 1.0f) * 0.5f) * 180.0f / (float)M_PI;
+                        }
+                        cgi.Printf("^~^~^ RAGDOLL sleep-rot ent=%d rot=%.0fdeg spin=%.1f spinmax=%.1f "
+                                   "yawf=%.2f rotlockAt=%d ctcmax=%d stretch=%.2f rawbad=%d "
+                                   "lock=%d slew=%.2f carry=%.2f vcap=%.0f\n",
+                                   s->entnum, rotDeg, s->spinRate, s->spinMax, s->spinYawFrac,
+                                   s->rotLockAtMs, (int)s->ctcMax, s->stretchMax, (int)s->rawBad,
+                                   rag_rotlock->integer, rag_slew->value, rag_carry->value,
+                                   rag_velcap->value);
                     }
                 }
             }
@@ -1566,6 +1748,8 @@ static void RagPendingThink(ragPend_t *p)
         s->branch    = 1;
         s->armTime   = armTime;
         s->gravScale = 0.0f;
+        s->freezePose = (rag_test->integer == 2); // the drill must be reachable on the branch
+                                                  // that actually ships (it used to require mode 3)
         for (i = 0; i < RAG_PTS; i++) {
             VectorCopy(s->pt[i], s->goal[i]); // the authored pose is the target silhouette
         }
@@ -1583,8 +1767,10 @@ static void RagPendingThink(ragPend_t *p)
                 nm = cgi.Anim_NameForNum(s->tiki, cs->frameInfo[dom].index);
             }
             // the anim name is DIAGNOSTIC ONLY now - it gates nothing
-            cgi.Printf("^~^~^ RAGDOLL settle-armed ent=%d channels=%d after=%dms via=solid anim=%s buried=%d\n",
-                       entnum, s->count, cg.time - armTime, nm ? nm : "?", (int)s->buried);
+            cgi.Printf("^~^~^ RAGDOLL settle-armed ent=%d channels=%d after=%dms via=solid anim=%s "
+                       "buried=%d prelift=%d capspan=(%.0f %.0f %.0f)\n",
+                       entnum, s->count, cg.time - armTime, nm ? nm : "?", (int)s->buried,
+                       (int)s->preLifted, s->capSpan[0], s->capSpan[1], s->capSpan[2]);
         }
     }
 }
@@ -1699,7 +1885,7 @@ void CG_RagdollTransition(centity_t *cent)
         return;
     }
 
-    if (rag_mode->integer == 1 && !rag_test->integer) {
+    if (rag_mode->integer == 1 && rag_test->integer != 1) {
         // SETTLE: record a pending arm and let the animators own the fall. The capture happens
         // when the SERVER parks the body, not when we guess the anim is over.
         int        k;
