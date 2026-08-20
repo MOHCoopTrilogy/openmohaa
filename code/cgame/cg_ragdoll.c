@@ -49,17 +49,21 @@ void     CG_RagdollClearEnt(int entnum);
 static void RagArm(centity_t *cent, entityState_t *ns);
 static void RagArmTestPose(entityState_t *ns, dtiki_t *tiki, int count);
 typedef struct ragSim_s ragSim_t;
-static void RagPendingThink(ragSim_t *s);
+typedef struct ragPend_s ragPend_t;
+static void RagPendingThink(ragPend_t *p);
 
 #define RAG_MAX_SIMS   8
 #define RAG_MAX_CH     128
 #define RAG_PTS        15
 #define RAG_SUBSTEP_MS 8
 #define RAG_MAX_STEPS  4
-#define RAG_GRAVITY    800.0f
 #define RAG_DAMPING    0.98f
 #define RAG_ITERS      6
-#define RAG_TRACE_BUDGET 240 // global per-frame trace ceiling (plan section-3)
+#define RAG_TRACE_BUDGET 240   // per-frame MOVER trace ceiling (world traces have their own)
+#define RAG_MOVER_PER_BODY 60  // ... and a per-body allowance, so the first corpses cannot eat it
+#define RAG_CONTACT_RELAX 0.15f // where a point touches the world, the shape-match yields to it
+#define RAG_MAX_PEND    16     // pending records live OUTSIDE the sim pool (32B vs ~9.4KB each)
+#define RAG_PEND_CAP_MS 8000   // give-up only - never fires a capture
 
 // the 15 sim bones: index, Bip01 tag name, parent sim index (-1 = root)
 static const struct {
@@ -81,6 +85,30 @@ static const struct {
     {"Bip01 L Calf",    11}, // 12
     {"Bip01 R Thigh",    0}, // 13
     {"Bip01 R Calf",    13}, // 14
+};
+
+// A bone's skinned mesh runs from its OWN origin toward its CHILD (measured across 39 humanoid
+// SKDs: every bone's weight centroid sits on the child side, no exceptions), so bone i's swing
+// must be measured on pt[i] -> pt[child]. The shipped code used pt[parent] -> pt[i], which
+// renders every limb off by the full angle its joint bent - the mesh literally cannot close at a
+// bent elbow. coop_ragdollTest 2 is structurally blind to this (S = I kills the difference).
+// Pelvis (-1) uses the anatomical triad; leaves (-1) keep the incoming segment.
+static const int s_ragDriveChild[RAG_PTS] = {
+    -1, //  0 Pelvis     - anatomical triad, never segment-driven
+     2, //  1 Spine1     -> Spine2
+     3, //  2 Spine2     -> Neck   (of 3 sim children: the spine's own flesh runs here)
+     4, //  3 Neck       -> Head
+    -1, //  4 Head       - leaf
+     6, //  5 L UpperArm -> L Forearm
+     7, //  6 L Forearm  -> L Hand
+    -1, //  7 L Hand     - leaf
+     9, //  8 R UpperArm -> R Forearm
+    10, //  9 R Forearm  -> R Hand
+    -1, // 10 R Hand     - leaf
+    12, // 11 L Thigh    -> L Calf
+    -1, // 12 L Calf     - leaf TODAY; becomes L Foot in round 9 (the unsimulated knee)
+    14, // 13 R Thigh    -> R Calf
+    -1, // 14 R Calf     - leaf
 };
 
 // stiffening braces beyond the 14 parent links (plan section-3). The grandparent links are
@@ -164,16 +192,33 @@ struct ragSim_s {
     vec3_t   goal[RAG_PTS];
     float    gravScale;            // 0 -> 1 over 250ms (no lurch at handoff)
     int      rampMs;
-    vec3_t   pendOrigin;           // pending-arm: last seen placement
-    int      pendStatic;           // consecutive frames the corpse has not moved
+    vec3_t   driveDir0[RAG_PTS];   // capture OUTGOING (bone->child) directions
+    byte     driveOk[RAG_PTS];
+    byte     contact[RAG_PTS];     // 2-substep memory of touching the world
+    byte     buried;               // points still in solid after the capture pre-lift
+    float    maxSpeed;             // peak mean point speed (acceptance evidence)
 
     byte     freezePose;           // coop_ragdollTest 2: push the capture verbatim, no sim -
                                    // a pure space/round-trip test (any warp = render defect)
 };
 
+// A pending record: a corpse whose authored death animation is still playing. Kept OUT of the sim
+// pool - the pending phase can legitimately run 5s (death_fire is 4.7s) and RagAllocSlot can only
+// evict sleeping sims, so pendings in sim slots would starve the pool after 8 quick deaths.
+struct ragPend_s {
+    qboolean active;
+    int      entnum;
+    int      armTime;
+    int      lastPrint;
+    int      pendStatic;
+    vec3_t   pendOrigin;
+};
+
+static ragPend_t s_ragPend[RAG_MAX_PEND];
 static ragSim_t s_ragSims[RAG_MAX_SIMS];
 static byte     s_ragNeverArm[MAX_GENTITIES]; // failure-ladder: NaN'd corpses keep the anim pose
-static int      s_ragTraceCount;              // reset each CG_RagdollFrame
+static int      s_ragTraceCount;              // MOVER traces (the RAG_TRACE_BUDGET is theirs)
+static int      s_ragWorldTraces;             // world traces: bounded by construction, reported
 
 // per-bone collision radius (facts-vet FIX 4): a uniform box seated every point at the
 // same height - the whole skeleton rested in one plane (z-span 0-2 in live data) and thick
@@ -222,18 +267,37 @@ static cvar_t  *coop_ragdoll = NULL;
 static cvar_t  *rag_test     = NULL;
 static cvar_t  *rag_mode     = NULL;
 static cvar_t  *rag_stiff    = NULL;
+static cvar_t  *rag_drive    = NULL;
 
 static void RagCvars(void)
 {
     if (!rag_debug) {
         rag_debug    = cgi.Cvar_Get("r_ragdollDebug", "0", CVAR_TEMP);
-        coop_ragdoll = cgi.Cvar_Get("coop_ragdoll", "0", CVAR_TEMP); // dark until P5 (plan section-1)
+        // ARCHIVE, not TEMP: a player's "off" has to survive a relaunch (CVAR_TEMP is
+        // explicitly non-archived). Still defaults 0 - dark until the look is signed off.
+        coop_ragdoll = cgi.Cvar_Get("coop_ragdoll", "0", CVAR_ARCHIVE);
         rag_test     = cgi.Cvar_Get("coop_ragdollTest", "0", CVAR_TEMP);
-        // 1 = SETTLE (authored death anim plays out, then physics drapes the corpse onto
-        // the geometry); 3 = the old arm-at-EF_DEAD behaviour, kept as the live A/B.
+        // 0 = OFF, 1 = SETTLE (authored death anim plays out, then physics drapes the corpse
+        // onto the geometry), 3 = the old arm-at-EF_DEAD behaviour, kept as the live A/B.
         rag_mode  = cgi.Cvar_Get("coop_ragdollMode", "1", CVAR_TEMP);
-        rag_stiff = cgi.Cvar_Get("coop_ragdollStiff", "0.35", CVAR_TEMP);
+        rag_stiff = cgi.Cvar_Get("coop_ragdollStiff", "0.25", CVAR_TEMP);
+        rag_drive = cgi.Cvar_Get("coop_ragdollDrive", "1", CVAR_TEMP);
     }
+}
+
+// the world's own gravity, not a hand-picked 800 (= 1.56 g against sv_gravity 512): a corpse must
+// fall at the same rate as the player looking at it, and the lower value drops the constraint
+// jitter floor the sleep gate has to clear.
+static float RagGravity(void)
+{
+    float g = (cg.snap && cg.snap->ps.gravity > 0) ? (float)cg.snap->ps.gravity : 512.0f;
+    if (g < 1.0f) {
+        g = 1.0f;
+    }
+    if (g > 4000.0f) {
+        g = 4000.0f;
+    }
+    return g;
 }
 
 static ragSim_t *RagSimFor(int entnum)
@@ -250,8 +314,14 @@ static ragSim_t *RagSimFor(int entnum)
 void CG_RagdollClearEnt(int entnum)
 {
     ragSim_t *s = RagSimFor(entnum);
+    int       i;
     if (s) {
         memset(s, 0, sizeof(*s));
+    }
+    for (i = 0; i < RAG_MAX_PEND; i++) { // clear signals must reach pending records too
+        if (s_ragPend[i].active && s_ragPend[i].entnum == entnum) {
+            memset(&s_ragPend[i], 0, sizeof(s_ragPend[i]));
+        }
     }
     if (cgi.R_ClearRagdoll) {
         cgi.R_ClearRagdoll(entnum);
@@ -497,7 +567,8 @@ static qboolean RagCapture(centity_t *cent, entityState_t *ns, ragSim_t *s)
             continue;
         }
         VectorCopy(s->pt[i], above);
-        above[2] += 24;
+        above[2] += 40; // 24 was too short on stepped geometry: both ends in solid = startsolid,
+                        // the point stays buried, freezes, and pins the body (bug-1962's pile)
         VectorSet(pm, -s_ragPtRadius[i], -s_ragPtRadius[i], -s_ragPtRadius[i]);
         VectorSet(px, s_ragPtRadius[i], s_ragPtRadius[i], s_ragPtRadius[i]);
         cgi.CM_BoxTrace(&tr, above, s->pt[i], pm, px, 0, MASK_DEADSOLID, qfalse);
@@ -505,6 +576,29 @@ static qboolean RagCapture(centity_t *cent, entityState_t *ns, ragSim_t *s)
             VectorCopy(tr.endpos, s->pt[i]);
             s->pt[i][2] += 0.25f;
             VectorCopy(s->pt[i], s->ptPrev[i]);
+        }
+    }
+
+    // a buried point starts every trace in-solid, freezes, and PINS the body. If the pre-lift
+    // could not free the TORSO, or four points anywhere, refuse to arm outright: keeping the
+    // authored pose is vanilla, therefore invisible, and strictly better than a pinned pile.
+    {
+        int nTorso = 0;
+        s->buried  = 0;
+        for (i = 0; i < RAG_PTS; i++) {
+            if (cgi.CM_PointContents(s->pt[i], 0) & MASK_DEADSOLID) {
+                s->buried++;
+                if (i <= 4) {
+                    nTorso++;
+                }
+            }
+        }
+        if (nTorso > 0 || s->buried >= 4) {
+            if (rag_debug->integer) {
+                cgi.Printf("^~^~^ RAGDOLL capture BURIED ent=%d torso=%d total=%d - not arming\n",
+                           ns->number, nTorso, (int)s->buried);
+            }
+            return qfalse;
         }
     }
 
@@ -554,6 +648,22 @@ static qboolean RagCapture(centity_t *cent, entityState_t *ns, ragSim_t *s)
     }
     VectorSubtract(s->pt[13], s->pt[11], s->hipDir0); // L thigh -> R thigh (world)
     VectorNormalize(s->hipDir0);
+
+    // capture the OUTGOING (bone -> child) directions the push drives each bone with
+    for (i = 0; i < RAG_PTS; i++) {
+        int    dch = s_ragDriveChild[i];
+        vec3_t dv;
+        s->driveOk[i] = 0;
+        if (dch < 0) {
+            continue;
+        }
+        VectorSubtract(s->pt[dch], s->pt[i], dv);
+        if (VectorNormalize(dv) < 0.01f) {
+            continue;
+        }
+        VectorCopy(dv, s->driveDir0[i]);
+        s->driveOk[i] = 1;
+    }
 
     // slave every channel to its nearest sim point at capture (fingers -> hands, face ->
     // head, gear -> nearest segment). rel = inv(anchor world) * channel world.
@@ -650,18 +760,22 @@ static void RagShapeMatch(ragSim_t *s, float alpha)
     RagBodyRotation(s, S);
     for (i = 1; i < RAG_PTS; i++) {
         vec3_t rel, want, d;
+        float  a = alpha;
         VectorSubtract(s->goal[i], s->goal[0], rel);
         RagMat3RotateVec(S, rel, want);
         VectorAdd(s->pt[0], want, want);
         VectorSubtract(want, s->pt[i], d);
-        VectorMA(s->pt[i], alpha, d, s->pt[i]);
+        if (s->contact[i]) {
+            a *= RAG_CONTACT_RELAX; // where the body TOUCHES, the ground gets the last word - the
+        }                           // limb stays draped where it landed instead of being reeled in
+        VectorMA(s->pt[i], a, d, s->pt[i]);
     }
 }
 
 static void RagStep(ragSim_t *s, float dt)
 {
     int   i, it;
-    float g = RAG_GRAVITY * dt * dt * (s->branch ? s->gravScale : 1.0f);
+    float g = RagGravity() * dt * dt * (s->branch ? s->gravScale : 1.0f);
 
     for (i = 0; i < RAG_PTS; i++) {
         vec3_t vel, next;
@@ -743,6 +857,7 @@ static void RagResolveHit(ragSim_t *s, int i, const trace_t *tr)
     if (tr->plane.normal[2] > 0.7f && VectorLength(v) < 0.35f) {
         VectorCopy(pos, s->pt[i]);
         VectorCopy(pos, s->ptPrev[i]);
+        s->contact[i] = 2; // resting on the world: the shape-match yields here
         return;
     }
     VectorScale(vn, -0.1f, vn); // restitution
@@ -796,6 +911,11 @@ static void RagCollideWorld(ragSim_t *s, vec3_t subStart[RAG_PTS])
     int     i;
 
     for (i = 0; i < RAG_PTS; i++) {
+        if (s->contact[i]) {
+            s->contact[i]--; // 2-substep memory: the shape-match runs BEFORE collide, so it
+        }                    // reads the previous substep's contact set
+    }
+    for (i = 0; i < RAG_PTS; i++) {
         vec3_t d, pm, px;
         VectorSubtract(s->pt[i], subStart[i], d);
         if (VectorLengthSquared(d) < 0.0001f) {
@@ -803,7 +923,8 @@ static void RagCollideWorld(ragSim_t *s, vec3_t subStart[RAG_PTS])
         }
         VectorSet(pm, -s_ragPtRadius[i], -s_ragPtRadius[i], -s_ragPtRadius[i]);
         VectorSet(px, s_ragPtRadius[i], s_ragPtRadius[i], s_ragPtRadius[i]);
-        s_ragTraceCount++;
+        s_ragWorldTraces++; // world traces have their OWN counter - sharing the mover budget
+                            // silently disabled mover collision from the 4th body onward
         cgi.CM_BoxTrace(&tr, subStart[i], s->pt[i], pm, px, 0, MASK_DEADSOLID, qfalse);
         if (tr.startsolid) {
             // stuck inside: hold, kill velocity, let the constraint web drag it out
@@ -823,6 +944,7 @@ static void RagCollideMovers(ragSim_t *s, vec3_t frameStart[RAG_PTS])
     centity_t *movers[4];
     vec3_t     bmins, bmaxs, angles;
     int        i, m, nMovers;
+    int        allow = s_ragTraceCount + RAG_MOVER_PER_BODY; // per-body slice of the budget
 
     // mover pass: one bounds query per body per frame (plan section-3)
     ClearBounds(bmins, bmaxs);
@@ -847,7 +969,7 @@ static void RagCollideMovers(ragSim_t *s, vec3_t frameStart[RAG_PTS])
         }
         for (i = 0; i < RAG_PTS; i++) {
             vec3_t pm, px;
-            if (s_ragTraceCount >= RAG_TRACE_BUDGET) {
+            if (s_ragTraceCount >= RAG_TRACE_BUDGET || s_ragTraceCount >= allow) {
                 return;
             }
             VectorSet(pm, -s_ragPtRadius[i], -s_ragPtRadius[i], -s_ragPtRadius[i]);
@@ -924,12 +1046,20 @@ static void RagPush(ragSim_t *s)
         } else if (p < 0) {
             RagBodyRotation(s, S); // pelvis: shared anatomical triad (see the helper)
         } else {
-            VectorSubtract(s->pt[i], s->pt[p], dNow);
+            const float *ref;
+            int          dch = rag_drive->integer ? s_ragDriveChild[i] : -1;
+            if (dch >= 0 && s->driveOk[i]) {
+                VectorSubtract(s->pt[dch], s->pt[i], dNow); // OUTGOING: the mesh's own run
+                ref = s->driveDir0[i];
+            } else {
+                VectorSubtract(s->pt[i], s->pt[p], dNow); // leaf / drive off: incoming segment
+                ref = s->restDir[i];
+            }
             if (VectorLength(dNow) < 0.01f) {
                 RagMat3Identity(S);
             } else {
                 VectorNormalize(dNow);
-                RagMat3FromTo(s->restDir[i], dNow, S);
+                RagMat3FromTo(ref, dNow, S);
             }
         }
         RagMat3Mul(s->rot0[i], S, rotNow[i]);
@@ -1017,16 +1147,18 @@ void CG_RagdollFrame(void)
     if (cg.frametime <= 0) {
         return; // paused/hitch: the table persists, Hook A keeps applying the last push
     }
-    s_ragTraceCount = 0;
+    s_ragTraceCount  = 0;
+    s_ragWorldTraces = 0;
+    for (i = 0; i < RAG_MAX_PEND; i++) {
+        if (s_ragPend[i].active) {
+            RagPendingThink(&s_ragPend[i]); // corpses whose authored death is still playing
+        }
+    }
     for (i = 0; i < RAG_MAX_SIMS; i++) {
         ragSim_t *s = &s_ragSims[i];
         vec3_t    frameStart[RAG_PTS];
         int       steps, ms, j;
         if (!s->active) {
-            continue;
-        }
-        if (s->state == -1) {
-            RagPendingThink(s); // waiting on the authored death anim
             continue;
         }
         if (rag_debug->integer >= 2) {
@@ -1109,6 +1241,9 @@ void CG_RagdollFrame(void)
                 speed += VectorLength(v);
             }
             speed = speed / RAG_PTS / (RAG_SUBSTEP_MS * 0.001f);
+            if (speed > s->maxSpeed) {
+                s->maxSpeed = speed; // acceptance evidence: >300 on settle = the pose wasn't landed
+            }
             // 10 not 4: truss-supported points that never floor-contact carry ~6u/s of
             // gravity-vs-constraint jitter (sub-pixel, invisible) - at 4 nothing ever
             // speed-slept, every body rode to the 6s life cap (live 21:46, 3/3 kills)
@@ -1145,9 +1280,21 @@ void CG_RagdollFrame(void)
                         }
                         drift /= (RAG_PTS - 1);
                     }
-                    cgi.Printf("^~^~^ RAGDOLL sleep ent=%d life=%dms span=(%.0f %.0f %.0f) branch=%s drift=%.1f\n",
-                               s->entnum, s->lifeMs, bmx[0] - bmn[0], bmx[1] - bmn[1], bmx[2] - bmn[2],
-                               s->branch ? "settle" : "free", drift);
+                    {
+                        int nContacts = 0;
+                        for (j = 0; j < RAG_PTS; j++) {
+                            if (s->contact[j]) {
+                                nContacts++;
+                            }
+                        }
+                        // life= is NOT an acceptance metric on the settle branch: the body starts
+                        // at rest so sleepMs accrues from frame 1. Judge drift/span/maxspd.
+                        cgi.Printf("^~^~^ RAGDOLL sleep ent=%d life=%dms span=(%.0f %.0f %.0f) branch=%s "
+                                   "drift=%.1f maxspd=%.0f contacts=%d alpha=%.2f drive=%d worldtr=%d\n",
+                                   s->entnum, s->lifeMs, bmx[0] - bmn[0], bmx[1] - bmn[1], bmx[2] - bmn[2],
+                                   s->branch ? "settle" : "free", drift, s->maxSpeed, nContacts,
+                                   rag_stiff->value, rag_drive->integer, s_ragWorldTraces);
+                    }
                 }
             }
         }
@@ -1220,75 +1367,84 @@ static void RagArm(centity_t *cent, entityState_t *ns)
 // LIVING one. Arming there photographed a standing soldier and dropped him cold, which is
 // the whole "bodies don't fall like that" verdict. We wait for the animator's fall to
 // finish and for the server to ground the corpse, THEN hand the landed pose to physics.
-static void RagPendingThink(ragSim_t *s)
+// THE SERVER'S OWN HANDOFF SIGNAL. Actor::FinishedAnimation_Killed is the only route to
+// Actor::BecomeCorpse, which swaps the box from the living {-15,-15,0}..{15,15,94} to the corpse
+// slab {-32,-32,0}..{32,32,16} and re-links, so SV_LinkEntity re-packs entityState.solid and the
+// 32-bit netfield delivers it to us. Seeing that box PROVES the two things eight rounds spent
+// guessing at: the authored death animation ran to completion, AND CheckGround()/droptofloor(64)
+// has already parked the body. DeathEmbalm also re-links every 0.5s during the anim but only ever
+// lowers maxs.z - x/y stay 15 the whole way down - so maxs[0] is a monotone one-shot
+// discriminator that cannot fire early.
+static qboolean RagServerParked(const entityState_t *es)
 {
-    centity_t     *cent = &cg_entities[s->entnum];
+    vec3_t bmin, bmax;
+
+    if (!es->solid) {
+        return qfalse; // SOLID_NOT (coop_corpseShootable 0) parks silently: those ride the cap
+    }
+    IntegerToBoundingBox(es->solid, bmin, bmax);
+    return (bmax[0] >= 24.0f && bmax[2] <= 32.0f) ? qtrue : qfalse;
+}
+
+// SETTLE branch: hold while the authored death animation plays, then capture the LANDED pose at
+// the exact frame the server parks the corpse. Arming at the EF_DEAD edge photographed a STANDING
+// soldier - the engine does not request the death anim until a Think after the edge and then
+// crossblends it in - which is the whole "bodies don't fall like that" verdict of rounds 1-8.
+static void RagPendingThink(ragPend_t *p)
+{
+    centity_t     *cent = &cg_entities[p->entnum];
     entityState_t *cs   = &cent->currentState;
-    dtiki_t       *tiki;
-    const char    *nm;
     vec3_t         d;
-    float          bestW = 0, animT;
-    int            i, dom = -1, age = cg.time - s->armTime;
-    qboolean       animDone = qfalse;
+    int            age = cg.time - p->armTime;
 
-    if (cs->modelindex <= 0 || !(cs->eFlags & EF_DEAD)) {
-        memset(s, 0, sizeof(*s)); // revived / recycled slot: drop the pending record
-        return;
-    }
-    tiki = cgi.R_Model_GetHandle(cgs.model_draw[cs->modelindex]);
-    if (!tiki) {
-        memset(s, 0, sizeof(*s));
+    // lifecycle first: revived, recycled, dropped from the snapshot, or PVS-exited
+    if (!cent->currentValid || !cent->interpolate || cs->modelindex <= 0 || cs->eType != ET_MODELANIM
+        || !(cs->eFlags & EF_DEAD)) {
+        memset(p, 0, sizeof(*p));
         return;
     }
 
-    for (i = 0; i < MAX_FRAMEINFOS; i++) {
-        if (cs->frameInfo[i].weight > bestW) {
-            bestW = cs->frameInfo[i].weight;
-            dom   = i;
-        }
+    VectorSubtract(cent->lerpOrigin, p->pendOrigin, d);
+    VectorCopy(cent->lerpOrigin, p->pendOrigin);
+    p->pendStatic = (VectorLength(d) < 0.5f) ? p->pendStatic + 1 : 0;
+
+    if (rag_debug->integer >= 2 && cg.time - p->lastPrint >= 250) {
+        vec3_t bmn, bmx;
+        p->lastPrint = cg.time;
+        IntegerToBoundingBox(cs->solid, bmn, bmx);
+        cgi.Printf("^~^~^ RAGDOLL pending ent=%d box=(%.0f %.0f) static=%d age=%d\n", p->entnum, bmx[0],
+                   bmx[2], p->pendStatic, age);
     }
-    if (dom >= 0) {
-        animT = cgi.Anim_Time(tiki, cs->frameInfo[dom].index);
-        if (animT > 0 && cs->frameInfo[dom].time >= animT - 0.06f) {
-            animDone = qtrue;
-        }
-        nm = cgi.Anim_NameForNum(tiki, cs->frameInfo[dom].index);
-        if (rag_debug->integer >= 2) {
-            cgi.Printf("^~^~^ RAGDOLL pending ent=%d anim=%s t=%.2f/%.2f age=%d\n", s->entnum,
-                       nm ? nm : "?", cs->frameInfo[dom].time, animT, age);
-        }
-        // set-piece gate: balcony/chair/welding deaths are engine- or script-driven along
-        // pre-baked paths and must never be touched. Give the crossblend 300ms to settle
-        // on a name before judging.
-        if (nm && !Q_stricmpn(nm, "death_balcony", 13)) {
-            memset(s, 0, sizeof(*s));
-            return;
-        }
-        if (age > 300 && (!nm || Q_stricmpn(nm, "death", 5))) {
+
+    if (!RagServerParked(cs)) {
+        // GIVE UP, never fire on a guess. A corpse the server never parks keeps its authored
+        // pose - which IS vanilla, and therefore invisible. Arming a guessed pose is the exact
+        // failure mode this branch exists to end.
+        if (age > RAG_PEND_CAP_MS) {
             if (rag_debug->integer) {
-                cgi.Printf("^~^~^ RAGDOLL pending dropped ent=%d (anim=%s not a death)\n", s->entnum,
-                           nm ? nm : "?");
+                cgi.Printf("^~^~^ RAGDOLL pending gave-up ent=%d age=%dms (server never parked)\n",
+                           p->entnum, age);
             }
-            memset(s, 0, sizeof(*s));
-            return;
+            memset(p, 0, sizeof(*p));
         }
-    }
-
-    VectorSubtract(cent->lerpOrigin, s->pendOrigin, d);
-    VectorCopy(cent->lerpOrigin, s->pendOrigin);
-    s->pendStatic = (VectorLength(d) < 0.5f) ? s->pendStatic + 1 : 0;
-
-    if (!((animDone && s->pendStatic >= 2) || age > 3000)) {
         return;
     }
-    if (!cent->interpolate || cs->eType != ET_MODELANIM) {
-        memset(s, 0, sizeof(*s)); // re-validated at capture time, not at the edge
-        return;
+    if (p->pendStatic < 2) {
+        return; // the park itself moves the origin (droptofloor 64u): let it land first
     }
+
     {
-        int entnum  = s->entnum;
-        int armTime = s->armTime;
-        memset(s, 0, sizeof(*s));
+        int         entnum  = p->entnum;
+        int         armTime = p->armTime;
+        const char *nm      = NULL;
+        ragSim_t   *s;
+        int         i;
+
+        memset(p, 0, sizeof(*p)); // the pending record is spent either way
+        s = RagAllocSlot(entnum);
+        if (!s) {
+            return; // pool full of awake sims: keep the authored pose
+        }
         if (!RagCapture(cent, cs, s)) {
             memset(s, 0, sizeof(*s));
             return;
@@ -1304,7 +1460,20 @@ static void RagPendingThink(ragSim_t *s)
         }
         RagPush(s);
         if (rag_debug->integer) {
-            cgi.Printf("^~^~^ RAGDOLL settle-armed ent=%d channels=%d after=%dms\n", s->entnum, s->count, age);
+            int   dom = -1, k;
+            float bw = 0;
+            for (k = 0; k < MAX_FRAMEINFOS; k++) {
+                if (cs->frameInfo[k].weight > bw) {
+                    bw  = cs->frameInfo[k].weight;
+                    dom = k;
+                }
+            }
+            if (dom >= 0) {
+                nm = cgi.Anim_NameForNum(s->tiki, cs->frameInfo[dom].index);
+            }
+            // the anim name is DIAGNOSTIC ONLY now - it gates nothing
+            cgi.Printf("^~^~^ RAGDOLL settle-armed ent=%d channels=%d after=%dms via=solid anim=%s buried=%d\n",
+                       entnum, s->count, cg.time - armTime, nm ? nm : "?", (int)s->buried);
         }
     }
 }
@@ -1419,20 +1588,46 @@ void CG_RagdollTransition(centity_t *cent)
         return;
     }
 
-    if (rag_mode->integer != 3 && !rag_test->integer) {
-        // SETTLE: record a pending arm and let the animators own the fall
-        ragSim_t *p = RagAllocSlot(ns->number);
+    if (rag_mode->integer == 1 && !rag_test->integer) {
+        // SETTLE: record a pending arm and let the animators own the fall. The capture happens
+        // when the SERVER parks the body, not when we guess the anim is over.
+        int        k;
+        ragPend_t *p = NULL;
+        if (RagSimFor(ns->number) || s_ragNeverArm[ns->number]) {
+            return;
+        }
+        for (k = 0; k < RAG_MAX_PEND; k++) {
+            if (s_ragPend[k].active && s_ragPend[k].entnum == ns->number) {
+                return; // already pending
+            }
+        }
+        for (k = 0; k < RAG_MAX_PEND; k++) {
+            if (!s_ragPend[k].active) {
+                p = &s_ragPend[k];
+                break;
+            }
+        }
+        if (!p) {
+            for (k = 0; k < RAG_MAX_PEND; k++) { // oldest-first eviction
+                if (!p || s_ragPend[k].armTime < p->armTime) {
+                    p = &s_ragPend[k];
+                }
+            }
+        }
         if (p) {
+            memset(p, 0, sizeof(*p));
             p->active  = qtrue;
             p->entnum  = ns->number;
-            p->state   = -1;
             p->armTime = cg.time;
             VectorCopy(cent->lerpOrigin, p->pendOrigin);
             if (rag_debug->integer) {
-                cgi.Printf("^~^~^ RAGDOLL pending-arm ent=%d (waiting on death anim)\n", ns->number);
+                cgi.Printf("^~^~^ RAGDOLL pending-arm ent=%d (waiting on server park)\n", ns->number);
             }
         }
         return;
+    }
+    if (rag_mode->integer != 3) {
+        return; // mode 0 = OFF (it used to fall through into settle - a silent trap)
     }
 
     RagArm(cent, ns);
