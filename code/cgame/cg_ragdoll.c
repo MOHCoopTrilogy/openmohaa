@@ -48,6 +48,8 @@ void     CG_RagdollFrame(void);
 void     CG_RagdollClearEnt(int entnum);
 static void RagArm(centity_t *cent, entityState_t *ns);
 static void RagArmTestPose(entityState_t *ns, dtiki_t *tiki, int count);
+typedef struct ragSim_s ragSim_t;
+static void RagPendingThink(ragSim_t *s);
 
 #define RAG_MAX_SIMS   8
 #define RAG_MAX_CH     128
@@ -118,7 +120,7 @@ static const float s_ragBraceMinFactor[RAG_BRACES] = {
     0.60f, 0.60f,                             // hips: sitting-fold ok, flat jackknife blocked
 };
 
-typedef struct {
+struct ragSim_s {
     qboolean active;
     int      entnum;
     dtiki_t *tiki;
@@ -153,9 +155,21 @@ typedef struct {
 
     float    moverHash;            // bmodel origin-sum at sleep time (mover-wake detector)
     byte     touched;              // first-world-contact debug latch
+
+    // SETTLE branch (round 8): the authored death animation owns the fall; physics owns
+    // only the landing. goal[] is the captured (authored, already-landed) pose - the sim
+    // is shape-matched back toward it every substep so the corpse keeps the animator's
+    // silhouette while draping over whatever it actually landed on.
+    byte     branch;               // 1 = settle, 0 = legacy free-fall (mode 3)
+    vec3_t   goal[RAG_PTS];
+    float    gravScale;            // 0 -> 1 over 250ms (no lurch at handoff)
+    int      rampMs;
+    vec3_t   pendOrigin;           // pending-arm: last seen placement
+    int      pendStatic;           // consecutive frames the corpse has not moved
+
     byte     freezePose;           // coop_ragdollTest 2: push the capture verbatim, no sim -
                                    // a pure space/round-trip test (any warp = render defect)
-} ragSim_t;
+};
 
 static ragSim_t s_ragSims[RAG_MAX_SIMS];
 static byte     s_ragNeverArm[MAX_GENTITIES]; // failure-ladder: NaN'd corpses keep the anim pose
@@ -206,6 +220,8 @@ static const struct {
 static cvar_t  *rag_debug    = NULL;
 static cvar_t  *coop_ragdoll = NULL;
 static cvar_t  *rag_test     = NULL;
+static cvar_t  *rag_mode     = NULL;
+static cvar_t  *rag_stiff    = NULL;
 
 static void RagCvars(void)
 {
@@ -213,6 +229,10 @@ static void RagCvars(void)
         rag_debug    = cgi.Cvar_Get("r_ragdollDebug", "0", CVAR_TEMP);
         coop_ragdoll = cgi.Cvar_Get("coop_ragdoll", "0", CVAR_TEMP); // dark until P5 (plan section-1)
         rag_test     = cgi.Cvar_Get("coop_ragdollTest", "0", CVAR_TEMP);
+        // 1 = SETTLE (authored death anim plays out, then physics drapes the corpse onto
+        // the geometry); 3 = the old arm-at-EF_DEAD behaviour, kept as the live A/B.
+        rag_mode  = cgi.Cvar_Get("coop_ragdollMode", "1", CVAR_TEMP);
+        rag_stiff = cgi.Cvar_Get("coop_ragdollStiff", "0.35", CVAR_TEMP);
     }
 }
 
@@ -596,10 +616,52 @@ static qboolean RagCapture(centity_t *cent, entityState_t *ns, ragSim_t *s)
 
 // ---------- per-frame sim ------------------------------------------------------------------
 
+// The body's rigid rotation from its capture pose to its current one: an anatomical triad
+// (spine direction + hip line) at both ends. ONE producer - RagPush's pelvis orientation
+// and the settle's shape-match goal must never disagree.
+static qboolean RagBodyRotation(const ragSim_t *s, float S[3][3])
+{
+    float  T0[3][3], T1[3][3];
+    vec3_t spineNow, hipNow;
+
+    VectorSubtract(s->pt[1], s->pt[0], spineNow);
+    VectorSubtract(s->pt[13], s->pt[11], hipNow);
+    if (RagTriad(s->restDir[1], s->hipDir0, T0) && RagTriad(spineNow, hipNow, T1)) {
+        RagMat3TransMul(T0, T1, S); // capture basis -> current basis (row-vector: v' = v*S)
+        return qtrue;
+    }
+    VectorNormalize(spineNow);
+    RagMat3FromTo(s->restDir[1], spineNow, S); // degenerate: 1-axis fallback
+    return qfalse;
+}
+
+// pull the point cloud back toward the authored pose, rigidly re-fitted to wherever the
+// body currently is (pelvis anchor + body rotation). alpha 1 = perfectly rigid corpse,
+// 0 = today's free Verlet. Runs after the constraints, before collision, so the ground
+// always gets the last word - that is what produces the drape.
+static void RagShapeMatch(ragSim_t *s, float alpha)
+{
+    float S[3][3];
+    int   i;
+
+    if (alpha <= 0.001f) {
+        return;
+    }
+    RagBodyRotation(s, S);
+    for (i = 1; i < RAG_PTS; i++) {
+        vec3_t rel, want, d;
+        VectorSubtract(s->goal[i], s->goal[0], rel);
+        RagMat3RotateVec(S, rel, want);
+        VectorAdd(s->pt[0], want, want);
+        VectorSubtract(want, s->pt[i], d);
+        VectorMA(s->pt[i], alpha, d, s->pt[i]);
+    }
+}
+
 static void RagStep(ragSim_t *s, float dt)
 {
     int   i, it;
-    float g = RAG_GRAVITY * dt * dt;
+    float g = RAG_GRAVITY * dt * dt * (s->branch ? s->gravScale : 1.0f);
 
     for (i = 0; i < RAG_PTS; i++) {
         vec3_t vel, next;
@@ -645,6 +707,19 @@ static void RagStep(ragSim_t *s, float dt)
             VectorMA(s->pt[a], -corr, d, s->pt[a]);
             VectorMA(s->pt[b], corr, d, s->pt[b]);
         }
+    }
+    if (s->branch) {
+        float target = rag_stiff->value;
+        float alpha;
+        if (target < 0) {
+            target = 0;
+        } else if (target > 1) {
+            target = 1;
+        }
+        // rigid at handoff, relaxing to the target over 300ms: the corpse never twitches
+        // as physics takes the wheel
+        alpha = (s->rampMs >= 300) ? target : target + (1.0f - target) * (1.0f - s->rampMs / 300.0f);
+        RagShapeMatch(s, alpha);
     }
 }
 
@@ -847,18 +922,7 @@ static void RagPush(ragSim_t *s)
             RagMat3Identity(S); // verbatim-capture drill: with S=I the push must reproduce
                                 // the death pose exactly; any warp isolates the render side
         } else if (p < 0) {
-            // pelvis: full 2-axis triad (spine dir + hip line), capture -> current, so a
-            // rolled body renders a rolled torso (the old 1-axis form lost all roll)
-            float  T0[3][3], T1[3][3];
-            vec3_t spineNow, hipNow;
-            VectorSubtract(s->pt[1], s->pt[0], spineNow);
-            VectorSubtract(s->pt[13], s->pt[11], hipNow);
-            if (RagTriad(s->restDir[1], s->hipDir0, T0) && RagTriad(spineNow, hipNow, T1)) {
-                RagMat3TransMul(T0, T1, S); // world S with basis0 -> basis1
-            } else {
-                VectorNormalize(spineNow);
-                RagMat3FromTo(s->restDir[1], spineNow, S); // degenerate: 1-axis fallback
-            }
+            RagBodyRotation(s, S); // pelvis: shared anatomical triad (see the helper)
         } else {
             VectorSubtract(s->pt[i], s->pt[p], dNow);
             if (VectorLength(dNow) < 0.01f) {
@@ -961,6 +1025,10 @@ void CG_RagdollFrame(void)
         if (!s->active) {
             continue;
         }
+        if (s->state == -1) {
+            RagPendingThink(s); // waiting on the authored death anim
+            continue;
+        }
         if (rag_debug->integer >= 2) {
             RagDrawSkeleton(s); // ground-truth dots, drawn for awake AND slept bodies
         }
@@ -999,6 +1067,10 @@ void CG_RagdollFrame(void)
         }
         s->accumMs += ms;
         s->lifeMs += ms;
+        if (s->branch) {
+            s->rampMs += ms;
+            s->gravScale = (s->rampMs >= 250) ? 1.0f : s->rampMs / 250.0f;
+        }
         for (j = 0; j < RAG_PTS; j++) {
             VectorCopy(s->pt[j], frameStart[j]);
         }
@@ -1053,12 +1125,29 @@ void CG_RagdollFrame(void)
                     // axis 55-75u and z 8-20u; a point-pile is <35u everywhere; sane
                     // points + mangled mesh means the PUSH rotation math is the defect
                     vec3_t bmn, bmx;
+                    float  drift = 0;
                     ClearBounds(bmn, bmx);
                     for (j = 0; j < RAG_PTS; j++) {
                         AddPointToBounds(s->pt[j], bmn, bmx);
                     }
-                    cgi.Printf("^~^~^ RAGDOLL sleep ent=%d life=%dms span=(%.0f %.0f %.0f)\n",
-                               s->entnum, s->lifeMs, bmx[0] - bmn[0], bmx[1] - bmn[1], bmx[2] - bmn[2]);
+                    if (s->branch) {
+                        // how far the settle moved the body off the animator's pose:
+                        // ~0 on flat ground (vanilla-identical), 5-20u draped on geometry
+                        float  S[3][3];
+                        vec3_t rel, want, dd;
+                        RagBodyRotation(s, S);
+                        for (j = 1; j < RAG_PTS; j++) {
+                            VectorSubtract(s->goal[j], s->goal[0], rel);
+                            RagMat3RotateVec(S, rel, want);
+                            VectorAdd(s->pt[0], want, want);
+                            VectorSubtract(want, s->pt[j], dd);
+                            drift += VectorLength(dd);
+                        }
+                        drift /= (RAG_PTS - 1);
+                    }
+                    cgi.Printf("^~^~^ RAGDOLL sleep ent=%d life=%dms span=(%.0f %.0f %.0f) branch=%s drift=%.1f\n",
+                               s->entnum, s->lifeMs, bmx[0] - bmn[0], bmx[1] - bmn[1], bmx[2] - bmn[2],
+                               s->branch ? "settle" : "free", drift);
                 }
             }
         }
@@ -1068,16 +1157,13 @@ void CG_RagdollFrame(void)
 
 // ---------- lifecycle ----------------------------------------------------------------------
 
-static void RagArm(centity_t *cent, entityState_t *ns)
+static ragSim_t *RagAllocSlot(int entnum)
 {
     ragSim_t *s = NULL;
     int       i;
 
-    if (RagSimFor(ns->number)) {
-        return;
-    }
-    if (s_ragNeverArm[ns->number]) {
-        return;
+    if (RagSimFor(entnum) || s_ragNeverArm[entnum]) {
+        return NULL;
     }
     for (i = 0; i < RAG_MAX_SIMS; i++) {
         if (!s_ragSims[i].active) {
@@ -1097,11 +1183,21 @@ static void RagArm(centity_t *cent, entityState_t *ns)
     }
     if (!s) {
         if (rag_debug->integer) {
-            cgi.Printf("^~^~^ RAGDOLL arm refused ent=%d (pool awake-full)\n", ns->number);
+            cgi.Printf("^~^~^ RAGDOLL arm refused ent=%d (pool awake-full)\n", entnum);
         }
-        return;
+        return NULL;
     }
     memset(s, 0, sizeof(*s));
+    return s;
+}
+
+static void RagArm(centity_t *cent, entityState_t *ns)
+{
+    ragSim_t *s = RagAllocSlot(ns->number);
+
+    if (!s) {
+        return;
+    }
     if (!RagCapture(cent, ns, s)) {
         memset(s, 0, sizeof(*s));
         return;
@@ -1115,6 +1211,101 @@ static void RagArm(centity_t *cent, entityState_t *ns)
     RagPush(s); // first push: the captured pose verbatim (visually seamless arm)
     if (rag_debug->integer) {
         cgi.Printf("^~^~^ RAGDOLL armed ent=%d channels=%d scale=%.2f\n", ns->number, s->count, s->scale);
+    }
+}
+
+// SETTLE branch, state -1: hold while the authored death animation plays. The engine does
+// not even REQUEST the death anim until a Think after the EF_DEAD edge, and then blends it
+// in over 0.5s (actor.cpp ChangeAnim m_fCrossblendTime) - so the pose at the edge is the
+// LIVING one. Arming there photographed a standing soldier and dropped him cold, which is
+// the whole "bodies don't fall like that" verdict. We wait for the animator's fall to
+// finish and for the server to ground the corpse, THEN hand the landed pose to physics.
+static void RagPendingThink(ragSim_t *s)
+{
+    centity_t     *cent = &cg_entities[s->entnum];
+    entityState_t *cs   = &cent->currentState;
+    dtiki_t       *tiki;
+    const char    *nm;
+    vec3_t         d;
+    float          bestW = 0, animT;
+    int            i, dom = -1, age = cg.time - s->armTime;
+    qboolean       animDone = qfalse;
+
+    if (cs->modelindex <= 0 || !(cs->eFlags & EF_DEAD)) {
+        memset(s, 0, sizeof(*s)); // revived / recycled slot: drop the pending record
+        return;
+    }
+    tiki = cgi.R_Model_GetHandle(cgs.model_draw[cs->modelindex]);
+    if (!tiki) {
+        memset(s, 0, sizeof(*s));
+        return;
+    }
+
+    for (i = 0; i < MAX_FRAMEINFOS; i++) {
+        if (cs->frameInfo[i].weight > bestW) {
+            bestW = cs->frameInfo[i].weight;
+            dom   = i;
+        }
+    }
+    if (dom >= 0) {
+        animT = cgi.Anim_Time(tiki, cs->frameInfo[dom].index);
+        if (animT > 0 && cs->frameInfo[dom].time >= animT - 0.06f) {
+            animDone = qtrue;
+        }
+        nm = cgi.Anim_NameForNum(tiki, cs->frameInfo[dom].index);
+        if (rag_debug->integer >= 2) {
+            cgi.Printf("^~^~^ RAGDOLL pending ent=%d anim=%s t=%.2f/%.2f age=%d\n", s->entnum,
+                       nm ? nm : "?", cs->frameInfo[dom].time, animT, age);
+        }
+        // set-piece gate: balcony/chair/welding deaths are engine- or script-driven along
+        // pre-baked paths and must never be touched. Give the crossblend 300ms to settle
+        // on a name before judging.
+        if (nm && !Q_stricmpn(nm, "death_balcony", 13)) {
+            memset(s, 0, sizeof(*s));
+            return;
+        }
+        if (age > 300 && (!nm || Q_stricmpn(nm, "death", 5))) {
+            if (rag_debug->integer) {
+                cgi.Printf("^~^~^ RAGDOLL pending dropped ent=%d (anim=%s not a death)\n", s->entnum,
+                           nm ? nm : "?");
+            }
+            memset(s, 0, sizeof(*s));
+            return;
+        }
+    }
+
+    VectorSubtract(cent->lerpOrigin, s->pendOrigin, d);
+    VectorCopy(cent->lerpOrigin, s->pendOrigin);
+    s->pendStatic = (VectorLength(d) < 0.5f) ? s->pendStatic + 1 : 0;
+
+    if (!((animDone && s->pendStatic >= 2) || age > 3000)) {
+        return;
+    }
+    if (!cent->interpolate || cs->eType != ET_MODELANIM) {
+        memset(s, 0, sizeof(*s)); // re-validated at capture time, not at the edge
+        return;
+    }
+    {
+        int entnum  = s->entnum;
+        int armTime = s->armTime;
+        memset(s, 0, sizeof(*s));
+        if (!RagCapture(cent, cs, s)) {
+            memset(s, 0, sizeof(*s));
+            return;
+        }
+        s->active    = qtrue;
+        s->entnum    = entnum;
+        s->state     = 1; // no seed: the authored fall already happened
+        s->branch    = 1;
+        s->armTime   = armTime;
+        s->gravScale = 0.0f;
+        for (i = 0; i < RAG_PTS; i++) {
+            VectorCopy(s->pt[i], s->goal[i]); // the authored pose is the target silhouette
+        }
+        RagPush(s);
+        if (rag_debug->integer) {
+            cgi.Printf("^~^~^ RAGDOLL settle-armed ent=%d channels=%d after=%dms\n", s->entnum, s->count, age);
+        }
     }
 }
 
@@ -1224,6 +1415,22 @@ void CG_RagdollTransition(centity_t *cent)
         }
         if (count > 0) {
             RagArmTestPose(ns, tiki, count);
+        }
+        return;
+    }
+
+    if (rag_mode->integer != 3 && !rag_test->integer) {
+        // SETTLE: record a pending arm and let the animators own the fall
+        ragSim_t *p = RagAllocSlot(ns->number);
+        if (p) {
+            p->active  = qtrue;
+            p->entnum  = ns->number;
+            p->state   = -1;
+            p->armTime = cg.time;
+            VectorCopy(cent->lerpOrigin, p->pendOrigin);
+            if (rag_debug->integer) {
+                cgi.Printf("^~^~^ RAGDOLL pending-arm ent=%d (waiting on death anim)\n", ns->number);
+            }
         }
         return;
     }
