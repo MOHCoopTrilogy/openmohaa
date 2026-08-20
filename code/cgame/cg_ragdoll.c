@@ -9,7 +9,7 @@ Collision (plan section-3): per awake body per frame, sweep a +/-2u box from eac
 frame-start position to its post-substep position - world first (cgi.CM_BoxTrace model 0,
 MASK_DEADSOLID: the engine's own dead-body clip), then one CG_GetBrushEntitiesInBounds
 query and CM_TransformedBoxTrace per nearby bmodel (doors/elevators, EF_LINKANGLES
-honored). Hits resolve with restitution 0.1 and tangential friction (0.6 on floors, 0.75
+honored). Hits resolve with restitution 0.1 and tangential friction (0.45 on floors, 0.75
 on walls), re-encoded into the Verlet ptPrev. Global ceiling 240 traces/frame - past it,
 points glide this frame (plan's stated degradation). Slept bodies re-wake when a bmodel
 in their bounds moves (origin-sum hash) so an elevator carries corpses instead of leaving
@@ -85,7 +85,7 @@ static const struct {
 // fold limits: they cap how sharply any joint can hinge, measured at the DEATH pose, and
 // they rotate with the body - so corpses topple and slump but cannot collapse into a
 // bead-chain pile (the P3 live finding 2026-08-19 21:37: pure neighbor links = heap).
-#define RAG_BRACES 14
+#define RAG_BRACES 16
 static const int s_ragBraces[RAG_BRACES][2] = {
     {5,  8},  // shoulder - shoulder
     {11, 13}, // thigh - thigh
@@ -100,7 +100,22 @@ static const int s_ragBraces[RAG_BRACES][2] = {
     {8,  10}, // R upperarm - R hand
     {0,  12}, // pelvis - L calf     (knee fold limit)
     {0,  14}, // pelvis - R calf
-    {1,  11}, // spine1 - L thigh    (hip fold limit)
+    {1,  11}, // spine1 - L thigh (geometrically inert - pt 11 IS the hip socket; kept, harmless)
+    {2,  12}, // spine2 - L calf  (HIP fold limit - facts-vet FIX 9: without these a full
+    {2,  14}, // spine2 - R calf   jackknife is constraint-legal; the live data proved it)
+};
+
+// fold limits are INEQUALITY braces: they stop the joint folding TIGHTER than the factor
+// of its capture distance, but never stop it straightening (an equality brace froze dead
+// arms at their death-pose bend). 0 = structural equality brace at full capture length.
+static const float s_ragBraceMinFactor[RAG_BRACES] = {
+    0,     0,     0,     0,     0,     0,     // structural truss: equality
+    0.80f,                                    // neck
+    0.70f, 0.70f,                             // shoulders
+    0.75f, 0.75f,                             // elbows
+    0.75f, 0.75f,                             // knees
+    0.75f,                                    // inert hip-socket brace
+    0.60f, 0.60f,                             // hips: sitting-fold ok, flat jackknife blocked
 };
 
 typedef struct {
@@ -145,6 +160,38 @@ static byte     s_ragNeverArm[MAX_GENTITIES]; // failure-ladder: NaN'd corpses k
 static int      s_ragTraceCount;              // reset each CG_RagdollFrame
 static const vec3_t s_ragPtMins = {-2, -2, -2};
 static const vec3_t s_ragPtMaxs = {2, 2, 2};
+
+// hierarchy anchor table (facts-vet FIX 2, table variant with its corrections applied:
+// tag_weapon_left belongs to the LEFT hand; "Bip01 Spine" parents to Pelvis). Prefix match,
+// first hit wins; sim channels self-anchor BEFORE this table runs (so "Bip01 Spine1/2"
+// never fall into the "Bip01 Spine" entry); unknown gear/helper bones fall back to nearest,
+// which is correct for them because they sit ON joints.
+static const struct {
+    const char *prefix;
+    byte        sim;
+} s_ragAnchorTable[] = {
+    {"Bip01 L Finger",   7 },
+    {"Bip01 R Finger",   10},
+    {"Bip01 L Hand",     7 }, // child nubs
+    {"Bip01 R Hand",     10},
+    {"Bip01 L Foot",     12},
+    {"Bip01 L Toe",      12},
+    {"Bip01 R Foot",     14},
+    {"Bip01 R Toe",      14},
+    {"Bip01 L Clavicle", 2 },
+    {"Bip01 R Clavicle", 2 },
+    {"tag_weapon_left",  7 },
+    {"tag_weapon",       10},
+    {"tag_eyes",         4 },
+    {"tag_head",         4 },
+    {"helmet",           4 },
+    {"eye",              4 },
+    {"JAW",              4 },
+    {"Bip01 Head",       4 }, // child nubs
+    {"Bip01 Neck",       3 },
+    {"Bip01 Spine",      0 },
+    {NULL,               0 },
+};
 static cvar_t  *rag_debug    = NULL;
 static cvar_t  *coop_ragdoll = NULL;
 static cvar_t  *rag_test     = NULL;
@@ -468,6 +515,9 @@ static qboolean RagCapture(centity_t *cent, entityState_t *ns, ragSim_t *s)
         vec3_t d;
         VectorSubtract(s->pt[s_ragBraces[i][0]], s->pt[s_ragBraces[i][1]], d);
         s->braceLen[i] = VectorLength(d);
+        if (s_ragBraceMinFactor[i] > 0) {
+            s->braceLen[i] *= s_ragBraceMinFactor[i]; // inequality limits store the MINIMUM
+        }
     }
     VectorSubtract(s->pt[13], s->pt[11], s->hipDir0); // L thigh -> R thigh (world)
     VectorNormalize(s->hipDir0);
@@ -475,22 +525,48 @@ static qboolean RagCapture(centity_t *cent, entityState_t *ns, ragSim_t *s)
     // slave every channel to its nearest sim point at capture (fingers -> hands, face ->
     // head, gear -> nearest segment). rel = inv(anchor world) * channel world.
     for (ch = 0; ch < s->count; ch++) {
-        vec3_t capPos, worldPos, rel;
-        int    best = 0;
-        float  bestD = 999999.0f;
+        vec3_t      capPos, worldPos, rel;
+        int         best = -1, t;
+        const char *chName;
 
         capPos[0] = s->mat0[ch][0][3];
         capPos[1] = s->mat0[ch][1][3];
         capPos[2] = s->mat0[ch][2][3];
         RagCaptureToWorld(s, capPos, worldPos);
+
+        // 1) sim channels anchor to themselves
         for (i = 0; i < RAG_PTS; i++) {
-            vec3_t d;
-            float  len;
-            VectorSubtract(worldPos, s->pt[i], d);
-            len = VectorLengthSquared(d);
-            if (len < bestD) {
-                bestD = len;
-                best  = i;
+            if (s->simChan[i] == ch) {
+                best = i;
+                break;
+            }
+        }
+        // 2) fixed Bip01 hierarchy table (nearest mis-binds clavicles to upper arms and
+        //    feet to the wrong calf in stride poses - facts-vet measured)
+        if (best < 0) {
+            chName = cgi.Tag_NameForNum(s->tiki, ch);
+            if (chName) {
+                for (t = 0; s_ragAnchorTable[t].prefix; t++) {
+                    if (!Q_stricmpn(chName, s_ragAnchorTable[t].prefix, strlen(s_ragAnchorTable[t].prefix))) {
+                        best = s_ragAnchorTable[t].sim;
+                        break;
+                    }
+                }
+            }
+        }
+        // 3) nearest: the fallback for gear/helper bones, which sit ON joints
+        if (best < 0) {
+            float bestD = 999999.0f;
+            best = 0;
+            for (i = 0; i < RAG_PTS; i++) {
+                vec3_t d;
+                float  len;
+                VectorSubtract(worldPos, s->pt[i], d);
+                len = VectorLengthSquared(d);
+                if (len < bestD) {
+                    bestD = len;
+                    best  = i;
+                }
             }
         }
         s->anchor[ch] = (byte)best;
@@ -543,6 +619,9 @@ static void RagStep(ragSim_t *s, float dt)
             len = VectorLength(d);
             if (len < 0.001f) {
                 continue;
+            }
+            if (s_ragBraceMinFactor[i] > 0 && len >= s->braceLen[i]) {
+                continue; // inequality fold limit: only ever pushes APART
             }
             corr = (len - s->braceLen[i]) * 0.5f / len; // firm: these are the anti-pile truss
             VectorMA(s->pt[a], -corr, d, s->pt[a]);
