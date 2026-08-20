@@ -195,6 +195,7 @@ struct ragSim_s {
     vec3_t   driveDir0[RAG_PTS];   // capture OUTGOING (bone->child) directions
     byte     driveOk[RAG_PTS];
     byte     contact[RAG_PTS];     // 2-substep memory of touching the world
+    float    ptRadius[RAG_PTS];    // per-point collision radius, clamped to capture clearance
     byte     buried;               // points still in solid after the capture pre-lift
     float    maxSpeed;             // peak mean point speed (acceptance evidence)
 
@@ -572,8 +573,8 @@ static qboolean RagCapture(centity_t *cent, entityState_t *ns, ragSim_t *s)
         VectorCopy(s->pt[i], above);
         above[2] += 40; // 24 was too short on stepped geometry: both ends in solid = startsolid,
                         // the point stays buried, freezes, and pins the body (bug-1962's pile)
-        VectorSet(pm, -s_ragPtRadius[i], -s_ragPtRadius[i], -s_ragPtRadius[i]);
-        VectorSet(px, s_ragPtRadius[i], s_ragPtRadius[i], s_ragPtRadius[i]);
+        VectorSet(pm, -s->ptRadius[i], -s->ptRadius[i], -s->ptRadius[i]);
+        VectorSet(px, s->ptRadius[i], s->ptRadius[i], s->ptRadius[i]);
         cgi.CM_BoxTrace(&tr, above, s->pt[i], pm, px, 0, MASK_DEADSOLID, qfalse);
         if (!tr.startsolid && tr.fraction < 1.0f) {
             VectorCopy(tr.endpos, s->pt[i]);
@@ -649,6 +650,30 @@ static qboolean RagCapture(centity_t *cent, entityState_t *ns, ragSim_t *s)
             s->braceLen[i] *= s_ragBraceMinFactor[i]; // inequality limits store the MINIMUM
         }
     }
+    // Per-point collision radius, CLAMPED TO THE CLEARANCE THE AUTHORED POSE ALREADY HAS.
+    // The animator's pose is by definition a correct-looking resting pose, so a point sitting
+    // 1u off the floor must keep a 1u box - inflating it to the anatomical radius shoves the
+    // body up off its own pose and it hovers (live 2026-08-20: "ragdolls float around a bit
+    // with their legs angled upwards" - the pelvis alone was lifting 7u).
+    for (i = 0; i < RAG_PTS; i++) {
+        trace_t tr;
+        vec3_t  down, tiny = {-1, -1, -1}, tinyx = {1, 1, 1};
+        float   clear = s_ragPtRadius[i];
+        VectorCopy(s->pt[i], down);
+        down[2] -= s_ragPtRadius[i] + 2.0f;
+        cgi.CM_BoxTrace(&tr, s->pt[i], down, tiny, tinyx, 0, MASK_DEADSOLID, qfalse);
+        if (!tr.startsolid && tr.fraction < 1.0f) {
+            clear = (s_ragPtRadius[i] + 2.0f) * tr.fraction;
+        }
+        if (clear > s_ragPtRadius[i]) {
+            clear = s_ragPtRadius[i];
+        }
+        if (clear < 1.0f) {
+            clear = 1.0f; // never zero: a zero-size box tunnels through everything
+        }
+        s->ptRadius[i] = clear;
+    }
+
     VectorSubtract(s->pt[13], s->pt[11], s->hipDir0); // L thigh -> R thigh (world)
     VectorNormalize(s->hipDir0);
 
@@ -924,8 +949,8 @@ static void RagCollideWorld(ragSim_t *s, vec3_t subStart[RAG_PTS])
         if (VectorLengthSquared(d) < 0.0001f) {
             continue;
         }
-        VectorSet(pm, -s_ragPtRadius[i], -s_ragPtRadius[i], -s_ragPtRadius[i]);
-        VectorSet(px, s_ragPtRadius[i], s_ragPtRadius[i], s_ragPtRadius[i]);
+        VectorSet(pm, -s->ptRadius[i], -s->ptRadius[i], -s->ptRadius[i]);
+        VectorSet(px, s->ptRadius[i], s->ptRadius[i], s->ptRadius[i]);
         s_ragWorldTraces++; // world traces have their OWN counter - sharing the mover budget
                             // silently disabled mover collision from the 4th body onward
         cgi.CM_BoxTrace(&tr, subStart[i], s->pt[i], pm, px, 0, MASK_DEADSOLID, qfalse);
@@ -984,8 +1009,8 @@ static void RagCollideMovers(ragSim_t *s, vec3_t frameStart[RAG_PTS])
             if (s_ragTraceCount >= RAG_TRACE_BUDGET || s_ragTraceCount >= allow) {
                 return;
             }
-            VectorSet(pm, -s_ragPtRadius[i], -s_ragPtRadius[i], -s_ragPtRadius[i]);
-            VectorSet(px, s_ragPtRadius[i], s_ragPtRadius[i], s_ragPtRadius[i]);
+            VectorSet(pm, -s->ptRadius[i], -s->ptRadius[i], -s->ptRadius[i]);
+            VectorSet(px, s->ptRadius[i], s->ptRadius[i], s->ptRadius[i]);
             s_ragTraceCount++;
             cgi.CM_TransformedBoxTrace(&tr, frameStart[i], s->pt[i], pm, px, cmodel,
                                        MASK_DEADSOLID, movers[m]->lerpOrigin, angles, qfalse);
@@ -1409,8 +1434,13 @@ static void RagPendingThink(ragPend_t *p)
     vec3_t         d;
     int            age = cg.time - p->armTime;
 
-    // lifecycle first: revived, recycled, dropped from the snapshot, or PVS-exited
-    if (!cent->currentValid || !cent->interpolate || cs->modelindex <= 0 || cs->eType != ET_MODELANIM
+    // lifecycle first: revived, recycled, dropped from the snapshot, or PVS-exited.
+    // NOT cent->interpolate: that guard exists for the FREE branch, which differences two
+    // snapshots to seed velocity. The settle branch seeds nothing - it captures a body the
+    // server has already parked - so requiring interpolation only discarded corpses. Live
+    // 2026-08-20: EVERY dropped pending read interp=0, i.e. this one guard was rejecting
+    // ~70% of all kills.
+    if (!cent->currentValid || cs->modelindex <= 0 || cs->eType != ET_MODELANIM
         || !(cs->eFlags & EF_DEAD)) {
         if (rag_debug->integer) {
             // WHICH condition dropped it - live round 8 showed 10 of 14 pendings vanishing with
