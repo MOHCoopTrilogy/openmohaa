@@ -295,6 +295,7 @@ static cvar_t  *rag_slew     = NULL;
 static cvar_t  *rag_carry    = NULL;
 static cvar_t  *rag_velcap   = NULL;
 static cvar_t  *rag_leash    = NULL;
+static cvar_t  *rag_truss    = NULL;
 
 static void RagCvars(void)
 {
@@ -316,6 +317,13 @@ static void RagCvars(void)
         rag_carry   = cgi.Cvar_Get("coop_ragdollCarry", "0.85", CVAR_TEMP);   // 0 = pre-fix
         rag_velcap  = cgi.Cvar_Get("coop_ragdollVelCap", "8", CVAR_TEMP);     // 24 = pre-fix
         rag_leash   = cgi.Cvar_Get("coop_ragdollLeash", "128", CVAR_TEMP);    // 0 = off
+        // THE TRUSS EXPERIMENT. 1 = today's anti-pile scaffolding at full strength; 0 = no
+        // braces at all. The equality braces weld thigh-to-thigh, shoulder-to-shoulder and each
+        // shoulder to the opposite hip, so the corpse is nearly rigid: a bullet anywhere slides
+        // the whole body instead of moving the limb, and kicking one leg drags the other. This
+        // knob tests - before we build 20 angular joint limits on the assumption - whether a
+        // LOOSE body actually articulates. Expect piles at 0: that is the thing limits fix.
+        rag_truss = cgi.Cvar_Get("coop_ragdollTruss", "1", CVAR_TEMP);
     }
 }
 
@@ -980,7 +988,14 @@ static void RagStep(ragSim_t *s, float dt)
         for (i = 0; i < RAG_BRACES; i++) {
             int    a = s_ragBraces[i][0], b = s_ragBraces[i][1];
             vec3_t d;
-            float  len, corr;
+            float  len, corr, tstiff = rag_truss->value;
+            if (tstiff <= 0.0f) {
+                break; // truss off: the body is free to articulate (and free to pile - the
+                       // experiment that tells us whether angular limits are worth building)
+            }
+            if (tstiff > 1.0f) {
+                tstiff = 1.0f;
+            }
             VectorSubtract(s->pt[a], s->pt[b], d);
             len = VectorLength(d);
             if (len < 0.001f) {
@@ -989,7 +1004,7 @@ static void RagStep(ragSim_t *s, float dt)
             if (s_ragBraceMinFactor[i] > 0 && len >= s->braceLen[i]) {
                 continue; // inequality fold limit: only ever pushes APART
             }
-            corr = (len - s->braceLen[i]) * 0.5f / len; // firm: these are the anti-pile truss
+            corr = (len - s->braceLen[i]) * 0.5f * tstiff / len; // firm: the anti-pile truss
             VectorMA(s->pt[a], -corr, d, s->pt[a]);
             VectorMA(s->pt[b], corr, d, s->pt[b]);
         }
