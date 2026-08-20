@@ -28,6 +28,7 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 #include "entity.h"
 #include "consoleevent.h"
 #include "player.h"
+#include "huddraw.h" // HZM coop - grenade-kick hud icon
 #include "worldspawn.h"
 #include "weapon.h"
 #include "trigger.h"
@@ -14589,6 +14590,64 @@ void Player::Postthink(void)
         if (!pGK) {
             pGK = gi.Cvar_Get("coop_grenadeKick", "1", CVAR_ARCHIVE);
         }
+        static byte s_bKickIcon[MAX_CLIENTS]; // [user 2026-08-19] "you need some kind of prompt or icon"
+        qboolean    bKickableNear = qfalse;
+        if (pGK->integer && !IsDead() && !IsSpectator()) {
+            Entity *pEnt;
+            // awareness pass (wider than the kick itself): a kickable grenade within 120u in
+            // front lights the KICK hud icon, so the mechanic is discoverable before it fires
+            for (pEnt = findradius(NULL, origin, 120.0f); pEnt; pEnt = findradius(pEnt, origin, 120.0f)) {
+                if (!pEnt->isSubclassOf(Projectile)) {
+                    continue;
+                }
+                Projectile *pP = static_cast<Projectile *>(pEnt);
+                if (pP->velocity.length() > 260.0f) {
+                    continue;
+                }
+                const char *pszM = pP->model.c_str();
+                if (!pszM
+                    || (!Q_stristr(pszM, "grenade") && !Q_stristr(pszM, "masher") && !Q_stristr(pszM, "mills")
+                        && !Q_stristr(pszM, "bomba"))) {
+                    continue;
+                }
+                Vector vT = pP->origin - origin;
+                if (fabs(vT.z) > 56.0f) {
+                    continue;
+                }
+                vT.z = 0;
+                float fD = vT.length();
+                if (fD > 120.0f) {
+                    continue;
+                }
+                Vector vF;
+                AngleVectors(GetViewAngles(), vF, NULL, NULL);
+                vF.z = 0;
+                vF.normalize();
+                if (fD > 12.0f && ((vT * (1.0f / fD)) * vF) < 0.35f) {
+                    continue;
+                }
+                bKickableNear = qtrue;
+                break;
+            }
+        }
+        if (client && client->ps.clientNum < MAX_CLIENTS) {
+            int cl = client->ps.clientNum;
+            if (bKickableNear && !s_bKickIcon[cl]) {
+                s_bKickIcon[cl] = 1;
+                iHudDrawShader(cl, 47, "textures/hud/coop_kick");
+                iHudDrawVirtualSize(cl, 47, 1);
+                iHudDrawAlign(cl, 47, 1, 1); // center / center
+                iHudDrawRect(cl, 47, -24, 90, 48, 48);
+                {
+                    static float s_fKickWhite[3] = {1.0f, 1.0f, 1.0f};
+                    iHudDrawColor(cl, 47, s_fKickWhite);
+                }
+                iHudDrawAlpha(cl, 47, 0.85f);
+            } else if (!bKickableNear && s_bKickIcon[cl]) {
+                s_bKickIcon[cl] = 0;
+                iHudDrawAlpha(cl, 47, 0.0f);
+            }
+        }
         if (pGK->integer && !IsDead() && !IsSpectator()) {
             Entity *pEnt;
             for (pEnt = findradius(NULL, origin, 64.0f); pEnt; pEnt = findradius(pEnt, origin, 64.0f)) {
@@ -14628,6 +14687,7 @@ void Player::Postthink(void)
                     }
                 }
                 pProj->m_fCoopKickOk = level.time + 0.6f;
+                pProj->Sound("coop_kick", CHAN_AUTO); // [user 2026-08-19] audible boot
                 pProj->velocity      = vFwd * 460.0f + Vector(0, 0, 230.0f);
                 pProj->avelocity     = Vector(crandom() * 260.0f, crandom() * 260.0f, crandom() * 260.0f);
                 pProj->groundentity  = NULL;
