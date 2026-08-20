@@ -320,6 +320,9 @@ void CG_RagdollClearEnt(int entnum)
     }
     for (i = 0; i < RAG_MAX_PEND; i++) { // clear signals must reach pending records too
         if (s_ragPend[i].active && s_ragPend[i].entnum == entnum) {
+            if (rag_debug && rag_debug->integer) {
+                cgi.Printf("^~^~^ RAGDOLL pending cleared ent=%d (clear-signal)\n", entnum);
+            }
             memset(&s_ragPend[i], 0, sizeof(s_ragPend[i]));
         }
     }
@@ -927,9 +930,18 @@ static void RagCollideWorld(ragSim_t *s, vec3_t subStart[RAG_PTS])
                             // silently disabled mover collision from the 4th body onward
         cgi.CM_BoxTrace(&tr, subStart[i], s->pt[i], pm, px, 0, MASK_DEADSOLID, qfalse);
         if (tr.startsolid) {
-            // stuck inside: hold, kill velocity, let the constraint web drag it out
-            VectorCopy(subStart[i], s->pt[i]);
-            VectorCopy(s->pt[i], s->ptPrev[i]);
+            // A point already inside geometry. On the FREE branch, hold it and kill its velocity
+            // (it has nowhere legal to go and holding stops tunnelling). On the SETTLE branch,
+            // RELEASE it instead: the authored pose is an attractor that will pull the limb back
+            // out on its own, whereas freezing anchors it inside the wall and the rest of the
+            // body tears around it - live 2026-08-20, a corpse clipped into a wall "got kinda
+            // mangled" at low stiffness, which is exactly that anchor.
+            if (!s->branch) {
+                VectorCopy(subStart[i], s->pt[i]);
+                VectorCopy(s->pt[i], s->ptPrev[i]);
+            } else {
+                s->contact[i] = 0; // full-strength pull home, not the contact-relaxed one
+            }
             continue;
         }
         if (tr.fraction < 1.0f) {
@@ -1400,6 +1412,14 @@ static void RagPendingThink(ragPend_t *p)
     // lifecycle first: revived, recycled, dropped from the snapshot, or PVS-exited
     if (!cent->currentValid || !cent->interpolate || cs->modelindex <= 0 || cs->eType != ET_MODELANIM
         || !(cs->eFlags & EF_DEAD)) {
+        if (rag_debug->integer) {
+            // WHICH condition dropped it - live round 8 showed 10 of 14 pendings vanishing with
+            // neither an arm nor a give-up, so the drop reason is the whole question
+            cgi.Printf("^~^~^ RAGDOLL pending dropped ent=%d age=%dms valid=%d interp=%d midx=%d "
+                       "etype=%d dead=%d\n",
+                       p->entnum, age, (int)cent->currentValid, (int)cent->interpolate, cs->modelindex,
+                       cs->eType, (cs->eFlags & EF_DEAD) ? 1 : 0);
+        }
         memset(p, 0, sizeof(*p));
         return;
     }
