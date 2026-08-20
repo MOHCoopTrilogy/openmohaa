@@ -135,6 +135,10 @@ static void CG_TransitionEntity(centity_t *cent)
         }
     }
 
+    // HZM coop - ragdoll Phase 0 probe (cg_ragdoll.c): death-edge + seed-quality logging,
+    // r_ragdollDebug-gated. Sits with the gore edge hooks because it reads BOTH states.
+    CG_RagdollTransition(cent);
+
     cent->currentState = cent->nextState;
     cent->currentValid = qtrue;
 

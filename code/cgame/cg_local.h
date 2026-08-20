@@ -566,6 +566,8 @@ const adsGunTune_t *CG_FindAdsTune(const char *wpn);
     void CG_ProcessPlayerModel();
     void CG_ServerModelLoaded(const char* name, qhandle_t handle);
     void CG_ServerModelUnloaded(qhandle_t handle);
+    // HZM coop - ragdoll Phase 0 (cg_ragdoll.c)
+    void CG_RagdollTransition(centity_t *cent);
     void CG_ModelAnim(centity_t *cent, qboolean bDoShaderTime);
     void CG_AttachEntity(
         refEntity_t *entity, refEntity_t *parent, dtiki_t *tiki, int tagnum, qboolean use_angles, vec3_t attach_offset
