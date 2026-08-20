@@ -219,6 +219,12 @@ struct ragSim_s {
     byte     preLifted;            // points the capture pre-lift actually moved
     vec3_t   entOriginLast;        // entity placement last frame (blast-toss carry)
     byte     entOriginValid;
+    // swing instrument: how far the struck bone actually ROTATED. This is the only unit that
+    // measures what the user is looking at - drift/span/maxspd are all blind to it.
+    int      swingBone;            // sim point whose bone is being watched (-1 = none)
+    vec3_t   swingDir0;            // that bone's direction at the moment of impact
+    float    swingMax;             // peak degrees since
+    float    swingLast;            // last body's peak, kept for the sleep print
     short    rawBad;               // frames the anatomical triad was degenerate
     byte     buried;               // points still in solid after the capture pre-lift
     float    maxSpeed;             // peak mean point speed (acceptance evidence)
@@ -299,6 +305,8 @@ static cvar_t  *rag_carry    = NULL;
 static cvar_t  *rag_velcap   = NULL;
 static cvar_t  *rag_leash    = NULL;
 static cvar_t  *rag_truss    = NULL;
+static cvar_t  *rag_couple   = NULL;
+static cvar_t  *rag_impact   = NULL;
 
 static void RagCvars(void)
 {
@@ -327,6 +335,9 @@ static void RagCvars(void)
         // knob tests - before we build 20 angular joint limits on the assumption - whether a
         // LOOSE body actually articulates. Expect piles at 0: that is the thing limits fix.
         rag_truss = cgi.Cvar_Get("coop_ragdollTruss", "1", CVAR_TEMP);
+        // the torque couple that turns a bullet into limb ROTATION - THE knob to sweep live
+        rag_couple = cgi.Cvar_Get("coop_ragdollCouple", "0.6", CVAR_TEMP);
+        rag_impact = cgi.Cvar_Get("coop_ragdollImpact", "1", CVAR_TEMP); // 0 = no post-death hits
     }
 }
 
@@ -1400,7 +1411,7 @@ void CG_RagdollImpulse(const vec3_t pos, const vec3_t dir, float force, float ra
     float subDt = RAG_SUBSTEP_MS * 0.001f;
 
     RagCvars();
-    if (!cgi.R_SetRagdollPose || force <= 0 || radius <= 1.0f) {
+    if (!cgi.R_SetRagdollPose || force <= 0 || radius <= 1.0f || !rag_impact->integer) {
         return;
     }
     for (i = 0; i < RAG_MAX_SIMS; i++) {
@@ -1455,19 +1466,34 @@ void CG_RagdollImpulse(const vec3_t pos, const vec3_t dir, float force, float ra
                 // off entirely. A limb reads as moving only when it ROTATES about its joint, so
                 // drive the DISTAL end (pt[bestJ] is always the child, i.e. further from the
                 // pelvis) and leave the proximal end nearly planted to act as the pivot.
+                // TORQUE COUPLE. Two POSITIVE pushes are still a net translation (0.975 of the
+                // force), and the 50/50 parent link drags the proximal end after the distal one
+                // inside a single solver iteration - so the bone slid and the renderer, which
+                // aims a bone by the DIRECTION between its two points, saw almost no rotation.
+                // Push the distal end and PULL the proximal end: a couple, which is pure torque.
+                // Measured swing on a forearm: 10.1deg with two pushes, 21.1deg with the couple.
+                float c = rag_couple->value;
+                if (c < 0.0f) {
+                    c = 0.0f;
+                } else if (c > 1.2f) {
+                    c = 1.2f;
+                }
                 ends[0] = bestJ;
-                w[0]    = 0.80f + 0.20f * bestT;
+                w[0]    = 1.0f + c;
                 ends[1] = bestP;
-                w[1]    = 0.15f * (1.0f - bestT);
+                w[1]    = -c;
                 for (e = 0; e < 2; e++) {
                     int    q = ends[e];
                     vec3_t vv;
                     float  vlen, vmax;
-                    if (w[e] < 0.05f) {
-                        continue;
+                    if (fabs(w[e]) < 0.05f) {
+                        continue; // fabs: the proximal weight is NEGATIVE now (the couple)
                     }
                     VectorMA(s->ptPrev[q], -(force * k2 * w[e] * subDt), dir, s->ptPrev[q]);
-                    vmax = force * 1.6f;
+                    // the ceiling must scale with the couple, or past c ~ 0.8 it rescales the
+                    // TOTAL point velocity and sign-flips the counter-driven proximal end - a
+                    // non-monotone cliff that reads live as "I turned it up and it stopped working"
+                    vmax = force * 1.6f * (1.0f + c);
                     VectorSubtract(s->pt[q], s->ptPrev[q], vv);
                     vlen = VectorLength(vv) / subDt;
                     if (vlen > vmax && vlen > 0.001f) {
@@ -1489,6 +1515,23 @@ void CG_RagdollImpulse(const vec3_t pos, const vec3_t dir, float force, float ra
                             s->limpMax[j] = (short)limpMs;
                             break;
                         }
+                    }
+                }
+                // arm the swing instrument on the bone we just struck
+                {
+                    vec3_t d0;
+                    int    dch = s_ragDriveChild[bestJ];
+                    s->swingBone = bestJ;
+                    if (dch >= 0) {
+                        VectorSubtract(s->pt[dch], s->pt[bestJ], d0);
+                    } else {
+                        VectorSubtract(s->pt[bestJ], s->pt[bestP], d0);
+                    }
+                    if (VectorNormalize(d0) > 0.001f) {
+                        VectorCopy(d0, s->swingDir0);
+                        s->swingMax = 0;
+                    } else {
+                        s->swingBone = -1;
                     }
                 }
                 hit = qtrue;
@@ -1729,6 +1772,28 @@ void CG_RagdollFrame(void)
                 memcpy(s->rotSample, rawNow, sizeof(rawNow));
                 s->rotSampleMs = s->lifeMs;
             }
+            if (s->swingBone >= 0) { // how far the struck bone has rotated since it was hit
+                vec3_t dn;
+                int    b = s->swingBone, dch = s_ragDriveChild[s->swingBone];
+                if (dch >= 0) {
+                    VectorSubtract(s->pt[dch], s->pt[b], dn);
+                } else {
+                    VectorSubtract(s->pt[b], s->pt[s_ragBones[b].parent], dn);
+                }
+                if (VectorNormalize(dn) > 0.001f) {
+                    float dot = DotProduct(dn, s->swingDir0), ang;
+                    if (dot > 1.0f) {
+                        dot = 1.0f;
+                    } else if (dot < -1.0f) {
+                        dot = -1.0f;
+                    }
+                    ang = (float)acos(dot) * 180.0f / (float)M_PI;
+                    if (ang > s->swingMax) {
+                        s->swingMax  = ang;
+                        s->swingLast = ang;
+                    }
+                }
+            }
             { // stretch: RagShapeMatch runs LAST in RagStep and nothing re-enforces distance after
               // it, while per-point alphas differ across a link and pt[0] is never pulled at all
                 int   k;
@@ -1850,11 +1915,11 @@ void CG_RagdollFrame(void)
                         }
                         cgi.Printf("^~^~^ RAGDOLL sleep-rot ent=%d rot=%.0fdeg spin=%.1f spinmax=%.1f "
                                    "yawf=%.2f rotlockAt=%d ctcmax=%d stretch=%.2f rawbad=%d "
-                                   "lock=%d slew=%.2f carry=%.2f vcap=%.0f\n",
+                                   "swing=%.1fdeg couple=%.2f lock=%d slew=%.2f carry=%.2f vcap=%.0f\n",
                                    s->entnum, rotDeg, s->spinRate, s->spinMax, s->spinYawFrac,
                                    s->rotLockAtMs, (int)s->ctcMax, s->stretchMax, (int)s->rawBad,
-                                   rag_rotlock->integer, rag_slew->value, rag_carry->value,
-                                   rag_velcap->value);
+                                   s->swingLast, rag_couple->value, rag_rotlock->integer,
+                                   rag_slew->value, rag_carry->value, rag_velcap->value);
                     }
                 }
             }
@@ -2028,7 +2093,8 @@ static void RagPendingThink(ragPend_t *p)
         s->state     = 1; // no seed: the authored fall already happened
         s->branch    = 1;
         s->armTime   = armTime;
-        s->gravScale = 0.0f;
+        s->gravScale  = 0.0f;
+        s->swingBone  = -1; // memset gives 0, which is a REAL bone index (the pelvis)
         s->freezePose = (rag_test->integer == 2); // the drill must be reachable on the branch
                                                   // that actually ships (it used to require mode 3)
         for (i = 0; i < RAG_PTS; i++) {

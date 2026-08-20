@@ -2622,7 +2622,27 @@ float BulletAttack(
                             gi.MSG_WriteCoord(vTmpEnd[0]);
                             gi.MSG_WriteCoord(vTmpEnd[1]);
                             gi.MSG_WriteCoord(vTmpEnd[2]);
-                            gi.MSG_WriteDir(trace.plane.normal);
+                            {
+                                // [2026-08-20] THE FLESH-HIT DIRECTION WAS NEVER A DIRECTION. On the
+                                // deep-trace path (the bone-accurate one every flesh hit takes) the only
+                                // plane writer is the coarse pre-test in cm_trace_lbd.cpp: it inflates the
+                                // box +40u on every axis, traces in the CORPSE'S YAW-LOCAL frame, and never
+                                // rotates the plane back; the bone-sphere test writes only fraction. So this
+                                // field carried one of three CONSTANTS - most often (0,0,-1), i.e. straight
+                                // down into the floor - regardless of where the shooter stood. Measured
+                                // consequence: a rifle round swung a corpse's forearm 2.34deg, against
+                                // 10.05deg with a real direction and 0.05deg for a body never shot at all.
+                                // Send the true impact-facing normal: from the wound back toward the muzzle,
+                                // which is what every consumer already expects (the client negates it to get
+                                // the travel direction). Falls back to the old value if the barrel is unset.
+                                Vector vHitDir = Vector(vBarrel) - Vector(vTmpEnd);
+                                if (vHitDir.lengthSquared() > 1.0f) {
+                                    vHitDir.normalize();
+                                    gi.MSG_WriteDir(vHitDir);
+                                } else {
+                                    gi.MSG_WriteDir(trace.plane.normal);
+                                }
+                            }
                             gi.MSG_WriteBits(bulletlarge, bulletbits);
                             gi.MSG_EndCGM();
                         } else if (ent->edict->r.contents & CONTENTS_SOLID) {
@@ -3396,31 +3416,6 @@ void RadiusDamage(
     for (i = 1; i <= ents.NumObjects(); i++) {
         ent = ents.ObjectAt(i);
 
-        // HZM coop - blast IMPULSE on dead bodies. Corpses are inert (MOVETYPE_NONE + takedamage off), so the
-        // damage/knockback path below skips them - give them a physics shove so explosions actually THROW
-        // bodies. g_corpseImpulse scales it (0 = off). Only already-dead sentients; live targets get normal
-        // knockback. Flip to TOSS + set a world clipmask so the body arcs and lands instead of sliding/sinking.
-        if (ent != ignore && ent != attacker && ent->IsSubclassOfSentient() && ent->health <= 0) {
-            cvar_t *pCI = gi.Cvar_Get("g_corpseImpulse", "1.0", CVAR_ARCHIVE);
-            float   fCI = pCI ? pCI->value : 0.0f;
-            if (fCI > 0.0f) {
-                Vector vImp  = ent->centroid - origin;
-                float  fDist = vImp.length();
-                if (fDist < radius) {
-                    float fScale = 1.0f - (fDist / radius);
-                    if (fDist < 1.0f) {
-                        vImp = Vector(0, 0, 1);
-                    }
-                    vImp.normalize();
-                    vImp[2] += 0.5f; // bias upward so bodies pop, not just slide
-                    vImp.normalize();
-                    ent->setMoveType(MOVETYPE_TOSS);
-                    ent->edict->clipmask = MASK_SOLID;
-                    ent->velocity += vImp * (350.0f * fScale * fCI);
-                }
-            }
-        }
-
         if (ent == ignore || !(ent->takedamage) || (hurtOwnerOnly && ent != attacker)) {
             continue;
         }
@@ -3500,10 +3495,54 @@ void RadiusDamage(
         );
     }
 
-    // HZM coop - CORPSE IMPULSE: blasts shove settled corpses. Corpses are SOLID_NOT +
-    // MOVETYPE_NONE and skipped by the damage loop above, so sweep them separately:
-    // flip to MOVETYPE_TOSS with a blast velocity and let the toss integrator re-settle
-    // them. g_corpseImpulse 0 disables; the value scales the strength.
+    // HZM coop - CORPSE IMPULSE: blasts shove settled corpses, so explosions actually THROW bodies
+    // instead of leaving them glued where they fell. g_corpseImpulse 0 disables; the value scales it.
+    //
+    // WHAT A COOP CORPSE ACTUALLY IS, since both of this function's impulse comments used to get it
+    // wrong (one said "takedamage off", this one said "SOLID_NOT + MOVETYPE_NONE"): since
+    // coop_corpseShootable landed (actor.cpp, bug-1321) a coop AI corpse is SOLID_BBOX +
+    // CONTENTS_WEAPONCLIP with the bbox flattened to (-32,-32,0)..(32,32,16), it keeps takedamage
+    // DAMAGE_AIM so it can still be shot and gibbed, and it keeps the live MASK_MONSTERSOLID
+    // clipmask. Only MOVETYPE_NONE was right, and only once the body has parked on real ground. The
+    // old SOLID_NOT + CONTENTS_TRIGGER description is now just the single-player / corpseShootable 0
+    // branch. Corpses therefore are NOT skipped by the damage loop above any more - they take radius
+    // damage like anything else - so nothing about that loop justifies a second impulse down here.
+    //
+    // SINGLE AUTHORITY (bug-1974). There used to be TWO of these: this sweep (added 07-04) and an
+    // independent copy inside the sorted damage loop above (added 07-01). Neither knew about the
+    // other - the comment here used to claim corpses were "skipped by the damage loop above", which
+    // was never true of that loop's own impulse block. Both gates matched the same AI corpse, so
+    // every blast applied the impulse TWICE, and g_corpseImpulse scaled an effect that landed twice.
+    // The loop copy is deleted; this is the only corpse impulse in RadiusDamage.
+    //
+    // MEASURED, not reasoned (2026-08-20, m3l3, instrumented A/B on the SAME corpse restored to the
+    // SAME spot between shots, blast at a fixed offset so frac is identical; each fixed-run repeated
+    // after the legacy run and reproducing to the decimal, so the trial has no drift):
+    //   blast at frac 0.80   one impulse 240 h / 168 v   both 490 h / 293 v   (exactly this + the loop copy)
+    //   blast at frac 0.90   one impulse 270 h / 189 v   both 552 h / 330 v
+    // The impulse is 2.04x horizontal and 1.75x vertical. What that does to the THROW depends
+    // entirely on what is in the way, which is why the velocity above is the honest number:
+    //   flat open ground   121 u -> 441 u   (3.65x further - range goes as horizontal speed x hang time)
+    //   partly obstructed   29 u ->  63 u   (2.2x)
+    //   body against geometry  32 u -> 32 u  (no difference at all; it is blocked either way)
+    //
+    // WHY THIS ONE. deadflag == DEAD_DEAD is the honest "settled corpse" test and loses no coverage
+    // versus the deleted block's health <= 0: DEAD_DYING is only ever set on Player (player.cpp),
+    // while actors go straight to DEAD_DEAD in Actor::Killed (actor.cpp). Excluding players is the
+    // point, not an oversight - Player::Killed deliberately parks a dead player as CONTENTS_CORPSE +
+    // MASK_DEADSOLID + MOVETYPE_TOSS, and the deleted block was stomping that clipmask down to
+    // MASK_SOLID, dropping dead players through playerclip and fences.
+    //
+    // The clipmask line below is the one thing the deleted block did that this one did not, kept so
+    // removing it changes only the impulse and not how a flying body collides: an actor corpse still
+    // carries the LIVE MASK_MONSTERSOLID from actor.cpp, which includes body/monsterclip contents, so
+    // without this a tossed body snags on living AI and on monsterclip brushes instead of arcing over
+    // the world. G_PushEntity only falls back to MASK_SOLID when clipmask is 0, so it must be set.
+    //
+    // NOT the whole story: an explosive KILL also gets a separate death impulse in Actor::Killed
+    // (actor.cpp, up to 420 * g_corpseImpulse along the blast normal). That one still stacks with
+    // this sweep on the killing blast. Deliberately left alone - it is a different feature with its
+    // own tuning, and collapsing it is a separate decision.
     if (g_corpseImpulse->value > 0 && radius > 0) {
         Entity *pBody;
 
@@ -3525,6 +3564,7 @@ void RadiusDamage(
             vPush.z = 0;
             vPush.normalize();
             pBody->setMoveType(MOVETYPE_TOSS);
+            pBody->edict->clipmask = MASK_SOLID;
             pBody->velocity += vPush * (300.0f * fFrac * g_corpseImpulse->value);
             pBody->velocity.z += 210.0f * fFrac * g_corpseImpulse->value;
         }
