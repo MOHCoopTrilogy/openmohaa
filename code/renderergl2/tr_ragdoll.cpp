@@ -16,7 +16,7 @@ transitions live in cgame's push/clear - this file has no frame logic and no lat
 #include "tiki.h"
 #include <vector.h>
 
-#define RAGDOLL_MAX_SLOTS    8
+#define RAGDOLL_MAX_SLOTS    16
 #define RAGDOLL_MAX_CHANNELS 128
 
 typedef struct ragdollSlot_s {

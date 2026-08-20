@@ -51,8 +51,9 @@ static void RagArmTestPose(entityState_t *ns, dtiki_t *tiki, int count);
 typedef struct ragSim_s ragSim_t;
 typedef struct ragPend_s ragPend_t;
 static void RagPendingThink(ragPend_t *p);
+static ragSim_t *RagAllocSlot(int entnum);
 
-#define RAG_MAX_SIMS   8
+#define RAG_MAX_SIMS   16
 #define RAG_MAX_CH     128
 #define RAG_PTS        15
 #define RAG_SUBSTEP_MS 8
@@ -307,6 +308,8 @@ static cvar_t  *rag_leash    = NULL;
 static cvar_t  *rag_truss    = NULL;
 static cvar_t  *rag_couple   = NULL;
 static cvar_t  *rag_impact   = NULL;
+static cvar_t  *rag_linear   = NULL;
+static cvar_t  *rag_anchor   = NULL;
 
 static void RagCvars(void)
 {
@@ -336,8 +339,16 @@ static void RagCvars(void)
         // LOOSE body actually articulates. Expect piles at 0: that is the thing limits fix.
         rag_truss = cgi.Cvar_Get("coop_ragdollTruss", "1", CVAR_TEMP);
         // the torque couple that turns a bullet into limb ROTATION - THE knob to sweep live
-        rag_couple = cgi.Cvar_Get("coop_ragdollCouple", "0.6", CVAR_TEMP);
+        rag_couple = cgi.Cvar_Get("coop_ragdollCouple", "0.9", CVAR_TEMP);
         rag_impact = cgi.Cvar_Get("coop_ragdollImpact", "1", CVAR_TEMP); // 0 = no post-death hits
+        // how much of a hit is PUSH rather than TWIST. The two used to be welded together: the
+        // weights (1+c, -c) always summed to 1.0, so no amount of couple could reduce the shove
+        // that slides a corpse across the floor. Now w = (lin + c, lin - c): the SUM (2*lin) is
+        // the slide and the DIFFERENCE (2*c) is the limb rotation, tunable independently.
+        rag_linear = cgi.Cvar_Get("coop_ragdollLinear", "0.30", CVAR_TEMP);
+        // and a weak spring holding the hips near where the body actually lies, so a struck limb
+        // moves without the whole corpse wandering off (0 = off)
+        rag_anchor = cgi.Cvar_Get("coop_ragdollAnchor", "0.10", CVAR_TEMP);
     }
 }
 
@@ -1041,6 +1052,30 @@ static void RagStep(ragSim_t *s, float dt)
             }
         }
     }
+    // PELVIS ANCHOR. Nothing in the system holds the hips: the shape-match ties all 14 other
+    // points TO the pelvis and the pelvis itself is free, so any net push slides the whole
+    // corpse across the floor ("bodies still slide a bit after you shoot them"). A weak spring
+    // toward where the body actually lies kills the wander without touching limb rotation.
+    // pt and ptPrev move together (no energy injection - that mistake has cost this project
+    // twice), then the pelvis velocity is bled so it settles instead of oscillating.
+    if (s->branch && rag_anchor->value > 0.0f) {
+        vec3_t d;
+        float  dist;
+        VectorSubtract(s->goal[0], s->pt[0], d);
+        dist = VectorLength(d);
+        if (dist > 1.0f) {
+            float a = rag_anchor->value;
+            vec3_t v;
+            if (a > 0.5f) {
+                a = 0.5f;
+            }
+            VectorMA(s->pt[0], a, d, s->pt[0]);
+            VectorMA(s->ptPrev[0], a, d, s->ptPrev[0]);
+            VectorSubtract(s->pt[0], s->ptPrev[0], v);
+            VectorScale(v, 0.90f, v);
+            VectorSubtract(s->pt[0], v, s->ptPrev[0]);
+        }
+    }
     RagBodyRotationAdvance(s); // the ONE filter advance, after the constraints
     if (s->branch) {
         float target = rag_stiff->value;
@@ -1414,6 +1449,54 @@ void CG_RagdollImpulse(const vec3_t pos, const vec3_t dir, float force, float ra
     if (!cgi.R_SetRagdollPose || force <= 0 || radius <= 1.0f || !rag_impact->integer) {
         return;
     }
+    // RE-ARM ON BEING SHOT. The sim pool is finite and RagAllocSlot evicts SLEEPING bodies to
+    // make room for fresh kills, so after enough deaths an older corpse silently stops being
+    // simulated - it still looks identical, but bullets have nothing to act on. Live
+    // 2026-08-20: "eventually it does nothing when you shoot the limbs". A corpse near this
+    // impact that is dead, drawn, and not currently simulated gets captured and armed right
+    // here, so any body reacts no matter how long ago it died.
+    {
+        int e;
+        for (e = 0; e < cg.snap->numEntities; e++) {
+            entityState_t *es = &cg.snap->entities[e];
+            centity_t     *ce;
+            ragSim_t      *ns;
+            vec3_t         dd;
+            if (es->eType != ET_MODELANIM || !(es->eFlags & EF_DEAD) || es->modelindex <= 0) {
+                continue;
+            }
+            if (es->number < cgs.maxclients || RagSimFor(es->number) || s_ragNeverArm[es->number]) {
+                continue;
+            }
+            ce = &cg_entities[es->number];
+            VectorSubtract(ce->lerpOrigin, pos, dd);
+            if (VectorLengthSquared(dd) > 96.0f * 96.0f) {
+                continue;
+            }
+            ns = RagAllocSlot(es->number);
+            if (!ns) {
+                continue;
+            }
+            if (!RagCapture(ce, es, ns)) {
+                memset(ns, 0, sizeof(*ns));
+                continue;
+            }
+            ns->active    = qtrue;
+            ns->entnum    = es->number;
+            ns->state     = 1;
+            ns->branch    = 1;
+            ns->armTime   = cg.time;
+            ns->gravScale = 1.0f; // already resting: no ramp needed
+            ns->rampMs    = 400;
+            ns->swingBone = -1;
+            for (i = 0; i < RAG_PTS; i++) {
+                VectorCopy(ns->pt[i], ns->goal[i]);
+            }
+            if (rag_debug->integer) {
+                cgi.Printf("^~^~^ RAGDOLL re-armed ent=%d (shot after eviction)\n", es->number);
+            }
+        }
+    }
     for (i = 0; i < RAG_MAX_SIMS; i++) {
         ragSim_t *s = &s_ragSims[i];
         qboolean  hit = qfalse;
@@ -1478,10 +1561,18 @@ void CG_RagdollImpulse(const vec3_t pos, const vec3_t dir, float force, float ra
                 } else if (c > 1.2f) {
                     c = 1.2f;
                 }
-                ends[0] = bestJ;
-                w[0]    = 1.0f + c;
-                ends[1] = bestP;
-                w[1]    = -c;
+                {
+                    float lin = rag_linear->value;
+                    if (lin < 0.0f) {
+                        lin = 0.0f;
+                    } else if (lin > 1.0f) {
+                        lin = 1.0f;
+                    }
+                    ends[0] = bestJ;
+                    w[0]    = lin + c;
+                    ends[1] = bestP;
+                    w[1]    = lin - c;
+                }
                 for (e = 0; e < 2; e++) {
                     int    q = ends[e];
                     vec3_t vv;
