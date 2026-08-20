@@ -792,10 +792,22 @@ static void RagPush(ragSim_t *s)
 {
     static float mat[RAG_MAX_CH][3][4];
     float        rotNow[RAG_PTS][3][3]; // rot0 * S: POSITION path only (sandwich cancels exactly)
-    float        conj[RAG_PTS][3][3];   // E * S * E^T: the world swing expressed in model space
-    float        E[3][3];
-    vec3_t       mins, maxs;
+    float        conj[RAG_PTS][3][3];   // Ecap * S * Enow^T: world swing in the renderer's frame
+    float        E[3][3], Enow[3][3];
+    vec3_t       mins, maxs, curOrigin;
+    vec3_t       axisNow[3];
+    centity_t   *cent = &cg_entities[s->entnum];
+    float        invScale;
     int          i, ch, r, c;
+
+    // CURRENT-frame placement (plan C13; live-proven 23:05: death anims keep moving the
+    // server corpse origin after capture - converting with the CAPTURE placement rendered
+    // the mesh offset from the simulated skeleton by every unit of post-death drift:
+    // bodies slid forward, clipped into rocks, and sank through floors while the sim
+    // points rested correctly on top).
+    VectorCopy(cent->lerpOrigin, curOrigin);
+    AnglesToAxis(cent->lerpAngles, axisNow);
+    invScale = 1.0f / s->scale;
 
     // MATH CONTRACT (math-vet confirmed 2026-08-19): the bone cache is MODEL space - the
     // renderer post-multiplies the entity axis E. mat0/rot0 are model space; the swing S is
@@ -805,7 +817,8 @@ static void RagPush(ragSim_t *s)
     // twisted channels (a hand rendered perpendicular to its own forearm at yaw 0).
     for (r = 0; r < 3; r++) {
         for (c = 0; c < 3; c++) {
-            E[r][c] = s->entAxis[r][c];
+            E[r][c]    = s->entAxis[r][c]; // capture-frame axis (the frame S was built against)
+            Enow[r][c] = axisNow[r][c];    // render-frame axis (what the renderer multiplies by)
         }
     }
 
@@ -841,7 +854,8 @@ static void RagPush(ragSim_t *s)
         }
         RagMat3Mul(s->rot0[i], S, rotNow[i]);
         RagMat3Mul(E, S, tmp);
-        RagMat3MulTrans(tmp, E, conj[i]); // conj = E * S * E^T
+        RagMat3MulTrans(tmp, Enow, conj[i]); // conj = Ecap * S * Enow^T (== E*S*E^T while the
+                                             // corpse's angles stay at their capture values)
     }
 
     ClearBounds(mins, maxs);
@@ -852,7 +866,15 @@ static void RagPush(ragSim_t *s)
         RagMat3RotateVec(rotNow[a], s->relPos[ch], off);
         VectorAdd(s->pt[a], off, world);
         AddPointToBounds(world, mins, maxs);
-        RagWorldToCapture(s, world, cap);
+        // world -> model against the CURRENT placement (curOrigin/axisNow), never the
+        // capture placement: the renderer recomposes with the current placement each frame
+        {
+            vec3_t relw;
+            VectorSubtract(world, curOrigin, relw);
+            cap[0] = DotProduct(relw, axisNow[0]) * invScale;
+            cap[1] = DotProduct(relw, axisNow[1]) * invScale;
+            cap[2] = DotProduct(relw, axisNow[2]) * invScale;
+        }
         mat[ch][0][3] = cap[0];
         mat[ch][1][3] = cap[1];
         mat[ch][2][3] = cap[2];
@@ -892,6 +914,8 @@ static void RagDrawSkeleton(ragSim_t *s)
         ent.hModel = hDot;
         AnglesToAxis(zero, ent.axis);
         ent.scale              = (i == 0) ? 0.30f : 0.16f;
+        ent.renderfx           = RF_DEPTHHACK; // dots sit at bone centers INSIDE the mesh -
+                                               // without this the body hides its own skeleton
         ent.reType             = RT_SPRITE;
         ent.frameInfo[0].index = 0;
         ent.shaderRGBA[0]      = -1;
