@@ -1633,6 +1633,11 @@ void CG_RagdollTransition(centity_t *cent)
                     p = &s_ragPend[k];
                 }
             }
+            if (p && rag_debug->integer) { // the last silent path: an evicted pending never
+                                           // arms and never prints, so it looked like a drop
+                cgi.Printf("^~^~^ RAGDOLL pending EVICTED ent=%d age=%dms (pool of %d full) for ent=%d\n",
+                           p->entnum, cg.time - p->armTime, RAG_MAX_PEND, ns->number);
+            }
         }
         if (p) {
             memset(p, 0, sizeof(*p));
