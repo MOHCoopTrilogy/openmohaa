@@ -200,6 +200,7 @@ struct ragSim_s {
     byte     driveOk[RAG_PTS];
     byte     contact[RAG_PTS];     // 2-substep memory of touching the world
     short    limpMs[RAG_PTS];      // >0 = recently struck: the shape-match yields on this point
+    short    limpMax[RAG_PTS];     // the window that limpMs is counting down FROM (see the ramp)
     float    ptRadius[RAG_PTS];    // per-point collision radius, clamped to capture clearance
     float    bodyRot[3][3];        // SMOOTHED body orientation (see RagBodyRotation)
     byte     bodyRotValid;
@@ -216,6 +217,8 @@ struct ragSim_s {
     float    stretchMax;           // peak len/restLen over the 14 parent links
     vec3_t   capSpan;              // AABB of the captured pose
     byte     preLifted;            // points the capture pre-lift actually moved
+    vec3_t   entOriginLast;        // entity placement last frame (blast-toss carry)
+    byte     entOriginValid;
     short    rawBad;               // frames the anatomical triad was degenerate
     byte     buried;               // points still in solid after the capture pre-lift
     float    maxSpeed;             // peak mean point speed (acceptance evidence)
@@ -933,8 +936,18 @@ static void RagShapeMatch(ragSim_t *s, float alpha)
         }                           // limb stays draped where it landed instead of being reeled in
         if (s->limpMs[i] > 0) {
             // struck limb: essentially free at the instant of impact, easing back to the full
-            // pose pull as the window expires (a hard restore would snap it home at the deadline)
-            float k = 1.0f - (float)s->limpMs[i] / (float)RAG_IMPACT_LIMP_MS;
+            // pose pull as the window expires (a hard restore would snap it home at the deadline).
+            // Ramp against the window THIS point was actually given, not a fixed constant: call
+            // sites pass 600-1410ms while the constant is 600, so anything longer drove k negative
+            // and VectorMA then pushed the point AWAY from its pose, compounding every substep -
+            // an anti-shape-match running ~568ms on every grenade near a corpse.
+            float span = (s->limpMax[i] > 0) ? (float)s->limpMax[i] : (float)RAG_IMPACT_LIMP_MS;
+            float k    = 1.0f - (float)s->limpMs[i] / span;
+            if (k < 0.0f) {
+                k = 0.0f;
+            } else if (k > 1.0f) {
+                k = 1.0f;
+            }
             a *= RAG_IMPACT_RELAX + (1.0f - RAG_IMPACT_RELAX) * k;
         }
         VectorMA(s->pt[i], a, d, s->pt[i]);
@@ -1461,7 +1474,8 @@ void CG_RagdollImpulse(const vec3_t pos, const vec3_t dir, float force, float ra
                         VectorScale(vv, (vmax / vlen) * subDt, vv);
                         VectorSubtract(s->pt[q], vv, s->ptPrev[q]);
                     }
-                    s->limpMs[q] = (short)limpMs;
+                    s->limpMs[q]  = (short)limpMs;
+                    s->limpMax[q] = (short)limpMs;
                 }
                 // ... and slacken everything BELOW the hit. If the forearm is struck but the hand
                 // is still being reeled toward the authored pose at full strength, the hand
@@ -1471,7 +1485,8 @@ void CG_RagdollImpulse(const vec3_t pos, const vec3_t dir, float force, float ra
                     for (depth = 0; depth < 6 && walk > 0; depth++) {
                         walk = s_ragBones[walk].parent;
                         if (walk == bestJ) {
-                            s->limpMs[j] = (short)limpMs;
+                            s->limpMs[j]  = (short)limpMs;
+                            s->limpMax[j] = (short)limpMs;
                             break;
                         }
                     }
@@ -1532,8 +1547,9 @@ void CG_RagdollImpulse(const vec3_t pos, const vec3_t dir, float force, float ra
                 }
             }
             if (k > 0.15f) {
-                s->limpMs[j] = (short)limpMs; // only the limb that was actually hit goes limp:
-            }                                 // limping the whole body makes it move as one lump
+                s->limpMs[j]  = (short)limpMs; // only the limb that was actually hit goes limp:
+                s->limpMax[j] = (short)limpMs; // limping the whole body makes it move as one lump
+            }
             hit = qtrue;
         }
         if (!hit) {
@@ -1614,6 +1630,40 @@ void CG_RagdollFrame(void)
                 }
             } else {
                 continue;
+            }
+        }
+        // RIDE THE SERVER'S CORPSE TOSS. A blast gives the corpse ENTITY real velocity (measured
+        // 121-441u of travel), but our points are world-anchored and RagPush converts world->model
+        // against the CURRENT placement while the renderer recomposes with that same placement -
+        // the two cancel exactly, so the mesh renders where the SIM is, not where the entity went.
+        // The body stayed behind, and the pelvis leash then measured the gap and permanently
+        // retired the corpse. Carry the whole sim - including goal[], or the shape-match instantly
+        // drags the body back to where the entity used to be.
+        {
+            centity_t *ce = &cg_entities[s->entnum];
+            vec3_t     ed;
+            if (!s->entOriginValid) {
+                VectorCopy(ce->lerpOrigin, s->entOriginLast);
+                s->entOriginValid = 1;
+            }
+            VectorSubtract(ce->lerpOrigin, s->entOriginLast, ed);
+            if (VectorLengthSquared(ed) > 0.0001f) {
+                if (VectorLengthSquared(ed) < 32.0f * 32.0f) { // a teleport is not a toss
+                    int q;
+                    for (q = 0; q < RAG_PTS; q++) {
+                        VectorAdd(s->pt[q], ed, s->pt[q]);
+                        VectorAdd(s->ptPrev[q], ed, s->ptPrev[q]);
+                        VectorAdd(s->goal[q], ed, s->goal[q]);
+                    }
+                    if (s->state == 2) { // being thrown wakes it, same as a mover
+                        s->state     = 1;
+                        s->sleepMs   = 0;
+                        s->lifeMs    = 0;
+                        s->accumMs   = 0;
+                        s->rotLocked = 0;
+                    }
+                }
+                VectorCopy(ce->lerpOrigin, s->entOriginLast);
             }
         }
         ms = cg.frametime;
