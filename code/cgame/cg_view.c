@@ -2925,6 +2925,8 @@ void CG_DrawActiveFrame(int serverTime, int frameTime, stereoFrame_t stereoView,
     if (!cg.snap || (cg.snap->snapFlags & SNAPFLAG_NOT_ACTIVE)) {
         return;
     }
+    CG_RagdollFrame(); // HZM coop - ragdoll: step sims + push poses BEFORE entities are added
+
 
     // this counter will be bumped for every valid scene we generate
     cg.clientFrame++;
