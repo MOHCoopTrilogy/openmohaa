@@ -1805,8 +1805,8 @@ void CG_ParseCGMessage_ver_15()
                     flesh_impact_large[flesh_impact_count] = iLarge;
                     flesh_impact_count++;
                 }
-                CG_RagdollImpulse(vStart, vEnd, 90.0f + 55.0f * iLarge, 30.0f + 2.0f * iLarge,
-                                  600 + 70 * iLarge); // corpse hit: the limb moves
+                CG_RagdollImpulse(vStart, vEnd, 150.0f + 70.0f * iLarge, 15.0f + 1.5f * iLarge,
+                                  600 + 70 * iLarge); // corpse hit: THAT limb moves
                 break;
             case CGM_BULLET_9:
                 if (flesh_impact_count < MAX_IMPACTS) {
@@ -1817,8 +1817,8 @@ void CG_ParseCGMessage_ver_15()
                     flesh_impact_large[flesh_impact_count] = iLarge;
                     flesh_impact_count++;
                 }
-                CG_RagdollImpulse(vStart, vEnd, 90.0f + 55.0f * iLarge, 30.0f + 2.0f * iLarge,
-                                  600 + 70 * iLarge); // corpse hit: the limb moves
+                CG_RagdollImpulse(vStart, vEnd, 150.0f + 70.0f * iLarge, 15.0f + 1.5f * iLarge,
+                                  600 + 70 * iLarge); // corpse hit: THAT limb moves
                 break;
             case CGM_BULLET_10:
                 if (wall_impact_count < MAX_IMPACTS) {
@@ -1860,6 +1860,13 @@ void CG_ParseCGMessage_ver_15()
             vStart[1] = cgi.MSG_ReadCoord();
             vStart[2] = cgi.MSG_ReadCoord();
             CG_MakeExplosionEffect(vStart, iType);
+            // blast wave onto any nearby corpse: radial (NULL dir), wide radius, long limp so the
+            // body tumbles instead of snapping back to its pose mid-flight. The server also tosses
+            // the corpse ENTITY and our pose already follows that - this adds the limb motion the
+            // toss alone cannot produce (live: "grenades kinda just lift the body up as a whole").
+            CG_RagdollImpulse(vStart, NULL, 400.0f + 20.0f * (iType - CGM_EXPLOSION_EFFECT_1),
+                              180.0f + 55.0f * (iType - CGM_EXPLOSION_EFFECT_1),
+                              1200 + 70 * (iType - CGM_EXPLOSION_EFFECT_1));
             break;
         case CGM_MAKE_EFFECT_1:
         case CGM_MAKE_EFFECT_2:
@@ -2222,8 +2229,8 @@ void CG_ParseCGMessage_ver_6()
                     flesh_impact_large[flesh_impact_count] = iLarge;
                     flesh_impact_count++;
                 }
-                CG_RagdollImpulse(vStart, vEnd, 90.0f + 55.0f * iLarge, 30.0f + 2.0f * iLarge,
-                                  600 + 70 * iLarge); // corpse hit: the limb moves
+                CG_RagdollImpulse(vStart, vEnd, 150.0f + 70.0f * iLarge, 15.0f + 1.5f * iLarge,
+                                  600 + 70 * iLarge); // corpse hit: THAT limb moves
                 break;
             case CGM6_BULLET_8:
                 if (flesh_impact_count < MAX_IMPACTS) {
@@ -2234,8 +2241,8 @@ void CG_ParseCGMessage_ver_6()
                     flesh_impact_large[flesh_impact_count] = iLarge;
                     flesh_impact_count++;
                 }
-                CG_RagdollImpulse(vStart, vEnd, 90.0f + 55.0f * iLarge, 30.0f + 2.0f * iLarge,
-                                  600 + 70 * iLarge); // corpse hit: the limb moves
+                CG_RagdollImpulse(vStart, vEnd, 150.0f + 70.0f * iLarge, 15.0f + 1.5f * iLarge,
+                                  600 + 70 * iLarge); // corpse hit: THAT limb moves
                 break;
             case CGM6_BULLET_9:
                 if (wall_impact_count < MAX_IMPACTS) {

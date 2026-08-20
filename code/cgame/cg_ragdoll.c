@@ -1389,10 +1389,14 @@ void CG_RagdollImpulse(const vec3_t pos, const vec3_t dir, float force, float ra
             if (dist >= radius) {
                 continue;
             }
-            // radius falloff, NOT nearest-point: kicking one point alone stretches its links and
-            // can trip the blowup net, while spreading it across neighbours turns the kick into
-            // limb ROTATION about the joint - which is also what actually looks right.
+            // QUADRATIC falloff, not linear (live 2026-08-20: "when I shoot one leg they both
+            // move... the whole body just kinda moves with it"). A soldier's hips are ~18u apart
+            // and his shoulders ~24u, so a linear 30u sphere hands nearly full force to the far
+            // limb and the pelvis, and the body translates instead of the limb swinging. Squaring
+            // it makes the struck point dominate while neighbours still take enough to keep the
+            // links near rest length - which is what turns the kick into rotation about a joint.
             k = 1.0f - (dist / radius);
+            k = k * k;
             if (dir && (dir[0] || dir[1] || dir[2])) {
                 VectorCopy(dir, n); // bullets: the inward normal the server already computed
             } else {
@@ -1403,8 +1407,24 @@ void CG_RagdollImpulse(const vec3_t pos, const vec3_t dir, float force, float ra
                 }
             }
             VectorMA(s->ptPrev[j], -(force * k * subDt), n, s->ptPrev[j]);
-            s->limpMs[j] = (short)limpMs;
-            hit          = qtrue;
+            // ACCUMULATION CEILING. Impulses add to whatever speed the point already had, so a
+            // magazine emptied into a corpse accelerates it like a puck - live 2026-08-20, seven
+            // rifle hits walked a body 128u from its own entity and tripped the leash. Clamp the
+            // RESULT, not the impulse: one hit still lands at full strength, ten do not stack.
+            {
+                vec3_t vv;
+                float  vlen, vmax = force * 1.6f;
+                VectorSubtract(s->pt[j], s->ptPrev[j], vv);
+                vlen = VectorLength(vv) / subDt; // u/s
+                if (vlen > vmax && vlen > 0.001f) {
+                    VectorScale(vv, (vmax / vlen) * subDt, vv);
+                    VectorSubtract(s->pt[j], vv, s->ptPrev[j]);
+                }
+            }
+            if (k > 0.15f) {
+                s->limpMs[j] = (short)limpMs; // only the limb that was actually hit goes limp:
+            }                                 // limping the whole body makes it move as one lump
+            hit = qtrue;
         }
         if (!hit) {
             continue;
