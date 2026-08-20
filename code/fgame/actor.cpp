@@ -5307,7 +5307,12 @@ void Actor::EventGetWeapon(Event *ev)
         ev->AddString(szBase);
         return;
     }
-    ev->AddConstString(m_csWeapon);
+    // bug-1957 (19:4x live session): NO m_csWeapon fallback - it returned the raw loadout
+    // string ("stg44") for an actor holding NOTHING, so the give-failure read-backs saw
+    // "armed" on empty-handed men and the auto re-arm never fired (variant=1, no FAIL log,
+    // unarmed officer). Unarmed now reads as the empty string, which is what every guard
+    // in aihandler/surrender tests for.
+    ev->AddString("");
 }
 
 /*
