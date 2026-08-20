@@ -153,6 +153,8 @@ typedef struct {
 
     float    moverHash;            // bmodel origin-sum at sleep time (mover-wake detector)
     byte     touched;              // first-world-contact debug latch
+    byte     freezePose;           // coop_ragdollTest 2: push the capture verbatim, no sim -
+                                   // a pure space/round-trip test (any warp = render defect)
 } ragSim_t;
 
 static ragSim_t s_ragSims[RAG_MAX_SIMS];
@@ -590,8 +592,13 @@ static void RagStep(ragSim_t *s, float dt)
 
     for (i = 0; i < RAG_PTS; i++) {
         vec3_t vel, next;
+        float  vlen;
         VectorSubtract(s->pt[i], s->ptPrev[i], vel);
         VectorScale(vel, RAG_DAMPING, vel);
+        vlen = VectorLength(vel);
+        if (vlen > 24.0f) {
+            VectorScale(vel, 24.0f / vlen, vel); // blowup insurance: 24u/substep = 3000u/s cap
+        }
         VectorCopy(s->pt[i], s->ptPrev[i]);
         VectorAdd(s->pt[i], vel, next);
         next[2] -= g;
@@ -807,7 +814,10 @@ static void RagPush(ragSim_t *s)
         float  S[3][3], tmp[3][3];
         vec3_t dNow;
 
-        if (p < 0) {
+        if (s->freezePose) {
+            RagMat3Identity(S); // verbatim-capture drill: with S=I the push must reproduce
+                                // the death pose exactly; any warp isolates the render side
+        } else if (p < 0) {
             // pelvis: full 2-axis triad (spine dir + hip line), capture -> current, so a
             // rolled body renders a rolled torso (the old 1-axis form lost all roll)
             float  T0[3][3], T1[3][3];
@@ -861,6 +871,37 @@ static void RagPush(ragSim_t *s)
     cgi.R_SetRagdollPose(s->entnum, s->tiki, s->count, &mat[0][0][0], mins, maxs);
 }
 
+// r_ragdollDebug 2: draw the 15 sim points as world sprites - the ground-truth view that
+// separates "the SKELETON is wrong" (dots piled/warped) from "the MESH is wrong" (dots form
+// a clean body shape but the model looks mangled). Pelvis renders red and bigger.
+static void RagDrawSkeleton(ragSim_t *s)
+{
+    static qhandle_t hDot = 0;
+    refEntity_t      ent;
+    vec3_t           zero = {0, 0, 0};
+    int              i;
+
+    if (!hDot) {
+        hDot = cgi.R_RegisterModel("textures/hud/coop_ally_icon.spr");
+        if (!hDot) {
+            return;
+        }
+    }
+    for (i = 0; i < RAG_PTS; i++) {
+        memset(&ent, 0, sizeof(ent));
+        ent.hModel = hDot;
+        AnglesToAxis(zero, ent.axis);
+        ent.scale              = (i == 0) ? 0.30f : 0.16f;
+        ent.reType             = RT_SPRITE;
+        ent.frameInfo[0].index = 0;
+        ent.shaderRGBA[0]      = -1;
+        ent.shaderRGBA[1]      = (i == 0) ? 0 : -1;
+        ent.shaderRGBA[2]      = (i == 0) ? 0 : -1;
+        VectorCopy(s->pt[i], ent.origin);
+        cgi.R_AddRefEntityToScene(&ent, ENTITYNUM_NONE);
+    }
+}
+
 void CG_RagdollFrame(void)
 {
     int i;
@@ -878,6 +919,13 @@ void CG_RagdollFrame(void)
         vec3_t    frameStart[RAG_PTS];
         int       steps, ms, j;
         if (!s->active) {
+            continue;
+        }
+        if (rag_debug->integer >= 2) {
+            RagDrawSkeleton(s); // ground-truth dots, drawn for awake AND slept bodies
+        }
+        if (s->freezePose) {
+            RagPush(s); // verbatim capture every frame; no sim, no seed, no sleep
             continue;
         }
         if (s->state == 0) {
@@ -1122,7 +1170,7 @@ void CG_RagdollTransition(centity_t *cent)
         return; // never a live player slot
     }
 
-    if (rag_test->integer) {
+    if (rag_test->integer == 1) {
         dtiki_t *tiki = cgi.R_Model_GetHandle(cgs.model_draw[ns->modelindex]);
         int      count;
         if (!tiki) {
@@ -1141,4 +1189,13 @@ void CG_RagdollTransition(centity_t *cent)
     }
 
     RagArm(cent, ns);
+    if (rag_test->integer == 2) {
+        ragSim_t *ss = RagSimFor(ns->number);
+        if (ss) {
+            ss->freezePose = 1; // verbatim-capture drill (any warp = render defect)
+            if (rag_debug->integer) {
+                cgi.Printf("^~^~^ RAGDOLL freeze-pose armed ent=%d\n", ns->number);
+            }
+        }
+    }
 }
