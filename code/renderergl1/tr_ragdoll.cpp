@@ -137,10 +137,25 @@ void R_RagdollApplyToCache(struct ragdollSlot_s *slot, skelBoneCache_t *cache, i
         slot->animPoseValid = qtrue;
     }
     n = n < slot->count ? n : slot->count;
+    // SPACE CONVERSION (math-vet 2026-08-19, the missed double-scale defect): the stored
+    // table is TIKI-orientation space, (val[3]+load_origin)*load_scale. The bone cache is
+    // RAW skeletor space - the skinner multiplies by (load_scale*e.scale) AFTERWARD
+    // (tr_model.cpp skin path). Copying verbatim applied load_scale TWICE: human tikis
+    // carry scale 0.52, so every bone pivot rendered at 52% of its true offset - a uniform
+    // compaction into a pile, present from the first (S=I) push on every human corpse.
+    {
+        float  ils = (slot->tiki && slot->tiki->load_scale > 0.0001f) ? 1.0f / slot->tiki->load_scale : 1.0f;
+        vec3_t lo  = {0, 0, 0};
+        if (slot->tiki) {
+            VectorCopy(slot->tiki->load_origin, lo);
+        }
+        for (i = 0; i < n; i++) {
+            cache[i].offset[0] = slot->mat[i][0][3] * ils - lo[0];
+            cache[i].offset[1] = slot->mat[i][1][3] * ils - lo[1];
+            cache[i].offset[2] = slot->mat[i][2][3] * ils - lo[2];
+        }
+    }
     for (i = 0; i < n; i++) {
-        cache[i].offset[0]    = slot->mat[i][0][3];
-        cache[i].offset[1]    = slot->mat[i][1][3];
-        cache[i].offset[2]    = slot->mat[i][2][3];
         cache[i].matrix[0][0] = slot->mat[i][0][0];
         cache[i].matrix[0][1] = slot->mat[i][0][1];
         cache[i].matrix[0][2] = slot->mat[i][0][2];

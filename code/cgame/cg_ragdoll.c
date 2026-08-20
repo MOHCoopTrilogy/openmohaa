@@ -123,7 +123,6 @@ typedef struct {
     // anchor sim-point per channel + capture offset in the anchor's capture frame
     byte     anchor[RAG_MAX_CH];
     vec3_t   relPos[RAG_MAX_CH];   // anchor-frame offset of the channel origin
-    float    relRot[RAG_MAX_CH][3][3];
 
     int      simChan[RAG_PTS];     // channel index per sim point (-1 = missing)
     vec3_t   pt[RAG_PTS];          // world positions
@@ -131,7 +130,8 @@ typedef struct {
     float    restLen[RAG_PTS];     // to parent
     float    braceLen[RAG_BRACES];
     vec3_t   restDir[RAG_PTS];     // capture direction parent->this (world)
-    float    rot0[RAG_PTS][3][3];  // capture world rotation per sim bone
+    vec3_t   hipDir0;              // capture hip line L->R thigh (world), pelvis roll triad
+    float    rot0[RAG_PTS][3][3];  // capture MODEL-SPACE rotation per sim bone (TIKI axis rows)
 
     vec3_t   seedOrigin;           // entity origin at arm (for snapshot differencing)
     int      seedServerTime;
@@ -209,6 +209,42 @@ static void RagMat3TransMul(const float a[3][3], const float b[3][3], float out[
     }
 }
 
+static void RagMat3MulTrans(const float a[3][3], const float b[3][3], float out[3][3])
+{
+    // out = a * transpose(b)
+    int r, c;
+    for (r = 0; r < 3; r++) {
+        for (c = 0; c < 3; c++) {
+            out[r][c] = a[r][0] * b[c][0] + a[r][1] * b[c][1] + a[r][2] * b[c][2];
+        }
+    }
+}
+
+// orthonormal row-triad from two world directions (primary kept exact, secondary
+// Gram-Schmidt'd); qfalse when degenerate (parallel/zero)
+static qboolean RagTriad(const vec3_t primary, const vec3_t secondary, float T[3][3])
+{
+    vec3_t x, y, z;
+    float  d;
+
+    VectorCopy(primary, x);
+    if (VectorNormalize(x) < 0.001f) {
+        return qfalse;
+    }
+    d    = DotProduct(secondary, x);
+    y[0] = secondary[0] - d * x[0];
+    y[1] = secondary[1] - d * x[1];
+    y[2] = secondary[2] - d * x[2];
+    if (VectorNormalize(y) < 0.001f) {
+        return qfalse;
+    }
+    CrossProduct(x, y, z);
+    VectorCopy(x, T[0]);
+    VectorCopy(y, T[1]);
+    VectorCopy(z, T[2]);
+    return qtrue;
+}
+
 static void RagMat3RotateVec(const float m[3][3], const vec3_t v, vec3_t out)
 {
     // row-vector: out = v * m
@@ -236,8 +272,30 @@ static void RagMat3FromTo(const vec3_t a, const vec3_t b, float out[3][3])
     if (s < 0.0001f) {
         RagMat3Identity(out);
         if (c < 0) {
-            out[0][0] = -1.0f; // 180: flip two axes (any perpendicular flip serves a corpse)
-            out[2][2] = -1.0f;
+            // exactly antiparallel: rotate pi about ANY axis perpendicular to a.
+            // (the old diag(-1,1,-1) fixed +y, so it silently failed for rest directions
+            // along world y - math-vet confirmed defect). R = 2*u*u^T - I, u perp a.
+            vec3_t u;
+            int    k = 0;
+            if (fabs(a[1]) < fabs(a[k])) {
+                k = 1;
+            }
+            if (fabs(a[2]) < fabs(a[k])) {
+                k = 2;
+            }
+            VectorClear(u);
+            u[k] = 1.0f;
+            CrossProduct(a, u, u);
+            VectorNormalize(u);
+            out[0][0] = 2.0f * u[0] * u[0] - 1.0f;
+            out[0][1] = 2.0f * u[0] * u[1];
+            out[0][2] = 2.0f * u[0] * u[2];
+            out[1][0] = 2.0f * u[1] * u[0];
+            out[1][1] = 2.0f * u[1] * u[1] - 1.0f;
+            out[1][2] = 2.0f * u[1] * u[2];
+            out[2][0] = 2.0f * u[2] * u[0];
+            out[2][1] = 2.0f * u[2] * u[1];
+            out[2][2] = 2.0f * u[2] * u[2] - 1.0f;
         }
         return;
     }
@@ -411,14 +469,15 @@ static qboolean RagCapture(centity_t *cent, entityState_t *ns, ragSim_t *s)
         VectorSubtract(s->pt[s_ragBraces[i][0]], s->pt[s_ragBraces[i][1]], d);
         s->braceLen[i] = VectorLength(d);
     }
+    VectorSubtract(s->pt[13], s->pt[11], s->hipDir0); // L thigh -> R thigh (world)
+    VectorNormalize(s->hipDir0);
 
     // slave every channel to its nearest sim point at capture (fingers -> hands, face ->
     // head, gear -> nearest segment). rel = inv(anchor world) * channel world.
     for (ch = 0; ch < s->count; ch++) {
         vec3_t capPos, worldPos, rel;
-        int    best = 0, r, c;
+        int    best = 0;
         float  bestD = 999999.0f;
-        float  chRotW[3][3];
 
         capPos[0] = s->mat0[ch][0][3];
         capPos[1] = s->mat0[ch][1][3];
@@ -437,15 +496,10 @@ static qboolean RagCapture(centity_t *cent, entityState_t *ns, ragSim_t *s)
         s->anchor[ch] = (byte)best;
         VectorSubtract(worldPos, s->pt[best], rel);
         RagMat3TransRotateVec(s->rot0[best], rel, s->relPos[ch]);
-        // channel world rotation = capture rotation composed with entity axis; store relative
-        // to the anchor's capture rotation. Entity axis cancels in the round trip, so we can
-        // work purely in capture-rotation space:
-        for (r = 0; r < 3; r++) {
-            for (c = 0; c < 3; c++) {
-                chRotW[r][c] = s->mat0[ch][r][c];
-            }
-        }
-        RagMat3TransMul(s->rot0[best], chRotW, s->relRot[ch]);
+        // NOTE (math-vet 2026-08-19): no relRot is stored any more. The old
+        // rot0^T*chRot0 "relative rotation" mixed model-space and world-space frames
+        // ("the entity axis cancels" was FALSE) and mangled every twisted channel.
+        // The push now composes chRot0 * (E*S*E^T) directly from mat0.
     }
 
     return qtrue;
@@ -649,45 +703,60 @@ static qboolean RagSane(const ragSim_t *s)
 static void RagPush(ragSim_t *s)
 {
     static float mat[RAG_MAX_CH][3][4];
-    float        rotNow[RAG_PTS][3][3];
+    float        rotNow[RAG_PTS][3][3]; // rot0 * S: POSITION path only (sandwich cancels exactly)
+    float        conj[RAG_PTS][3][3];   // E * S * E^T: the world swing expressed in model space
+    float        E[3][3];
     vec3_t       mins, maxs;
     int          i, ch, r, c;
 
-    // current world rotation per sim bone: swing from the capture parent-direction onto the
-    // simmed one (leafs inherit their parent's swing); pelvis gets a 2-axis basis from the
-    // spine and hip line for stability.
+    // MATH CONTRACT (math-vet confirmed 2026-08-19): the bone cache is MODEL space - the
+    // renderer post-multiplies the entity axis E. mat0/rot0 are model space; the swing S is
+    // WORLD space (built from world point directions). The correct channel rotation is
+    // chRot0 * (E*S*E^T). The old form (rot0*S)*(rot0^T*chRot0) carried a frame mismatch
+    // (120 deg bone error at yaw 90 + swing 90) AND put the swing on the wrong side for
+    // twisted channels (a hand rendered perpendicular to its own forearm at yaw 0).
+    for (r = 0; r < 3; r++) {
+        for (c = 0; c < 3; c++) {
+            E[r][c] = s->entAxis[r][c];
+        }
+    }
+
     for (i = 0; i < RAG_PTS; i++) {
-        int p = s_ragBones[i].parent;
+        int    p = s_ragBones[i].parent;
+        float  S[3][3], tmp[3][3];
+        vec3_t dNow;
+
         if (p < 0) {
-            // pelvis: forward-ish = spine dir, side = hip line
-            vec3_t up0, up1, side0, side1;
-            float  swing[3][3];
-            VectorSubtract(s->pt[1], s->pt[0], up1);
-            VectorSubtract(s->restDir[1], vec3_origin, up0); // capture spine dir (unit)
-            VectorNormalize(up1);
-            RagMat3FromTo(up0, up1, swing);
-            RagMat3Mul(s->rot0[i], swing, rotNow[i]);
-            (void)side0;
-            (void)side1;
+            // pelvis: full 2-axis triad (spine dir + hip line), capture -> current, so a
+            // rolled body renders a rolled torso (the old 1-axis form lost all roll)
+            float  T0[3][3], T1[3][3];
+            vec3_t spineNow, hipNow;
+            VectorSubtract(s->pt[1], s->pt[0], spineNow);
+            VectorSubtract(s->pt[13], s->pt[11], hipNow);
+            if (RagTriad(s->restDir[1], s->hipDir0, T0) && RagTriad(spineNow, hipNow, T1)) {
+                RagMat3TransMul(T0, T1, S); // world S with basis0 -> basis1
+            } else {
+                VectorNormalize(spineNow);
+                RagMat3FromTo(s->restDir[1], spineNow, S); // degenerate: 1-axis fallback
+            }
         } else {
-            vec3_t dNow;
-            float  swing[3][3];
             VectorSubtract(s->pt[i], s->pt[p], dNow);
             if (VectorLength(dNow) < 0.01f) {
-                memcpy(rotNow[i], s->rot0[i], sizeof(rotNow[i]));
-                continue;
+                RagMat3Identity(S);
+            } else {
+                VectorNormalize(dNow);
+                RagMat3FromTo(s->restDir[i], dNow, S);
             }
-            VectorNormalize(dNow);
-            RagMat3FromTo(s->restDir[i], dNow, swing);
-            RagMat3Mul(s->rot0[i], swing, rotNow[i]);
         }
+        RagMat3Mul(s->rot0[i], S, rotNow[i]);
+        RagMat3Mul(E, S, tmp);
+        RagMat3MulTrans(tmp, E, conj[i]); // conj = E * S * E^T
     }
 
     ClearBounds(mins, maxs);
     for (ch = 0; ch < s->count && ch < RAG_MAX_CH; ch++) {
         int    a = s->anchor[ch];
         vec3_t off, world, cap;
-        float  rot[3][3];
 
         RagMat3RotateVec(rotNow[a], s->relPos[ch], off);
         VectorAdd(s->pt[a], off, world);
@@ -696,12 +765,11 @@ static void RagPush(ragSim_t *s)
         mat[ch][0][3] = cap[0];
         mat[ch][1][3] = cap[1];
         mat[ch][2][3] = cap[2];
-        RagMat3Mul(rotNow[a], s->relRot[ch], rot);
-        // convert the WORLD-composed rotation back to capture-rotation space: the entity
-        // axis cancels because both rot0 and the swing were built in the same frame.
+        // rotation: chRot0 (rows of mat0) * conj[anchor]
         for (r = 0; r < 3; r++) {
             for (c = 0; c < 3; c++) {
-                mat[ch][r][c] = rot[r][c];
+                mat[ch][r][c] = s->mat0[ch][r][0] * conj[a][0][c] + s->mat0[ch][r][1] * conj[a][1][c]
+                              + s->mat0[ch][r][2] * conj[a][2][c];
             }
         }
     }
@@ -812,7 +880,16 @@ void CG_RagdollFrame(void)
                 s->state     = 2;
                 s->moverHash = RagMoverHash(s); // baseline for the mover-wake detector
                 if (rag_debug->integer) {
-                    cgi.Printf("^~^~^ RAGDOLL sleep ent=%d life=%dms\n", s->entnum, s->lifeMs);
+                    // span discriminates pile-vs-mangle: a sprawled body has one lateral
+                    // axis 55-75u and z 8-20u; a point-pile is <35u everywhere; sane
+                    // points + mangled mesh means the PUSH rotation math is the defect
+                    vec3_t bmn, bmx;
+                    ClearBounds(bmn, bmx);
+                    for (j = 0; j < RAG_PTS; j++) {
+                        AddPointToBounds(s->pt[j], bmn, bmx);
+                    }
+                    cgi.Printf("^~^~^ RAGDOLL sleep ent=%d life=%dms span=(%.0f %.0f %.0f)\n",
+                               s->entnum, s->lifeMs, bmx[0] - bmn[0], bmx[1] - bmn[1], bmx[2] - bmn[2]);
                 }
             }
         }
