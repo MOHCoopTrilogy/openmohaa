@@ -60,7 +60,7 @@ void CG_RagdollTransition(centity_t *cent)
     entityState_t *ns = &cent->nextState;
     ragProbe_t    *p;
 
-    // plan §4 clear signals - ALWAYS evaluated (not debug-gated): EF_DEAD falling edge,
+    // plan ï¿½4 clear signals - ALWAYS evaluated (not debug-gated): EF_DEAD falling edge,
     // teleport toggle, modelindex change, eType change -> drop any override for this slot.
     if (((cs->eFlags & EF_DEAD) && !(ns->eFlags & EF_DEAD))
         || ((cs->eFlags ^ ns->eFlags) & EF_TELEPORT_BIT)
@@ -146,10 +146,18 @@ void CG_RagdollArmTestPose(entityState_t *ns)
         coop_ragdoll = cgi.Cvar_Get("coop_ragdoll", "0", CVAR_TEMP); // dark until P5 (plan Â§1)
     }
     if (!coop_ragdoll->integer || !cgi.R_SetRagdollPose) {
-        return; // off, or the active renderer has no bridge (gl2) - clean no-op
+        // diagnostics (P1 arm was silently failing with cvar=1, 20:33 session): name the gate
+        if (rag_debug && rag_debug->integer) {
+            cgi.Printf("^~^~^ RAGDOLL P1 skip ent=%d coop_ragdoll=%d bridge=%s\n",
+                       ns->number, coop_ragdoll->integer, cgi.R_SetRagdollPose ? "ok" : "NULL");
+        }
+        return;
     }
     tiki = cgi.R_Model_GetHandle(cgs.model_draw[ns->modelindex]);
     if (!tiki) {
+        if (rag_debug && rag_debug->integer) {
+            cgi.Printf("^~^~^ RAGDOLL P1 skip ent=%d NO TIKI (modelindex=%d)\n", ns->number, ns->modelindex);
+        }
         return;
     }
     // channel count: walk the tag namespace (cgi exposes no count API; NameForNum
@@ -161,6 +169,9 @@ void CG_RagdollArmTestPose(entityState_t *ns)
         }
     }
     if (count <= 0) {
+        if (rag_debug && rag_debug->integer) {
+            cgi.Printf("^~^~^ RAGDOLL P1 skip ent=%d ZERO CHANNELS\n", ns->number);
+        }
         return;
     }
     Com_Memset(mat, 0, sizeof(mat));

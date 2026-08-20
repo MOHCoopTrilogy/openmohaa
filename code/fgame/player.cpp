@@ -14633,6 +14633,11 @@ void Player::Postthink(void)
         if (client && client->ps.clientNum < MAX_CLIENTS) {
             int cl = client->ps.clientNum;
             if (bKickableNear && !s_bKickIcon[cl]) {
+                {
+                    static cvar_t *pWD = NULL;
+                    if (!pWD) { pWD = gi.Cvar_Get("coop_weapDebug", "0", 0); }
+                    if (pWD->integer) { gi.Printf("^~^~^ KICKICON show cl=%d\n", cl); }
+                }
                 s_bKickIcon[cl] = 1;
                 iHudDrawShader(cl, 47, "textures/hud/coop_kick");
                 iHudDrawVirtualSize(cl, 47, 1);

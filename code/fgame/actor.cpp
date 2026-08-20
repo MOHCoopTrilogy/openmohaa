@@ -5316,6 +5316,9 @@ void Actor::EventGetWeapon(Event *ev)
         // spam, no reload anim). Stripping " (" keeps ALL consumers keyed on the base gun.
         char szBase[256];
         Q_strncpyz(szBase, pActive->GetItemName(), sizeof(szBase));
+        Q_strlwr(szBase); // bug-1960: Morpheus SWITCH is case-sensitive; every retail anim
+        // switch was written lowercase for the tolower'd m_csWeapon - mixed-case names
+        // defaulted 359 reloads/session. Lowercase = the getter honors that contract.
         char *pParen = strstr(szBase, " (");
         if (pParen) {
             *pParen = 0;
