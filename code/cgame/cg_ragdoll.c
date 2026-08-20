@@ -1436,10 +1436,16 @@ void CG_RagdollImpulse(const vec3_t pos, const vec3_t dir, float force, float ra
                 int   ends[2];
                 float w[2];
                 int   e;
+                // ASYMMETRIC, and this is the whole trick. Splitting the force between both ends
+                // by where the round hit makes the bone TRANSLATE, and translation is invisible -
+                // live 2026-08-20, limbs "dont really move at all" even with the truss switched
+                // off entirely. A limb reads as moving only when it ROTATES about its joint, so
+                // drive the DISTAL end (pt[bestJ] is always the child, i.e. further from the
+                // pelvis) and leave the proximal end nearly planted to act as the pivot.
                 ends[0] = bestJ;
-                w[0]    = bestT;
+                w[0]    = 0.80f + 0.20f * bestT;
                 ends[1] = bestP;
-                w[1]    = 1.0f - bestT;
+                w[1]    = 0.15f * (1.0f - bestT);
                 for (e = 0; e < 2; e++) {
                     int    q = ends[e];
                     vec3_t vv;
@@ -1456,6 +1462,19 @@ void CG_RagdollImpulse(const vec3_t pos, const vec3_t dir, float force, float ra
                         VectorSubtract(s->pt[q], vv, s->ptPrev[q]);
                     }
                     s->limpMs[q] = (short)limpMs;
+                }
+                // ... and slacken everything BELOW the hit. If the forearm is struck but the hand
+                // is still being reeled toward the authored pose at full strength, the hand
+                // anchors the forearm and the swing dies. The limb has to go limp as a chain.
+                for (j = 1; j < RAG_PTS; j++) {
+                    int walk = j, depth;
+                    for (depth = 0; depth < 6 && walk > 0; depth++) {
+                        walk = s_ragBones[walk].parent;
+                        if (walk == bestJ) {
+                            s->limpMs[j] = (short)limpMs;
+                            break;
+                        }
+                    }
                 }
                 hit = qtrue;
             }
