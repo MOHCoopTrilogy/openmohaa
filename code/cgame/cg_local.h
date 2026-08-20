@@ -569,6 +569,8 @@ const adsGunTune_t *CG_FindAdsTune(const char *wpn);
     // HZM coop - ragdoll Phase 0 (cg_ragdoll.c)
     void CG_RagdollTransition(centity_t *cent);
     void CG_RagdollFrame(void);
+    // post-death impacts: dir NULL/zero = radial (explosion), else the inward impact normal
+    void CG_RagdollImpulse(const vec3_t pos, const vec3_t dir, float force, float radius, int limpMs);
     void CG_ModelAnim(centity_t *cent, qboolean bDoShaderTime);
     void CG_AttachEntity(
         refEntity_t *entity, refEntity_t *parent, dtiki_t *tiki, int tagnum, qboolean use_angles, vec3_t attach_offset

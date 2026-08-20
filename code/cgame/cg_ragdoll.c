@@ -62,6 +62,10 @@ static void RagPendingThink(ragPend_t *p);
 #define RAG_TRACE_BUDGET 240   // per-frame MOVER trace ceiling (world traces have their own)
 #define RAG_MOVER_PER_BODY 60  // ... and a per-body allowance, so the first corpses cannot eat it
 #define RAG_CONTACT_RELAX 0.15f // where a point touches the world, the shape-match yields to it
+#define RAG_IMPACT_RELAX  0.05f // a struck limb keeps only 5% of the pose pull at the moment of
+#define RAG_IMPACT_LIMP_MS 600  // impact, easing back to full over this long. Without it the
+                                // 0.25 pull reels the limb home in two frames and a hit on a
+                                // corpse reads as a twitch instead of a limb actually moving.
 #define RAG_MAX_PEND    16     // pending records live OUTSIDE the sim pool (32B vs ~9.4KB each)
 #define RAG_PEND_CAP_MS 8000   // give-up only - never fires a capture
 
@@ -195,6 +199,7 @@ struct ragSim_s {
     vec3_t   driveDir0[RAG_PTS];   // capture OUTGOING (bone->child) directions
     byte     driveOk[RAG_PTS];
     byte     contact[RAG_PTS];     // 2-substep memory of touching the world
+    short    limpMs[RAG_PTS];      // >0 = recently struck: the shape-match yields on this point
     float    ptRadius[RAG_PTS];    // per-point collision radius, clamped to capture clearance
     float    bodyRot[3][3];        // SMOOTHED body orientation (see RagBodyRotation)
     byte     bodyRotValid;
@@ -918,6 +923,12 @@ static void RagShapeMatch(ragSim_t *s, float alpha)
         if (s->contact[i]) {
             a *= RAG_CONTACT_RELAX; // where the body TOUCHES, the ground gets the last word - the
         }                           // limb stays draped where it landed instead of being reeled in
+        if (s->limpMs[i] > 0) {
+            // struck limb: essentially free at the instant of impact, easing back to the full
+            // pose pull as the window expires (a hard restore would snap it home at the deadline)
+            float k = 1.0f - (float)s->limpMs[i] / (float)RAG_IMPACT_LIMP_MS;
+            a *= RAG_IMPACT_RELAX + (1.0f - RAG_IMPACT_RELAX) * k;
+        }
         VectorMA(s->pt[i], a, d, s->pt[i]);
         // ... and carry ptPrev most of the way with it. In Verlet the gap between pt and ptPrev
         // IS the velocity, so a pull that moves pt alone injects (a*|d|)/dt of speed every
@@ -981,6 +992,14 @@ static void RagStep(ragSim_t *s, float dt)
             corr = (len - s->braceLen[i]) * 0.5f / len; // firm: these are the anti-pile truss
             VectorMA(s->pt[a], -corr, d, s->pt[a]);
             VectorMA(s->pt[b], corr, d, s->pt[b]);
+        }
+    }
+    for (i = 0; i < RAG_PTS; i++) { // impact-limp windows tick down with the sim, not the frame
+        if (s->limpMs[i] > 0) {
+            s->limpMs[i] -= RAG_SUBSTEP_MS;
+            if (s->limpMs[i] < 0) {
+                s->limpMs[i] = 0;
+            }
         }
     }
     RagBodyRotationAdvance(s); // the ONE filter advance, after the constraints
@@ -1162,15 +1181,19 @@ static void RagCollideMovers(ragSim_t *s, vec3_t frameStart[RAG_PTS])
     }
 }
 
-static qboolean RagSane(const ragSim_t *s)
+static qboolean RagSane(const ragSim_t *s, const char **why)
 {
     vec3_t mn, mx;
     int    i;
 
     ClearBounds(mn, mx);
     for (i = 0; i < RAG_PTS; i++) {
-        if (Q_isnan(s->pt[i][0]) || Q_isnan(s->pt[i][1]) || Q_isnan(s->pt[i][2])
-            || fabs(s->pt[i][0]) > 65536 || fabs(s->pt[i][1]) > 65536 || fabs(s->pt[i][2]) > 65536) {
+        if (Q_isnan(s->pt[i][0]) || Q_isnan(s->pt[i][1]) || Q_isnan(s->pt[i][2])) {
+            *why = "nan";
+            return qfalse;
+        }
+        if (fabs(s->pt[i][0]) > 65536 || fabs(s->pt[i][1]) > 65536 || fabs(s->pt[i][2]) > 65536) {
+            *why = "offworld";
             return qfalse;
         }
         AddPointToBounds(s->pt[i], mn, mx);
@@ -1180,6 +1203,7 @@ static qboolean RagSane(const ragSim_t *s)
     // "a body spassed and flew across the world" into a silent revert to the authored pose.
     for (i = 0; i < 3; i++) {
         if (mx[i] - mn[i] > 200.0f) {
+            *why = "span";
             return qfalse;
         }
     }
@@ -1191,6 +1215,7 @@ static qboolean RagSane(const ragSim_t *s)
         vec3_t dd;
         VectorSubtract(s->pt[0], cg_entities[s->entnum].lerpOrigin, dd);
         if (VectorLengthSquared(dd) > rag_leash->value * rag_leash->value) {
+            *why = "leash";
             return qfalse;
         }
     }
@@ -1329,6 +1354,73 @@ static void RagDrawSkeleton(ragSim_t *s)
         ent.shaderRGBA[2]      = (i == 0) ? 0 : -1;
         VectorCopy(s->pt[i], ent.origin);
         cgi.R_AddRefEntityToScene(&ent, ENTITYNUM_NONE);
+    }
+}
+
+// ---------- post-death impacts: shoot a corpse and its limbs move ----------------------------
+//
+// Called from the flesh-impact and explosion paths in cg_parsemsg.cpp. The server already sends
+// a bone-accurate impact position and an inward normal for every flesh hit, to EVERYONE in PVS,
+// so this needs no new networking and reacts to other players' shots as well as the local one.
+//
+// Impulse goes on ptPrev, never pt: in Verlet the gap between them IS the velocity, so moving
+// ptPrev gives the point speed without teleporting it (moving pt would do the opposite - the
+// exact bug that flung bodies across the map).
+void CG_RagdollImpulse(const vec3_t pos, const vec3_t dir, float force, float radius, int limpMs)
+{
+    int   i, j;
+    float subDt = RAG_SUBSTEP_MS * 0.001f;
+
+    RagCvars();
+    if (!cgi.R_SetRagdollPose || force <= 0 || radius <= 1.0f) {
+        return;
+    }
+    for (i = 0; i < RAG_MAX_SIMS; i++) {
+        ragSim_t *s = &s_ragSims[i];
+        qboolean  hit = qfalse;
+        if (!s->active || s->state < 1) {
+            continue; // pendings and empty slots have no points to push
+        }
+        for (j = 0; j < RAG_PTS; j++) {
+            vec3_t d, n;
+            float  dist, k;
+            VectorSubtract(s->pt[j], pos, d);
+            dist = VectorLength(d);
+            if (dist >= radius) {
+                continue;
+            }
+            // radius falloff, NOT nearest-point: kicking one point alone stretches its links and
+            // can trip the blowup net, while spreading it across neighbours turns the kick into
+            // limb ROTATION about the joint - which is also what actually looks right.
+            k = 1.0f - (dist / radius);
+            if (dir && (dir[0] || dir[1] || dir[2])) {
+                VectorCopy(dir, n); // bullets: the inward normal the server already computed
+            } else {
+                VectorCopy(d, n); // explosions: outward from the blast, per point
+                n[2] += radius * 0.35f;
+                if (VectorNormalize(n) < 0.001f) {
+                    VectorSet(n, 0, 0, 1);
+                }
+            }
+            VectorMA(s->ptPrev[j], -(force * k * subDt), n, s->ptPrev[j]);
+            s->limpMs[j] = (short)limpMs;
+            hit          = qtrue;
+        }
+        if (!hit) {
+            continue;
+        }
+        if (s->state == 2) { // wake: same recipe as the mover-wake, including the fresh life
+            s->state   = 1;  // budget - the 6s cap is per-wake, not a retirement, so a corpse
+            s->sleepMs = 0;  // shot 30 seconds after death still reacts
+            s->lifeMs  = 0;
+            s->accumMs = 0;
+        }
+        s->rotLocked   = 0; // a struck body may re-orient; it re-latches once it rests again
+        s->rotLockAtMs = -1;
+        if (rag_debug->integer) {
+            cgi.Printf("^~^~^ RAGDOLL impulse ent=%d force=%.0f radius=%.0f limp=%d\n", s->entnum,
+                       force, radius, limpMs);
+        }
     }
 }
 
@@ -1484,13 +1576,21 @@ void CG_RagdollFrame(void)
                 }
             }
         }
-        if (!RagSane(s)) {
-            if (rag_debug->integer) {
-                cgi.Printf("^~^~^ RAGDOLL NaN/blowup ent=%d - reverting to anim pose\n", s->entnum);
+        {
+            const char *why = "?";
+            if (!RagSane(s, &why)) {
+                if (rag_debug->integer) {
+                    // WHICH test fired matters: live 2026-08-20 both blowups landed on the same
+                    // death anim (unarmed_pain_kneestodeath), so the failing condition names the
+                    // pose that breaks the solver
+                    cgi.Printf("^~^~^ RAGDOLL blowup ent=%d reason=%s life=%dms stretch=%.2f "
+                               "spinmax=%.1f - reverting to anim pose\n",
+                               s->entnum, why, s->lifeMs, s->stretchMax, s->spinMax);
+                }
+                s_ragNeverArm[s->entnum] = 1;
+                CG_RagdollClearEnt(s->entnum);
+                continue;
             }
-            s_ragNeverArm[s->entnum] = 1;
-            CG_RagdollClearEnt(s->entnum);
-            continue;
         }
         // sleep: average speed below 4u/s for 1s, or life exceeded
         {

@@ -1805,6 +1805,8 @@ void CG_ParseCGMessage_ver_15()
                     flesh_impact_large[flesh_impact_count] = iLarge;
                     flesh_impact_count++;
                 }
+                CG_RagdollImpulse(vStart, vEnd, 90.0f + 55.0f * iLarge, 30.0f + 2.0f * iLarge,
+                                  600 + 70 * iLarge); // corpse hit: the limb moves
                 break;
             case CGM_BULLET_9:
                 if (flesh_impact_count < MAX_IMPACTS) {
@@ -1815,6 +1817,8 @@ void CG_ParseCGMessage_ver_15()
                     flesh_impact_large[flesh_impact_count] = iLarge;
                     flesh_impact_count++;
                 }
+                CG_RagdollImpulse(vStart, vEnd, 90.0f + 55.0f * iLarge, 30.0f + 2.0f * iLarge,
+                                  600 + 70 * iLarge); // corpse hit: the limb moves
                 break;
             case CGM_BULLET_10:
                 if (wall_impact_count < MAX_IMPACTS) {
@@ -2218,6 +2222,8 @@ void CG_ParseCGMessage_ver_6()
                     flesh_impact_large[flesh_impact_count] = iLarge;
                     flesh_impact_count++;
                 }
+                CG_RagdollImpulse(vStart, vEnd, 90.0f + 55.0f * iLarge, 30.0f + 2.0f * iLarge,
+                                  600 + 70 * iLarge); // corpse hit: the limb moves
                 break;
             case CGM6_BULLET_8:
                 if (flesh_impact_count < MAX_IMPACTS) {
@@ -2228,6 +2234,8 @@ void CG_ParseCGMessage_ver_6()
                     flesh_impact_large[flesh_impact_count] = iLarge;
                     flesh_impact_count++;
                 }
+                CG_RagdollImpulse(vStart, vEnd, 90.0f + 55.0f * iLarge, 30.0f + 2.0f * iLarge,
+                                  600 + 70 * iLarge); // corpse hit: the limb moves
                 break;
             case CGM6_BULLET_9:
                 if (wall_impact_count < MAX_IMPACTS) {
