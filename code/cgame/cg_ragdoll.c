@@ -1,10 +1,20 @@
 /*
 HZM coop - RAGDOLL (ragdoll_plan.md v3, vetted 3 rounds / 7 agents, PASS 2026-08-19).
 
-PHASE 2: real pose capture + Verlet simulation, NO world collision yet (P2 acceptance:
-corpses crumple and fall through the floor; fingers/face ride their limbs; capture verified
-non-bind). P1's bridge proof PASSED live on gl2 2026-08-19 20:57 (channels=72, matching the
-static census exactly).
+PHASE 3: world + brush-entity collision on top of the P2 sim. P2 PASSED live 2026-08-19
+21:15 (armed/seeded/slept clean, corpses crumpled as one body and fell through the floor -
+the expected P2 state). P1 bridge proof PASSED 20:57 (channels=72 = static census).
+
+Collision (plan section-3): per awake body per frame, sweep a +/-2u box from each point's
+frame-start position to its post-substep position - world first (cgi.CM_BoxTrace model 0,
+MASK_DEADSOLID: the engine's own dead-body clip), then one CG_GetBrushEntitiesInBounds
+query and CM_TransformedBoxTrace per nearby bmodel (doors/elevators, EF_LINKANGLES
+honored). Hits resolve with restitution 0.1 and tangential friction (0.6 on floors, 0.75
+on walls), re-encoded into the Verlet ptPrev. Global ceiling 240 traces/frame - past it,
+points glide this frame (plan's stated degradation). Slept bodies re-wake when a bmodel
+in their bounds moves (origin-sum hash) so an elevator carries corpses instead of leaving
+them in the air. Sleep is measured AFTER collision resolve, else the rest-contact jitter
+(gravity vs floor) reads as ~6u/s and bodies never sleep.
 
 Architecture (see the plan for the full vetted rationale):
 - cgame captures the death pose per channel via ForceUpdatePose + TIKI_Orientation, sims 15
@@ -47,6 +57,7 @@ static void RagArmTestPose(entityState_t *ns, dtiki_t *tiki, int count);
 #define RAG_GRAVITY    800.0f
 #define RAG_DAMPING    0.985f
 #define RAG_ITERS      6
+#define RAG_TRACE_BUDGET 240 // global per-frame trace ceiling (plan section-3)
 
 // the 15 sim bones: index, Bip01 tag name, parent sim index (-1 = root)
 static const struct {
@@ -112,10 +123,16 @@ typedef struct {
 
     vec3_t   seedOrigin;           // entity origin at arm (for snapshot differencing)
     int      seedServerTime;
+
+    float    moverHash;            // bmodel origin-sum at sleep time (mover-wake detector)
+    byte     touched;              // first-world-contact debug latch
 } ragSim_t;
 
 static ragSim_t s_ragSims[RAG_MAX_SIMS];
 static byte     s_ragNeverArm[MAX_GENTITIES]; // failure-ladder: NaN'd corpses keep the anim pose
+static int      s_ragTraceCount;              // reset each CG_RagdollFrame
+static const vec3_t s_ragPtMins = {-2, -2, -2};
+static const vec3_t s_ragPtMaxs = {2, 2, 2};
 static cvar_t  *rag_debug    = NULL;
 static cvar_t  *coop_ragdoll = NULL;
 static cvar_t  *rag_test     = NULL;
@@ -448,6 +465,128 @@ static void RagStep(ragSim_t *s, float dt)
     }
 }
 
+// ---------- collision (PHASE 3) -------------------------------------------------------------
+
+static void RagResolveHit(ragSim_t *s, int i, const trace_t *tr)
+{
+    vec3_t v, vn, vt, pos;
+    float  d;
+
+    VectorMA(tr->endpos, 0.25f, tr->plane.normal, pos);
+    // implicit per-substep velocity, split on the contact plane
+    VectorSubtract(s->pt[i], s->ptPrev[i], v);
+    d = DotProduct(v, tr->plane.normal);
+    VectorScale(tr->plane.normal, d, vn);
+    VectorSubtract(v, vn, vt);
+    VectorScale(vn, -0.1f, vn); // restitution
+    VectorScale(vt, (tr->plane.normal[2] > 0.7f) ? 0.6f : 0.75f, vt);
+    VectorAdd(vn, vt, v);
+    VectorCopy(pos, s->pt[i]);
+    VectorSubtract(pos, v, s->ptPrev[i]);
+    if (!s->touched) {
+        s->touched = 1;
+        if (rag_debug->integer) {
+            cgi.Printf("^~^~^ RAGDOLL contact ent=%d pt=%d n=(%.2f %.2f %.2f)\n",
+                       s->entnum, i, tr->plane.normal[0], tr->plane.normal[1], tr->plane.normal[2]);
+        }
+    }
+}
+
+// origin-sum over bmodels in the body's bounds; a slept body wakes when this changes
+static float RagMoverHash(const ragSim_t *s)
+{
+    centity_t *movers[4];
+    vec3_t     bmins, bmaxs;
+    int        n, m, i;
+    float      h = 0;
+
+    ClearBounds(bmins, bmaxs);
+    for (i = 0; i < RAG_PTS; i++) {
+        AddPointToBounds(s->pt[i], bmins, bmaxs);
+    }
+    for (i = 0; i < 3; i++) {
+        bmins[i] -= 8;
+        bmaxs[i] += 8;
+    }
+    n = CG_GetBrushEntitiesInBounds(4, movers, bmins, bmaxs);
+    for (m = 0; m < n; m++) {
+        h += (float)movers[m]->currentState.number * 3.0f;
+        h += movers[m]->lerpOrigin[0] + movers[m]->lerpOrigin[1] + movers[m]->lerpOrigin[2];
+        h += movers[m]->lerpAngles[1];
+    }
+    return h;
+}
+
+static void RagCollide(ragSim_t *s, vec3_t frameStart[RAG_PTS])
+{
+    trace_t    tr;
+    centity_t *movers[4];
+    vec3_t     bmins, bmaxs, angles;
+    int        i, m, nMovers;
+
+    // world pass: sweep each moved point across its whole frame path (no tunneling)
+    for (i = 0; i < RAG_PTS; i++) {
+        vec3_t d;
+        VectorSubtract(s->pt[i], frameStart[i], d);
+        if (VectorLengthSquared(d) < 0.0001f) {
+            continue;
+        }
+        if (s_ragTraceCount >= RAG_TRACE_BUDGET) {
+            return; // glide this frame (plan section-3 degradation)
+        }
+        s_ragTraceCount++;
+        cgi.CM_BoxTrace(&tr, frameStart[i], s->pt[i], s_ragPtMins, s_ragPtMaxs, 0, MASK_DEADSOLID, qfalse);
+        if (tr.startsolid) {
+            // stuck inside: hold, kill velocity, let the constraint web drag it out
+            VectorCopy(frameStart[i], s->pt[i]);
+            VectorCopy(s->pt[i], s->ptPrev[i]);
+            continue;
+        }
+        if (tr.fraction < 1.0f) {
+            RagResolveHit(s, i, &tr);
+        }
+    }
+
+    // mover pass: one bounds query per body per frame (plan section-3)
+    ClearBounds(bmins, bmaxs);
+    for (i = 0; i < RAG_PTS; i++) {
+        AddPointToBounds(s->pt[i], bmins, bmaxs);
+        AddPointToBounds(frameStart[i], bmins, bmaxs);
+    }
+    for (i = 0; i < 3; i++) {
+        bmins[i] -= 8;
+        bmaxs[i] += 8;
+    }
+    nMovers = CG_GetBrushEntitiesInBounds(4, movers, bmins, bmaxs);
+    for (m = 0; m < nMovers; m++) {
+        clipHandle_t cmodel = cgi.CM_InlineModel(movers[m]->currentState.modelindex);
+        if (!cmodel) {
+            continue;
+        }
+        if (movers[m]->currentState.eFlags & EF_LINKANGLES) {
+            VectorCopy(movers[m]->lerpAngles, angles);
+        } else {
+            VectorClear(angles);
+        }
+        for (i = 0; i < RAG_PTS; i++) {
+            if (s_ragTraceCount >= RAG_TRACE_BUDGET) {
+                return;
+            }
+            s_ragTraceCount++;
+            cgi.CM_TransformedBoxTrace(&tr, frameStart[i], s->pt[i], s_ragPtMins, s_ragPtMaxs, cmodel,
+                                       MASK_DEADSOLID, movers[m]->lerpOrigin, angles, qfalse);
+            if (tr.startsolid) {
+                s->pt[i][2] += 2.5f; // mover rose into the body: shove up, re-settle next frame
+                VectorCopy(s->pt[i], s->ptPrev[i]);
+                continue;
+            }
+            if (tr.fraction < 1.0f) {
+                RagResolveHit(s, i, &tr);
+            }
+        }
+    }
+}
+
 static qboolean RagSane(const ragSim_t *s)
 {
     int i;
@@ -537,9 +676,11 @@ void CG_RagdollFrame(void)
     if (cg.frametime <= 0) {
         return; // paused/hitch: the table persists, Hook A keeps applying the last push
     }
+    s_ragTraceCount = 0;
     for (i = 0; i < RAG_MAX_SIMS; i++) {
         ragSim_t *s = &s_ragSims[i];
-        int       steps, ms;
+        vec3_t    frameStart[RAG_PTS];
+        int       steps, ms, j;
         if (!s->active) {
             continue;
         }
@@ -555,7 +696,18 @@ void CG_RagdollFrame(void)
             }
         }
         if (s->state == 2) {
-            continue; // sleeping: last pushed pose stands
+            // sleeping: last pushed pose stands - unless a bmodel under/over it moved
+            if (RagMoverHash(s) != s->moverHash) {
+                s->state   = 1;
+                s->sleepMs = 0;
+                s->lifeMs  = 0; // ride the mover as long as it moves
+                s->accumMs = 0;
+                if (rag_debug->integer) {
+                    cgi.Printf("^~^~^ RAGDOLL mover-wake ent=%d\n", s->entnum);
+                }
+            } else {
+                continue;
+            }
         }
         ms = cg.frametime;
         if (ms > 200) {
@@ -563,6 +715,9 @@ void CG_RagdollFrame(void)
         }
         s->accumMs += ms;
         s->lifeMs += ms;
+        for (j = 0; j < RAG_PTS; j++) {
+            VectorCopy(s->pt[j], frameStart[j]);
+        }
         steps = 0;
         while (s->accumMs >= RAG_SUBSTEP_MS && steps < RAG_MAX_STEPS) {
             RagStep(s, RAG_SUBSTEP_MS * 0.001f);
@@ -571,6 +726,9 @@ void CG_RagdollFrame(void)
         }
         if (s->accumMs > RAG_SUBSTEP_MS * RAG_MAX_STEPS) {
             s->accumMs = RAG_SUBSTEP_MS * RAG_MAX_STEPS; // discard the hitch backlog
+        }
+        if (steps) {
+            RagCollide(s, frameStart); // sweep frame-start -> current, world then movers
         }
         if (!RagSane(s)) {
             if (rag_debug->integer) {
@@ -596,7 +754,8 @@ void CG_RagdollFrame(void)
                 s->sleepMs = 0;
             }
             if (s->sleepMs > 1000 || s->lifeMs > 6000) {
-                s->state = 2;
+                s->state     = 2;
+                s->moverHash = RagMoverHash(s); // baseline for the mover-wake detector
                 if (rag_debug->integer) {
                     cgi.Printf("^~^~^ RAGDOLL sleep ent=%d life=%dms\n", s->entnum, s->lifeMs);
                 }
