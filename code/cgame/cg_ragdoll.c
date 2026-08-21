@@ -310,6 +310,7 @@ static cvar_t  *rag_couple   = NULL;
 static cvar_t  *rag_impact   = NULL;
 static cvar_t  *rag_linear   = NULL;
 static cvar_t  *rag_anchor   = NULL;
+static cvar_t  *rag_stick    = NULL;
 
 static void RagCvars(void)
 {
@@ -339,7 +340,7 @@ static void RagCvars(void)
         // LOOSE body actually articulates. Expect piles at 0: that is the thing limits fix.
         rag_truss = cgi.Cvar_Get("coop_ragdollTruss", "1", CVAR_TEMP);
         // the torque couple that turns a bullet into limb ROTATION - THE knob to sweep live
-        rag_couple = cgi.Cvar_Get("coop_ragdollCouple", "0.9", CVAR_TEMP);
+        rag_couple = cgi.Cvar_Get("coop_ragdollCouple", "1.1", CVAR_TEMP);
         rag_impact = cgi.Cvar_Get("coop_ragdollImpact", "1", CVAR_TEMP); // 0 = no post-death hits
         // how much of a hit is PUSH rather than TWIST. The two used to be welded together: the
         // weights (1+c, -c) always summed to 1.0, so no amount of couple could reduce the shove
@@ -349,6 +350,12 @@ static void RagCvars(void)
         // and a weak spring holding the hips near where the body actually lies, so a struck limb
         // moves without the whole corpse wandering off (0 = off)
         rag_anchor = cgi.Cvar_Get("coop_ragdollAnchor", "0.10", CVAR_TEMP);
+        // 1 = a struck limb KEEPS its new position instead of being reeled back to the death
+        // pose. The shape-match holds every point to the pose captured at death, so a shot limb
+        // swung and then snapped home within ~600ms and the damage read as cosmetic. With this
+        // on, the pose itself is rewritten for the limb that moved: the body accumulates the
+        // shape you shot it into. 0 = the old snap-back.
+        rag_stick = cgi.Cvar_Get("coop_ragdollStick", "1", CVAR_TEMP);
     }
 }
 
@@ -956,6 +963,16 @@ static void RagShapeMatch(ragSim_t *s, float alpha)
         if (s->contact[i]) {
             a *= RAG_CONTACT_RELAX; // where the body TOUCHES, the ground gets the last word - the
         }                           // limb stays draped where it landed instead of being reeled in
+        if (s->limpMs[i] > 0 && rag_stick->integer) {
+            // THE LIMB KEEPS WHAT THE BULLET DID TO IT. Rewrite this point's goal to where it
+            // actually is now, expressed in the body's own frame, so when the limp window closes
+            // the pose being held IS the new one. Bone lengths are still enforced by the distance
+            // links and the truss still forbids a collapse - only the limb's resting angle moves.
+            vec3_t rel, inv;
+            VectorSubtract(s->pt[i], s->pt[0], rel);
+            RagMat3TransRotateVec(S, rel, inv); // inverse of the body rotation (row-vector)
+            VectorAdd(s->goal[0], inv, s->goal[i]);
+        }
         if (s->limpMs[i] > 0) {
             // struck limb: essentially free at the instant of impact, easing back to the full
             // pose pull as the window expires (a hard restore would snap it home at the deadline).
