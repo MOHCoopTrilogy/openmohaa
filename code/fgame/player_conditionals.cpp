@@ -230,7 +230,37 @@ qboolean Player::CondWeaponActive(Conditional& condition)
 
     Weapon *weapon = GetActiveWeapon(hand);
 
-    return (weapon && !Q_stricmp(weaponName, weapon->item_name));
+    if (!weapon) {
+        return false;
+    }
+    if (!Q_stricmp(weaponName, weapon->item_name)) {
+        return true; // exact match FIRST, so a variant-specific statemap row stays possible
+    }
+    // [user 2026-08-20] SKIN VARIANTS MUST MATCH THEIR BASE GUN. A variant is named
+    // "<Base Gun> (<Finish>)", and this compare is whole-string - so every one of the 247
+    // variant tiks matched no IS_WEAPON_ACTIVE row and fell through to the CLASS DEFAULT.
+    // The visible symptom was the wrong magazine in the player's hand: the clip is not part of
+    // the gun at all, it is an Animate spawned by an attachmodel frame command in the
+    // THIRD-PERSON torso animation, so a Springfield variant was handed the class-default
+    // Garand en-bloc clip. The reload STYLE is misrouted with it, which is why bolt rifles and
+    // shotguns lost their shell-by-shell torso animation while the first-person hands still
+    // played the right one. cgame has stripped this suffix since 2026-08-17 in both
+    // CG_GetVMAnimPrefixIndex and CG_FindAdsTune; the server half was never done.
+    {
+        const char *paren = strstr(weapon->item_name.c_str(), " (");
+        if (paren) {
+            int len = (int)(paren - weapon->item_name.c_str());
+            if (len > 0 && len < 64) {
+                char base[64];
+                memcpy(base, weapon->item_name.c_str(), len);
+                base[len] = 0;
+                if (!Q_stricmp(weaponName, base)) {
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
 }
 
 qboolean Player::CondWeaponClassActive(Conditional& condition)
