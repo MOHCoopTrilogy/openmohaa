@@ -158,6 +158,9 @@ static qboolean CoopWeaponFeelOn(void)
 
 // [2026-08-21] THE FEEL BUDGET. The weapon position before any feel layer touches it, and
 // whether it was captured this frame (it is not on paths that skip the weapon offset).
+// Authored, deliberately-large stows (medkit, weapon collision, DBNO eye drop) accumulate here
+// and are EXEMPT from the jitter budget - clamping them broke all three.
+static vec3_t   s_vFeelExempt = {0, 0, 0};
 static vec3_t   s_vFeelBase = {0, 0, 0};
 static qboolean s_bFeelBase = qfalse;
 // HZM coop [user 2026-08-21] "slight fov snap when shooting". A small, fast fov widening on
@@ -1373,6 +1376,7 @@ void CG_OffsetFirstPersonView(refEntity_t *pREnt, qboolean bUseWorldPosition)
         // position, and NOTHING bounded the total - each layer clamped only itself, which is
         // precisely how a sum stays "within budget" while being ten times the budget.
         VectorCopy(pREnt->origin, s_vFeelBase);
+        VectorClear(s_vFeelExempt);
         s_bFeelBase = qtrue;
 
         // HZM coop - ADS SWAY + RECOIL. Both are applied to the view weapon (hands + gun) ONLY - they move
@@ -1671,6 +1675,9 @@ void CG_OffsetFirstPersonView(refEntity_t *pREnt, qboolean bUseWorldPosition)
                     if (s_medStow > 0.001f) {
                         VectorMA(pREnt->origin, -s_medStow * 26.0f, mat[2], pREnt->origin);
                         VectorMA(pREnt->origin, -s_medStow * 6.0f,  mat[0], pREnt->origin);
+                        // authored pose, not jitter - exempt from the feel budget
+                        VectorMA(s_vFeelExempt, -s_medStow * 26.0f, mat[2], s_vFeelExempt);
+                        VectorMA(s_vFeelExempt, -s_medStow * 6.0f,  mat[0], s_vFeelExempt);
                     }
                 }
 
@@ -2301,6 +2308,10 @@ void CG_OffsetFirstPersonView(refEntity_t *pREnt, qboolean bUseWorldPosition)
         float  back, len;
 
         VectorSubtract(pREnt->origin, s_vFeelBase, vFeel);
+        // subtract the AUTHORED stows before clamping, add them back after. Without this the
+        // budget truncated the medkit stow, the weapon-collision retract and the DBNO eye drop -
+        // three deliberate poses whose whole job is to be large.
+        VectorSubtract(vFeel, s_vFeelExempt, vFeel);
         back = -DotProduct(vFeel, mat[0]); // positive = toward the eye
         if (back > 4.0f) {
             VectorMA(vFeel, back - 4.0f, mat[0], vFeel); // give back the excess only
@@ -2309,6 +2320,7 @@ void CG_OffsetFirstPersonView(refEntity_t *pREnt, qboolean bUseWorldPosition)
         if (len > 9.0f && len > 0.0001f) {
             VectorScale(vFeel, 9.0f / len, vFeel);
         }
+        VectorAdd(vFeel, s_vFeelExempt, vFeel);
         VectorAdd(s_vFeelBase, vFeel, pREnt->origin);
         s_bFeelBase = qfalse;
     }
@@ -2334,11 +2346,39 @@ void CG_OffsetFirstPersonView(refEntity_t *pREnt, qboolean bUseWorldPosition)
         vec3_t        vRight, vFwd;
         float         scale = CoopCamMotion();
 
+        static int s_camLastFrame = 0;
+
         dt = cg.frametime / 1000.0f;
         if (dt > 0.1f) {
             dt = 0.1f; // a hitch must never teleport an integrator (TRAPS)
         }
         VectorClear(camOfs);
+
+        // RE-SEED after any frame this block did not run (dead, third person, spectating,
+        // cutscene). Every static below only advances HERE, so without this the whole skipped
+        // interval arrives as one frame delta - die while airborne and s_lastGnd2 = 0 with
+        // s_lastVelZ2 ~ -700 survives into the respawn, firing a full-strength landing slam on
+        // every such respawn. Exactly the bug the crouch-weight guard was added for.
+        if (cg.time - s_camLastFrame > 250) {
+            s_lastGnd2  = (cg.predicted_player_state.groundEntityNum != ENTITYNUM_NONE);
+            s_lastVelZ2 = cg.predicted_player_state.velocity[2];
+            s_lastYaw   = cg.refdefViewAngles[1];
+            s_camLand   = 0.0f;
+            s_camLandV  = 0.0f;
+            s_camRoll   = 0.0f;
+        }
+        s_camLastFrame = cg.time;
+
+        // A glued vehicle rider INHERITS the vehicle velocity and the vehicle IS their ground
+        // entity, so a walking bob would run at vehicle speed - the "truck steps forward in little
+        // jumps" stutter this file already guards the stock bob against. Turrets likewise: the
+        // server owns that camera.
+        if ((cg.snap->ps.pm_flags & (PMF_NO_MOVE | PMF_TURRET))
+            || !cg.predicted_player_state.walking) {
+            s_lastGnd2  = (cg.predicted_player_state.groundEntityNum != ENTITYNUM_NONE);
+            s_lastVelZ2 = cg.predicted_player_state.velocity[2];
+            s_lastYaw   = cg.refdefViewAngles[1];
+        }
 
         bGnd = (cg.predicted_player_state.groundEntityNum != ENTITYNUM_NONE);
         spd  = (float)sqrt(cg.predicted_player_state.velocity[0] * cg.predicted_player_state.velocity[0]
@@ -2358,9 +2398,19 @@ void CG_OffsetFirstPersonView(refEntity_t *pREnt, qboolean bUseWorldPosition)
         s_lastGnd2  = bGnd;
         s_lastVelZ2 = cg.predicted_player_state.velocity[2];
         if (s_camLand != 0.0f || s_camLandV != 0.0f) {
-            s_camLandV += (-s_camLand * 145.0f) * dt;   // spring back to rest
-            s_camLandV -= s_camLandV * dt * 11.0f;      // damping
-            s_camLand  += s_camLandV * dt;
+            // dt is clamped to 0.1, but an EXPLICIT damping multiplier (1 - 11*dt) goes negative
+            // at dt > 1/11 and the 2x2 update matrix picks up an eigenvalue above 1 - it grows
+            // ~13% per frame while the frame rate stays under ~11 FPS, then whips when it
+            // recovers. An exponential decay is unconditionally stable at any dt.
+            float dtS = (dt > 0.033f) ? 0.033f : dt;
+            s_camLandV += (-s_camLand * 145.0f) * dtS;
+            s_camLandV *= (float)exp(-11.0f * dtS);
+            s_camLand  += s_camLandV * dtS;
+            // the integrator STATE needs its own bound - CoopCamClamp only bounds the output
+            if (s_camLand < -6.0f)  { s_camLand = -6.0f; }
+            else if (s_camLand > 6.0f) { s_camLand = 6.0f; }
+            if (s_camLandV < -120.0f) { s_camLandV = -120.0f; }
+            else if (s_camLandV > 120.0f) { s_camLandV = 120.0f; }
             if (s_camLand > -0.01f && s_camLand < 0.01f && s_camLandV > -0.5f && s_camLandV < 0.5f) {
                 s_camLand = s_camLandV = 0.0f;
             }
@@ -2384,7 +2434,8 @@ void CG_OffsetFirstPersonView(refEntity_t *pREnt, qboolean bUseWorldPosition)
         else if (yawDelta < -220.0f) { yawDelta = -220.0f; }
 
         tgtRoll = 0.0f;
-        if (bGnd) {
+        if (bGnd && cg.predicted_player_state.walking
+            && !(cg.snap->ps.pm_flags & (PMF_NO_MOVE | PMF_TURRET))) {
             tgtRoll += (side / 300.0f) * 1.5f;      // lean into a strafe
         }
         tgtRoll += (yawDelta / 220.0f) * 0.9f;      // and into a hard turn
@@ -2409,7 +2460,9 @@ void CG_OffsetFirstPersonView(refEntity_t *pREnt, qboolean bUseWorldPosition)
         // NOTE: this is gait-SHAPED, not synchronised to the footstep SOUND. Those are emitted by the
         // legs animation server-side, and there is no client hook to phase-lock to. Matching the
         // shape gets most of the read; true sync would need a footstep event on the wire.
-        if (bGnd && spd > 40.0f && !(cg.snap->ps.stats[STAT_INZOOM])) {
+        if (bGnd && spd > 40.0f && !(cg.snap->ps.stats[STAT_INZOOM])
+            && cg.predicted_player_state.walking
+            && !(cg.snap->ps.pm_flags & (PMF_NO_MOVE | PMF_TURRET))) {
             float cyc, drop, amp;
             s_stepPh += dt * (1.35f + spd * 0.0042f);
             if (s_stepPh > 10000.0f) {
@@ -2915,7 +2968,9 @@ static int CG_CalcFov(void)
         // kick would vanish. Widening the world alone pushes the scene away from the muzzle,
         // which is what a recoil impulse actually looks like.
         if (s_fovPunch > 0.001f) {
-            fov_x += s_fovPunch;
+            // RELATIVE. An absolute +2.2 degrees is a 2.75% nudge at an 80 degree world fov but
+            // 14-22% under a scope, which reads as a zoom pop on every bolt-rifle shot.
+            fov_x *= (1.0f + s_fovPunch / 80.0f);
             s_fovPunch -= s_fovPunch * ((cg.frametime > 200 ? 200.0f : (float)cg.frametime) / 1000.0f) * 13.0f;
             if (s_fovPunch < 0.01f) {
                 s_fovPunch = 0.0f;
@@ -3047,8 +3102,20 @@ static int CG_CalcFov(void)
         // from a harmless 0.08 into a saturated full-screen blood flash. No real hit moves
         // health by more than a quarter of the bar between two snapshots, so treat that as a
         // context switch and mute it rather than flashing the screen.
-        if (h > 0 && maxH > 0 && s_lastSuppHealth > 0 && h < s_lastSuppHealth
-            && (s_lastSuppHealth - h) <= (maxH / 4)) {
+        // [2026-08-21] the first attempt gated on the SIZE of the drop, which silently swallowed
+        // every grenade, panzerschreck, tank shell and mine - no flinch and no blood on exactly
+        // the hits that most need feedback. There IS a vehicle signal already on the wire:
+        // player.cpp publishes STAT_VEHICLE_HEALTH whenever the player is in one. Gate on that
+        // instead, and mute the frame the stat transitions (board/dismount).
+        {
+            static int s_lastVeh = 0;
+            int        veh = cg.snap ? cg.snap->ps.stats[STAT_VEHICLE_HEALTH] : 0;
+            if (veh != 0 || s_lastVeh != veh) {
+                s_lastSuppHealth = h; // riding, or just boarded/dismounted: resync, do not flinch
+            }
+            s_lastVeh = veh;
+        }
+        if (h > 0 && maxH > 0 && s_lastSuppHealth > 0 && h < s_lastSuppHealth) {
             // The severity scaling below has never actually been felt in play - the unit bug above
             // held `lost` under 0.133 for the whole life of the feature - so the authored constants
             // are unproven at their intended magnitude. coop_hitSeverity scales just the severity

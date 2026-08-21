@@ -11348,6 +11348,25 @@ Actor::setModel
 */
 qboolean Actor::setModel(void)
 {
+    // HZM coop [user 2026-08-21] CLEAR THE SURFACE BITS ON A COMPOSITE REBUILD.
+    //
+    // s.surfaces[] is an INDEX-keyed bitfield (per-surface NODRAW + gore skin offset). This function
+    // rebuilds the composite tiki name from weapon|headmodel|headskin|<path>, which changes the
+    // SURFACE INDEX SPACE - index N is a different surface before and after. Nothing cleared the
+    // bits across that change, so a NODRAW set to hide a helmet under one composite could land on
+    // the tunic under the next.
+    //
+    // Why officers and their reinforcements specifically: they are the actors whose composite is
+    // rebuilt AFTER spawn. coop_mod/aihandler.scr:275-276 pins the clone's headmodel and headskin
+    // to the parent's resolved pick, and giving the weapon bakes another rebuild - three setModel
+    // passes on a body that has already had surface bits applied.
+    //
+    // NOTE: an earlier attempt cleared this in Level::InitEdict on the theory that recycled edicts
+    // carried stale bits. That was WRONG and inert - Level::FreeEdict already memsets the entire
+    // gentity_t on every free, so a recycled slot is always clean. The index space moving under
+    // live bits is the mechanism, not entity reuse.
+    memset(edict->s.surfaces, 0, sizeof(edict->s.surfaces));
+
     str      name;
     qboolean success;
 

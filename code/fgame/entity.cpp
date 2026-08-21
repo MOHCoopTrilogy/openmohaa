@@ -2017,6 +2017,12 @@ const char *Entity::getModel() const
 
 void Entity::setModel(const str& mdl)
 {
+    // HZM coop [2026-08-21] a new model means a new surface INDEX SPACE, and s.surfaces is
+    // index-keyed. This function already clears the frame infos for the same reason; the surface
+    // bits were missed. ProcessInitCommands() below re-applies any TIKI-authored
+    // `surface X +nodraw`, so legitimate hidden surfaces survive - only stale ones are dropped.
+    memset(edict->s.surfaces, 0, sizeof(edict->s.surfaces));
+
     int animnum;
     int i;
 

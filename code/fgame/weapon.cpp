@@ -1024,6 +1024,12 @@ Weapon::Weapon()
 
     mAIRange = RANGE_SHORT;
 
+    // [2026-08-21] BEFORE the LoadingSavegame return, and these two are not archived - left
+    // after it they would be indeterminate on a savegame load, and an uninitialised time makes
+    // the term latch at maximum spread permanently.
+    m_fCoopMoveSpread     = 0.0f;
+    m_fCoopMoveSpreadTime = 0.0f;
+
     if (LoadingSavegame) {
         // Archive function will setup all necessary data
         return;
@@ -1195,8 +1201,6 @@ Weapon::Weapon()
     m_csWeaponGroup    = STRING_EMPTY;
     m_fMovementSpeed   = 1.0f;
     m_fMaxFireMovement = 1.0f;
-    m_fCoopMoveSpread     = 0.0f;
-    m_fCoopMoveSpreadTime = 0.0f;
     m_fZoomMovement    = 1.0f;
 
     m_sAmmoPickupSound  = "snd_pickup_";
@@ -1951,8 +1955,15 @@ void Weapon::Shoot(Event *ev)
 
                             if (pMS->value > 0.0f) {
                                 settle = (pMSSet->value > 0.05f) ? pMSSet->value : 0.6f;
-                                mv     = player->velocity.length()
+                                // lengthXY, not length: a glued vehicle rider inherits the
+                                // vehicle velocity and a falling player has a large Z - either
+                                // would sit at maximum spread through no choice of their own.
+                                mv     = player->velocity.lengthXY()
                                          / ((sv_runspeed->integer > 0) ? sv_runspeed->integer : 287);
+                                if (player->client
+                                    && (player->client->ps.pm_flags & PMF_NO_MOVE)) {
+                                    mv = 0.0f; // glued rider: not their movement
+                                }
                                 if (mv > 1.0f) {
                                     mv = 1.0f;
                                 }
