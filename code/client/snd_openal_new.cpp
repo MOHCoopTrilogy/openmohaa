@@ -3578,15 +3578,25 @@ void openal_channel::set_gain(float gain)
         }
     }
 
-    // cinematic effects duck (music exempt so the soundtrack stays full while effects recede)
-    if (s_sfxduck && s_sfxduck->value < 1.f && !bMusic) {
-        gain *= s_sfxduck->value;
-    }
-
     // --- cue sidechain (see S_HZM_CueTier above) ---
     {
         int   cueTier = 0;
         float duckScale;
+
+        // Classify FIRST, because the cinematic duck below must not dim the very cue the duck was
+        // armed for. [user 2026-08-20] "when a challenge unlocks we have sound ducking, but it
+        // sounds like the typewriter sounds are ducking too instead of standing out" - the script
+        // sets s_sfxduck 0.25 and then plays the typewriter, and this test exempted only MUSIC, so
+        // the cue was quartered and then asked to stand out of the mix it had just been buried in.
+        if (!bMusic && !bLoop && pSfx) {
+            cueTier = S_HZM_CueTier(pSfx->name);
+        }
+
+        // cinematic effects duck (music exempt so the soundtrack stays full while effects recede,
+        // and standout CUES exempt so an unlock cue is never ducked by its own duck)
+        if (s_sfxduck && s_sfxduck->value < 1.f && !bMusic && cueTier == 0) {
+            gain *= s_sfxduck->value;
+        }
 
         if (!s_cueDuck) {
             s_cueDuck = Cvar_Get("s_cueDuck", "2", CVAR_ARCHIVE);   // [user 2026-08-07] default 2
@@ -3594,11 +3604,9 @@ void openal_channel::set_gain(float gain)
         duckScale = s_cueDuck->value;
         if (duckScale < 0.0f) { duckScale = 0.0f; }
 
-        // A looping or music source is never itself a cue - that also keeps a map that uses the
-        // same sample as ambience (Mec_SteamLoop_01) from arming the duck forever.
-        if (!bMusic && !bLoop && pSfx) {
-            cueTier = S_HZM_CueTier(pSfx->name);
-        }
+        // (classified above, before the cinematic duck, so that duck can exempt it. A looping or
+        // music source is never itself a cue - which also keeps a map using the same sample as
+        // ambience from arming the duck forever.)
 
         // [user 2026-08-07] live gain knob so the cue level can be tuned without a rebuild:
         //   s_cueGain  - standout tier (challenge typewriter, rank-up ping)

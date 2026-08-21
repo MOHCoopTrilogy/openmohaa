@@ -14601,7 +14601,13 @@ void Player::Postthink(void)
                     continue;
                 }
                 Projectile *pP = static_cast<Projectile *>(pEnt);
-                if (pP->velocity.length() > 260.0f) {
+                // [user 2026-08-20] "I haven't seen the kick grenade icon in a minute even though
+                // I've had tons of grenades thrown at me". The ICON's gates were the KICK's gates,
+                // and all four had to hold at once - within 10 feet, slow, level with you, and
+                // looked at - a window that barely opens on a grenade that lands and detonates in
+                // two seconds. Awareness is now deliberately looser than the kick itself: you get
+                // told a grenade is at your feet even while it is still rolling.
+                if (pP->velocity.length() > 500.0f) {
                     continue;
                 }
                 const char *pszM = pP->model.c_str();
@@ -14611,21 +14617,16 @@ void Player::Postthink(void)
                     continue;
                 }
                 Vector vT = pP->origin - origin;
-                if (fabs(vT.z) > 56.0f) {
+                if (fabs(vT.z) > 72.0f) {
                     continue;
                 }
                 vT.z = 0;
                 float fD = vT.length();
-                if (fD > 120.0f) {
+                if (fD > 200.0f) {
                     continue;
                 }
-                Vector vF;
-                AngleVectors(GetViewAngles(), vF, NULL, NULL);
-                vF.z = 0;
-                vF.normalize();
-                if (fD > 12.0f && ((vT * (1.0f / fD)) * vF) < 0.35f) {
-                    continue;
-                }
+                // no facing test for the ICON: a grenade behind you is exactly the one you most
+                // need telling about, and the kick itself still requires you to turn and face it
                 bKickableNear = qtrue;
                 break;
             }
