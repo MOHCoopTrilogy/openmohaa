@@ -160,6 +160,13 @@ static qboolean CoopWeaponFeelOn(void)
 // whether it was captured this frame (it is not on paths that skip the weapon offset).
 // Authored, deliberately-large stows (medkit, weapon collision, DBNO eye drop) accumulate here
 // and are EXEMPT from the jitter budget - clamping them broke all three.
+// The ROLL channel needs its own ceiling. Translation is bounded by the feel budget, but roll has
+// five independent contributors - lean, the low-health limp, injury sway, the CalcViewValues lean
+// and the new strafe bank - and nothing bounded their sum. Hurt + limping + leaning + strafing
+// stacks past 7 degrees of horizon tilt, which is the same "six of them peaking together" failure
+// the translation budget exists to prevent.
+static float    s_fRollBase = 0.0f;
+static qboolean s_bRollBase = qfalse;
 static vec3_t   s_vFeelExempt = {0, 0, 0};
 static vec3_t   s_vFeelBase = {0, 0, 0};
 static qboolean s_bFeelBase = qfalse;
@@ -1378,6 +1385,8 @@ void CG_OffsetFirstPersonView(refEntity_t *pREnt, qboolean bUseWorldPosition)
         VectorCopy(pREnt->origin, s_vFeelBase);
         VectorClear(s_vFeelExempt);
         s_bFeelBase = qtrue;
+        s_fRollBase = cg.refdefViewAngles[2];
+        s_bRollBase = qtrue;
 
         // HZM coop - ADS SWAY + RECOIL. Both are applied to the view weapon (hands + gun) ONLY - they move
         // the weapon model in view space, NOT the actual aim/bullet direction, so they're immersion-only and
@@ -2324,6 +2333,15 @@ void CG_OffsetFirstPersonView(refEntity_t *pREnt, qboolean bUseWorldPosition)
         VectorAdd(s_vFeelBase, vFeel, pREnt->origin);
         s_bFeelBase = qfalse;
     }
+    if (s_bRollBase) {
+        float dRoll = cg.refdefViewAngles[2] - s_fRollBase;
+        if (dRoll > 6.0f) {
+            cg.refdefViewAngles[2] = s_fRollBase + 6.0f;
+        } else if (dRoll < -6.0f) {
+            cg.refdefViewAngles[2] = s_fRollBase - 6.0f;
+        }
+        s_bRollBase = qfalse;
+    }
 
     // HZM coop [user 2026-08-21] CAMERA MOTION - "momentum and acceleration to movement would make
     // it feel less like a moving camera... what else for weightiness and not feeling like a moving
@@ -2510,6 +2528,24 @@ void CG_OffsetFirstPersonView(refEntity_t *pREnt, qboolean bUseWorldPosition)
 
         // ---- THE CEILING -----------------------------------------------------------------------
         CoopCamClamp(camOfs, 4.5f);
+        // TRACED. This runs after the MASK_PLAYERSOLID height/lateral traces earlier in the
+        // function, so an unclipped offset could punch the eye through a floor, a low ceiling or
+        // a waterline - the rule this file states for its own dip block and which the DBNO eye
+        // drop already obeys. Scale by the hit fraction and hold off the surface.
+        if (camOfs[0] != 0.0f || camOfs[1] != 0.0f || camOfs[2] != 0.0f) {
+            trace_t trCam;
+            vec3_t  vCamEnd;
+            VectorAdd(origin, camOfs, vCamEnd);
+            CG_Trace(&trCam, origin, vec3_origin, vec3_origin, vCamEnd, cg.snap->ps.clientNum,
+                     MASK_CAMERASOLID, qfalse, qtrue, "CamMotion");
+            if (trCam.fraction < 1.0f) {
+                float f = trCam.fraction - 0.15f;
+                if (f < 0.0f) {
+                    f = 0.0f;
+                }
+                VectorScale(camOfs, f, camOfs);
+            }
+        }
         VectorAdd(origin, camOfs, origin);
         cg.refdefViewAngles[2] += s_camRoll;
     }
@@ -4168,7 +4204,12 @@ void CG_NoteLocalFire(void)
     if (!pFol) {
         pFol = cgi.Cvar_Get("coop_actionFoley", "1", CVAR_ARCHIVE);
     }
-    if (pFol->value > 0.0f && s_foleyAt == 0) {
+    // [2026-08-21] RE-ARM rather than "only if nothing pending". The first version ignored a shot
+    // while one was queued, so any weapon cycling faster than ~1090 RPM - the MG42 - lost
+    // alternate layers unpredictably. Re-arming keeps the layer locked to the LAST shot, which on
+    // a fast weapon reads as a continuous mechanical rattle rather than a stutter, and a floor
+    // stops it retriggering faster than the sample can be heard.
+    if (pFol->value > 0.0f && (s_foleyAt == 0 || cg.time + 55 > s_foleyAt + 45)) {
         s_foleyAt = cg.time + 55; // ms after the shot
     }
 }
@@ -4186,6 +4227,11 @@ static void CG_ActionFoleyThink(void)
         return;
     }
     iClass = cg.snap->ps.stats[STAT_EQUIPPED_WEAPON];
+    // NOTE: S_StartLocalSound hardcodes CHAN_MENU internally and ignores the alias channel, so
+    // this shares a voice with the breath-hold cues and will cut them. Accepted for now because
+    // the alternative is a positional S_StartSound, which would need a real sfxHandle and would
+    // reintroduce the distance falloff this layer deliberately does not want. Flagged rather than
+    // hidden: if the breath-hold cue starts getting clipped in play, this is why.
     if (iClass & (WEAPON_CLASS_RIFLE | WEAPON_CLASS_MG | WEAPON_CLASS_HEAVY)) {
         cgi.S_StartLocalSound("coop_wpn_action_heavy", qfalse);
     } else {

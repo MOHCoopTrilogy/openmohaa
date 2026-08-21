@@ -629,7 +629,19 @@ typedef struct {
     void (*function)(void);
 } consoleCommand_t;
 
+// HZM coop [user 2026-08-21] SHOULDER SWAP. Requested as part of the third-person cover aim
+// scheme ("middle mouse switches shoulders") and never wired: cg_adsShoulderRight has existed as a
+// cvar since the staged-ADS work with no command and no key bound to it, so there was no way to
+// actually swap in play.
+static void CG_AdsSwapShoulder_f(void)
+{
+    cvar_t *pRight = cgi.Cvar_Get("cg_adsShoulderRight", "1", CVAR_ARCHIVE);
+
+    cgi.Cvar_Set("cg_adsShoulderRight", pRight->integer ? "0" : "1");
+}
+
 static consoleCommand_t commands[] = {
+    {"shoulderswap",           &CG_AdsSwapShoulder_f       },
     {"useweaponclass",         &CG_UseWeaponClass_f        },
     {"weapnext",               &CG_NextWeapon_f            },
     {"weapprev",               &CG_PrevWeapon_f            },

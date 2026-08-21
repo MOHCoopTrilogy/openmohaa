@@ -1639,14 +1639,28 @@ static void RagResolveHit(ragSim_t *s, int i, const trace_t *tr)
     // speed-sleep instead of micro-skidding their whole 6s life (and off ledges).
     // 0.35/substep = ~44u/s; the old 1.2 gate was 150u/s and froze the landing slide,
     // folding bodies vertically over their first contact (audit defect 3)
-    if (tr->plane.normal[2] > 0.7f && VectorLength(v) < 0.35f) {
+    // [user 2026-08-21] "we do sometimes still have bodies that spin and turn upside down",
+    // reported with a screenshot of a corpse draped over SANDBAGS.
+    //
+    // This gate used to require normal[2] > 0.7 - a near-horizontal FLOOR - so a body resting on
+    // anything sloped or curved could never speed-sleep no matter how slowly it was moving. The
+    // same test also chose the friction, giving those surfaces the LIGHT value (0.75 retained
+    // rather than 0.45), so a corpse on a prop kept three quarters of its sliding speed on every
+    // contact and ground on indefinitely against the shape-match pull. Sandbags, crates, rubble
+    // and slopes are exactly where bodies were seen spinning.
+    //
+    // A slow point in sustained contact should rest on ANY surface. The normal is still consulted
+    // for how much friction to apply below, but it no longer decides whether rest is possible.
+    if (VectorLength(v) < 0.35f) {
         VectorCopy(pos, s->pt[i]);
         VectorCopy(pos, s->ptPrev[i]);
         s->contact[i] = 2; // resting on the world: the shape-match yields here
         return;
     }
     VectorScale(vn, -0.1f, vn); // restitution
-    VectorScale(vt, (tr->plane.normal[2] > 0.7f) ? 0.45f : 0.75f, vt);
+    // steep contacts kept 75% of their tangential speed, which is what let a body grind around a
+    // prop forever. Still lighter than a floor, but no longer near-frictionless.
+    VectorScale(vt, (tr->plane.normal[2] > 0.7f) ? 0.45f : 0.55f, vt);
     VectorAdd(vn, vt, v);
     VectorCopy(pos, s->pt[i]);
     VectorSubtract(pos, v, s->ptPrev[i]);
