@@ -348,6 +348,8 @@ static cvar_t  *rag_stickmax = NULL;
 static cvar_t  *rag_buriedmax = NULL;
 static cvar_t  *rag_feet     = NULL;
 static cvar_t  *rag_limits   = NULL;
+static cvar_t  *rag_self     = NULL;
+static cvar_t  *rag_twist    = NULL;
 
 static void RagCvars(void)
 {
@@ -406,6 +408,14 @@ static void RagCvars(void)
         // the 18 angular joint limits. ATOMIC with the fold-brace gate by construction:
         // this one cvar is the single authority over both, so the pair cannot half-ship.
         rag_limits = cgi.Cvar_Get("coop_ragdollLimits", "1", CVAR_TEMP);
+        // self-collision: scales the minimum separation between body parts that are not
+        // already tied together. 0 = off, 1 = full anatomical radii, 0.85 leaves a little
+        // slack so a corpse can still lie with its arm against its chest.
+        rag_self = cgi.Cvar_Get("coop_ragdollSelf", "0.85", CVAR_TEMP);
+        // how far the chest may rotate relative to the hips, in degrees. A real spine does
+        // about 35; without a bound the shoulder line can wind around the spine forever
+        // with every bone still the right length. 0 = off.
+        rag_twist = cgi.Cvar_Get("coop_ragdollTwist", "35", CVAR_TEMP);
     }
 }
 
@@ -629,6 +639,62 @@ static void RagWorldToCapture(const ragSim_t *s, const vec3_t world, vec3_t cap)
 
 // ---------- capture ------------------------------------------------------------------------
 
+
+
+// ---------- self-collision (stage 4) --------------------------------------------------------
+// Joint limits constrain ANGLES; they say nothing about two body parts occupying the same space.
+// Without this a hand passes through the chest, the knees swap sides, and a corpse shot enough
+// times slowly merges into itself. These are push-apart-ONLY minimum separations between pairs
+// that are not already tied by a link or an equality brace - a pair that IS tied would fight it.
+// Distances come from the anatomical radius table, not the per-corpse clamped radii, because the
+// clamped ones shrink to the floor clearance and would let parts inter-penetrate on the ground.
+#define RAG_SELF_PAIRS 16
+static const byte s_ragSelfPairs[RAG_SELF_PAIRS][2] = {
+    {7, 10},  // hand - hand
+    {7, 2},   // L hand - chest
+    {10, 2},  // R hand - chest
+    {7, 0},   // L hand - pelvis
+    {10, 0},  // R hand - pelvis
+    {7, 4},   // L hand - head
+    {10, 4},  // R hand - head
+    {6, 2},   // L forearm - chest
+    {9, 2},   // R forearm - chest
+    {6, 9},   // forearm - forearm
+    {12, 14}, // knee - knee
+    {15, 16}, // foot - foot
+    {15, 14}, // L foot - R knee
+    {16, 12}, // R foot - L knee
+    {4, 0},   // head - pelvis
+    {4, 2},   // head - chest
+};
+
+// Push-apart-only, and BOTH pt and ptPrev move by the same delta so the separation is perfectly
+// inelastic: it cannot inject the velocity that blew bodies across the map twice in this project.
+static void RagSelfCollide(ragSim_t *s, float scale)
+{
+    int i;
+    for (i = 0; i < RAG_SELF_PAIRS; i++) {
+        int    a = s_ragSelfPairs[i][0], b = s_ragSelfPairs[i][1];
+        vec3_t d;
+        float  len, minSep, corr;
+        minSep = (s_ragPtRadius[a] + s_ragPtRadius[b]) * scale;
+        VectorSubtract(s->pt[a], s->pt[b], d);
+        len = VectorLength(d);
+        if (len >= minSep) {
+            continue;
+        }
+        if (len < 0.001f) {
+            VectorSet(d, 0, 0, 1); // exactly coincident: pick an axis rather than divide by zero
+            len = 0.001f;
+        }
+        corr = (minSep - len) * 0.5f / len;
+        VectorMA(s->pt[a], corr, d, s->pt[a]);
+        VectorMA(s->ptPrev[a], corr, d, s->ptPrev[a]);
+        VectorMA(s->pt[b], -corr, d, s->pt[b]);
+        VectorMA(s->ptPrev[b], -corr, d, s->ptPrev[b]);
+    }
+}
+
 // ============================ ANGULAR JOINT LIMITS (stage 3) ================================
 // What stops a corpse folding into poses no body can hold. Distance constraints keep bones the
 // right LENGTH but say nothing about direction: a knee can bend backwards without any distance
@@ -740,6 +806,65 @@ static void RagRotateSet(ragSim_t *s, unsigned mask, const vec3_t pivot, const f
 }
 
 static void RagLimitFrames(ragSim_t *s, float T0[3][3], float T2[3][3], qboolean ok[2]);
+
+// ---------- torso twist limit ---------------------------------------------------------------
+// A spine can rotate maybe 35 degrees relative to the hips. Nothing in a distance-constraint
+// model forbids more: the shoulder line can wind around the spine axis indefinitely and every
+// bone keeps its length, so a corpse shot repeatedly can end up with its chest facing backwards.
+// Measured between the two anatomical triads and corrected by rotating the whole upper body
+// about the spine axis, which is a rigid rotation and therefore preserves every distance inside
+// that set. The two torso-cross braces resist the same twist, so they agree with this rather
+// than fighting it - but they only slow it, they cannot bound it, which is why this exists.
+#define RAG_TWIST_SET ((1u << 3) | (1u << 4) | (1u << 5) | (1u << 6) | (1u << 7) | (1u << 8) | (1u << 9) | (1u << 10))
+
+static void RagTwistLimit(ragSim_t *s, float maxDeg, float k)
+{
+    float    T0[3][3], T2[3][3], R[3][3];
+    vec3_t   axis, l0, l2;
+    float    phi, lim, excess, d;
+
+    if (maxDeg <= 0.0f) {
+        return;
+    }
+    if (!RagBodyTriad(s->pt[1], s->pt[0], s->pt[13], s->pt[11], s->faceSign[0], T0)) {
+        return;
+    }
+    if (!RagBodyTriad(s->pt[3], s->pt[2], s->pt[8], s->pt[5], s->faceSign[1], T2)) {
+        return;
+    }
+    // twist is measured about the SPINE, so use the chest's own up axis as the reference: the
+    // two LEFT axes projected onto the plane perpendicular to it
+    VectorCopy(T2[2], axis);
+    VectorCopy(T0[1], l0);
+    VectorMA(l0, -DotProduct(l0, axis), axis, l0);
+    if (VectorNormalize(l0) < 0.001f) {
+        return;
+    }
+    VectorCopy(T2[1], l2);
+    VectorMA(l2, -DotProduct(l2, axis), axis, l2);
+    if (VectorNormalize(l2) < 0.001f) {
+        return;
+    }
+    phi = RagSignedAngle(l0, l2, axis);
+    lim = DEG2RAD(maxDeg);
+    if (phi > lim) {
+        excess = phi - lim;
+    } else if (phi < -lim) {
+        excess = phi + lim;
+    } else {
+        return;
+    }
+    d = -excess * k;
+    if (d > RAG_LIMIT_MAX_STEP) {
+        d = RAG_LIMIT_MAX_STEP;
+    } else if (d < -RAG_LIMIT_MAX_STEP) {
+        d = -RAG_LIMIT_MAX_STEP;
+    }
+    RagMat3FromAxisAngle(axis, d, R);
+    RagRotateSet(s, RAG_TWIST_SET, s->pt[2], R); // pivot at the chest, so the spine link survives
+    s->limCount++;
+}
+
 
 static qboolean RagCapture(centity_t *cent, entityState_t *ns, ragSim_t *s)
 {
@@ -1236,7 +1361,11 @@ static void RagShapeMatch(ragSim_t *s, float alpha)
         if (s->contact[i]) {
             a *= RAG_CONTACT_RELAX; // where the body TOUCHES, the ground gets the last word - the
         }                           // limb stays draped where it landed instead of being reeled in
-        if (s->limpMs[i] > 0 && rag_stick->integer) {
+        if (s->limpMs[i] > 0 && rag_stick->integer && i > 4) {
+            // i > 4: pelvis, spines and neck are EXCLUDED. Letting damage rewrite the
+            // torso's own resting shape is what allows a chest to accumulate twist and
+            // deformation over repeated hits until the body reads as melted. Limbs and the
+            // head keep what the bullet did to them; the trunk keeps its authored shape.
             // THE LIMB KEEPS WHAT THE BULLET DID TO IT. Rewrite this point's goal to where it
             // actually is now, expressed in the body's own frame, so when the limp window closes
             // the pose being held IS the new one. Bone lengths are still enforced by the distance
@@ -1300,6 +1429,18 @@ static void RagLimitApply(ragSim_t *s, int idx, const vec3_t axis, float phi, fl
 
     if (target == phi) {
         return; // inequality: project only when actually violated
+    }
+    // CHATTER RAMP. A limit that switches on and off between iterations makes the limb buzz at
+    // the boundary - live 2026-08-20, "sometimes the head kinda stutters after being shot up",
+    // the head being a leaf with a single link and two neck limits acting on it. Fade the
+    // correction in over the first 4 degrees of violation so a hair's-breadth overshoot gets a
+    // hair's-breadth correction instead of a full-strength one.
+    {
+        float viol = (float)fabs(target - phi) / DEG2RAD(4.0f);
+        if (viol > 1.0f) {
+            viol = 1.0f;
+        }
+        k *= viol * viol * (3.0f - 2.0f * viol); // smoothstep
     }
     d = (target - phi) * k;
     if (d > RAG_LIMIT_MAX_STEP) {
@@ -1463,6 +1604,12 @@ static void RagStep(ragSim_t *s, float dt)
             VectorMA(s->pt[b], corr, d, s->pt[b]);
         }
         RagLimitSweep(s, it); // the 18 angular limits, inside the iteration loop
+        if (rag_limits->integer) {
+            RagTwistLimit(s, rag_twist->value, 0.479f); // ... and the spine cannot wind up
+        }
+        if (rag_self->value > 0.0f) {
+            RagSelfCollide(s, rag_self->value); // ... then stop parts sharing space
+        }
     }
     for (i = 0; i < RAG_PTS; i++) { // impact-limp windows tick down with the sim, not the frame
         if (s->limpMs[i] > 0) {
@@ -1512,6 +1659,9 @@ static void RagStep(ragSim_t *s, float dt)
         // as physics takes the wheel
         alpha = (s->rampMs >= 300) ? target : target + (1.0f - target) * (1.0f - s->rampMs / 300.0f);
         RagShapeMatch(s, alpha);
+        if (rag_self->value > 0.0f) {
+            RagSelfCollide(s, rag_self->value);
+        }
         RagLimitSweep(s, 0); // the shape-match moves points with PER-POINT alphas, so it is
                              // not rigid and can re-violate a limit it was just corrected
                              // out of. Collision still gets the last word after RagStep.
