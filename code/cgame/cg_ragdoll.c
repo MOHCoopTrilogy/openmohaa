@@ -55,13 +55,13 @@ static ragSim_t *RagAllocSlot(int entnum);
 
 #define RAG_MAX_SIMS   16
 #define RAG_MAX_CH     128
-#define RAG_PTS        15
+#define RAG_PTS        17
 #define RAG_SUBSTEP_MS 8
 #define RAG_MAX_STEPS  4
 #define RAG_DAMPING    0.98f
 #define RAG_ITERS      6
-#define RAG_TRACE_BUDGET 240   // per-frame MOVER trace ceiling (world traces have their own)
-#define RAG_MOVER_PER_BODY 60  // ... and a per-body allowance, so the first corpses cannot eat it
+#define RAG_TRACE_BUDGET 272   // per-frame MOVER trace ceiling (world traces have their own)
+#define RAG_MOVER_PER_BODY 68  // ... and a per-body allowance, so the first corpses cannot eat it
 #define RAG_CONTACT_RELAX 0.15f // where a point touches the world, the shape-match yields to it
 #define RAG_IMPACT_RELAX  0.05f // a struck limb keeps only 5% of the pose pull at the moment of
 #define RAG_IMPACT_LIMP_MS 600  // impact, easing back to full over this long. Without it the
@@ -74,7 +74,7 @@ static ragSim_t *RagAllocSlot(int entnum);
 static const struct {
     const char *name;
     int         parent;
-} s_ragBones[RAG_PTS] = {
+} s_ragBones[] = {
     {"Bip01 Pelvis",    -1}, // 0
     {"Bip01 Spine1",     0}, // 1
     {"Bip01 Spine2",     1}, // 2
@@ -90,6 +90,11 @@ static const struct {
     {"Bip01 L Calf",    11}, // 12
     {"Bip01 R Thigh",    0}, // 13
     {"Bip01 R Calf",    13}, // 14
+    // The calf point IS the knee (the engine stores only a LENGTH for the IK elbow/wrist and
+    // places the bone at hip + thighLength). Without a foot the entire shin - ~24u, and about a
+    // third of the body mesh - rendered as a rigid copy of the thigh.
+    {"Bip01 L Foot",    12}, // 15
+    {"Bip01 R Foot",    14}, // 16
 };
 
 // A bone's skinned mesh runs from its OWN origin toward its CHILD (measured across 39 humanoid
@@ -98,7 +103,7 @@ static const struct {
 // renders every limb off by the full angle its joint bent - the mesh literally cannot close at a
 // bent elbow. coop_ragdollTest 2 is structurally blind to this (S = I kills the difference).
 // Pelvis (-1) uses the anatomical triad; leaves (-1) keep the incoming segment.
-static const int s_ragDriveChild[RAG_PTS] = {
+static const int s_ragDriveChild[] = {
     -1, //  0 Pelvis     - anatomical triad, never segment-driven
      2, //  1 Spine1     -> Spine2
      3, //  2 Spine2     -> Neck   (of 3 sim children: the spine's own flesh runs here)
@@ -111,17 +116,19 @@ static const int s_ragDriveChild[RAG_PTS] = {
     10, //  9 R Forearm  -> R Hand
     -1, // 10 R Hand     - leaf
     12, // 11 L Thigh    -> L Calf
-    -1, // 12 L Calf     - leaf TODAY; becomes L Foot in round 9 (the unsimulated knee)
+    15, // 12 L Calf     -> L Foot   (was a leaf: the whole shin copied the thigh's rotation)
     14, // 13 R Thigh    -> R Calf
-    -1, // 14 R Calf     - leaf
+    16, // 14 R Calf     -> R Foot   (the shin finally has a direction of its own)
+    -1, // 15 L Foot     - leaf
+    -1, // 16 R Foot     - leaf
 };
 
 // stiffening braces beyond the 14 parent links (plan section-3). The grandparent links are
 // fold limits: they cap how sharply any joint can hinge, measured at the DEATH pose, and
 // they rotate with the body - so corpses topple and slump but cannot collapse into a
 // bead-chain pile (the P3 live finding 2026-08-19 21:37: pure neighbor links = heap).
-#define RAG_BRACES 16
-static const int s_ragBraces[RAG_BRACES][2] = {
+#define RAG_BRACES 18
+static const int s_ragBraces[][2] = {
     {5,  8},  // shoulder - shoulder
     {11, 13}, // thigh - thigh
     {5,  13}, // L shoulder - R thigh (torso cross)
@@ -138,12 +145,14 @@ static const int s_ragBraces[RAG_BRACES][2] = {
     {1,  11}, // spine1 - L thigh (geometrically inert - pt 11 IS the hip socket; kept, harmless)
     {2,  12}, // spine2 - L calf  (HIP fold limit - facts-vet FIX 9: without these a full
     {2,  14}, // spine2 - R calf   jackknife is constraint-legal; the live data proved it)
+    {11, 15}, // L hip - L ankle: with hip->knee and knee->ankle both fixed links, this distance
+    {13, 16}, // R hip - R ankle  is a pure function of the KNEE angle - the first real one
 };
 
 // fold limits are INEQUALITY braces: they stop the joint folding TIGHTER than the factor
 // of its capture distance, but never stop it straightening (an equality brace froze dead
 // arms at their death-pose bend). 0 = structural equality brace at full capture length.
-static const float s_ragBraceMinFactor[RAG_BRACES] = {
+static const float s_ragBraceMinFactor[] = {
     0,     0,     0,     0,     0,     0,     // structural truss: equality
     0.80f,                                    // neck
     0.70f, 0.70f,                             // shoulders
@@ -151,6 +160,10 @@ static const float s_ragBraceMinFactor[RAG_BRACES] = {
     0.75f, 0.75f,                             // knees
     0.75f,                                    // inert hip-socket brace
     0.60f, 0.60f,                             // hips: sitting-fold ok, flat jackknife blocked
+    0.34f, 0.34f,                             // knees: DERIVED, not picked. thigh 24.10u +
+                                              // shin 23.94u, straight leg 48.04u; 140deg of
+                                              // flexion leaves 16.43u = 0.342. (0.75 would cap
+                                              // the knee at 83deg - a kneeling death exceeds it.)
 };
 
 struct ragSim_s {
@@ -256,12 +269,13 @@ static int      s_ragWorldTraces;             // world traces: bounded by constr
 // per-bone collision radius (facts-vet FIX 4): a uniform box seated every point at the
 // same height - the whole skeleton rested in one plane (z-span 0-2 in live data) and thick
 // parts clipped the floor. Torso/head hold higher, extremities lower = natural drape.
-static const float s_ragPtRadius[RAG_PTS] = {
+static const float s_ragPtRadius[] = {
     7.0f, 7.0f, 7.5f, 4.0f, 5.0f, // pelvis, spine1, spine2, neck, head
     4.0f, 3.0f, 2.5f,             // L upperarm, forearm, hand
     4.0f, 3.0f, 2.5f,             // R arm
     5.0f, 4.0f,                   // L thigh, calf
     5.0f, 4.0f,                   // R thigh, calf
+    3.0f, 3.0f,                   // L foot, R foot
 };
 
 // hierarchy anchor table (facts-vet FIX 2, table variant with its corrections applied:
@@ -313,6 +327,8 @@ static cvar_t  *rag_linear   = NULL;
 static cvar_t  *rag_anchor   = NULL;
 static cvar_t  *rag_stick    = NULL;
 static cvar_t  *rag_stickmax = NULL;
+static cvar_t  *rag_buriedmax = NULL;
+static cvar_t  *rag_feet     = NULL;
 
 static void RagCvars(void)
 {
@@ -362,8 +378,26 @@ static void RagCvars(void)
         // actually died in. Unbounded, every hit compounds and the corpse mangles into poses no
         // body can hold; this keeps the damage visible but anatomically anchored.
         rag_stickmax = cgi.Cvar_Get("coop_ragdollStickMax", "12", CVAR_TEMP);
+        // feet are the most burial-prone points on a corpse, and adding two of them tightens an
+        // absolute threshold that used to see 15 points
+        rag_buriedmax = cgi.Cvar_Get("coop_ragdollBuriedMax", "5", CVAR_TEMP);
+        // 0 = seed the feet ON the knees, which makes driveOk fall to 0 by itself and reverts
+        // the body to the byte-for-byte 15-point sim inside a 17-point array
+        rag_feet = cgi.Cvar_Get("coop_ragdollFeet", "1", CVAR_TEMP);
     }
 }
+
+// A table that forgot a row now SHRINKS, so these catch it at compile time. SIZED arrays would
+// not: C zero-fills the missing rows and sizeof() still equals RAG_PTS, so the guard would pass
+// in exactly the case it exists to catch. The three invisible zero-fills this prevents: a 0
+// radius makes the pre-lift a POINT trace (bug-1962's pin), a 0 drive-child aims a foot at the
+// pelvis, a 0 min-factor turns a fold limit into an EQUALITY brace welding ankle to hip - and a
+// NULL bone name is an access violation inside stricmp on the first kill.
+typedef char rag_chk_bones[(sizeof(s_ragBones) / sizeof(s_ragBones[0]) == RAG_PTS) ? 1 : -1];
+typedef char rag_chk_drive[(sizeof(s_ragDriveChild) / sizeof(s_ragDriveChild[0]) == RAG_PTS) ? 1 : -1];
+typedef char rag_chk_radius[(sizeof(s_ragPtRadius) / sizeof(s_ragPtRadius[0]) == RAG_PTS) ? 1 : -1];
+typedef char rag_chk_brace[(sizeof(s_ragBraces) / sizeof(s_ragBraces[0]) == RAG_BRACES) ? 1 : -1];
+typedef char rag_chk_minf[(sizeof(s_ragBraceMinFactor) / sizeof(s_ragBraceMinFactor[0]) == RAG_BRACES) ? 1 : -1];
 
 // the world's own gravity, not a hand-picked 800 (= 1.56 g against sv_gravity 512): a corpse must
 // fall at the same rate as the player looking at it, and the lower value drops the constraint
@@ -635,12 +669,30 @@ static qboolean RagCapture(centity_t *cent, entityState_t *ns, ragSim_t *s)
     for (i = 0; i < RAG_PTS; i++) {
         vec3_t cap;
         s->simChan[i] = cgi.Tag_NumForName(model.tiki, s_ragBones[i].name);
+        if (i >= 15 && !rag_feet->integer) {
+            s->simChan[i] = -1; // rollback path: behave exactly like a footless model
+        }
         if (s->simChan[i] < 0 || s->simChan[i] >= s->count) {
+            if (i >= 15) {
+                // FOOTLESS MODEL, or coop_ragdollFeet 0. Never bail for a foot: a bail costs
+                // that corpse its ragdoll permanently, and coverage is the number this project
+                // is not handing back. Seeding the foot ON the knee keeps all 17 array slots
+                // valid, makes the zero-length link a no-op, and drops driveOk[12] to 0 by
+                // itself - which reverts the calf to today's leaf behaviour with no special
+                // case anywhere in RagPush.
+                s->simChan[i] = -1;
+                VectorCopy(s->pt[(i == 15) ? 12 : 14], s->pt[i]);
+                VectorCopy(s->pt[i], s->ptPrev[i]);
+                continue;
+            }
             if (rag_debug->integer) {
                 cgi.Printf("^~^~^ RAGDOLL capture FAILED ent=%d reason=missing-tag '%s'\n",
                            ns->number, s_ragBones[i].name);
             }
             return qfalse; // vet1 verified all 17 names across the roster; a miss = bail clean
+        }
+        if (s->simChan[i] < 0) {
+            continue; // seeded foot: pt[] already set above, it has no channel of its own
         }
         cap[0] = s->mat0[s->simChan[i]][0][3];
         cap[1] = s->mat0[s->simChan[i]][1][3];
@@ -693,7 +745,7 @@ static qboolean RagCapture(centity_t *cent, entityState_t *ns, ragSim_t *s)
                 }
             }
         }
-        if (nTorso > 0 || s->buried >= 4) {
+        if (nTorso > 0 || s->buried >= rag_buriedmax->integer) {
             if (rag_debug->integer) {
                 cgi.Printf("^~^~^ RAGDOLL capture BURIED ent=%d torso=%d total=%d - not arming\n",
                            ns->number, nTorso, (int)s->buried);
