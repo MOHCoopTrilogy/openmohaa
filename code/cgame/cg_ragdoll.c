@@ -1455,7 +1455,7 @@ void CG_RagdollImpulse(const vec3_t pos, const vec3_t dir, float force, float ra
     // 2026-08-20: "eventually it does nothing when you shoot the limbs". A corpse near this
     // impact that is dead, drawn, and not currently simulated gets captured and armed right
     // here, so any body reacts no matter how long ago it died.
-    {
+    if (cg.snap) { // NULL before the first rendered frame - a real deref, caught by the r13 audit
         int e;
         for (e = 0; e < cg.snap->numEntities; e++) {
             entityState_t *es = &cg.snap->entities[e];
