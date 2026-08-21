@@ -1514,7 +1514,12 @@ void Sentient::ArmorDamage(Event *ev)
         AIDamageMult = gi.Cvar_Get("g_aiDamageMult", "1.0", 0);
     }
 
+    // HZM coop [user 2026-08-20] bug-1975 - THE DEAD BRANCH. This early-out is what made every
+    // post-death gore path unreachable dead code; see Sentient::CoopGoreCorpseDamage for the full
+    // story. Everything BELOW this line is the LIVING damage pipeline and is deliberately left
+    // untouched: a corpse never reaches health, pain, knockback, EV_Killed or any AI reaction.
     if (IsDead()) {
+        CoopGoreCorpseDamage(ev);
         return;
     }
 
@@ -3013,6 +3018,181 @@ void Sentient::CoopGoreTryGibSkins(int meansofdeath, Entity *inflictor)
         gi.Printf("^~^~^ GOREGIB ent=%d mod=%d mark=%d pattern=%d gib_surfs=%d/%d model=%s\n",
                   entnum, meansofdeath, m_bCoopGoreGibMark ? 1 : 0, pattern, nExtreme, numsurfaces,
                   model.c_str());
+    }
+}
+
+/*
+=================
+Sentient::CoopGoreCorpseDamage   (HZM coop [user 2026-08-20], bug-1975)
+
+POST-DEATH GORE - the DEAD half of ArmorDamage.
+
+STANDING RULE (bug-1321): "All models should be susceptible to complete annihilation by shooting
+them even if dead."
+
+bug-1321 made the corpse STOPPABLE (SOLID_BBOX + CONTENTS_WEAPONCLIP in Actor::BecomeCorpse) and
+recorded that everything else was already in place. Half of that was true. The DELIVERY end is
+genuinely fine, and was re-verified writing this: Entity::Damage has no deadflag test, takedamage
+is set once in Actor (actor.cpp:2929) and never cleared on death, and RadiusDamage keeps corpses
+in its target list. What defeated all of it was ArmorDamage's OWN opening line -
+
+    if (IsDead()) { return; }
+
+- an unconditional early-out, IsDead() being deadflag != DEAD_NO (entity.cpp) and
+Actor::HandleKilled setting deadflag = DEAD_DEAD. The commented-out vanilla dead-body block ~90
+lines further down inside ArmorDamage is a DIFFERENT one and was never the gate; that is what the
+bug-1321 note misread.
+
+So every gore path on a corpse hit was unreachable: CoopGoreUpdateSkinTier, CoopGoreTryWoundProp,
+CoopGoreDisfigureHead and CoopGoreTryGibSkins - the last of which carries a terminal-tier lock
+(m_iCoopGoreSkinTier >= 3) written expressly so post-death hits could not re-tier a gibbed corpse
+back down, and which therefore could never run either. Same for bug-1874's m_bCoopHeadGore
+exemption, whose stated purpose is "the next damage event on the corpse". All you actually got for
+shooting a body was the CGM_BULLET_8 flesh message (weaputils.cpp sends it OUTSIDE
+"if (ent->takedamage)") plus the client-side UV wound stamp: blood, and nothing else.
+
+WHAT THIS DELIBERATELY DOES NOT DO. No health change, no EV_Pain, no EV_Killed / EV_GotKill, no
+knockback, no AI reaction, no headshot kill-confirm cue (this body was already dead - the cue would
+be a lie), no DropBloodPool and no CoopGoreTryDripAttach. The last two are excluded on cost, not
+principle: both re-spawn their entity/decal on every CALL, so driving them from a per-bullet path
+would churn drip slots and stack non-fading pool decals.
+
+WHAT IT COSTS. Everything on the free path is entityState surface bits, which replicate for nothing
+and reach late joiners. The one entity-spawning call - the wound prop - carries a global per-frame
+budget. Shooting bodies is a voluntary, SUSTAINED activity (that is the whole point of the feature)
+and one shotgun blast is ~10 EV_Damage events inside a single server frame. Per-BODY cost was
+already bounded, since CoopGoreTryWoundProp recycles its oldest slot (bug-1876); the per-FRAME
+spawn rate is the thing that took the AI down in bug-856/861, so it is capped here rather than
+trusted. The two heavier paths reachable from here (chunks, decapitation) already carry their own
+per-frame budgets, and the decap can fire at most once per body.
+=================
+*/
+void Sentient::CoopGoreCorpseDamage(Event *ev)
+{
+    static cvar_t *pOn = NULL, *pBudget = NULL, *pDbg = NULL;
+    static int     s_iFrameTime = -1, s_iThisFrame = 0;
+    Sentient      *attacker;
+    Entity        *inflictor;
+    Vector         position, direction;
+    float          damage;
+    int            meansofdeath, location;
+
+    // NEVER a player body. Nothing is ever painted on or attached to a player (bug-785/792 standing
+    // rule), and a dead player is a DBNO/respawn state rather than scenery. Player::ArmorDamage
+    // chains into Sentient::ArmorDamage, so dead players DO arrive here without this guard.
+    if (IsSubclassOfPlayer()) {
+        return;
+    }
+    // Coop only, matching the corpse-shootable change this completes. In SP a corpse is SOLID_NOT so
+    // bullets pass through it anyway, but a script radiusdamage still reaches a body - gate it so
+    // vanilla SP behaviour is provably unchanged either way.
+    if (g_gametype->integer == GT_SINGLE_PLAYER) {
+        return;
+    }
+    if (!pOn) {
+        pOn     = gi.Cvar_Get("coop_corpseGore", "1", CVAR_ARCHIVE);
+        pBudget = gi.Cvar_Get("coop_corpseGoreBudget", "6", 0);
+        pDbg    = gi.Cvar_Get("coop_goreDebug", "0", 0);
+    }
+    if (!pOn->integer || !com_blood->integer) {
+        return;
+    }
+
+    // --- the living path's own gates, in the living path's own order, so the two cannot drift ---
+    if ((takedamage == DAMAGE_NO) || (movetype == MOVETYPE_NOCLIP)) {
+        return;
+    }
+
+    location = CheckHitLocation(ev->GetInteger(10));
+    if (location == HITLOC_MISS) {
+        return;
+    }
+
+    attacker     = (Sentient *)ev->GetEntity(1);
+    damage       = ev->GetFloat(2);
+    inflictor    = ev->GetEntity(3);
+    position     = ev->GetVector(4);
+    direction    = ev->GetVector(5);
+    meansofdeath = ev->GetInteger(9);
+
+    if (Immune(meansofdeath)) {
+        return;
+    }
+    if (damage <= 0.0f || (flags & FL_GODMODE)) {
+        return; // a zero-damage bookkeeping event has nothing to show
+    }
+
+    // The coop ally-protection filters the living path applies above this point (the RF_COOP_BOSS
+    // drop, the bug-1586 blastshield, the same-team damage filter) are every one of them about
+    // HEALTH, and no health is changed here - so they are deliberately NOT mirrored. The standing
+    // rule says ALL models, which includes a friendly body: you can gib a dead ally, you simply
+    // cannot hurt a live one.
+    if (location > HITLOC_GENERAL && location < NUMBODYLOCATIONS) {
+        damage *= m_fDamageMultipliers[location];
+    }
+
+    // RadiusDamage hands over an UN-normalized direction (org - origin, tens or hundreds of units
+    // long) while BulletAttack hands over a unit vector. The living path only ever normalizes inside
+    // its knockback block, so anything downstream that scales by direction has to do it itself -
+    // CoopGoreThrowChunks multiplies by up to 250, which on a raw radius vector is a chunk fired at
+    // several thousand units per second.
+    direction.normalize();
+
+    // --- ACCUMULATE. m_fCoopGoreDamage only ever RISES on this path, so the monotonic tier guard
+    //     (coop_gorePermanent) and the terminal gib lock can only hold or advance, never reverse. ---
+    m_fCoopGoreDamage += damage;
+    CoopGoreUpdateSkinTier();
+
+    // Bullet holes where you are shooting NOW - the one entity-spawning call, hence the budget.
+    // NOTE this whole call is inert while coop_goreWounds is 0.
+    if (s_iFrameTime != level.inttime) {
+        s_iFrameTime = level.inttime;
+        s_iThisFrame = 0;
+    }
+    if (s_iThisFrame < (pBudget->integer > 0 ? pBudget->integer : 6)) {
+        s_iThisFrame++;
+        CoopGoreTryWoundProp(location, meansofdeath, position);
+    }
+
+    // A headshot ruins the face on a body exactly as it does on the killing blow (bug-1874) - but
+    // WITHOUT CoopHeadshotKillFx and without the coop_headshot cue, both of which confirm a KILL
+    // that has already happened.
+    if (attacker && attacker->IsSubclassOfPlayer()
+        && (meansofdeath == MOD_BULLET || meansofdeath == MOD_FAST_BULLET || meansofdeath == MOD_SHOTGUN)
+        && (location == HITLOC_HEAD || location == HITLOC_HELMET || location == HITLOC_NECK)) {
+        CoopGoreDisfigureHead();
+    }
+
+    // An explosion still gibs a body. Surface bits only - and this is what finally arms the terminal
+    // tier lock that the function was written around in the first place.
+    CoopGoreTryGibSkins(meansofdeath, inflictor);
+
+    if (CoopGoreModIsExplosive(meansofdeath, inflictor)) {
+        // the same 2-chunk spray a blast DEATH throws (CoopGoreDeathKinetics). CoopGoreThrowChunks
+        // carries its own global per-frame budget (coop_goreChunkBudget).
+        CoopGoreThrowChunks(position, direction, 2, "models/fx/coop_gorechunk.tik", 1.1f);
+    }
+
+    // ...and a blast or a shotgun can still take the head off a body that has one. Safe to call per
+    // hit: it is dead-gated by construction (its own "if (health > 0) return;"), chance-gated,
+    // budgeted at coop_decapBudget per server frame, and it refuses a corpse whose head surfaces are
+    // already NODRAW - so it fires at most once per body however long you keep shooting it.
+    CoopGoreTryDecapitate(meansofdeath, inflictor);
+
+    if (pDbg->integer) {
+        // TRAPS T3: this whole family was dead code precisely because nothing ever said so. One
+        // machine-parseable line per corpse, same convention as GORESKIN / GOREGIB. Throttled to
+        // ~1Hz per body because coop_goreDebug is forced on in autoexec.cfg and a magazine emptied
+        // into one corpse is 30 hits.
+        static int   s_iLastEnt  = -1;
+        static float s_fLastTime = -1.0f;
+
+        if (entnum != s_iLastEnt || level.time - s_fLastTime > 1.0f) {
+            s_iLastEnt  = entnum;
+            s_fLastTime = level.time;
+            gi.Printf("^~^~^ CORPSEGORE ent=%d mod=%d loc=%d dmg=%.0f tier=%d model=%s\n",
+                      entnum, meansofdeath, location, damage, m_iCoopGoreSkinTier, model.c_str());
+        }
     }
 }
 

@@ -1847,6 +1847,31 @@ void Level::InitEdict(gentity_t *e)
     e->s.wasframe = 0;
     e->spawntime  = level.time;
 
+    // HZM coop [user 2026-08-20] CLEAR THE SURFACE BITS. Reported symptom: "still sometimes seeing
+    // guys with invisible torsos running around", later narrowed to "an officer and their
+    // reinforcement specifically", and unaffected by coop_goreSkins 0.
+    //
+    // s.surfaces[] is an INDEX-keyed bitfield in entity state carrying per-surface NODRAW and gore
+    // skin-offset bits. Nothing anywhere cleared it, and InitEdict - the one place a recycled edict
+    // is reset - resets renderfx, scale, constantLight, wasframe and every bone controller but not
+    // this. So a slot freed by a corpse handed its stale bits straight to the next occupant.
+    //
+    // That is invisible-body-part-shaped because the bits are keyed by surface INDEX, and index N
+    // means a different surface on every model. A NODRAW set to hide a HELMET on a dead rifleman
+    // (Sentient::EventPopHelmet, or the headgear fallback that hides "outside"/"inside"/"hat")
+    // lands on whatever occupies that index next - and on german_*_officer.tik the surfaces are
+    // hand/holster/mp40clips/officercap/pants/tunic/tunic_c, so it can land squarely on the tunic.
+    //
+    // It presents on officers and reinforcements because those are the actors spawned DYNAMICALLY
+    // mid-wave, long after map load, into slots recently freed by the enemies the players just
+    // killed - i.e. precisely the slots most likely to carry helmet-pop or decap NODRAW bits.
+    // coop_goreSkins 0 could never help: the gore loop deliberately preserves the nodraw bits and
+    // only rewrites the skin-offset ones, so it is not the source.
+    //
+    // beam.cpp makes this worse by using s.surfaces[0..9] as arbitrary PARAMETER storage (segment
+    // count, life, endalpha), so a recycled beam slot hands an actor pure garbage in the same field.
+    memset(e->s.surfaces, 0, sizeof(e->s.surfaces));
+
     for (i = 0; i < NUM_BONE_CONTROLLERS; i++) {
         e->s.bone_tag[i] = -1;
         VectorClear(e->s.bone_angles[i]);

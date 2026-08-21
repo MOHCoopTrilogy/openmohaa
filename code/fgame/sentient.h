@@ -162,6 +162,7 @@ protected:
     void             CoopGoreHeadshotExtras(const Vector &pos, const Vector &dir); // HZM coop [user 2026-08-19] brain chunks + dangling eyeball
     void             CoopGoreDeathKinetics(const Vector &pos, const Vector &dir, float fDamage, int mod, Entity *inflictor); // HZM coop [user 2026-08-19] corpse impulse + explosion decap/chunks
     void             CoopGoreTryDecapitate(int meansofdeath, Entity *inflictor); // HZM coop [user 2026-08-17] - blast/shotgun decapitation
+    void             CoopGoreCorpseDamage(Event *ev); // HZM coop [user 2026-08-20] bug-1975 - the DEAD half of ArmorDamage: gore only, no health/pain/death
     qboolean         ShouldBleed(int meansofdeath, qboolean dead);
     qboolean         ShouldGib(int meansofdeath, float damage);
     str              GetBloodSpurtName(void);
