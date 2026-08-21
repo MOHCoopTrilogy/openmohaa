@@ -1875,10 +1875,26 @@ void CG_OffsetFirstPersonView(refEntity_t *pREnt, qboolean bUseWorldPosition)
                     }
                     if (s_inspEnv > 0.001f) {
                         // raise, draw toward the eye, and drift laterally - a look-over, not a spin
-                        float e = s_inspEnv * (0.75f + 0.35f * fClassKick);
-                        VectorMA(pREnt->origin,  e * 2.6f, mat[2], pREnt->origin);
-                        VectorMA(pREnt->origin, -e * 2.2f, mat[0], pREnt->origin);
-                        VectorMA(pREnt->origin,  e * 1.1f, mat[1], pREnt->origin);
+                        // [user 2026-08-21] "Gun inspection (at least for stg44) makes the back
+                        // of the gun (stock) clip into the camera so you see inside the gun."
+                        //
+                        // The first version pulled the weapon 2.2u TOWARD the eye, which is what
+                        // a real inspect does - but the view weapon already rests only a few
+                        // units ahead of the camera, and a long gun (StG 44, rifles, the BAR)
+                        // has its stock at the back of that. Any rearward travel puts the stock
+                        // through the near plane and you see the inside of the receiver.
+                        //
+                        // Moved AWAY from the eye instead. It cannot be a close inspection in a
+                        // first-person view this tight; raising and turning the weapon reads as
+                        // "having a look at it" and cannot clip. Scaled DOWN by class weight,
+                        // not up: the heavy guns are the long ones.
+                        float e = s_inspEnv * (1.15f - 0.25f * fClassKick);
+                        if (e < 0.0f) {
+                            e = 0.0f;
+                        }
+                        VectorMA(pREnt->origin,  e * 2.2f, mat[2], pREnt->origin); // raise
+                        VectorMA(pREnt->origin,  e * 1.6f, mat[0], pREnt->origin); // AWAY from the eye
+                        VectorMA(pREnt->origin,  e * 1.4f, mat[1], pREnt->origin); // and turn it over
                     }
 
                     // ---- SPRINT-TO-FIRE ----------------------------------------------------------
@@ -2225,6 +2241,10 @@ void CG_OffsetFirstPersonView(refEntity_t *pREnt, qboolean bUseWorldPosition)
                     float fDip  = pWcDip ? pWcDip->value : 4.0f;
                     VectorMA(pREnt->origin, -s_wcEnv * fBack, mat[0], pREnt->origin); // pull BACK toward camera
                     VectorMA(pREnt->origin, -s_wcEnv * fDip,  mat[2], pREnt->origin); // dip DOWN (muzzle drops)
+                    // EXEMPT from the feel budget - an authored retract (default 9u back), not
+                    // jitter. Clamped, the muzzle went back through walls at under half strength.
+                    VectorMA(s_vFeelExempt, -s_wcEnv * fBack, mat[0], s_vFeelExempt);
+                    VectorMA(s_vFeelExempt, -s_wcEnv * fDip,  mat[2], s_vFeelExempt);
                 }
             }
         }
@@ -2291,6 +2311,13 @@ void CG_OffsetFirstPersonView(refEntity_t *pREnt, qboolean bUseWorldPosition)
         origin[2] -= drop;
         if (pREnt && !VectorCompare(pREnt->origin, vec3_origin)) {
             pREnt->origin[2] -= drop;
+            // [user 2026-08-21] "you broke the dbno cam... revert it back". EXEMPT from the feel
+            // budget. That clamp bounds the summed jitter layers to 9u, but this is an authored
+            // 50u pose and the CAMERA above takes the full drop unconditionally - so clamping only
+            // the weapon half made the gun climb the screen as the eye sank, which is precisely the
+            // regression the note further up this file records as already fixed once. The budget
+            // cannot tell an authored stow from jitter; it has to be told.
+            s_vFeelExempt[2] -= drop;
         }
     }
 
@@ -2433,6 +2460,35 @@ void CG_OffsetFirstPersonView(refEntity_t *pREnt, qboolean bUseWorldPosition)
                 s_camLand = s_camLandV = 0.0f;
             }
             camOfs[2] += s_camLand;
+        }
+
+        // ---- CROUCH / STAND, ON THE CAMERA -----------------------------------------------------
+        // [user 2026-08-21] "When you crouch and stand up the hands/gun moves like you are, but it
+        // doesnt feel like the body is actually standing up or crouching."
+        //
+        // Exactly right: coop_crouchWeight moved the WEAPON, and the engine slides the eye height,
+        // but the eye slide is a clean interpolation with no overshoot - so it reads as a camera
+        // being lowered on a rail rather than a body folding at the knees. Drive a small spring off
+        // the RATE of the crouch blend: going down the camera keeps going a little past the target
+        // and settles back up, coming up it lags and then catches. That overshoot is the whole tell.
+        {
+            static float s_camCrPrev = 0.0f;
+            static float s_camCrVel  = 0.0f;
+            static qboolean s_camCrInit = qfalse;
+            float cbC = CG_AdsCrouchBlend();
+            float dC;
+            if (!s_camCrInit) { s_camCrInit = qtrue; s_camCrPrev = cbC; }
+            dC = cbC - s_camCrPrev;
+            if (dC > 0.2f) { dC = 0.2f; } else if (dC < -0.2f) { dC = -0.2f; }
+            s_camCrPrev = cbC;
+            s_camCrVel += dC * 34.0f * scale;
+            if (s_camCrVel > 3.5f) { s_camCrVel = 3.5f; }
+            else if (s_camCrVel < -3.5f) { s_camCrVel = -3.5f; }
+            if (s_camCrVel > 0.001f || s_camCrVel < -0.001f) {
+                camOfs[2] -= s_camCrVel;
+                s_camCrVel -= s_camCrVel * dt * 7.5f;
+                if (s_camCrVel < 0.002f && s_camCrVel > -0.002f) { s_camCrVel = 0.0f; }
+            }
         }
 
         // ---- STRAFE / TURN BANK ---------------------------------------------------------------
@@ -2634,6 +2690,21 @@ static qboolean CG_AdsStagedOn(void)
     if (!pOn) { pOn = cgi.Cvar_Get("cg_adsShoulder", "1", CVAR_ARCHIVE); }
     if (CG_ActiveWeaponHasScope()) {
         return qfalse; // snipers/scoped: straight to the scope, no shoulder stage
+    }
+    // [user 2026-08-21] "When behind cover and I hold right mouse I go straight into ADS now, it's
+    // supposed to start in over shoulder with the scroll functionality to go in/out of ADS and
+    // middle mouse to switch shoulders."
+    //
+    // Cover is a THIRD-PERSON state, but it is entered through PMF_COOP_COVER rather than by the
+    // player setting cg_3rd_person - so this returned false while covered, CG_AdsForceFirstPerson
+    // took its "no staged system in play -> instant first person" branch, and aiming from cover
+    // snapped straight to the irons. Before the cover/ADS ordering fix that was masked, because the
+    // cover force simply overrode the camera afterwards; fixing the ordering exposed it.
+    //
+    // Treating cover as a staged-ADS state is what makes the wheel work there too:
+    // CG_AdsShoulderWheelActive is built on this same predicate, so the scroll capture follows.
+    if (pOn->integer && cg.snap && (cg.snap->ps.pm_flags & PMF_COOP_COVER)) {
+        return qtrue;
     }
     return (pOn->integer && cg_3rd_person->integer) ? qtrue : qfalse;
 }
@@ -2982,13 +3053,33 @@ static int CG_CalcFov(void)
                 }
             }
         }
-        // ease toward the target so ADS zooms in QUICKLY but smoothly (no jarring instant snap)
-        step = (cg.frametime > 0) ? ((float)cg.frametime / 1000.0f) * 12.0f : 1.0f;
-        if (step > 1.0f) { step = 1.0f; }
-        s_adsZoomCur += (fTarget - s_adsZoomCur) * step;
-        if (s_adsZoomCur > fTarget - 0.003f && s_adsZoomCur < fTarget + 0.003f) {
-            s_adsZoomCur = fTarget; // settle
+        // [user 2026-08-21] "Still not smooth when transitioning out of ADS (testing with STG44).
+        // Still snappy."
+        //
+        // THE ZOOM WAS NEVER UNIFIED. The pose (rotation + screen shift) was put on one eased factor,
+        // but this kept its own independent 12/s ease - and on RELEASE that is roughly 100 ms while
+        // the pose takes ~350 ms at 8.5/s. The world therefore zoomed back out three times faster
+        // than the gun moved, and for a weapon whose per-gun rotation is small the zoom IS the
+        // transition: the StG 44's standing tune is 2.5 degrees of yaw and a 0.04 shift, so almost
+        // everything the eye sees on that gun was the fast zoom snapping back.
+        //
+        // Now derived from the same factor, so zoom, rotation and shift are one motion with one
+        // curve - fast in, slow out - by construction rather than by matching three numbers.
+        //
+        // The TARGET has to be latched. fTarget falls to 1.0 the instant the ADS button is released,
+        // so interpolating toward a live target would collapse the zoom to 1.0 in a single frame -
+        // the very snap being fixed. Hold the last aimed-at value and let the factor decay across it.
+        {
+            static float s_adsZoomTgt = 1.0f;
+            if (CG_AimingDownSights()) {
+                s_adsZoomTgt = fTarget;
+            }
+            s_adsZoomCur = 1.0f + (s_adsZoomTgt - 1.0f) * CG_AdsPoseFactor();
+            if (s_adsZoomCur > 0.9995f) {
+                s_adsZoomCur = 1.0f; // exact, so the weapon-fov gate below closes cleanly
+            }
         }
+        (void)step;
 
         if (s_adsZoomCur < 0.999f) { // any zoom (including mid-transition)
             float fGunZoom = cg_adsGunZoom ? cg_adsGunZoom->value : 0.0f;

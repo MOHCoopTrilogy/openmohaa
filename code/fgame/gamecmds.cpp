@@ -47,7 +47,78 @@ typedef struct {
     SafePtr<Listener> master;
 } commandmaster_t;
 
+
+/*
+=================
+G_SurfScanCmd
+
+HZM coop [user 2026-08-21] INVISIBLE BODY PARTS - the probe, not another guess.
+
+Reported three times with a widening scope: first "guys with invisible torsos", then narrowed to
+"an officer and their reinforcement specifically", then "an axis ai, not a reinforcement/officer,
+just an actor from the mission itself, that has no body".
+
+Two root causes have already been proposed and both were wrong. The first blamed stale surface bits
+surviving entity recycling; Level::FreeEdict already memsets the whole gentity, so that was inert.
+The second blamed Actor::setModel rebuilding the composite tiki and moving the surface index space,
+which is real and worth fixing but cannot explain a plain mission actor that never has its model
+rebuilt. Guessing a third time is not the way to close this, and this codebase has a precedent for
+exactly that (see the DECAPSURF probe in sentient.cpp).
+
+So: walk every live sentient and print any that has a NODRAW bit set, with the model, the surface
+index, and the surface NAME at that index. When an invisible body is on screen, run this and the
+answer is in one line - either the hidden surface is a body part (so something hid the wrong thing)
+or the index is out of range / the name is empty (so the index space moved under the bits).
+
+Usage: type `coop_surfscan` in the console while looking at one.
+=================
+*/
+static qboolean G_SurfScanCmd(gentity_t *ent)
+{
+    gentity_t *e;
+    int        i, si, ns, nfound = 0;
+
+    gi.Printf("^~^~^ SURFSCAN begin\n");
+    for (i = 0; i < globals.num_entities; i++) {
+        Sentient *sent;
+        e = &g_entities[i];
+        if (!e->inuse || !e->entity || !e->tiki) {
+            continue;
+        }
+        if (!e->entity->isSubclassOf(Sentient)) {
+            continue;
+        }
+        sent = (Sentient *)e->entity;
+        ns   = gi.TIKI_NumSurfaces(e->tiki);
+        if (ns > MAX_MODEL_SURFACES) {
+            ns = MAX_MODEL_SURFACES;
+        }
+        for (si = 0; si < MAX_MODEL_SURFACES; si++) {
+            if (!(e->s.surfaces[si] & MDL_SURFACE_NODRAW)) {
+                continue;
+            }
+            {
+                const char *sn = (si < ns) ? gi.Surface_NumToName(e->tiki, si) : "<INDEX OUT OF RANGE>";
+                gi.Printf(
+                    "^~^~^ SURFSCAN ent=%d alive=%d name=%s tiki=%s nsurf=%d hidden[%d]=%s\n",
+                    i,
+                    sent->health > 0 ? 1 : 0,
+                    sent->targetname.length() ? sent->targetname.c_str() : "<none>",
+                    gi.TIKI_NameForNum(e->tiki),
+                    ns,
+                    si,
+                    (sn && *sn) ? sn : "<EMPTY NAME>"
+                );
+                nfound++;
+            }
+        }
+    }
+    gi.Printf("^~^~^ SURFSCAN end, %d hidden surface(s) across all sentients\n", nfound);
+    return qtrue;
+}
+
 consolecmd_t G_ConsoleCmds[] = {
+    {"coop_surfscan",   G_SurfScanCmd,        qtrue },
     //   command name       function             available in multiplayer?
     {"say",             G_SayCmd,             qtrue },
     {"eventlist",       G_EventListCmd,       qfalse},
