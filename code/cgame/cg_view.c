@@ -1584,6 +1584,45 @@ void CG_OffsetFirstPersonView(refEntity_t *pREnt, qboolean bUseWorldPosition)
                         VectorMA(pREnt->origin, amp * 0.45f * (float)sin(ph * 0.5f), mat[1], pREnt->origin);
                     }
                 }
+                // HZM coop [user 2026-08-20] CROUCH / STAND WEIGHT.
+                // "Crouching and standing up could feel more realistic too."
+                //
+                // The engine moves the view height on a crouch, but nothing REACTS to it - the
+                // weapon is carried down and up as though bolted to the eye, which is what makes it
+                // read as a camera slide rather than a body movement. Drive a dip off the RATE of
+                // the crouch blend (already eased for the ADS pose, so this costs one subtraction):
+                // going down, the weapon lags and sinks; coming up, it lags and rises. Heavier
+                // weapons lag more, and it settles with its own decay rather than tracking the
+                // blend, so the reaction outlives the transition slightly the way real mass does.
+                //
+                // Translation channel, so it never touches the aim ray.
+                {
+                    static cvar_t *pCr   = NULL;
+                    static float   s_crPrev = 0.0f;
+                    static float   s_crVel  = 0.0f;
+                    float          cb, d;
+
+                    if (!pCr) { pCr = cgi.Cvar_Get("coop_crouchWeight", "1.0", CVAR_ARCHIVE); }
+                    cb = CG_AdsCrouchBlend();
+                    d  = cb - s_crPrev;
+                    s_crPrev = cb;
+
+                    if (pCr->value > 0.0f && fDt2 > 0.0f) {
+                        // impulse proportional to how fast the pose is changing
+                        s_crVel += d * 26.0f * fClassKick * pCr->value;
+                    }
+                    if (s_crVel > 4.0f) { s_crVel = 4.0f; }
+                    else if (s_crVel < -4.0f) { s_crVel = -4.0f; }
+
+                    if (s_crVel > 0.0005f || s_crVel < -0.0005f) {
+                        VectorMA(pREnt->origin, -s_crVel * 0.9f, mat[2], pREnt->origin);
+                        VectorMA(pREnt->origin, -s_crVel * 0.35f, mat[0], pREnt->origin);
+                        s_crVel -= s_crVel * fDt2
+                                   * (6.5f / (fClassKick > 0.1f ? fClassKick : 1.0f));
+                        if (s_crVel < 0.002f && s_crVel > -0.002f) { s_crVel = 0.0f; }
+                    }
+                }
+
                 // HZM coop [user 2026-08-20] SPRINT-TO-FIRE, IDLE INSPECT and LOW-AMMO TELL.
                 // All three ride pREnt->origin (translation), which is the only aim-honest channel:
                 // it moves the gun, never the aim ray. None of them exists in third person, because
