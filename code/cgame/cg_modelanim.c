@@ -1306,6 +1306,8 @@ static const char *const s_adsDonor[][2] = {
     {"S&W M10 .38",   "Webley Revolver" }, // top-break-style revolver sight picture
 };
 
+static float s_fAdsPose = 0.0f; // eased ADS pose factor (0 = hip, 1 = full sight alignment)
+
 static const adsGunTune_t *CG_AdsTuneExact(const char *wpn)
 {
     int i;
@@ -1651,7 +1653,33 @@ void CG_ModelAnim(centity_t *cent, qboolean bDoShaderTime)
                 // uniformly, so it cannot line the REAR aperture up with the FRONT post; rotating the
                 // weapon about tag_weapon (near the grip) tilts/angles the barrel so both sights fall on
                 // the aim line. cg_adsPitch (up/down) + cg_adsYaw (left/right), live-tunable, ADS only.
-                if (CG_AimingDownSights()) {
+                // [user 2026-08-20] "if the animation could be smoother coming out of ads for all
+                // guns that would be ideal". The per-gun sight rotation used to be a hard on/off -
+                // full alignment the instant ADS engaged, gone the instant it released - so the gun
+                // SNAPPED at both ends regardless of how smoothly the zoom eased. Ease a 0..1 pose
+                // factor and scale every angle by it: at 1 the sight picture is identical to before,
+                // at 0 the block does not run at all, and in between the gun rotates into and out of
+                // alignment. Out is deliberately gentler than in - coming down off the sights is a
+                // relax, not a snap.
+                {
+                    static float s_adsPoseCur  = 0.0f;
+                    static int   s_adsPoseTime = -1;
+                    if (s_adsPoseTime != cg.time) {
+                        float tgt  = CG_AimingDownSights() ? 1.0f : 0.0f;
+                        float rate = (tgt > s_adsPoseCur) ? 15.0f : 8.5f;
+                        float st   = (cg.frametime > 0) ? ((float)cg.frametime / 1000.0f) * rate : 1.0f;
+                        if (st > 1.0f) {
+                            st = 1.0f; // the frame clamp is 5s for a client of a remote server
+                        }
+                        s_adsPoseCur += (tgt - s_adsPoseCur) * st;
+                        if (fabs(s_adsPoseCur - tgt) < 0.002f) {
+                            s_adsPoseCur = tgt;
+                        }
+                        s_adsPoseTime = cg.time;
+                    }
+                    s_fAdsPose = s_adsPoseCur;
+                }
+                if (s_fAdsPose > 0.001f) {
                     vec3_t      vAdsA, vAdsB;
                     const char *adsWpn   = "";
                     const adsGunTune_t *adsT;
@@ -1669,6 +1697,9 @@ void CG_ModelAnim(centity_t *cent, qboolean bDoShaderTime)
                     fAdsPitch = adsT ? adsT->sPitch : (cg_adsPitch ? cg_adsPitch->value : 0.0f);
                     fAdsYaw   = adsT ? adsT->sYaw   : (cg_adsYaw   ? cg_adsYaw->value   : 0.0f);
                     fAdsRoll  = adsT ? adsT->sRoll  : (cg_adsRoll  ? cg_adsRoll->value  : 0.0f);
+                    fAdsPitch *= s_fAdsPose; // scaled by the eased pose: full at 1, nothing at 0
+                    fAdsYaw   *= s_fAdsPose;
+                    fAdsRoll  *= s_fAdsPose;
 
                     // pitch: rotate forward + up about the left axis (tilt muzzle up/down)
                     if (fAdsPitch != 0.0f) {
