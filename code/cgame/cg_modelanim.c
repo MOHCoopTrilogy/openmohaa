@@ -1391,7 +1391,10 @@ void CG_ModelAnim(centity_t *cent, qboolean bDoShaderTime)
     // cg_view.c, where the player still keeps the choice, not by force-hiding their body here.
     // HZM coop - IN COVER auto-3P: draw the own body whenever the cover view force is active
     // (lockstep with cg_view.c renderingThirdPerson - turret-camera-regression rule 2)
-    bThirdPerson |= (cg.snap->ps.pm_flags & PMF_COOP_COVER) ? qtrue : qfalse;
+    // [user 2026-08-20] cover must not outrank the ADS first-person handoff - lockstep with the
+    // matching change in cg_view.c (turret-camera-regression rule 2: if the camera goes first
+    // person and the body draw does not, the camera sits inside the drawn head).
+    if ((cg.snap->ps.pm_flags & PMF_COOP_COVER) && !CG_AdsForceFirstPerson()) { bThirdPerson = qtrue; }
     // Fixed in OPM
     //  Draw world model body when in camera
     bThirdPerson |= (cg.snap->ps.pm_flags & PMF_CAMERA_VIEW && !(cg.snap->ps.pm_flags & PMF_TURRET));
@@ -1661,24 +1664,12 @@ void CG_ModelAnim(centity_t *cent, qboolean bDoShaderTime)
                 // at 0 the block does not run at all, and in between the gun rotates into and out of
                 // alignment. Out is deliberately gentler than in - coming down off the sights is a
                 // relax, not a snap.
-                {
-                    static float s_adsPoseCur  = 0.0f;
-                    static int   s_adsPoseTime = -1;
-                    if (s_adsPoseTime != cg.time) {
-                        float tgt  = CG_AimingDownSights() ? 1.0f : 0.0f;
-                        float rate = (tgt > s_adsPoseCur) ? 15.0f : 8.5f;
-                        float st   = (cg.frametime > 0) ? ((float)cg.frametime / 1000.0f) * rate : 1.0f;
-                        if (st > 1.0f) {
-                            st = 1.0f; // the frame clamp is 5s for a client of a remote server
-                        }
-                        s_adsPoseCur += (tgt - s_adsPoseCur) * st;
-                        if (fabs(s_adsPoseCur - tgt) < 0.002f) {
-                            s_adsPoseCur = tgt;
-                        }
-                        s_adsPoseTime = cg.time;
-                    }
-                    s_fAdsPose = s_adsPoseCur;
-                }
+                // [user 2026-08-20] the ease now lives in cg_view.c (CG_AdsFactorAdvance) and is
+                // advanced unconditionally once per frame. It used to be advanced HERE, inside the
+                // first-person weapon-tag branch - which does not run in third person, in cover, on
+                // a cutscene camera, or while dead - so the pose froze and was then re-applied at
+                // full strength on the first frame this branch ran again.
+                s_fAdsPose = CG_AdsPoseFactor();
                 if (s_fAdsPose > 0.001f) {
                     vec3_t      vAdsA, vAdsB;
                     const char *adsWpn   = "";
@@ -1726,10 +1717,22 @@ void CG_ModelAnim(centity_t *cent, qboolean bDoShaderTime)
                     // CROUCH-only EXTRA correction (added on top of the standing rotation): the crouch pose
                     // hunches the body and carries the gun off the standing sight line. Per-gun crouch values
                     // come from the table; tune mode / un-tabled guns fall back to the cg_adsCrouch* cvars.
-                    if (ducked) {
-                        float cp = adsT ? adsT->cPitch : (cg_adsCrouchPitch ? cg_adsCrouchPitch->value : 0.0f);
-                        float cy = adsT ? adsT->cYaw   : (cg_adsCrouchYaw   ? cg_adsCrouchYaw->value   : 0.0f);
-                        float cr = adsT ? adsT->cRoll  : (cg_adsCrouchRoll  ? cg_adsCrouchRoll->value  : 0.0f);
+                    // [user 2026-08-20] THE ADS JOLT. These three were applied at FULL STRENGTH,
+                    // never multiplied by s_fAdsPose, for the whole ~0.73s ease-out - and then
+                    // vanished in a single frame when the enclosing gate (> 0.001f) closed. The
+                    // values are not small: cYaw is -38.5 on the M1 Garand, -34.5 on the KAR98,
+                    // -43.0 on the shotgun. Crouched, that is the entire per-gun sight correction
+                    // snapping off at once, which is exactly the reported "gun may be way to the
+                    // right aiming up ... so it snaps back into its non ADS position".
+                    // Now scaled by BOTH the ADS factor and the eased crouch blend, so the pose
+                    // is continuous when aiming in/out AND when crouching/standing while aimed.
+                    // The guard also has to admit the blend-OUT frames after PMF_DUCKED clears,
+                    // or standing up while aimed would still cut the correction off at once.
+                    if (ducked || CG_AdsCrouchBlend() > 0.001f) {
+                        float fCrouchMix = s_fAdsPose * CG_AdsCrouchBlend();
+                        float cp = (adsT ? adsT->cPitch : (cg_adsCrouchPitch ? cg_adsCrouchPitch->value : 0.0f)) * fCrouchMix;
+                        float cy = (adsT ? adsT->cYaw   : (cg_adsCrouchYaw   ? cg_adsCrouchYaw->value   : 0.0f)) * fCrouchMix;
+                        float cr = (adsT ? adsT->cRoll  : (cg_adsCrouchRoll  ? cg_adsCrouchRoll->value  : 0.0f)) * fCrouchMix;
                         if (cp != 0.0f) {
                             RotatePointAroundVector(vAdsA, model.axis[1], model.axis[0], cp);
                             RotatePointAroundVector(vAdsB, model.axis[1], model.axis[2], cp);

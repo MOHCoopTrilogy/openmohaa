@@ -644,6 +644,9 @@ const adsGunTune_t *CG_FindAdsTune(const char *wpn);
     void  CG_OffsetFirstPersonView(refEntity_t *pREnt, qboolean bUseWorldPosition);
     qboolean CG_AimingDownSights(void); // HZM coop - RMB-held iron-sight ADS gate (zoom + 3rd->1st person)
     qboolean CG_AdsForceFirstPerson(void); // HZM coop - staged 3P ADS: "render FIRST person this frame" (camera + own-model draw MUST both use this)
+    void  CG_AdsFactorAdvance(void); // HZM coop - advance the ONE ADS ease; called once per frame from CG_DrawActiveFrame BEFORE any consumer
+    float CG_AdsPoseFactor(void);    // HZM coop - 0 = hip, 1 = full sight alignment. The only ADS ease; rotation, shift and zoom all read it
+    float CG_AdsCrouchBlend(void);   // HZM coop - 0 = standing, 1 = crouched, eased (PMF_DUCKED is binary and the crouch tune is up to 43 deg)
     float CG_AdsShoulderFrac(void); // HZM coop - shoulder-stage camera envelope 0..1 (2D ADS effects follow the camera ease)
     qboolean CG_AdsShoulderWheelActive(void); // HZM coop - wheel steals ADS-stage events this frame (FALSE for scoped rifles)
     qboolean CG_FreecamCaptureActive(void); // HZM coop - free-cam orbit owns the mouse this frame (crosshair hides: camera != aim)

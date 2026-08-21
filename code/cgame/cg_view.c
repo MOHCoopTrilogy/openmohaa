@@ -21,6 +21,12 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 */
 
 #include "cg_local.h"
+
+// Absolute ceilings for the view-weapon recoil offset, in world units. Constants rather
+// than multiples of the per-shot kick, so that "can this reach the camera?" has an answer
+// that does not depend on weapon class, cvar values, or how long the trigger was held.
+#define RECOIL_MAX_UNITS 3.0f
+#define RECOIL_MAX_BACK  1.1f
 #include "cg_parsemsg.h"
 
 //============================================================================
@@ -101,6 +107,21 @@ static int   s_dizzyStart = 0;
 // eases up (fast rise, like the gun being hefted), and eases back down once the reload anim
 // ends - so it tracks single-loaders (RELOAD_SINGLE loops) and interrupted reloads for free.
 // coop_reloadSway = peak pitch in degrees (0 disables).
+// [user 2026-08-20] ONE master switch for the whole weapon-feel batch (landing dip, footfall
+// bob, idle breathing, handling shake). Five feel layers shipped in a single batch and none of
+// them had been judged individually, so there was no way to answer "is this better than before"
+// without a rebuild per layer. `coop_weaponFeel 0` restores the pre-batch viewmodel exactly.
+static qboolean CoopWeaponFeelOn(void)
+{
+    static cvar_t *pFeel = NULL;
+    if (!pFeel) {
+        pFeel = cgi.Cvar_Get("coop_weaponFeel", "1", CVAR_ARCHIVE);
+    }
+    return (qboolean)(pFeel->integer != 0);
+}
+
+static float s_shakeAmp   = 0.0f;   // handling-tremor AMPLITUDE, eased. The oscillation itself
+                                    // is stateless - computed at apply time. See bug note below.
 static float s_reloadLift = 0.0f;   // eased pitch, degrees; advanced once per frame
 static float s_reloadRoll = 0.0f;   // roll companion, eased separately
 
@@ -257,23 +278,33 @@ static void CG_ReloadFeelAdvance(void)
     s_reloadLift += (fTarget - s_reloadLift) * k;
     s_reloadRoll += (fTarget * 0.30f - s_reloadRoll) * k * 0.8f; // roll lags the pitch slightly
 
-    // [user 2026-08-20] "a slight camera shake too... make things feel less stiff". A single
-    // clean arc is what reads as mechanical, so overlay a small tremor while the hands are busy.
-    // Two incommensurable sine terms rather than a random number: it cannot jitter frame to frame,
-    // it cannot be re-rolled by a hitch, and it costs nothing. Scaled by the SAME class weight, so
-    // a BAR shakes and a pistol barely does, and folded into the eased value AFTER the clamp
-    // above so it can never push past coop_reloadSwayMax by more than its own small amplitude.
-    if (fTarget != 0.0f || fabs(s_reloadLift) > 0.01f) {
+    // HANDLING SHAKE. Only the AMPLITUDE is state; the oscillation is recomputed from scratch
+    // at apply time.
+    //
+    // [user 2026-08-20 - bug] The first version added the sine DIRECTLY INTO s_reloadLift, which
+    // is the persistent eased state rather than an output. That is a feedback loop with three
+    // separate failure modes, and it shipped: (a) the next frame the ease saw the tremor as part
+    // of the value it was tracking and fought it; (b) the entry gate |s_reloadLift| > 0.01 was
+    // held true BY THE TREMOR ITSELF, so once a reload started the shake never stopped; (c) the
+    // return-to-rest snap |s_reloadLift| < 0.004 could therefore never fire either. Net effect:
+    // after the first reload of a map, a permanent ~2.75 Hz tremor on the CAMERA lasting until
+    // map change - reported as the gun being jittery and the whole game feeling unsmooth. Never
+    // write a periodic term into the state variable an exponential ease is tracking.
+    {
         static cvar_t *pShake = NULL;
-        float          t, amp;
+        float          fShakeTarget = 0.0f;
         if (!pShake) {
-            pShake = cgi.Cvar_Get("coop_weaponShake", "0.22", CVAR_ARCHIVE);
+            pShake = cgi.Cvar_Get("coop_weaponShake", "0.10", CVAR_ARCHIVE);
         }
-        if (pShake->value > 0.0f) {
-            t   = cg.time * 0.001f;
-            amp = pShake->value * s_fWeight * (0.35f + 0.65f * (fabs(fTarget) / (fPeak + 0.001f)));
-            s_reloadLift += amp * ((float)sin(t * 17.3f) * 0.6f + (float)sin(t * 27.9f) * 0.4f);
-            s_reloadRoll += amp * 0.5f * (float)sin(t * 21.1f);
+        // gate on the ANIMATION being live, not on the envelope magnitude the shake feeds
+        if (CoopWeaponFeelOn() && pShake->value > 0.0f && bAlive && !cg.renderingThirdPerson
+            && iAnim >= VM_ANIM_RECHAMBER && iAnim <= VM_ANIM_PUTAWAY) {
+            fShakeTarget = pShake->value * s_fWeight
+                           * (0.35f + 0.65f * (fabs(fTarget) / (fPeak + 0.001f)));
+        }
+        s_shakeAmp += (fShakeTarget - s_shakeAmp) * k;
+        if (s_shakeAmp < 0.0005f && fShakeTarget == 0.0f) {
+            s_shakeAmp = 0.0f;
         }
     }
 
@@ -291,6 +322,12 @@ static void CG_ApplyReloadFeel(vec3_t vAngles)
 {
     float fLift = s_reloadLift, fRoll = s_reloadRoll;
 
+    // stateless tremor: fixed frequencies, so there is no phase to drift and nothing to latch
+    if (s_shakeAmp > 0.0f) {
+        float t = cg.time * 0.001f;
+        fLift += s_shakeAmp * ((float)sin(t * 17.3f) * 0.6f + (float)sin(t * 27.9f) * 0.4f);
+        fRoll += s_shakeAmp * 0.5f * (float)sin(t * 21.1f);
+    }
     if (fLift == 0.0f && fRoll == 0.0f) {
         return;
     }
@@ -981,9 +1018,16 @@ void CG_OffsetFirstPersonView(refEntity_t *pREnt, qboolean bUseWorldPosition)
                 // HZM coop - while ADS, damp the lean view-roll so the iron sights stay aligned instead of
                 // tilting off-screen (lean+ADS stays usable). cg_adsLeanRoll: 1 = full lean tilt, 0 = none
                 // while aiming (sights dead level). Live-tunable.
+                // [user 2026-08-20] "stay in the same exact ads from a camera/gun standpoint but
+                // just lean left or right". The registered default was "1.0" - FULL lean tilt
+                // while aiming - even though the null-fallback beside it says 0.25, which is what
+                // the author intended. The damper has therefore been inert since it was written.
+                // Rolling the view rolls the world under a level sight picture, so it is the part
+                // that makes leaning unusable with sights; the LATERAL peek (the eye pivot below,
+                // cg_adsLeanShift) is the part worth keeping and is left at full strength.
                 if (CG_AimingDownSights()) {
-                    cvar_t *pALR = cgi.Cvar_Get("cg_adsLeanRoll", "1.0", CVAR_ARCHIVE);
-                    leanRoll *= (pALR ? pALR->value : 0.25f);
+                    cvar_t *pALR = cgi.Cvar_Get("cg_adsLeanRoll", "0", CVAR_ARCHIVE);
+                    leanRoll *= (pALR ? pALR->value : 0.0f);
                 }
                 cg.refdefViewAngles[2] += cg.predicted_player_state.fLeanAngle * leanRoll;
             }
@@ -1403,9 +1447,19 @@ void CG_OffsetFirstPersonView(refEntity_t *pREnt, qboolean bUseWorldPosition)
                 // weapon is not braced against the shoulder) but decays out of a pose nobody is
                 // aiming with, so it costs no accuracy feel.
                 if (pRecoil && pRecoil->value > 0.0f) {
+                    // [user 2026-08-20 - bug] "guns kinda clip into the camera when you hold
+                    // down the trigger". The sustained-fire cap was 6x the PER-SHOT kick, so it
+                    // scaled with the same three factors the kick did: on an MG that is
+                    // 0.5 * 1.5 * 1.35 * 6 = 6.1 units of standing displacement, 3.0 of it
+                    // straight back into the near plane. A cap expressed as a multiple of the
+                    // thing it is capping is not a cap. It is now an absolute ceiling in world
+                    // units - the only frame in which "does it touch the camera" is a question.
                     float fHip    = bAds ? 1.0f : 1.35f;
                     float fMax    = pRecoil->value * fClassKick * fHip * 6.0f;
                     float fBreath = s_breathSteady ? 0.5f : 1.0f;
+                    if (fMax > RECOIL_MAX_UNITS) {
+                        fMax = RECOIL_MAX_UNITS;
+                    }
                     s_recoil += pRecoil->value * fClassKick * fBreath * fHip * (float)(s_lastClip - iClip);
                     if (s_recoil > fMax) { s_recoil = fMax; }
                 }
@@ -1414,9 +1468,15 @@ void CG_OffsetFirstPersonView(refEntity_t *pREnt, qboolean bUseWorldPosition)
             s_lastWpn  = iWpn;
 
             if (s_recoil > 0.0f) {
-                // gun kicks UP (muzzle climb) and BACK toward the camera, then recovers
+                // gun kicks UP (muzzle climb) and BACK toward the camera, then recovers. The
+                // backward term saturates INDEPENDENTLY of the cap above: muzzle climb may grow
+                // freely without ever intersecting the view, travel toward the eye may not.
+                float fBack = s_recoil * 0.5f;
+                if (fBack > RECOIL_MAX_BACK) {
+                    fBack = RECOIL_MAX_BACK;
+                }
                 VectorMA(pREnt->origin,  s_recoil * 0.8f, mat[2], pREnt->origin); // up
-                VectorMA(pREnt->origin, -s_recoil * 0.5f, mat[0], pREnt->origin); // back toward camera
+                VectorMA(pREnt->origin, -fBack,           mat[0], pREnt->origin); // back toward camera
                 // ASYMMETRIC RECOVERY. A single fast decay reads as springy and light: real weight
                 // is a sharp kick and a SLOW return, and the heavier the weapon the slower it
                 // settles. Divide the recovery rate by the class kick, so a pistol snaps back at
@@ -1436,11 +1496,16 @@ void CG_OffsetFirstPersonView(refEntity_t *pREnt, qboolean bUseWorldPosition)
             // dip-and-settle on the gun scaled by both the fall speed and the weapon class. The
             // footfall term is a slow bob that only exists while actually moving on the ground, so
             // a standing player sees none of it.
-            {
+            if (CoopWeaponFeelOn()) {
                 static float s_landDip   = 0.0f;   // eased, units
                 static float s_lastVelZ  = 0.0f;
                 static int   s_lastGround = 1;
+                // CLAMPED. The phase integrators below (s_stepPhase, s_brPhase) accumulate dt, and
+                // cg.frametime is clamped to 5000ms - not 200 - for a client of a remote server.
+                // An unclamped 5s hitch would advance the footfall phase by ~20 radians, which is
+                // the very phase teleport those integrators were introduced to prevent.
                 float        fDt2  = cg.frametime / 1000.0f;
+                if (fDt2 > 0.1f) { fDt2 = 0.1f; }
                 int          bGround = (cg.predicted_player_state.groundEntityNum != ENTITYNUM_NONE);
                 float        fSpeed;
 
@@ -1468,7 +1533,8 @@ void CG_OffsetFirstPersonView(refEntity_t *pREnt, qboolean bUseWorldPosition)
                 if (bGround && fSpeed > 40.0f && !bScoped) {
                     // footfall bob: amplitude from speed, frequency from speed, weight from class.
                     // Halved in ADS so it never fights the sight picture.
-                    static cvar_t *pStep = NULL;
+                    static cvar_t *pStep      = NULL;
+                    static float   s_stepPhase = 0.0f;
                     float          amp, ph;
                     if (!pStep) {
                         pStep = cgi.Cvar_Get("cg_weaponFootfall", "1", CVAR_ARCHIVE);
@@ -1478,7 +1544,22 @@ void CG_OffsetFirstPersonView(refEntity_t *pREnt, qboolean bUseWorldPosition)
                         if (amp > 1.2f) {
                             amp = 1.2f;
                         }
-                        ph = cg.time * 0.001f * (4.0f + fSpeed * 0.012f);
+                        // [user 2026-08-20 - bug] "gun seems like it kinda stutters while you
+                        // are walking". This was ph = cg.time * 0.001f * (4.0f + fSpeed*0.012f)
+                        // - phase computed as elapsed_time x current_frequency. When frequency
+                        // changes, that expression jumps by elapsed_time x delta_frequency, and
+                        // elapsed_time only ever grows: five minutes into a map, a speed change
+                        // of ONE unit displaces the phase by 300 * 0.012 = 3.6 radians - over
+                        // half a cycle - in a single frame. Walking speed changes every frame,
+                        // so the bob teleported around the sine continuously, and it got worse
+                        // the longer the map ran. Integrate the phase instead: frequency then
+                        // sets the RATE and may change freely without moving the current
+                        // position. The breathing term below had the same bug, keyed on health.
+                        s_stepPhase += fDt2 * (4.0f + fSpeed * 0.012f);
+                        if (s_stepPhase > 62831.85f) {
+                            s_stepPhase -= 62831.85f; // 10k cycles; keeps float precision sane
+                        }
+                        ph = s_stepPhase;
                         VectorMA(pREnt->origin, amp * (float)sin(ph), mat[2], pREnt->origin);
                         VectorMA(pREnt->origin, amp * 0.45f * (float)sin(ph * 0.5f), mat[1], pREnt->origin);
                     }
@@ -1486,7 +1567,8 @@ void CG_OffsetFirstPersonView(refEntity_t *pREnt, qboolean bUseWorldPosition)
                 // IDLE BREATHING. A slow drift that is always present out of ADS, grows when hurt,
                 // and is suppressed while holding breath. Small enough to be felt rather than seen.
                 if (!bScoped) {
-                    static cvar_t *pBr = NULL;
+                    static cvar_t *pBr      = NULL;
+                    static float   s_brPhase = 0.0f;
                     float          hp, amp2, t2;
                     if (!pBr) {
                         pBr = cgi.Cvar_Get("cg_weaponBreath", "1", CVAR_ARCHIVE);
@@ -1503,7 +1585,14 @@ void CG_OffsetFirstPersonView(refEntity_t *pREnt, qboolean bUseWorldPosition)
                     if (s_breathSteady) {
                         amp2 *= 0.15f;
                     }
-                    t2 = cg.time * 0.001f * (1.15f + (1.0f - hp) * 0.9f); // hurt = faster breathing
+                    // accumulated, not time x frequency - see the footfall note above. Health
+                    // changes less often than speed, but a phase jump on every hit is a visible
+                    // snap at exactly the moment the player is being shot at.
+                    s_brPhase += fDt2 * (1.15f + (1.0f - hp) * 0.9f); // hurt = faster breathing
+                    if (s_brPhase > 62831.85f) {
+                        s_brPhase -= 62831.85f;
+                    }
+                    t2 = s_brPhase;
                     VectorMA(pREnt->origin, amp2 * (float)sin(t2), mat[2], pREnt->origin);
                     VectorMA(pREnt->origin, amp2 * 0.4f * (float)sin(t2 * 0.7f), mat[1], pREnt->origin);
                 }
@@ -2249,15 +2338,26 @@ static int CG_CalcFov(void)
                 adsWpn = CG_ConfigString(CS_WEAPONS + cg.snap->ps.activeItems[1]);
             }
             // baked per-gun shift; tune mode / un-tabled guns fall back to the global cg_adsShift* cvars
-            adsT    = (cg_adsTune && cg_adsTune->integer) ? NULL : CG_FindAdsTune(adsWpn);
-            fShiftX = adsT ? adsT->sShiftX : (cg_adsShiftX ? cg_adsShiftX->value : 0.0f);
-            fShiftY = adsT ? adsT->sShiftY : (cg_adsShiftY ? cg_adsShiftY->value : 0.0f);
-            if (cg.predicted_player_state.pm_flags & PMF_DUCKED) {
-                fShiftX += adsT ? adsT->cShiftX : (cg_adsCrouchShiftX ? cg_adsCrouchShiftX->value : 0.0f);
-                fShiftY += adsT ? adsT->cShiftY : (cg_adsCrouchShiftY ? cg_adsCrouchShiftY->value : 0.0f);
+            // [user 2026-08-20] the shift is now scaled by the SAME factor as the rotation, so
+            // hands+gun and the sight rotation move as one rigid object. The crouch extra rides
+            // the eased crouch blend instead of binary PMF_DUCKED.
+            {
+                float fAdsF = CG_AdsPoseFactor();
+                float fCrB  = CG_AdsCrouchBlend();
+                adsT    = (cg_adsTune && cg_adsTune->integer) ? NULL : CG_FindAdsTune(adsWpn);
+                fShiftX = adsT ? adsT->sShiftX : (cg_adsShiftX ? cg_adsShiftX->value : 0.0f);
+                fShiftY = adsT ? adsT->sShiftY : (cg_adsShiftY ? cg_adsShiftY->value : 0.0f);
+                fShiftX += (adsT ? adsT->cShiftX : (cg_adsCrouchShiftX ? cg_adsCrouchShiftX->value : 0.0f)) * fCrB;
+                fShiftY += (adsT ? adsT->cShiftY : (cg_adsCrouchShiftY ? cg_adsCrouchShiftY->value : 0.0f)) * fCrB;
+                fShiftX *= fAdsF;
+                fShiftY *= fAdsF;
+                // settle to EXACT zero. These are printed with %g, so a residual 1.2e-09 would
+                // still read as a non-zero shift to anything testing the cvar.
+                if (fabs(fShiftX) < 0.0001f) { fShiftX = 0.0f; }
+                if (fabs(fShiftY) < 0.0001f) { fShiftY = 0.0f; }
+                cgi.Cvar_Set("r_weaponshiftx", va("%g", fShiftX));
+                cgi.Cvar_Set("r_weaponshifty", va("%g", fShiftY));
             }
-            cgi.Cvar_Set("r_weaponshiftx", va("%g", fShiftX));
-            cgi.Cvar_Set("r_weaponshifty", va("%g", fShiftY));
         }
     }
 
@@ -2842,7 +2942,15 @@ static int CG_CalcViewValues(void)
         // HZM coop - IN COVER forces THIRD person (the pose/peek only reads from outside; user:
         // "1st person cover should auto shift to third"). Server drops PMF_COOP_COVER the frame
         // cover ends, so a first-person player snaps straight back to first person on exit.
-        if (ps->pm_flags & PMF_COOP_COVER) { cg.renderingThirdPerson = qtrue; }
+        // [user 2026-08-20] "...scrolling up to go ads when behind cover puts the camera behind
+        // the players head, not actually down their sights properly". The cover force ran AFTER
+        // the ADS handoff had already chosen first person, so it silently overrode it. This is
+        // the same ordering collision the native scope hit (see the note directly below); that
+        // one was fixed for STAT_INZOOM only, and the coop ADS handoff - a second, later route
+        // to first person - never got the same treatment. CG_AdsForceFirstPerson is documented
+        // as the single decider the camera AND the own-model draw must both use, so the mirror
+        // of this line in cg_modelanim.c changes with it (turret-camera-regression rule 2).
+        if ((ps->pm_flags & PMF_COOP_COVER) && !CG_AdsForceFirstPerson()) { cg.renderingThirdPerson = qtrue; }
         // HZM coop [237] - NATIVE ZOOM IS FINAL: re-assert first person AFTER every 3P force above.
         // The cover force-3P ran after the zoom force, so scoping while covered/peeking left the
         // camera in third person with the scope overlay drawn over the back of your own head
@@ -3171,6 +3279,83 @@ static void CG_SyncWussPk3Count(void)
     cgi.Cvar_Set("coop_wussCount", va("%d", count));
 }
 
+// HZM coop [user 2026-08-20] THE ONE ADS FACTOR.
+//
+// Before this, the ADS pose was eased in THREE places on THREE schedules - the sight rotation in
+// cg_modelanim.c (15/s in, 8.5/s out), the world zoom here (12/s), and the screen shift not at all -
+// so the gun could never translate and rotate as one rigid object at any tuning. Worse, the
+// rotation's ease lived inside CG_ModelAnim's first-person weapon-tag branch, which does not run in
+// third person, in cover, on a cutscene camera, or while dead: the factor FROZE at its last value
+// and was re-applied at full strength on the first frame the branch ran again.
+//
+// This advances once per frame from CG_DrawActiveFrame, before anything reads it, so there is no
+// frame-order skew between the consumers and no state in which it stops tracking.
+//
+// Two details are load-bearing:
+//   * the exact-settle snap. A pure exponential never reaches its target, and the tune workbench
+//     (cg_adsTune / adssave) assumes a steady ADS hold applies the dialled value EXACTLY. Without
+//     the snap every captured per-gun tune would be silently off by ~0.2%.
+//   * a zero-length frame is SKIPPED, not snapped. The idiom this replaces was
+//     `(cg.frametime > 0) ? dt*rate : 1.0f`, which jumps straight to the target on a zero-dt frame -
+//     and cg.frametime is 0 whenever CL_AdjustTimeDelta nudges server time backwards, i.e. exactly
+//     during the packet-loss jitter where a snap is least wanted.
+static float s_adsFactorCur  = 0.0f;
+static float s_adsCrouchCur  = 0.0f;
+static int   s_adsFactorTime = -1;
+
+void CG_AdsFactorAdvance(void)
+{
+    float tgt, rate, st, dt;
+
+    if (s_adsFactorTime == cg.time) {
+        return; // already advanced this frame
+    }
+    s_adsFactorTime = cg.time;
+    if (cg.frametime <= 0) {
+        return; // skip, never snap
+    }
+    dt = (float)cg.frametime / 1000.0f;
+
+    // ADS pose. Turrets excluded: the server owns that camera and STAT_CLIPAMMO/activeItems are the
+    // turret's while manning one, so the per-gun tune lookup would miss anyway.
+    tgt = 0.0f;
+    if (cg.snap && CG_AimingDownSights() && !(cg.snap->ps.pm_flags & PMF_TURRET)) {
+        tgt = 1.0f;
+    }
+    rate = (tgt > s_adsFactorCur) ? 15.0f : 8.5f;
+    st   = dt * rate;
+    if (st > 1.0f) {
+        st = 1.0f; // MANDATORY: the frame clamp is 5s for a client of a remote server
+    }
+    s_adsFactorCur += (tgt - s_adsFactorCur) * st;
+    if (fabs(s_adsFactorCur - tgt) < 0.002f) {
+        s_adsFactorCur = tgt;
+    }
+
+    // CROUCH blend. PMF_DUCKED is binary, and the crouch tune is large - up to 38.5 degrees of yaw
+    // on the Garand, 43 on the shotgun - so crouching or standing WHILE AIMING used to apply or
+    // remove the whole correction in a single frame. Ease it.
+    tgt = (cg.predicted_player_state.pm_flags & PMF_DUCKED) ? 1.0f : 0.0f;
+    st  = dt * 10.0f;
+    if (st > 1.0f) {
+        st = 1.0f;
+    }
+    s_adsCrouchCur += (tgt - s_adsCrouchCur) * st;
+    if (fabs(s_adsCrouchCur - tgt) < 0.002f) {
+        s_adsCrouchCur = tgt;
+    }
+}
+
+float CG_AdsPoseFactor(void)
+{
+    return s_adsFactorCur;
+}
+
+float CG_AdsCrouchBlend(void)
+{
+    return s_adsCrouchCur;
+}
+
 void CG_DrawActiveFrame(int serverTime, int frameTime, stereoFrame_t stereoView, qboolean demoPlayback)
 {
     cg.time         = serverTime;
@@ -3178,6 +3363,7 @@ void CG_DrawActiveFrame(int serverTime, int frameTime, stereoFrame_t stereoView,
     cg.demoPlayback = demoPlayback;
 
     // HZM coop bug-1502 - run every frame regardless of view/weapon state (see function banner).
+    CG_AdsFactorAdvance(); // must precede every consumer - see the banner on the function
     CG_UpdateScriptedAudioDucks();
     // HZM coop bug-1508 - throttled internally, safe to call every frame (see function banner).
     CG_SyncWussPk3Count();

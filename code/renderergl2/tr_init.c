@@ -2063,8 +2063,11 @@ void R_Register( void )
 	// HZM gl2 re-port Fix 3: ADS view-weapon projection (cgame sets r_weaponfovx/shift each frame)
 	r_weaponfovx = ri.Cvar_Get( "r_weaponfovx", "0", 0 );
 	r_weaponznear = ri.Cvar_Get( "r_weaponznear", "1", CVAR_ARCHIVE );
-	r_weaponshifty = ri.Cvar_Get( "r_weaponshifty", "-0.05", CVAR_ARCHIVE );
-	r_weaponshiftx = ri.Cvar_Get( "r_weaponshiftx", "0", CVAR_ARCHIVE );
+	// HZM [2026-08-20] NOT CVAR_ARCHIVE - cgame rewrites these every frame and they now carry an
+	// EASED value, so leaving them archived meant a full Com_WriteConfiguration() per frame while
+	// aiming. Mirrors renderergl1/tr_init.c. r_weaponfovx uses flags 0 for the same reason.
+	r_weaponshifty = ri.Cvar_Get( "r_weaponshifty", "-0.05", 0 );
+	r_weaponshiftx = ri.Cvar_Get( "r_weaponshiftx", "0", 0 );
 	r_farplane = ri.Cvar_Get("r_farplane", "0", CVAR_CHEAT);
 	r_farplane_bias = ri.Cvar_Get("r_farplane_bias", "0", CVAR_CHEAT);
 	r_farplane_color = ri.Cvar_Get("r_farplane_color", ".5 .5 .5", CVAR_CHEAT);

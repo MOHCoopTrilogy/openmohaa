@@ -747,7 +747,22 @@ void CG_CalcViewModelMovement(float fViewBobPhase, float fViewBobAmp, vec_t *vVe
 
     VectorAdd(vMovement, cgi.anim->g_vCurrentVMPosOffset, vMovement);
     if (cg.predicted_player_state.fLeanAngle) {
-        vMovement[2] -= fabs(cg.predicted_player_state.fLeanAngle) * vm_lean_lower->value;
+        // [user 2026-08-20] THE REASON LEAN+ADS NEVER WORKED. This drops the VIEW WEAPON by up to
+        // |leanAngle| * 0.1 = 4.0-4.5 units (leanMax is 40-45) while the CAMERA does not move down
+        // with it, so the sights fall below the aim point by an amount that scales continuously
+        // with lean angle. No per-gun tune column could ever correct that - the error is a
+        // continuous function of a continuous input, whereas the tune table has two discrete pose
+        // columns (standing, crouch). Two ADS dampers were added for lean previously
+        // (cg_adsLeanRoll, cg_adsLeanShift) and BOTH were registered at 1.0 - full strength - which
+        // is consistent with someone damping the two visible effects, finding the sights still did
+        // not line up because THIS third one was untouched, and reverting to vanilla.
+        float fLower = vm_lean_lower->value;
+        if (CG_AimingDownSights()) {
+            static cvar_t *pALL = NULL;
+            if (!pALL) { pALL = cgi.Cvar_Get("cg_adsLeanLower", "0", CVAR_ARCHIVE); }
+            fLower *= pALL->value;
+        }
+        vMovement[2] -= fabs(cg.predicted_player_state.fLeanAngle) * fLower;
     }
 
     if (VectorNormalize2(vMovement, vNorm) > vm_offset_max->value) {

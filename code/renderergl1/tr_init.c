@@ -1449,8 +1449,15 @@ void R_Register( void )
 	r_znear = ri.Cvar_Get( "r_znear", "4", CVAR_CHEAT );
 	r_weaponfovx = ri.Cvar_Get( "r_weaponfovx", "0", 0 );	// HZM: set by cgame each frame (un-zoomed weapon fov_x)
 	r_weaponznear = ri.Cvar_Get( "r_weaponznear", "1", CVAR_ARCHIVE );	// HZM: ADS view-weapon near clip (lower = more of the gun's back end shows)
-	r_weaponshifty = ri.Cvar_Get( "r_weaponshifty", "-0.05", CVAR_ARCHIVE );	// HZM: ADS sight vertical align (-up/+down)
-	r_weaponshiftx = ri.Cvar_Get( "r_weaponshiftx", "0", CVAR_ARCHIVE );	// HZM: ADS sight horizontal align (+right/-left)
+	// HZM [2026-08-20] NOT CVAR_ARCHIVE. cgame rewrites these authoritatively every frame
+	// (cg_view.c), so the archived value is never read - and now that they carry an EASED
+	// value they change every frame of every ADS transition. Com_Frame calls
+	// Com_WriteConfiguration() every frame, which rewrites the WHOLE config whenever any
+	// CVAR_ARCHIVE cvar changed - so leaving these archived meant a full config file write
+	// per frame while aiming, and mid-transition garbage persisted into the user config.
+	// r_weaponfovx is registered with flags 0 for exactly this reason.
+	r_weaponshifty = ri.Cvar_Get( "r_weaponshifty", "-0.05", 0 );	// HZM: ADS sight vertical align (-up/+down)
+	r_weaponshiftx = ri.Cvar_Get( "r_weaponshiftx", "0", 0 );	// HZM: ADS sight horizontal align (+right/-left)
 	r_postProcess   = ri.Cvar_Get( "r_postProcess",   "1", CVAR_ARCHIVE );	// HZM post-FX master (LIVE toggle; FBO/procs always created at init, this only gates the per-frame pass so menu toggles apply instantly)
 	r_ppPassthrough = ri.Cvar_Get( "r_ppPassthrough", "1", CVAR_ARCHIVE );	// HZM post-FX Phase-0 passthrough
 	r_ppBloom          = ri.Cvar_Get( "r_ppBloom",          "1",   CVAR_ARCHIVE );	// HZM post-FX bloom (live-tunable)
