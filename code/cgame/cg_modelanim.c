@@ -2108,6 +2108,20 @@ void CG_ModelAnim(centity_t *cent, qboolean bDoShaderTime)
             AngleVectors(s1->angles, model.axis[0], model.axis[1], model.axis[2]);
         }
 
+        // HZM coop [user 2026-08-20] BLOOD ON THE GUN. Darken the weapon toward a dried red-brown
+        // in proportion to how much blood it has picked up at knife range. This is a TINT, not a
+        // decal: a decal cannot be projected onto the view weapon, which renders in its own
+        // projection, and per-gun bloodied textures would mean authoring art for all 69 weapons.
+        // Only the first-person weapon is tinted - the third-person model other players see is
+        // untouched, so this is purely local flavour and cannot desync anything.
+        if ((model.renderfx & RF_DEPTHHACK) && CG_GunBlood() > 0.01f) {
+            float b = CG_GunBlood();
+            if (b > 1.0f) { b = 1.0f; }
+            model.shaderRGBA[0] = (byte)(255 - (int)(40.0f * b));   // keep the reds
+            model.shaderRGBA[1] = (byte)(255 - (int)(150.0f * b));  // pull the greens...
+            model.shaderRGBA[2] = (byte)(255 - (int)(160.0f * b));  // ...and blues hard
+        }
+
         // add to refresh list
         cgi.R_AddRefEntityToScene(&model, s1->parent);
     }

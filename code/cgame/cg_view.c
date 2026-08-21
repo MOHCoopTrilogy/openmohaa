@@ -1461,6 +1461,9 @@ void CG_OffsetFirstPersonView(refEntity_t *pREnt, qboolean bUseWorldPosition)
             // weapon switches), accumulate a kick (capped for sustained auto), then decay back to rest.
             // Holding breath (steady) softens the visual kick too.
             if (iWpn == s_lastWpn && s_lastClip >= 0 && iClip < s_lastClip && (s_lastClip - iClip) <= 4) {
+                CG_NoteLocalFire(); // timestamp OUR shot. Flesh impacts are broadcast for EVERY
+                                    // shooter, so without this a teammate killing someone next to
+                                    // us would splatter blood on OUR weapon.
                 // [user 2026-08-20] HIP FIRE KICKS TOO. This was gated on bAds, so the gun only
                 // recoiled while aiming - and most shooting in this game is from the hip, which is
                 // exactly where the weapon read as weightless. Hip kick is LARGER than ADS (the
@@ -1584,6 +1587,32 @@ void CG_OffsetFirstPersonView(refEntity_t *pREnt, qboolean bUseWorldPosition)
                         VectorMA(pREnt->origin, amp * 0.45f * (float)sin(ph * 0.5f), mat[1], pREnt->origin);
                     }
                 }
+                // HZM coop [user 2026-08-20] MEDKIT STOW.
+                // "you probably wouldnt have a gun out when doing that". The third-person torso
+                // state (COOP_SELFHEAL) already existed; this is the first-person half. The server
+                // stuffs coop_medkitView for the duration - the same per-client pattern coop_dbnoView
+                // and coop_limpView use - and the weapon sinks out of frame and eases back.
+                //
+                // The alive test is a SAFETY, not decoration: medkit.scr clears the flag on all four
+                // of its exit paths, but if a player is ever removed mid-heal the clear cannot run,
+                // and a permanently invisible weapon is a far worse bug than a missing animation.
+                {
+                    static cvar_t *pMed = NULL;
+                    static float   s_medStow = 0.0f;
+                    float          tgt2, k2;
+                    if (!pMed) { pMed = cgi.Cvar_Get("coop_medkitView", "0", 0); }
+                    tgt2 = (pMed->integer && cg.snap && cg.snap->ps.stats[STAT_HEALTH] > 0)
+                               ? 1.0f : 0.0f;
+                    k2 = fDt2 * 6.0f;
+                    if (k2 > 1.0f) { k2 = 1.0f; }
+                    s_medStow += (tgt2 - s_medStow) * k2;
+                    if (s_medStow < 0.001f && tgt2 == 0.0f) { s_medStow = 0.0f; }
+                    if (s_medStow > 0.001f) {
+                        VectorMA(pREnt->origin, -s_medStow * 26.0f, mat[2], pREnt->origin);
+                        VectorMA(pREnt->origin, -s_medStow * 6.0f,  mat[0], pREnt->origin);
+                    }
+                }
+
                 // HZM coop [user 2026-08-20] CROUCH / STAND WEIGHT.
                 // "Crouching and standing up could feel more realistic too."
                 //
@@ -3705,6 +3734,88 @@ float CoopWFeelStress(void)
     return s_wfeelStress;
 }
 
+
+// HZM coop [user 2026-08-20] BLOOD ON THE GUN, and the medkit stow.
+//
+// "Another idea to explore is blood on guns if you are shooting enemies up super close" /
+// "rain washes it off".
+//
+// The signal is free and needs no protocol change: cg_parsemsg already decodes flesh impacts into
+// flesh_impact_pos[] for its own hit sounds, so the client already knows where every bullet hit a
+// body. Two qualifiers turn that into "I just shot someone in the face": the impact has to be close
+// to the camera, and the local player has to have fired recently - flesh impacts are broadcast for
+// EVERY shooter, so without the second test a teammate executing someone beside you would splatter
+// your weapon.
+//
+// Rain uses r_ppRainWet, which the weather system already publishes per-client, so a downpour
+// scrubs the gun clean in a few seconds while a dry map keeps it for a couple of minutes.
+static float s_gunBlood = 0.0f;
+static int   s_lastFireTime = 0;
+
+void CG_NoteLocalFire(void)
+{
+    s_lastFireTime = cg.time;
+}
+
+void CG_NoteFleshImpact(const vec3_t pos)
+{
+    static cvar_t *pOn = NULL;
+    float          d;
+    vec3_t         v;
+
+    if (!pOn) {
+        pOn = cgi.Cvar_Get("coop_gunBlood", "1", CVAR_ARCHIVE);
+    }
+    if (pOn->value <= 0.0f || !cg.snap) {
+        return;
+    }
+    // must be OUR shot: flesh impacts are broadcast for every shooter in earshot
+    if (cg.time - s_lastFireTime > 350) {
+        return;
+    }
+    VectorSubtract(pos, cg.refdef.vieworg, v);
+    d = VectorLength(v);
+    if (d > 150.0f) {
+        return; // "super close" - roughly 12 feet at 1 unit ~ 1 inch
+    }
+    // full strength in your face, tapering to nothing at the range limit
+    s_gunBlood += (1.0f - (d / 150.0f)) * 0.55f * pOn->value;
+    if (s_gunBlood > 1.0f) {
+        s_gunBlood = 1.0f;
+    }
+}
+
+float CG_GunBlood(void)
+{
+    return s_gunBlood;
+}
+
+static void CG_GunBloodDecay(void)
+{
+    static int s_last = 0;
+    float      dt, rate, wet;
+
+    if (s_last == 0) {
+        s_last = cg.time;
+    }
+    dt     = (cg.time - s_last) / 1000.0f;
+    s_last = cg.time;
+    if (dt <= 0.0f || s_gunBlood <= 0.0f) {
+        return;
+    }
+    if (dt > 0.5f) {
+        dt = 0.5f;
+    }
+    wet  = cgi.Cvar_Get("r_ppRainWet", "0", 0)->value; // 0 dry .. 1 soaked
+    if (wet < 0.0f) { wet = 0.0f; } else if (wet > 1.0f) { wet = 1.0f; }
+    // dry: ~2 minutes to fade. Rain: seconds.
+    rate = 0.008f + wet * 0.30f;
+    s_gunBlood -= rate * dt;
+    if (s_gunBlood < 0.0f) {
+        s_gunBlood = 0.0f;
+    }
+}
+
 // HZM coop [user 2026-08-20] THE ONE ADS FACTOR.
 //
 // Before this, the ADS pose was eased in THREE places on THREE schedules - the sight rotation in
@@ -3791,6 +3902,7 @@ void CG_DrawActiveFrame(int serverTime, int frameTime, stereoFrame_t stereoView,
     // HZM coop bug-1502 - run every frame regardless of view/weapon state (see function banner).
     CG_AdsFactorAdvance(); // must precede every consumer - see the banner on the function
     CG_FeelStressAdvance(); // one shared "how rattled is the player" scalar, same rule
+    CG_GunBloodDecay();     // blood on the weapon fades, and much faster in the rain
     CG_UpdateScriptedAudioDucks();
     // HZM coop bug-1508 - throttled internally, safe to call every frame (see function banner).
     CG_SyncWussPk3Count();

@@ -650,6 +650,9 @@ const adsGunTune_t *CG_FindAdsTune(const char *wpn);
     void  CG_FeelStressAdvance(void); // HZM coop - advance the shared feel-context scalar; once per frame, before consumers
     float CoopWFeelStress(void);      // HZM coop - 0 = calm, 1 = maximally rattled. THE stress input; do not add a second one
     float CG_GetSuppression(void);    // HZM coop - under-fire intensity 0..1 (one frame stale before CG_CalcFov)
+    void  CG_NoteLocalFire(void);           // HZM coop - the local player pulled the trigger this frame
+    void  CG_NoteFleshImpact(const vec3_t pos); // HZM coop - a bullet hit a body here (any shooter)
+    float CG_GunBlood(void);                // HZM coop - 0..1 blood on the view weapon; rain washes it off
     qboolean CG_GetStamina(float *outFrac); // HZM coop - sprint pool 0..1; FIRST PERSON ONLY (mirror only advances there)
     float CG_AdsShoulderFrac(void); // HZM coop - shoulder-stage camera envelope 0..1 (2D ADS effects follow the camera ease)
     qboolean CG_AdsShoulderWheelActive(void); // HZM coop - wheel steals ADS-stage events this frame (FALSE for scoped rifles)

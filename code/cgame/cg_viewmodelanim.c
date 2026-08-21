@@ -452,6 +452,44 @@ int CG_GetVMAnimPrefixIndex()
     return WPREFIX_UNARMED;
 }
 
+
+// HZM coop [user 2026-08-20] MINIMUM VIEWMODEL CROSSBLEND.
+//
+// "coming out of ads is still not smooth, it seems pretty choppy with the anims" - and the reason
+// is data, not code. The blend duration between two viewmodel animations comes from the TIKI's
+// authored `crossblend` value. A survey of all 688 retail weapon tikis found that only 32 declare
+// one at all (every one of those is 0.1). The other 656 declare nothing, so Anim_CrossblendTime
+// returns 0, which the caller reads as "no crossblend" and takes a HARD CUT between states.
+//
+// So on the overwhelming majority of weapons there was never any blend between viewmodel animation
+// states at all. ADS is the `charge` animation in this codebase, so entering and leaving sights is
+// an idle<->charge state change - i.e. exactly one of those hard cuts, on almost every gun. That is
+// the "choppy anims" half of the ADS complaint, and it is distinct from the POSE snap fixed
+// separately in cg_view.c/cg_modelanim.c.
+//
+// Rather than edit 656 tiki files (which we do not ship and would have to start shipping), impose a
+// floor here. Authored values still win when they are LONGER.
+//
+// FIRE is deliberately exempt. A fire animation restarts on every shot, and blending each shot into
+// the previous one would smear exactly the snap that makes a weapon feel like it discharges. Its
+// authored value - usually none - is left alone.
+static float CoopVMCrossblend(dtiki_t *pTiki, int index)
+{
+    static cvar_t *pBlend   = NULL;
+    float          authored = cgi.Anim_CrossblendTime(pTiki, index);
+
+    if (!pBlend) {
+        pBlend = cgi.Cvar_Get("coop_vmBlend", "0.12", CVAR_ARCHIVE); // 0 = vanilla hard cuts
+    }
+    if (cgi.anim->g_iLastVMAnim == VM_ANIM_FIRE || cgi.anim->g_iLastVMAnim == VM_ANIM_FIRE_SECONDARY) {
+        return authored;
+    }
+    if (authored < pBlend->value) {
+        return pBlend->value;
+    }
+    return authored;
+}
+
 void CG_ViewModelAnimation(refEntity_t *pModel)
 {
     int         i;
@@ -556,7 +594,7 @@ void CG_ViewModelAnimation(refEntity_t *pModel)
         Com_sprintf(szAnimName, sizeof(szAnimName), "%s_%s", AnimPrefixList[iAnimPrefixIndex], pszAnimSuffix);
         if (!bWeaponChanged) {
             fCrossblendTime =
-                cgi.Anim_CrossblendTime(pTiki, cgi.anim->g_VMFrameInfo[cgi.anim->g_iCurrentVMAnimSlot].index);
+                CoopVMCrossblend(pTiki, cgi.anim->g_VMFrameInfo[cgi.anim->g_iCurrentVMAnimSlot].index);
             fCrossblendAmount = cgi.anim->g_iCurrentVMDuration / 1000.0;
 
             if (fCrossblendAmount < fCrossblendTime && fCrossblendAmount > 0.0) {
@@ -591,7 +629,7 @@ void CG_ViewModelAnimation(refEntity_t *pModel)
 
         if (!bWeaponChanged) {
             fCrossblendTime =
-                cgi.Anim_CrossblendTime(pTiki, cgi.anim->g_VMFrameInfo[cgi.anim->g_iCurrentVMAnimSlot].index);
+                CoopVMCrossblend(pTiki, cgi.anim->g_VMFrameInfo[cgi.anim->g_iCurrentVMAnimSlot].index);
             if (!fCrossblendTime) {
                 for (i = 0; i < MAX_FRAMEINFOS; ++i) {
                     if (i != cgi.anim->g_iCurrentVMAnimSlot) {
@@ -619,7 +657,7 @@ void CG_ViewModelAnimation(refEntity_t *pModel)
 
     cgi.anim->g_iCurrentVMDuration += cg.frametime;
     if (cgi.anim->g_bCrossblending) {
-        fCrossblendTime = cgi.Anim_CrossblendTime(pTiki, cgi.anim->g_VMFrameInfo[cgi.anim->g_iCurrentVMAnimSlot].index);
+        fCrossblendTime = CoopVMCrossblend(pTiki, cgi.anim->g_VMFrameInfo[cgi.anim->g_iCurrentVMAnimSlot].index);
         fCrossblendAmount = cgi.anim->g_iCurrentVMDuration / 1000.0;
         if (fCrossblendAmount >= fCrossblendTime || fCrossblendAmount <= 0.0) {
             // clear crossblend values

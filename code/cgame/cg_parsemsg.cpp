@@ -1803,6 +1803,7 @@ void CG_ParseCGMessage_ver_15()
                     VectorCopy(vStart, flesh_impact_pos[flesh_impact_count]);
                     VectorCopy(vEnd, flesh_impact_norm[flesh_impact_count]);
                     flesh_impact_large[flesh_impact_count] = iLarge;
+                    CG_NoteFleshImpact(vStart); // HZM coop - blood on the gun at knife range
                     flesh_impact_count++;
                 }
                 CG_RagdollImpulse(vStart, vEnd, 150.0f + 70.0f * iLarge, 15.0f + 1.5f * iLarge,
@@ -1815,6 +1816,7 @@ void CG_ParseCGMessage_ver_15()
                     VectorCopy(vStart, flesh_impact_pos[flesh_impact_count]);
                     VectorCopy(vEnd, flesh_impact_norm[flesh_impact_count]);
                     flesh_impact_large[flesh_impact_count] = iLarge;
+                    CG_NoteFleshImpact(vStart); // HZM coop - blood on the gun at knife range
                     flesh_impact_count++;
                 }
                 CG_RagdollImpulse(vStart, vEnd, 150.0f + 70.0f * iLarge, 15.0f + 1.5f * iLarge,
@@ -2227,6 +2229,7 @@ void CG_ParseCGMessage_ver_6()
                     VectorCopy(vStart, flesh_impact_pos[flesh_impact_count]);
                     VectorCopy(vEnd, flesh_impact_norm[flesh_impact_count]);
                     flesh_impact_large[flesh_impact_count] = iLarge;
+                    CG_NoteFleshImpact(vStart); // HZM coop - blood on the gun at knife range
                     flesh_impact_count++;
                 }
                 CG_RagdollImpulse(vStart, vEnd, 150.0f + 70.0f * iLarge, 15.0f + 1.5f * iLarge,
@@ -2239,6 +2242,7 @@ void CG_ParseCGMessage_ver_6()
                     VectorCopy(vStart, flesh_impact_pos[flesh_impact_count]);
                     VectorCopy(vEnd, flesh_impact_norm[flesh_impact_count]);
                     flesh_impact_large[flesh_impact_count] = iLarge;
+                    CG_NoteFleshImpact(vStart); // HZM coop - blood on the gun at knife range
                     flesh_impact_count++;
                 }
                 CG_RagdollImpulse(vStart, vEnd, 150.0f + 70.0f * iLarge, 15.0f + 1.5f * iLarge,
