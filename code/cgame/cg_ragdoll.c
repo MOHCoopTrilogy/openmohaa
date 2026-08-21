@@ -127,6 +127,13 @@ static const int s_ragDriveChild[] = {
 // fold limits: they cap how sharply any joint can hinge, measured at the DEATH pose, and
 // they rotate with the body - so corpses topple and slump but cannot collapse into a
 // bead-chain pile (the P3 live finding 2026-08-19 21:37: pure neighbor links = heap).
+#define RAG_LIMITS        18
+#define RAG_LIMIT_MAX_STEP DEG2RAD(12.0f) // a struck forearm can open 33deg of violation in one
+                                          // substep; this is a primary limiter, not a belt
+#define RAG_LIMIT_KIND_SWING 0
+#define RAG_LIMIT_KIND_HINGE 1
+#define RAG_LIMIT_KIND_OOP   2
+
 #define RAG_BRACES 18
 static const int s_ragBraces[][2] = {
     {5,  8},  // shoulder - shoulder
@@ -208,6 +215,17 @@ struct ragSim_s {
     // silhouette while draping over whatever it actually landed on.
     byte     branch;               // 1 = settle, 0 = legacy free-fall (mode 3)
     vec3_t   goal[RAG_PTS];
+    // per-corpse limit derivation (stage 3)
+    vec3_t   limACap[RAG_LIMITS];  // hinge: parent segment direction at capture
+    vec3_t   limHCap[RAG_LIMITS];  // hinge: the flexion axis at capture
+    float    limLo[RAG_LIMITS], limHi[RAG_LIMITS];   // anatomical range
+    float    limLo0[RAG_LIMITS], limHi0[RAG_LIMITS]; // widened to admit the death pose
+    byte     limDisabled[RAG_LIMITS];
+    float    faceSign[2];
+    int      limAgeMs;             // NEVER reset - lifeMs is, and a re-widen on a late shot
+                                   // would admit a stale capture value exactly when it matters
+    int      limCount, limSat, limOff, limBad;
+    float    limMax;
     vec3_t   goal0[RAG_PTS];       // the pose he actually died in - the anchor the rewrite is bounded against
     float    gravScale;            // 0 -> 1 over 250ms (no lurch at handoff)
     int      rampMs;
@@ -329,6 +347,7 @@ static cvar_t  *rag_stick    = NULL;
 static cvar_t  *rag_stickmax = NULL;
 static cvar_t  *rag_buriedmax = NULL;
 static cvar_t  *rag_feet     = NULL;
+static cvar_t  *rag_limits   = NULL;
 
 static void RagCvars(void)
 {
@@ -384,6 +403,9 @@ static void RagCvars(void)
         // 0 = seed the feet ON the knees, which makes driveOk fall to 0 by itself and reverts
         // the body to the byte-for-byte 15-point sim inside a 17-point array
         rag_feet = cgi.Cvar_Get("coop_ragdollFeet", "1", CVAR_TEMP);
+        // the 18 angular joint limits. ATOMIC with the fold-brace gate by construction:
+        // this one cvar is the single authority over both, so the pair cannot half-ship.
+        rag_limits = cgi.Cvar_Get("coop_ragdollLimits", "1", CVAR_TEMP);
     }
 }
 
@@ -606,6 +628,118 @@ static void RagWorldToCapture(const ragSim_t *s, const vec3_t world, vec3_t cap)
 }
 
 // ---------- capture ------------------------------------------------------------------------
+
+// ============================ ANGULAR JOINT LIMITS (stage 3) ================================
+// What stops a corpse folding into poses no body can hold. Distance constraints keep bones the
+// right LENGTH but say nothing about direction: a knee can bend backwards without any distance
+// changing. These 18 limits are derived per corpse from its own skeleton at capture, so they
+// work across every model without hand authoring.
+
+typedef struct {
+    byte  kind;
+    byte  frame;   // 0 = pelvis triad, 1 = chest triad
+    byte  pivot, grand, child;
+    byte  axisRow; // swing: which triad row is the axis
+    float neutSign; // swing: neutral is neutSign * T[2]
+    float hSign;    // hinge: +1 knee (hinges back), -1 elbow (hinges forward)
+    float lo, hi;   // radians
+    unsigned mask;  // the child subtree that rotates
+} ragLimitDef_t;
+
+// Ranges are ANATOMICAL and their signs are derived, not copied: RagSignedAngle returns theta
+// for n2 = R(n,theta)*n1, so positive phi moves b toward (n x n1). For a hip, axis = T[1] = L
+// and neutral = -T[2] = -U, so n x n1 = L x -U = -F: POSITIVE IS BACKWARD, i.e. EXTENSION.
+// An earlier design table had the hips as [-25,+110], which grants 110 degrees of BACKWARD
+// swing - and no instrument can see a range inversion, the body just settles wrong. Do not
+// "tidy" these signs without re-deriving them.
+static const ragLimitDef_t s_ragLimits[RAG_LIMITS] = {
+    // kind                  frame pivot grand child axisRow neutSign hSign   lo        hi      mask
+    {RAG_LIMIT_KIND_SWING, 1,  3, 0,  4, 1, +1.0f, 0, DEG2RAD(-50), DEG2RAD(55),  (1u<<4)},
+    {RAG_LIMIT_KIND_SWING, 1,  3, 0,  4, 0, +1.0f, 0, DEG2RAD(-40), DEG2RAD(40),  (1u<<4)},
+    {RAG_LIMIT_KIND_SWING, 1,  5, 0,  6, 1, -1.0f, 0, DEG2RAD(-170),DEG2RAD(60),  (1u<<6)|(1u<<7)},
+    {RAG_LIMIT_KIND_SWING, 1,  5, 0,  6, 0, -1.0f, 0, DEG2RAD(-20), DEG2RAD(150), (1u<<6)|(1u<<7)},
+    {RAG_LIMIT_KIND_SWING, 1,  8, 0,  9, 1, -1.0f, 0, DEG2RAD(-170),DEG2RAD(60),  (1u<<9)|(1u<<10)},
+    {RAG_LIMIT_KIND_SWING, 1,  8, 0,  9, 0, -1.0f, 0, DEG2RAD(-150),DEG2RAD(20),  (1u<<9)|(1u<<10)},
+    {RAG_LIMIT_KIND_HINGE, 1,  6, 5,  7, 0,  0.0f, -1.0f, DEG2RAD(2), DEG2RAD(150), (1u<<7)},
+    {RAG_LIMIT_KIND_OOP,   1,  6, 5,  7, 0,  0.0f, -1.0f, DEG2RAD(-12), DEG2RAD(12), (1u<<7)},
+    {RAG_LIMIT_KIND_HINGE, 1,  9, 8, 10, 0,  0.0f, -1.0f, DEG2RAD(2), DEG2RAD(150), (1u<<10)},
+    {RAG_LIMIT_KIND_OOP,   1,  9, 8, 10, 0,  0.0f, -1.0f, DEG2RAD(-12), DEG2RAD(12), (1u<<10)},
+    {RAG_LIMIT_KIND_SWING, 0, 11, 0, 12, 1, -1.0f, 0, DEG2RAD(-115),DEG2RAD(25),  (1u<<12)|(1u<<15)},
+    {RAG_LIMIT_KIND_SWING, 0, 11, 0, 12, 0, -1.0f, 0, DEG2RAD(-15), DEG2RAD(55),  (1u<<12)|(1u<<15)},
+    {RAG_LIMIT_KIND_SWING, 0, 13, 0, 14, 1, -1.0f, 0, DEG2RAD(-115),DEG2RAD(25),  (1u<<14)|(1u<<16)},
+    {RAG_LIMIT_KIND_SWING, 0, 13, 0, 14, 0, -1.0f, 0, DEG2RAD(-55), DEG2RAD(15),  (1u<<14)|(1u<<16)},
+    {RAG_LIMIT_KIND_HINGE, 0, 12, 11, 15, 0, 0.0f, +1.0f, DEG2RAD(2), DEG2RAD(150), (1u<<15)},
+    {RAG_LIMIT_KIND_OOP,   0, 12, 11, 15, 0, 0.0f, +1.0f, DEG2RAD(-8), DEG2RAD(8),  (1u<<15)},
+    {RAG_LIMIT_KIND_HINGE, 0, 14, 13, 16, 0, 0.0f, +1.0f, DEG2RAD(2), DEG2RAD(150), (1u<<16)},
+    {RAG_LIMIT_KIND_OOP,   0, 14, 13, 16, 0, 0.0f, +1.0f, DEG2RAD(-8), DEG2RAD(8),  (1u<<16)},
+};
+
+// T rows = [Forward, Left, Up]. MOHAA convention: at yaw 0, axis[0]=(1,0,0) fwd, axis[1]=(0,1,0)
+// LEFT, axis[2]=(0,0,1) up. Built from points rigidly attached to the same bone in ANY pose -
+// the hip sockets are the thigh origins, the shoulder sockets the upper-arm origins - so this
+// needs no bind pose.
+static qboolean RagBodyTriad(const vec3_t tip, const vec3_t base, const vec3_t sockR,
+                             const vec3_t sockL, float faceSign, float T[3][3])
+{
+    vec3_t U, L, F;
+    VectorSubtract(tip, base, U);
+    if (VectorNormalize(U) < 0.001f) {
+        return qfalse;
+    }
+    VectorSubtract(sockL, sockR, L);
+    VectorMA(L, -DotProduct(L, U), U, L); // Gram-Schmidt against U
+    if (VectorNormalize(L) < 0.001f) {
+        return qfalse;
+    }
+    VectorScale(L, faceSign, L);
+    CrossProduct(L, U, F);
+    VectorCopy(F, T[0]);
+    VectorCopy(L, T[1]);
+    VectorCopy(U, T[2]);
+    return qtrue;
+}
+
+static float RagSignedAngle(const vec3_t n1, const vec3_t n2, const vec3_t n)
+{
+    vec3_t x;
+    CrossProduct(n1, n2, x);
+    return (float)atan2(DotProduct(x, n), DotProduct(n1, n2));
+}
+
+static void RagMat3FromAxisAngle(const vec3_t axis, float ang, float out[3][3])
+{
+    float c = (float)cos(ang), sn = (float)sin(ang), t = 1.0f - c;
+    float x = axis[0], y = axis[1], z = axis[2];
+    out[0][0] = t * x * x + c;      out[0][1] = t * x * y + sn * z; out[0][2] = t * x * z - sn * y;
+    out[1][0] = t * x * y - sn * z; out[1][1] = t * y * y + c;      out[1][2] = t * y * z + sn * x;
+    out[2][0] = t * x * z + sn * y; out[2][1] = t * y * z - sn * x; out[2][2] = t * z * z + c;
+}
+
+// Rotating the whole child SUBTREE, not one point, is what makes this stable: a rigid rotation
+// preserves every distance inside the set, so a limit can never fight a link it passes through,
+// and the link crossing the pivot survives because the pivot is ON the axis.
+static void RagRotateSet(ragSim_t *s, unsigned mask, const vec3_t pivot, const float R[3][3])
+{
+    int i;
+    for (i = 0; i < RAG_PTS; i++) {
+        vec3_t r, o;
+        if (!(mask & (1u << i))) {
+            continue;
+        }
+        // NON-NEGOTIABLE: pt AND ptPrev by the SAME rotation about the SAME pivot. In Verlet the
+        // gap between them IS the velocity, so rotating both leaves |v| exactly unchanged and
+        // tangent to the stop - the limb slides ALONG the limit instead of buzzing against it.
+        // Moving pt alone is the pattern that produced the flying-body blowup twice already.
+        VectorSubtract(s->pt[i], pivot, r);
+        RagMat3RotateVec(R, r, o);
+        VectorAdd(pivot, o, s->pt[i]);
+        VectorSubtract(s->ptPrev[i], pivot, r);
+        RagMat3RotateVec(R, r, o);
+        VectorAdd(pivot, o, s->ptPrev[i]);
+    }
+}
+
+static void RagLimitFrames(ragSim_t *s, float T0[3][3], float T2[3][3], qboolean ok[2]);
 
 static qboolean RagCapture(centity_t *cent, entityState_t *ns, ragSim_t *s)
 {
@@ -841,6 +975,86 @@ static qboolean RagCapture(centity_t *cent, entityState_t *ns, ragSim_t *s)
         VectorSubtract(cmx, cmn, s->capSpan); // was the corpse captured upright or flat?
     }
 
+
+    // ---- derive this corpse's joint limits from its own captured pose (stage 3) ----
+    {
+        float    T[2][3][3];
+        qboolean tok[2];
+        int      k;
+        // faceSign only has to be right to within 90deg: it orients the LEFT axis against the
+        // corpse's facing at death
+        s->faceSign[0] = s->faceSign[1] = 1.0f;
+        RagBodyTriad(s->pt[1], s->pt[0], s->pt[13], s->pt[11], 1.0f, T[0]);
+        s->faceSign[0] = (DotProduct(T[0][0], s->entAxis[0]) >= 0.0f) ? 1.0f : -1.0f;
+        RagBodyTriad(s->pt[3], s->pt[2], s->pt[8], s->pt[5], 1.0f, T[1]);
+        s->faceSign[1] = (DotProduct(T[1][0], s->entAxis[0]) >= 0.0f) ? 1.0f : -1.0f;
+        RagLimitFrames(s, T[0], T[1], tok);
+
+        for (k = 0; k < RAG_LIMITS; k++) {
+            const ragLimitDef_t *J = &s_ragLimits[k];
+            vec3_t               a, b, h, neut, axis, x;
+            float                capPhi = 0;
+            s->limDisabled[k] = 0;
+            s->limLo[k]       = J->lo;
+            s->limHi[k]       = J->hi;
+            if (!tok[J->frame]) {
+                s->limDisabled[k] = 1;
+                s->limOff++;
+                continue;
+            }
+            VectorSubtract(s->pt[J->child], s->pt[J->pivot], b);
+            if (VectorNormalize(b) < 0.001f) {
+                s->limDisabled[k] = 1;
+                s->limOff++;
+                continue;
+            }
+            if (J->kind == RAG_LIMIT_KIND_SWING) {
+                VectorCopy(T[J->frame][J->axisRow], axis);
+                VectorScale(T[J->frame][2], J->neutSign, neut);
+                capPhi = RagSignedAngle(neut, b, axis);
+            } else {
+                VectorSubtract(s->pt[J->pivot], s->pt[J->grand], a);
+                if (VectorNormalize(a) < 0.001f) {
+                    s->limDisabled[k] = 1;
+                    s->limOff++;
+                    continue;
+                }
+                // SIGN IS ANATOMY, NOT MEASUREMENT: a knee flexes so the ankle goes BACKWARD, an
+                // elbow so the hand goes FORWARD. The opposite hSign is correct, not a bug.
+                VectorScale(T[J->frame][1], J->hSign, h);
+                VectorMA(h, -DotProduct(h, a), a, h); // Gram-Schmidt: h perpendicular to a
+                if (VectorNormalize(h) < 0.001f) {
+                    s->limDisabled[k] = 1;
+                    s->limOff++;
+                    continue;
+                }
+                // VALIDATOR, never a source: if the limb is genuinely bent at capture, the real
+                // flexion plane must agree with the anatomical rule. If it disagrees this
+                // skeleton is not the one we reasoned about, so disable this hinge for this
+                // corpse rather than guessing or snapping it straight.
+                CrossProduct(a, b, x);
+                if (VectorNormalize(x) > 0.342f && DotProduct(x, h) < 0.0f) {
+                    s->limDisabled[k] = 1;
+                    s->limOff++;
+                    continue;
+                }
+                VectorCopy(a, s->limACap[k]);
+                VectorCopy(h, s->limHCap[k]);
+                capPhi = (J->kind == RAG_LIMIT_KIND_HINGE) ? RagSignedAngle(a, b, h)
+                                                           : (float)asin(DotProduct(b, h));
+            }
+            // the death pose may already sit outside an anatomical range; snapping it in on
+            // frame 1 is a visible pop, so start wide enough to admit it and close over 300ms
+            s->limLo0[k] = (capPhi - DEG2RAD(5.0f) < J->lo) ? capPhi - DEG2RAD(5.0f) : J->lo;
+            s->limHi0[k] = (capPhi + DEG2RAD(5.0f) > J->hi) ? capPhi + DEG2RAD(5.0f) : J->hi;
+            // failsafe: a capture far outside the range means the derivation is suspect
+            if (capPhi < J->lo - DEG2RAD(30.0f) || capPhi > J->hi + DEG2RAD(30.0f)) {
+                s->limDisabled[k] = 1;
+                s->limOff++;
+            }
+        }
+    }
+
     // capture the OUTGOING (bone -> child) directions the push drives each bone with
     for (i = 0; i < RAG_PTS; i++) {
         int    dch = s_ragDriveChild[i];
@@ -915,6 +1129,7 @@ static qboolean RagCapture(centity_t *cent, entityState_t *ns, ragSim_t *s)
 
     return qtrue;
 }
+
 
 // ---------- per-frame sim ------------------------------------------------------------------
 
@@ -1067,6 +1282,116 @@ static void RagShapeMatch(ragSim_t *s, float alpha)
     }
 }
 
+
+// Rebuild both body frames from the CURRENT points. On a degenerate spine or a hip line
+// parallel to it, every limit in that frame is skipped for this iteration.
+static void RagLimitFrames(ragSim_t *s, float T0[3][3], float T2[3][3], qboolean ok[2])
+{
+    ok[0] = RagBodyTriad(s->pt[1], s->pt[0], s->pt[13], s->pt[11], s->faceSign[0], T0);
+    ok[1] = RagBodyTriad(s->pt[3], s->pt[2], s->pt[8], s->pt[5], s->faceSign[1], T2);
+}
+
+static void RagLimitApply(ragSim_t *s, int idx, const vec3_t axis, float phi, float lo, float hi,
+                          float k)
+{
+    const ragLimitDef_t *J = &s_ragLimits[idx];
+    float                target = (phi < lo) ? lo : ((phi > hi) ? hi : phi);
+    float                d, R[3][3];
+
+    if (target == phi) {
+        return; // inequality: project only when actually violated
+    }
+    d = (target - phi) * k;
+    if (d > RAG_LIMIT_MAX_STEP) {
+        d = RAG_LIMIT_MAX_STEP;
+        s->limSat++;
+    } else if (d < -RAG_LIMIT_MAX_STEP) {
+        d = -RAG_LIMIT_MAX_STEP;
+        s->limSat++;
+    }
+    RagMat3FromAxisAngle(axis, d, R);
+    RagRotateSet(s, J->mask, s->pt[J->pivot], R);
+    s->limCount++;
+    if (fabs(d) > s->limMax) {
+        s->limMax = (float)fabs(d);
+    }
+}
+
+// One sweep of all 18 limits. Order is REVERSED on odd iterations so Gauss-Seidel bias does not
+// make one side of the body stiffer than the other.
+static void RagLimitSweep(ragSim_t *s, int iter)
+{
+    float    T[2][3][3], k;
+    qboolean ok[2];
+    float    t, span;
+    int      n, i;
+
+    if (!rag_limits->integer) {
+        return;
+    }
+    RagLimitFrames(s, T[0], T[1], ok);
+    if (!ok[0] && !ok[1]) {
+        s->limBad++;
+        return;
+    }
+    // iteration-count-independent stiffness, so tuning survives an RAG_ITERS change
+    k = 1.0f - (float)pow(1.0f - 0.98f, 1.0f / (float)RAG_ITERS);
+    // ranges start wide enough to admit the pose he died in, and close to anatomical over 300ms
+    t = (s->limAgeMs >= 300) ? 1.0f : (float)s->limAgeMs / 300.0f;
+
+    for (n = 0; n < RAG_LIMITS; n++) {
+        const ragLimitDef_t *J;
+        vec3_t               a, b, h, axis, neut;
+        float                phi, lo, hi;
+        i = (iter & 1) ? (RAG_LIMITS - 1 - n) : n;
+        J = &s_ragLimits[i];
+        if (s->limDisabled[i] || !ok[J->frame]) {
+            continue;
+        }
+        lo = s->limLo0[i] + (s->limLo[i] - s->limLo0[i]) * t;
+        hi = s->limHi0[i] + (s->limHi[i] - s->limHi0[i]) * t;
+
+        VectorSubtract(s->pt[J->child], s->pt[J->pivot], b);
+        if (VectorNormalize(b) < 0.001f) {
+            continue;
+        }
+        if (J->kind == RAG_LIMIT_KIND_SWING) {
+            VectorCopy(T[J->frame][J->axisRow], axis);
+            VectorScale(T[J->frame][2], J->neutSign, neut);
+            phi = RagSignedAngle(neut, b, axis);
+        } else {
+            // hinge: the axis rides the PARENT segment's own swing since capture, so it can
+            // never be flipped by animation noise the way a live cross product can
+            float Rp[3][3];
+            VectorSubtract(s->pt[J->pivot], s->pt[J->grand], a);
+            if (VectorNormalize(a) < 0.001f) {
+                continue;
+            }
+            RagMat3FromTo(s->limACap[i], a, Rp);
+            RagMat3RotateVec(Rp, s->limHCap[i], h);
+            if (J->kind == RAG_LIMIT_KIND_HINGE) {
+                VectorCopy(h, axis);
+                phi = RagSignedAngle(a, b, h);
+            } else {
+                // out-of-plane: how far the child has left the hinge plane
+                vec3_t oop;
+                CrossProduct(b, h, oop);
+                if (VectorNormalize(oop) < 0.001f) {
+                    continue;
+                }
+                VectorCopy(oop, axis);
+                phi = (float)asin(DotProduct(b, h) > 1.0f ? 1.0f
+                                  : (DotProduct(b, h) < -1.0f ? -1.0f : DotProduct(b, h)));
+            }
+        }
+        span = hi - lo;
+        if (span < DEG2RAD(1.0f)) {
+            continue;
+        }
+        RagLimitApply(s, i, axis, phi, lo, hi, k);
+    }
+}
+
 static void RagStep(ragSim_t *s, float dt)
 {
     int   i, it;
@@ -1121,6 +1446,15 @@ static void RagStep(ragSim_t *s, float dt)
             if (len < 0.001f) {
                 continue;
             }
+            if (s_ragBraceMinFactor[i] > 0 && i != 13 && rag_limits->integer) {
+                // ATOMICITY, ENFORCED AT RUNTIME. These fold rows cap the very joints the
+                // angular limits now cap properly - with a direction instead of a distance -
+                // and a min-distance brace shoving a hand away from spine2 while a shoulder
+                // limit pulls the arm across is a guaranteed limit cycle. Row 13 is the one
+                // exception: neither endpoint is in any limit's moving set and its distance
+                // is not fixed, so it stays a live bound on a lumbar DOF no limit covers.
+                continue;
+            }
             if (s_ragBraceMinFactor[i] > 0 && len >= s->braceLen[i]) {
                 continue; // inequality fold limit: only ever pushes APART
             }
@@ -1128,6 +1462,7 @@ static void RagStep(ragSim_t *s, float dt)
             VectorMA(s->pt[a], -corr, d, s->pt[a]);
             VectorMA(s->pt[b], corr, d, s->pt[b]);
         }
+        RagLimitSweep(s, it); // the 18 angular limits, inside the iteration loop
     }
     for (i = 0; i < RAG_PTS; i++) { // impact-limp windows tick down with the sim, not the frame
         if (s->limpMs[i] > 0) {
@@ -1161,6 +1496,9 @@ static void RagStep(ragSim_t *s, float dt)
             VectorSubtract(s->pt[0], v, s->ptPrev[0]);
         }
     }
+    s->limAgeMs += RAG_SUBSTEP_MS; // NEVER reset: lifeMs is, and a re-widen on a late shot
+                                  // would admit a stale capture value exactly when the
+                                  // limits are most needed
     RagBodyRotationAdvance(s); // the ONE filter advance, after the constraints
     if (s->branch) {
         float target = rag_stiff->value;
@@ -1174,6 +1512,9 @@ static void RagStep(ragSim_t *s, float dt)
         // as physics takes the wheel
         alpha = (s->rampMs >= 300) ? target : target + (1.0f - target) * (1.0f - s->rampMs / 300.0f);
         RagShapeMatch(s, alpha);
+        RagLimitSweep(s, 0); // the shape-match moves points with PER-POINT alphas, so it is
+                             // not rigid and can re-violate a limit it was just corrected
+                             // out of. Collision still gets the last word after RagStep.
     }
 }
 
@@ -2093,10 +2434,13 @@ void CG_RagdollFrame(void)
                         }
                         cgi.Printf("^~^~^ RAGDOLL sleep-rot ent=%d rot=%.0fdeg spin=%.1f spinmax=%.1f "
                                    "yawf=%.2f rotlockAt=%d ctcmax=%d stretch=%.2f rawbad=%d "
-                                   "swing=%.1fdeg couple=%.2f lock=%d slew=%.2f carry=%.2f vcap=%.0f\n",
+                                   "swing=%.1fdeg couple=%.2f lim=%d limmax=%.0fdeg limsat=%d limoff=%d limbad=%d "
+                                   "lock=%d slew=%.2f carry=%.2f vcap=%.0f\n",
                                    s->entnum, rotDeg, s->spinRate, s->spinMax, s->spinYawFrac,
                                    s->rotLockAtMs, (int)s->ctcMax, s->stretchMax, (int)s->rawBad,
-                                   s->swingLast, rag_couple->value, rag_rotlock->integer,
+                                   s->swingLast, rag_couple->value, s->limCount,
+                                   s->limMax * 180.0f / (float)M_PI, s->limSat, s->limOff,
+                                   s->limBad, rag_rotlock->integer,
                                    rag_slew->value, rag_carry->value, rag_velcap->value);
                     }
                 }
