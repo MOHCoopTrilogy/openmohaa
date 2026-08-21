@@ -214,7 +214,20 @@ static void CG_ReloadFeelAdvance(void)
     } else if (fPhase > 1.0f) {
         fPhase = 1.0f;
     }
+    // [user 2026-08-20] "reload speeds for all guns based on calm vs stressed" / "I think we
+    // should also try to make weapon movement feel dynamic, no reload should feel the same".
+    //
+    // The TIMING is deliberately not touched. The viewmodel clock is client-side while the real
+    // reload completion is server-side, so scaling only the visible half desynchronises the
+    // animation from when ammo actually returns - and slowing a reload under stress punishes the
+    // player at the exact moment they are already losing. What changes is the CHARACTER: a rattled
+    // player's hands travel further and settle less tidily over the identical duration.
     fPeak = pRS->value * s_fWeight;
+    {
+        static cvar_t *pStrAmt = NULL;
+        if (!pStrAmt) { pStrAmt = cgi.Cvar_Get("coop_wfeelStressAmt", "0.45", CVAR_ARCHIVE); }
+        fPeak *= (1.0f + pStrAmt->value * CoopWFeelStress());
+    }
 
     if (!bAlive || cg.renderingThirdPerson || (cg.snap->ps.pm_flags & PMF_CAMERA_VIEW)) {
         // in 3P/cutscene/dead the duration counter does not advance either, so decay the envelope
@@ -300,7 +313,8 @@ static void CG_ReloadFeelAdvance(void)
         if (CoopWeaponFeelOn() && pShake->value > 0.0f && bAlive && !cg.renderingThirdPerson
             && iAnim >= VM_ANIM_RECHAMBER && iAnim <= VM_ANIM_PUTAWAY) {
             fShakeTarget = pShake->value * s_fWeight
-                           * (0.35f + 0.65f * (fabs(fTarget) / (fPeak + 0.001f)));
+                           * (0.35f + 0.65f * (fabs(fTarget) / (fPeak + 0.001f)))
+                           * (1.0f + 1.2f * CoopWFeelStress()); // rattled hands are less tidy
         }
         s_shakeAmp += (fShakeTarget - s_shakeAmp) * k;
         if (s_shakeAmp < 0.0005f && fShakeTarget == 0.0f) {
@@ -738,6 +752,12 @@ static qboolean s_faCamInit  = qfalse;
 // zings, from cg_parsemsg.cpp) + by taking damage (in CG_CalcFov), decays each frame, published to the
 // renderer as r_ppSuppress. File-static so both CG_AddSuppression and CG_CalcFov share it.
 static float    s_coopSuppress = 0.0f;
+
+// HZM coop [2026-08-20] hoisted from CG_OffsetFirstPersonView so the feel-context scalar can
+// read it. Still only ADVANCED there, so it is first-person-only - see CG_FeelStressAdvance.
+static float    s_spEnvCur  = 0.0f;    // sprint lower envelope, mirrored for sprint-to-fire
+static float    s_spStam    = 9999.0f; // client mirror of the stamina pool (seconds)
+static float    s_spStamMax = 5.0f;    // the max it was clamped against this frame
 
 // HZM coop [user 08-02] - ON-HIT BLOOD intensity 0..1. Distinct from suppression: suppression is the
 // sustained "under fire" state (near-misses count), this fires only when a round actually LANDS on the
@@ -1564,6 +1584,197 @@ void CG_OffsetFirstPersonView(refEntity_t *pREnt, qboolean bUseWorldPosition)
                         VectorMA(pREnt->origin, amp * 0.45f * (float)sin(ph * 0.5f), mat[1], pREnt->origin);
                     }
                 }
+                // HZM coop [user 2026-08-20] SPRINT-TO-FIRE, IDLE INSPECT and LOW-AMMO TELL.
+                // All three ride pREnt->origin (translation), which is the only aim-honest channel:
+                // it moves the gun, never the aim ray. None of them exists in third person, because
+                // this whole function is skipped there.
+                //
+                // NOTE ON ROTATION: an "inspect" that turns the weapon toward the camera is NOT
+                // possible here. The arms and the gun are SEPARATE render entities - every feel
+                // layer in this file writes pREnt->origin only, and the sole rotation in the
+                // pipeline (the ADS tune) is applied to the gun alone and capped near 12 degrees
+                // precisely because more visibly detaches it from the hand. Rotating at
+                // inspect-scale angles would pull the gun out of the player's grip. So the inspect
+                // is expressed as a raise, a pull toward the eye and a lateral drift - readable as
+                // "having a look at it" without ever desynchronising gun from hands.
+                {
+                    static cvar_t *pInsp = NULL, *pS2F = NULL, *pLowA = NULL;
+                    static int     s_actTime   = 0;     // last frame the player DID something
+                    static int     s_inspNext  = 0;     // when the next inspect may fire
+                    static float   s_inspEnv   = 0.0f;  // 0..1 eased
+                    static int     s_inspEnd   = 0;     // when the current inspect stops holding
+                    static unsigned s_inspSeed = 2463534242u;
+                    static int     s_lastWpn2  = -2;
+                    static float   s_spEnvPrev = 0.0f;
+                    static float   s_s2fEnv    = 0.0f;  // sprint-to-fire recovery, 0..1
+                    usercmd_t      icmd;
+                    int            iWpn2, iClip2, iMaxClip2;
+                    qboolean       bBusy, bFiring;
+
+                    if (!pInsp) { pInsp = cgi.Cvar_Get("coop_idleInspect", "1", CVAR_ARCHIVE); }
+                    if (!pS2F)  { pS2F  = cgi.Cvar_Get("coop_sprintToFire", "1", CVAR_ARCHIVE); }
+                    if (!pLowA) { pLowA = cgi.Cvar_Get("coop_lowAmmoTell", "1", CVAR_ARCHIVE); }
+
+                    cgi.GetUserCmd(cgi.GetCurrentCmdNumber(), &icmd);
+                    iWpn2     = (cg.snap && cg.snap->ps.activeItems[1] >= 0) ? cg.snap->ps.activeItems[1] : -1;
+                    iClip2    = cg.snap ? cg.snap->ps.stats[STAT_CLIPAMMO] : -1;
+                    iMaxClip2 = cg.snap ? cg.snap->ps.stats[STAT_MAXCLIPAMMO] : 0;
+                    bFiring   = (icmd.buttons & (BUTTON_ATTACKLEFT | BUTTON_ATTACKRIGHT)) ? qtrue : qfalse;
+
+                    // "busy" = anything that must cancel an inspect. Fire, ADS, sprint and weapon
+                    // switch are all readable THIS frame - usercmds are built before the frame is
+                    // drawn, and CL_CmdButtons latches a press so even a sub-frame tap is caught.
+                    // The viewmodel anim state is included too, but it is SNAPSHOT data: `reload` is
+                    // a server console command, not a usercmd bit, so a reload cancel arrives one
+                    // round trip late (100-300 ms on a remote server). That is accepted rather than
+                    // hidden - the inspect amplitude is small enough that a late cancel is a slight
+                    // drift, not a gun across the face.
+                    bBusy = (qboolean)(bFiring || bAds || bScoped || fSpeed > 40.0f
+                                       || iWpn2 != s_lastWpn2
+                                       || (cg.snap && cg.snap->ps.iViewModelAnim != VM_ANIM_IDLE));
+                    s_lastWpn2 = iWpn2;
+
+                    if (bBusy || !bGround) {
+                        s_actTime  = cg.time;
+                        s_inspEnd  = 0;
+                        s_inspNext = 0;
+                    }
+                    if (s_actTime == 0) { s_actTime = cg.time; }
+
+                    // ---- IDLE INSPECT ------------------------------------------------------------
+                    // 15 s base, randomised so it is not metronomic. The interval is rolled ONCE when
+                    // the timer arms and then held: re-rolling per frame would make it jitter, and a
+                    // frame hitch would re-roll it.
+                    if (pInsp->integer && !bBusy && bGround) {
+                        if (s_inspNext == 0) {
+                            s_inspSeed ^= s_inspSeed << 13;
+                            s_inspSeed ^= s_inspSeed >> 17;
+                            s_inspSeed ^= s_inspSeed << 5;
+                            // 15 s, plus 0..14 s of spread
+                            s_inspNext = s_actTime + 15000 + (int)(s_inspSeed % 14000u);
+                        }
+                        if (s_inspEnd == 0 && cg.time > s_inspNext
+                            && CoopWFeelStress() < 0.25f) { // only when genuinely calm
+                            s_inspEnd = cg.time + 2200;
+                        }
+                    }
+                    if (s_inspEnd != 0 && cg.time > s_inspEnd) {
+                        s_inspEnd  = 0;
+                        s_inspNext = 0;
+                        s_actTime  = cg.time;
+                    }
+                    {
+                        float tgt = (s_inspEnd != 0) ? 1.0f : 0.0f;
+                        float k   = fDt2 * (tgt > s_inspEnv ? 3.2f : 6.0f); // in slow, out fast
+                        if (k > 1.0f) { k = 1.0f; }
+                        s_inspEnv += (tgt - s_inspEnv) * k;
+                        if (s_inspEnv < 0.001f && tgt == 0.0f) { s_inspEnv = 0.0f; }
+                    }
+                    if (s_inspEnv > 0.001f) {
+                        // raise, draw toward the eye, and drift laterally - a look-over, not a spin
+                        float e = s_inspEnv * (0.75f + 0.35f * fClassKick);
+                        VectorMA(pREnt->origin,  e * 2.6f, mat[2], pREnt->origin);
+                        VectorMA(pREnt->origin, -e * 2.2f, mat[0], pREnt->origin);
+                        VectorMA(pREnt->origin,  e * 1.1f, mat[1], pREnt->origin);
+                    }
+
+                    // ---- SPRINT-TO-FIRE ----------------------------------------------------------
+                    // COSMETIC ONLY, as the user specified: the weapon looks unready, it still fires
+                    // normally. Modulates the EXISTING sprint-lower envelope rather than replacing
+                    // it. When that envelope drops (sprint ended) the weapon overshoots slightly and
+                    // settles, more slowly the heavier it is.
+                    if (pS2F->integer) {
+                        if (s_spEnvPrev - s_spEnvCur > 0.02f) {
+                            float add = (s_spEnvPrev - s_spEnvCur) * 2.2f;
+                            s_s2fEnv += add;
+                            if (s_s2fEnv > 1.0f) { s_s2fEnv = 1.0f; }
+                        }
+                        s_spEnvPrev = s_spEnvCur;
+                        if (s_s2fEnv > 0.001f) {
+                            float e2 = s_s2fEnv * fClassKick;
+                            VectorMA(pREnt->origin, -e2 * 1.5f, mat[2], pREnt->origin);
+                            VectorMA(pREnt->origin, -e2 * 0.9f, mat[0], pREnt->origin);
+                            VectorMA(pREnt->origin,  e2 * 0.6f, mat[1], pREnt->origin);
+                            s_s2fEnv -= s_s2fEnv * fDt2
+                                        * (5.5f / (fClassKick > 0.1f ? fClassKick : 1.0f));
+                            if (s_s2fEnv < 0.002f) { s_s2fEnv = 0.0f; }
+                        }
+                    }
+
+                    // ---- LOW-AMMO TELL -----------------------------------------------------------
+                    // The guard is the whole feature. Weapon::ClipAmmo returns -1 for anything with
+                    // no clip (grenades, knife, binoculars, mine detector) and STAT_MAXCLIPAMMO is 0
+                    // for them, so a naive "clip <= 25% of max" reads -1 <= 0 = TRUE and every one of
+                    // those items would sit at a permanent maximum tell. Require BOTH a real clip
+                    // size and a non-negative count - the same shape the recoil detector above uses.
+                    if (pLowA->integer && iMaxClip2 > 0 && iClip2 >= 0 && !bAds && !bScoped
+                        && !bFiring && cg.snap && cg.snap->ps.iViewModelAnim == VM_ANIM_IDLE) {
+                        float frac2 = (float)iClip2 / (float)iMaxClip2;
+                        if (frac2 < 0.25f) {
+                            // grows as the clip empties; a canted "how many left?" hold rather than a
+                            // motion, so it reads at a glance without demanding attention
+                            static float s_lowPhase = 0.0f;
+                            float        lowAmt = (0.25f - frac2) / 0.25f;
+                            s_lowPhase += fDt2 * 1.6f;
+                            if (s_lowPhase > 62831.85f) { s_lowPhase -= 62831.85f; }
+                            VectorMA(pREnt->origin, lowAmt * 0.9f, mat[1], pREnt->origin);
+                            VectorMA(pREnt->origin,
+                                     lowAmt * 0.45f * (float)sin(s_lowPhase), mat[2], pREnt->origin);
+                        }
+                    }
+                }
+
+                // HZM coop [user 2026-08-20] INJURED / STRESSED HAND TREMOR.
+                // "when you are injured I think gun shaking should be more prevelant when ads and
+                // also when not but that can also be based on compose/stress we build."
+                //
+                // This is a SECOND injury effect and it deliberately uses a different channel from
+                // the one that already ships. coop_injurySway (further down this file) writes
+                // cg.refdefViewAngles - an ANGULAR layer. Angular layers are not aim-honest: bullets
+                // leave along ps->viewangles, which the sway never touches, so the camera lies by
+                // exactly the sway amount. In the hip that only means the crosshair is off. Under
+                // SIGHTS it is worse, because the iron sights are rebuilt from the already-swayed
+                // angles - so the sight picture stays perfectly aligned and lies invisibly. Making
+                // the angular sway stronger in ADS, which is what was literally asked for, would
+                // have made aiming while hurt silently inaccurate with no visible tell.
+                //
+                // So the ADS half rides pREnt->origin instead. Translating the weapon moves the gun,
+                // not the aim ray: the sights visibly drift off the target and the player can SEE
+                // that they are unsteady, which is the actual goal. It is therefore allowed to be
+                // strong under sights, unlike every other perturbation here.
+                //
+                // Phase is integrated, never time x frequency (see the footfall note above), and the
+                // three frequencies are mutually detuned so it never reads as a metronome.
+                if (!bScoped) {
+                    static cvar_t *pInj = NULL, *pInjAds = NULL;
+                    static float   s_injPhase = 0.0f;
+                    float          hpF, sev, amp3;
+
+                    if (!pInj)    { pInj    = cgi.Cvar_Get("coop_injuryShake", "1.0", CVAR_ARCHIVE); }
+                    if (!pInjAds) { pInjAds = cgi.Cvar_Get("coop_injuryShakeAds", "1.15", CVAR_ARCHIVE); }
+
+                    // reuse the published, peak-calibrated health fraction rather than a fourth
+                    // health tracker - it already handles DBNO (0.02 while downed)
+                    hpF = cgi.Cvar_Get("r_ppHealthFrac", "1", 0)->value;
+                    if (hpF < 0.0f) { hpF = 0.0f; } else if (hpF > 1.0f) { hpF = 1.0f; }
+
+                    // being hurt is the driver; general stress adds to it but cannot create it on
+                    // its own, so a healthy player sprinting under fire does not get shaky hands
+                    sev = (1.0f - hpF) * (0.65f + 0.35f * CoopWFeelStress());
+
+                    if (pInj->value > 0.0f && sev > 0.01f) {
+                        amp3 = sev * sev * 0.9f * pInj->value * (bAds ? pInjAds->value : 1.0f);
+                        if (amp3 > 1.6f) { amp3 = 1.6f; }
+                        s_injPhase += fDt2 * 7.3f;
+                        if (s_injPhase > 62831.85f) { s_injPhase -= 62831.85f; }
+                        VectorMA(pREnt->origin, amp3 * (float)sin(s_injPhase), mat[2], pREnt->origin);
+                        VectorMA(pREnt->origin, amp3 * 0.7f * (float)sin(s_injPhase * 1.37f + 0.9f),
+                                 mat[1], pREnt->origin);
+                        VectorMA(pREnt->origin, amp3 * 0.35f * (float)sin(s_injPhase * 0.61f + 2.1f),
+                                 mat[0], pREnt->origin);
+                    }
+                }
+
                 // IDLE BREATHING. A slow drift that is always present out of ADS, grows when hurt,
                 // and is suppressed while holding breath. Small enough to be felt rather than seen.
                 if (!bScoped) {
@@ -1680,7 +1891,6 @@ void CG_OffsetFirstPersonView(refEntity_t *pREnt, qboolean bUseWorldPosition)
             {
                 static qboolean s_spInit = qfalse;
                 static float    s_spEnv  = 0.0f;   // 0 = rest, 1 = fully lowered; eased in/out
-                static float    s_spStam = 9999.0f; // client mirror of the stamina pool (seconds)
                 cvar_t  *pSpOn   = cgi.Cvar_Get("coop_sprint", "1", CVAR_ARCHIVE);
                 cvar_t  *pSpStam = cgi.Cvar_Get("coop_sprintStamina", "5", CVAR_ARCHIVE);
                 cvar_t  *pSpRegen= cgi.Cvar_Get("coop_sprintRegen", "0.6", CVAR_ARCHIVE);
@@ -1699,6 +1909,7 @@ void CG_OffsetFirstPersonView(refEntity_t *pREnt, qboolean bUseWorldPosition)
 
                 if (fMaxStam < 0.1f) { fMaxStam = 0.1f; }
                 if (s_spStam > fMaxStam) { s_spStam = fMaxStam; } // clamp mirror to current max
+                s_spStamMax = fMaxStam; // published for CG_GetStamina
 
                 cgi.GetUserCmd(cgi.GetCurrentCmdNumber(), &scmd);
 
@@ -1731,6 +1942,10 @@ void CG_OffsetFirstPersonView(refEntity_t *pREnt, qboolean bUseWorldPosition)
                 }
                 if (s_spEnv < 0.0f) { s_spEnv = 0.0f; }
                 if (s_spEnv > 1.0f) { s_spEnv = 1.0f; }
+                // mirrored for the sprint-to-fire recovery, which lives in the feel block
+                // ABOVE this one and therefore reads it one frame stale. 16 ms; harmless for
+                // an edge detector that only needs to see the envelope fall.
+                s_spEnvCur = s_spEnv;
 
                 if (pLower && pLower->value != 0.0f && s_spEnv > 0.001f) {
                     float fDip  = pLowAmt ? pLowAmt->value : 3.0f;
@@ -2410,8 +2625,27 @@ static int CG_CalcFov(void)
         static int s_lastSuppTime   = 0;
         static int s_lastSuppHealth  = 0;
         int        h        = cg.snap ? cg.snap->ps.stats[STAT_HEALTH] : 0;
-        cvar_t    *pSuppMax = cgi.Cvar_Get("coop_health", "750", CVAR_ARCHIVE);
-        int        maxH     = pSuppMax ? (int)pSuppMax->value : 750; // real coop max, so the spike is proportional to the hit
+        // [2026-08-20] UNIT BUG, shipped. This read `coop_health` (750) as the denominator, with a
+        // comment claiming "real coop max, so the spike is proportional to the hit". But STAT_HEALTH
+        // is NOT hit points - fgame assigns it a 0..100 PERCENTAGE:
+        //     healthfrac = (health / max_health * 100.0f);
+        //     client->ps.stats[STAT_HEALTH] = healthfrac;          (player.cpp:8402, :8417)
+        // so dividing a percentage delta by 750 made `lost` top out at 100/750 = 0.133 instead of
+        // 1.0. The severity term was therefore ~7.5x too weak and effectively dead: the `lost * 2.5`
+        // suppression spike could only ever contribute 0.33, and the `lost * 3.0` blood spike 0.40.
+        // Every hit read as the same small flinch regardless of how hard it landed.
+        //
+        // STAT_MAXHEALTH is hardwired to 100 (player.cpp:8435) and is the matching scale, so use it
+        // and fall back to 100 rather than to coop_health.
+        //
+        // CAVEAT for anything else built on this detector: STAT_HEALTH is hijacked by vehicles.
+        // player.cpp:8404-8408 reports the VEHICLE's health as the player's while riding one, so
+        // boarding a damaged vehicle (m1l3a/m1l3b jeep, t2l2 halftrack) looks like a huge instant
+        // hit and dismounting looks like an instant heal. There is no PMF_VEHICLE flag to gate on;
+        // if that becomes a problem, detect the ride some other way rather than widening this test.
+        int        maxH     = (cg.snap && cg.snap->ps.stats[STAT_MAXHEALTH] > 0)
+                                  ? cg.snap->ps.stats[STAT_MAXHEALTH]
+                                  : 100;
         float      dt;
         cvar_t    *pFade = cgi.Cvar_Get("coop_suppressFade", "1.4", CVAR_ARCHIVE);
         float      fade  = (pFade && pFade->value > 0.1f) ? pFade->value : 0.9f;
@@ -2423,15 +2657,25 @@ static int CG_CalcFov(void)
 
         // taking fire = a health drop since last frame; scale the spike by how big the hit was
         if (h > 0 && maxH > 0 && s_lastSuppHealth > 0 && h < s_lastSuppHealth) {
-            float lost = (float)(s_lastSuppHealth - h) / (float)maxH;
-            CG_AddSuppression(0.25f + lost * 2.5f); // small flinch on any hit, scaled by severity (real max)
+            // The severity scaling below has never actually been felt in play - the unit bug above
+            // held `lost` under 0.133 for the whole life of the feature - so the authored constants
+            // are unproven at their intended magnitude. coop_hitSeverity scales just the severity
+            // term (never the flat flinch), so it can be dialled without a rebuild; 0 restores the
+            // old, effectively-flat behaviour.
+            static cvar_t *pSev = NULL;
+            float          lost = (float)(s_lastSuppHealth - h) / (float)maxH;
+            float          sev;
+            if (!pSev) { pSev = cgi.Cvar_Get("coop_hitSeverity", "1.0", CVAR_ARCHIVE); }
+            sev = lost * (pSev->value < 0.0f ? 0.0f : pSev->value);
+            if (sev > 1.0f) { sev = 1.0f; }
+            CG_AddSuppression(0.25f + sev * 2.5f); // small flinch on any hit, scaled by severity
 
             // HZM coop [user 08-02] ON-HIT BLOOD spikes off the SAME health-drop detector, so there is
             // one source of truth for "I just got hit". Fast attack (straight to a level proportional to
             // the wound) then a slow decay below - a hit should register instantly and linger, unlike
             // suppression which ramps with sustained fire.
             {
-                float bloodHit = 0.35f + lost * 3.0f;
+                float bloodHit = 0.35f + sev * 3.0f;
                 if (bloodHit > 1.0f) { bloodHit = 1.0f; }
                 if (bloodHit > s_coopHit) { s_coopHit = bloodHit; }
             }
@@ -3279,6 +3523,149 @@ static void CG_SyncWussPk3Count(void)
     cgi.Cvar_Set("coop_wussCount", va("%d", count));
 }
 
+
+// =================================================================================================
+// HZM coop [user 2026-08-20] ONE FEEL-CONTEXT SCALAR: how rattled is the player, 0..1.
+//
+// The user asked for reload/handling character to change with "calm vs stressed", for injured hands
+// to shake more, and for a shared notion of stress to drive future work. This is that one number.
+//
+// It is deliberately NOT called "composure": an AI *morale* system already ships
+// (coop_moraleEnable, coop_mod/morale.scr) and two similarly-named scalars in the same logs would be
+// a trap. The name matches the pre-existing design note in
+// _research/weapon_feel_r1_variation.md section 3, which specified these same inputs.
+//
+// Everything here is client-side and already networked - nothing new crosses the wire.
+//
+// Three input choices are worth explaining, because the obvious versions are all wrong:
+//
+//  * HEALTH is read from the published r_ppHealthFrac rather than from STAT_HEALTH directly. Two
+//    reasons. STAT_HEALTH is a 0..100 PERCENTAGE, not hit points (player.cpp:8402), and it is
+//    hijacked by vehicles - riding one reports the VEHICLE's health as yours. r_ppHealthFrac is the
+//    existing self-calibrating peak tracker, which carries a "VERIFIED SOUND - do not fix this"
+//    banner, and it ALSO already applies the DBNO override (0.02 while downed). Reusing it means a
+//    downed player reads as maximally stressed for free, instead of reading as perfectly healthy -
+//    which is what a fresh STAT_HEALTH read would have done, since dbno.scr sets health to full.
+//    It is one frame stale (published from CG_CalcFov, which runs later in the frame). 16 ms.
+//
+//  * SUPPRESSION is the headline term, per the design note. Also one frame stale, same reason.
+//
+//  * STAMINA is a client-side re-simulation of the server's pool and is known to diverge - it only
+//    advances inside CG_OffsetFirstPersonView, so in third person it regenerates while the server
+//    drains it. That is acceptable HERE and only here, because every consumer of this scalar is a
+//    first-person viewmodel effect; do not reuse the stamina term for anything a 3P player sees.
+//
+// Stress SPIKES fast and RECOVERS slowly - the same asymmetry that makes recoil read as weight. A
+// symmetric ease reads as a meter, not as adrenaline.
+static float s_wfeelStress = 0.0f;
+static int   s_wfeelTime   = -1;
+
+float CG_GetSuppression(void)
+{
+    return s_coopSuppress; // NOTE: one frame stale for readers that run before CG_CalcFov
+}
+
+qboolean CG_GetStamina(float *outFrac)
+{
+    if (!outFrac) {
+        return qfalse;
+    }
+    if (s_spStamMax <= 0.01f) {
+        *outFrac = 1.0f;
+        return qfalse;
+    }
+    *outFrac = s_spStam / s_spStamMax;
+    if (*outFrac < 0.0f) {
+        *outFrac = 0.0f;
+    } else if (*outFrac > 1.0f) {
+        *outFrac = 1.0f;
+    }
+    return qtrue;
+}
+
+void CG_FeelStressAdvance(void)
+{
+    static cvar_t *pOn = NULL;
+    float          raw, hp, stam, supp, spd, dt, rate;
+    qboolean       bAlive;
+
+    if (s_wfeelTime == cg.time) {
+        return; // once per frame
+    }
+    s_wfeelTime = cg.time;
+    if (cg.frametime <= 0) {
+        return; // skip a zero-length frame, never snap
+    }
+    if (!pOn) {
+        pOn = cgi.Cvar_Get("coop_wfeelStress", "1", CVAR_ARCHIVE);
+    }
+
+    // bug-1306's predicate, verbatim. NEVER `health <= 0` alone: Player::Spectator() leaves health
+    // at max, so that test misses spectators entirely and they inherit whatever the last live
+    // player's state was.
+    bAlive = (qboolean)(cg.snap && cg.snap->ps.stats[STAT_HEALTH] > 0
+                        && !(cg.snap->ps.pm_flags & (PMF_SPECTATING | PMF_INTERMISSION)));
+
+    raw = 0.0f;
+    if (pOn->integer && bAlive
+        && !(cg.snap->ps.pm_flags & (PMF_TURRET | PMF_CAMERA_VIEW))) {
+        hp = cgi.Cvar_Get("r_ppHealthFrac", "1", 0)->value; // 1 = unhurt, 0.02 = downed
+        if (hp < 0.0f) { hp = 0.0f; } else if (hp > 1.0f) { hp = 1.0f; }
+
+        if (!CG_GetStamina(&stam)) {
+            stam = 1.0f;
+        }
+
+        supp = CG_GetSuppression();
+        if (supp < 0.0f) { supp = 0.0f; } else if (supp > 1.0f) { supp = 1.0f; }
+
+        spd = 0.0f;
+        if (cg.predicted_player_state.speed > 1.0f) {
+            spd = VectorLength(cg.predicted_player_state.velocity)
+                  / cg.predicted_player_state.speed;
+            if (spd > 1.0f) { spd = 1.0f; }
+        }
+
+        // weights sum to 1.0, ordered per the design note: under fire is the headline, then how hurt
+        // you are, then how winded, then how hard you are moving
+        raw = 0.45f * supp + 0.25f * (1.0f - hp) + 0.18f * (1.0f - stam) + 0.12f * spd;
+
+        // and the two things that CALM a person: being braced, and holding your breath
+        if (cg.snap->ps.pm_flags & PMF_DUCKED) {
+            raw *= 0.85f;
+        }
+        if (CG_IsBreathSteady()) {
+            raw *= 0.60f;
+        }
+        if (raw < 0.0f) { raw = 0.0f; } else if (raw > 1.0f) { raw = 1.0f; }
+    }
+
+    dt   = (float)cg.frametime / 1000.0f;
+    if (dt > 0.1f) {
+        dt = 0.1f; // a hitch must not teleport the envelope
+    }
+    rate = (raw > s_wfeelStress) ? 9.0f : 0.8f; // spike fast, bleed off slowly
+    {
+        float k = dt * rate;
+        if (k > 1.0f) {
+            k = 1.0f; // MANDATORY - this is a TWO-SIDED ease and has no floor to rescue an overshoot
+        }
+        s_wfeelStress += (raw - s_wfeelStress) * k;
+    }
+    if (s_wfeelStress < 0.0005f && raw == 0.0f) {
+        s_wfeelStress = 0.0f;
+    }
+
+    // debug mirror. Flags 0 - NOT archived (it would latch, TRAPS T7) and NOT userinfo (a value
+    // changing every frame would send a userinfo packet every frame).
+    cgi.Cvar_Set("coop_wfeelStressCur", va("%.3f", s_wfeelStress));
+}
+
+float CoopWFeelStress(void)
+{
+    return s_wfeelStress;
+}
+
 // HZM coop [user 2026-08-20] THE ONE ADS FACTOR.
 //
 // Before this, the ADS pose was eased in THREE places on THREE schedules - the sight rotation in
@@ -3364,6 +3751,7 @@ void CG_DrawActiveFrame(int serverTime, int frameTime, stereoFrame_t stereoView,
 
     // HZM coop bug-1502 - run every frame regardless of view/weapon state (see function banner).
     CG_AdsFactorAdvance(); // must precede every consumer - see the banner on the function
+    CG_FeelStressAdvance(); // one shared "how rattled is the player" scalar, same rule
     CG_UpdateScriptedAudioDucks();
     // HZM coop bug-1508 - throttled internally, safe to call every frame (see function banner).
     CG_SyncWussPk3Count();

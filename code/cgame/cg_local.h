@@ -647,6 +647,10 @@ const adsGunTune_t *CG_FindAdsTune(const char *wpn);
     void  CG_AdsFactorAdvance(void); // HZM coop - advance the ONE ADS ease; called once per frame from CG_DrawActiveFrame BEFORE any consumer
     float CG_AdsPoseFactor(void);    // HZM coop - 0 = hip, 1 = full sight alignment. The only ADS ease; rotation, shift and zoom all read it
     float CG_AdsCrouchBlend(void);   // HZM coop - 0 = standing, 1 = crouched, eased (PMF_DUCKED is binary and the crouch tune is up to 43 deg)
+    void  CG_FeelStressAdvance(void); // HZM coop - advance the shared feel-context scalar; once per frame, before consumers
+    float CoopWFeelStress(void);      // HZM coop - 0 = calm, 1 = maximally rattled. THE stress input; do not add a second one
+    float CG_GetSuppression(void);    // HZM coop - under-fire intensity 0..1 (one frame stale before CG_CalcFov)
+    qboolean CG_GetStamina(float *outFrac); // HZM coop - sprint pool 0..1; FIRST PERSON ONLY (mirror only advances there)
     float CG_AdsShoulderFrac(void); // HZM coop - shoulder-stage camera envelope 0..1 (2D ADS effects follow the camera ease)
     qboolean CG_AdsShoulderWheelActive(void); // HZM coop - wheel steals ADS-stage events this frame (FALSE for scoped rifles)
     qboolean CG_FreecamCaptureActive(void); // HZM coop - free-cam orbit owns the mouse this frame (crosshair hides: camera != aim)
