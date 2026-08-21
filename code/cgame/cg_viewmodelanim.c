@@ -473,6 +473,11 @@ int CG_GetVMAnimPrefixIndex()
 // FIRE is deliberately exempt. A fire animation restarts on every shot, and blending each shot into
 // the previous one would smear exactly the snap that makes a weapon feel like it discharges. Its
 // authored value - usually none - is left alone.
+// The animation being blended AWAY from. g_iLastVMAnim has already been overwritten with the
+// INCOMING animation by the time the first crossblend call site runs, so testing it alone would
+// catch entering ADS and miss leaving it - which is the direction actually complained about.
+static int s_iCoopPrevVMAnim = -1;
+
 static float CoopVMCrossblend(dtiki_t *pTiki, int index)
 {
     static cvar_t *pBlend   = NULL;
@@ -488,6 +493,28 @@ static float CoopVMCrossblend(dtiki_t *pTiki, int index)
     if (cgi.anim->g_iLastVMAnim == VM_ANIM_FIRE || cgi.anim->g_iLastVMAnim == VM_ANIM_FIRE_SECONDARY
         || cgi.anim->g_iLastVMAnim == VM_ANIM_RELOAD_SINGLE
         || cgi.anim->g_iLastVMAnim == VM_ANIM_LADDERSTEP) {
+        return authored;
+    }
+    // [user 2026-08-21] "STG44 anim still not great coming out of ads its still very jolty."
+    //
+    // The pose and the animation were still finishing at different times. The ADS pose factor eases
+    // out at 8.5/s - about 350 ms to settle - while the general crossblend floor is 120 ms. So the
+    // viewmodel animation had fully returned to idle while the sight rotation, screen shift and
+    // world zoom were still travelling for another ~230 ms. Two halves of one motion arriving a
+    // fifth of a second apart is exactly what reads as a jolt, and it is why fixing the pose and
+    // then the zoom each helped without curing it.
+    //
+    // ADS is the `charge` animation in this codebase, so give that transition its own floor matched
+    // to the pose ease. Everything else keeps the shorter general floor - a reload or a bolt cycle
+    // does not want a third of a second of blend.
+    if (cgi.anim->g_iLastVMAnim == VM_ANIM_CHARGE || s_iCoopPrevVMAnim == VM_ANIM_CHARGE) {
+        static cvar_t *pBlendAds = NULL;
+        if (!pBlendAds) {
+            pBlendAds = cgi.Cvar_Get("coop_vmBlendAds", "0.30", CVAR_ARCHIVE);
+        }
+        if (authored < pBlendAds->value) {
+            return pBlendAds->value;
+        }
         return authored;
     }
     if (authored < pBlend->value) {
@@ -543,6 +570,7 @@ void CG_ViewModelAnimation(refEntity_t *pModel)
 
     if (cg.snap->ps.iViewModelAnimChanged != cgi.anim->g_iLastVMAnimChanged) {
         bAnimChanged                   = qtrue;
+        s_iCoopPrevVMAnim              = cgi.anim->g_iLastVMAnim; // what we are blending FROM
         cgi.anim->g_iLastVMAnim        = cg.snap->ps.iViewModelAnim;
         cgi.anim->g_iLastVMAnimChanged = cg.snap->ps.iViewModelAnimChanged;
     }

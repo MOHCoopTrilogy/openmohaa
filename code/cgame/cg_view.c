@@ -516,7 +516,28 @@ float CG_CoopCoverViewLift(void)
     if (!pCoverView)  { pCoverView  = cgi.Cvar_Get("coop_coverView",      "0",  0); }
     if (!pCoverRaise) { pCoverRaise = cgi.Cvar_Get("coop_coverViewRaise", "16", CVAR_ARCHIVE); }
 
-    return pCoverView->integer ? pCoverRaise->value : 0.0f;
+    {
+        float lift = pCoverView->integer ? pCoverRaise->value : 0.0f;
+
+        // [user 2026-08-21] "when ads from behind cover you don't actually look down the sights
+        // like you do when you actually go ADS."
+        //
+        // This lift exists so a player in cover can see OVER it, and it raises the eye by
+        // coop_coverViewRaise - 16 units by default, about a head. But every per-gun ADS tune in
+        // s_adsGunTune was dialled with the eye at its normal height, so while the lift is applied
+        // the sights are aligned for an eye that is 16 units below where the camera actually is.
+        // No per-gun value can fix that: the tune table has no cover column, and adding one would
+        // mean re-dialling all 45 rows for a second pose.
+        //
+        // So the lift yields to the sights instead. It stays at full strength at the hip and
+        // through the over-the-shoulder stage - which is where seeing over cover matters - and
+        // eases to nothing as the weapon comes up to the irons, on the same factor as the rest of
+        // the ADS pose, so it moves as one motion rather than as a second correction.
+        if (lift != 0.0f && CG_AdsForceFirstPerson()) {
+            lift *= (1.0f - CG_AdsPoseFactor());
+        }
+        return lift;
+    }
 }
 
 static void CG_OffsetThirdPersonView(void)
