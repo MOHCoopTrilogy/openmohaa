@@ -37,11 +37,24 @@ float pm_duckScale = 0.25f;
 float pm_swimScale = 1.0f;
 float pm_wadeScale = 0.70f;
 
-float pm_accelerate      = 8.0f;
+// HZM coop [user 2026-08-21] MOVEMENT MOMENTUM. "momentum and acceleration to movement would make
+// it feel less like a moving camera."
+//
+// At the stock 8.0/6.0 a player reaches full speed in roughly 130ms and stops in about the same,
+// which is what makes the view read as a camera being dragged rather than a body being moved. These
+// are deliberately CONSTANTS and not cvars: bg_pmove is shared code compiled into BOTH cgame.dll
+// and game.dll, and pmove must produce bit-identical results on the client predictor and the
+// server or every step mispredicts. A cvar could differ between the two; a constant cannot, as long
+// as the two DLLs ship together - which build.ps1 enforces.
+//
+// 5.5/4.5 puts the ramp near 190ms each way. That is a real GAMEPLAY change - peeking, strafing and
+// dodging all carry more inertia - so it is the one item in this batch to A/B deliberately rather
+// than to judge on feel alone. Stock values are 8.0 and 6.0 if it needs reverting.
+float pm_accelerate      = 5.5f;
 float pm_airaccelerate   = 1.0f;
 float pm_wateraccelerate = 8.0f;
 
-float pm_friction         = 6.0f;
+float pm_friction         = 4.5f; // HZM coop [2026-08-21] was 6.0 - see pm_accelerate above
 float pm_waterfriction    = 2.0f;
 float pm_slipperyfriction = 0.25f;
 float pm_strafespeed      = 0.85f;

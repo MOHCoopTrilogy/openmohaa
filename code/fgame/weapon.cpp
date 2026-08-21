@@ -1195,6 +1195,8 @@ Weapon::Weapon()
     m_csWeaponGroup    = STRING_EMPTY;
     m_fMovementSpeed   = 1.0f;
     m_fMaxFireMovement = 1.0f;
+    m_fCoopMoveSpread     = 0.0f;
+    m_fCoopMoveSpreadTime = 0.0f;
     m_fZoomMovement    = 1.0f;
 
     m_sAmmoPickupSound  = "snd_pickup_";
@@ -1926,6 +1928,54 @@ void Weapon::Shoot(Event *ev)
                         fSpreadFactor = 1.0f - fSpreadFactor;
                         vSpread += bulletspread[mode] * fSpreadFactor;
                         vSpread *= m_fFireSpreadMult[mode] + 1.0f;
+
+                        // HZM coop [user 2026-08-21] MOVEMENT PUNISHMENT. "If you move, the gun
+                        // bounces out of true alignment... to hit a target you must fully stop, wait
+                        // a brief fraction of a second for your soldier to steady the weapon."
+                        //
+                        // The SETTLE is the feature, not the penalty. A penalty keyed only on current
+                        // velocity would make stopping instantly accurate, which teaches nothing and
+                        // feels like a switch. Instead the term rises immediately with speed and then
+                        // bleeds off over coop_moveSpreadSettle seconds, so the moment after you stop
+                        // is still unsteady and holding still is an actual decision.
+                        //
+                        // Sampled per shot rather than per frame: no think, no timer to leak, and the
+                        // elapsed time since the previous shot is exactly the settle window. A player
+                        // who stops and waits before firing gets the full recovery for free.
+                        {
+                            static cvar_t *pMS = NULL, *pMSSet = NULL;
+                            float          mv, settle, dtq;
+
+                            if (!pMS)    { pMS    = gi.Cvar_Get("coop_moveSpread", "1.0", CVAR_ARCHIVE); }
+                            if (!pMSSet) { pMSSet = gi.Cvar_Get("coop_moveSpreadSettle", "0.6", CVAR_ARCHIVE); }
+
+                            if (pMS->value > 0.0f) {
+                                settle = (pMSSet->value > 0.05f) ? pMSSet->value : 0.6f;
+                                mv     = player->velocity.length()
+                                         / ((sv_runspeed->integer > 0) ? sv_runspeed->integer : 287);
+                                if (mv > 1.0f) {
+                                    mv = 1.0f;
+                                }
+                                dtq = level.time - m_fCoopMoveSpreadTime;
+                                if (dtq < 0.0f) {
+                                    dtq = 0.0f; // level restart
+                                }
+                                m_fCoopMoveSpreadTime = level.time;
+
+                                if (mv > m_fCoopMoveSpread) {
+                                    m_fCoopMoveSpread = mv; // moving costs you immediately
+                                } else {
+                                    m_fCoopMoveSpread -= dtq / settle; // ... and recovers on a clock
+                                    if (m_fCoopMoveSpread < mv) {
+                                        m_fCoopMoveSpread = mv;
+                                    }
+                                }
+                                if (m_fCoopMoveSpread < 0.0f) { m_fCoopMoveSpread = 0.0f; }
+                                else if (m_fCoopMoveSpread > 1.0f) { m_fCoopMoveSpread = 1.0f; }
+
+                                vSpread *= 1.0f + m_fCoopMoveSpread * 2.5f * pMS->value;
+                            }
+                        }
 
                         // HZM coop [user 2026-08-17] HOLD-BREATH ACCURACY. The breath-hold already
                         // existed but was PURELY COSMETIC: cg_view.c steadies the ADS sway on the

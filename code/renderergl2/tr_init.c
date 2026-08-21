@@ -2068,6 +2068,12 @@ void R_Register( void )
 	// aiming. Mirrors renderergl1/tr_init.c. r_weaponfovx uses flags 0 for the same reason.
 	r_weaponshifty = ri.Cvar_Get( "r_weaponshifty", "-0.05", 0 );
 	r_weaponshiftx = ri.Cvar_Get( "r_weaponshiftx", "0", 0 );
+	// [2026-08-21] Cvar_Get ORs flags and NEVER clears them, and any profile that already ran
+	// a config containing `seta r_weaponshiftx` has the archive bit set before we get here -
+	// so simply passing 0 above does nothing. Strip it explicitly, or Com_WriteConfiguration()
+	// rewrites the whole config every frame while aiming (these now carry an EASED value).
+	if ( r_weaponshifty ) { r_weaponshifty->flags &= ~CVAR_ARCHIVE; }
+	if ( r_weaponshiftx ) { r_weaponshiftx->flags &= ~CVAR_ARCHIVE; }
 	r_farplane = ri.Cvar_Get("r_farplane", "0", CVAR_CHEAT);
 	r_farplane_bias = ri.Cvar_Get("r_farplane_bias", "0", CVAR_CHEAT);
 	r_farplane_color = ri.Cvar_Get("r_farplane_color", ".5 .5 .5", CVAR_CHEAT);

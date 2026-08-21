@@ -2114,12 +2114,17 @@ void CG_ModelAnim(centity_t *cent, qboolean bDoShaderTime)
         // projection, and per-gun bloodied textures would mean authoring art for all 69 weapons.
         // Only the first-person weapon is tinted - the third-person model other players see is
         // untouched, so this is purely local flavour and cannot desync anything.
-        if ((model.renderfx & RF_DEPTHHACK) && CG_GunBlood() > 0.01f) {
+        // [2026-08-21] MULTIPLY into whatever colour the entity already carries rather than
+        // overwriting it - the previous version stomped cent->color, which other systems set.
+        // Also excluded on a turret: vehicleturret.cpp sets RF_DEPTHHACK on the turret viewmodel
+        // too, and that is not the player's weapon.
+        if ((model.renderfx & RF_DEPTHHACK) && CG_GunBlood() > 0.01f && cg.snap
+            && !(cg.snap->ps.pm_flags & PMF_TURRET)) {
             float b = CG_GunBlood();
             if (b > 1.0f) { b = 1.0f; }
-            model.shaderRGBA[0] = (byte)(255 - (int)(40.0f * b));   // keep the reds
-            model.shaderRGBA[1] = (byte)(255 - (int)(150.0f * b));  // pull the greens...
-            model.shaderRGBA[2] = (byte)(255 - (int)(160.0f * b));  // ...and blues hard
+            model.shaderRGBA[0] = (byte)(model.shaderRGBA[0] * (1.0f - 0.16f * b));
+            model.shaderRGBA[1] = (byte)(model.shaderRGBA[1] * (1.0f - 0.59f * b));
+            model.shaderRGBA[2] = (byte)(model.shaderRGBA[2] * (1.0f - 0.63f * b));
         }
 
         // add to refresh list

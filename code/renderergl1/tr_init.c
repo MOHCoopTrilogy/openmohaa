@@ -1457,7 +1457,13 @@ void R_Register( void )
 	// per frame while aiming, and mid-transition garbage persisted into the user config.
 	// r_weaponfovx is registered with flags 0 for exactly this reason.
 	r_weaponshifty = ri.Cvar_Get( "r_weaponshifty", "-0.05", 0 );	// HZM: ADS sight vertical align (-up/+down)
-	r_weaponshiftx = ri.Cvar_Get( "r_weaponshiftx", "0", 0 );	// HZM: ADS sight horizontal align (+right/-left)
+	r_weaponshiftx = ri.Cvar_Get( "r_weaponshiftx", "0", 0 );
+	// [2026-08-21] Cvar_Get ORs flags and NEVER clears them, and any profile that already ran
+	// a config containing `seta r_weaponshiftx` has the archive bit set before we get here -
+	// so simply passing 0 above does nothing. Strip it explicitly, or Com_WriteConfiguration()
+	// rewrites the whole config every frame while aiming (these now carry an EASED value).
+	if ( r_weaponshifty ) { r_weaponshifty->flags &= ~CVAR_ARCHIVE; }
+	if ( r_weaponshiftx ) { r_weaponshiftx->flags &= ~CVAR_ARCHIVE; }	// HZM: ADS sight horizontal align (+right/-left)
 	r_postProcess   = ri.Cvar_Get( "r_postProcess",   "1", CVAR_ARCHIVE );	// HZM post-FX master (LIVE toggle; FBO/procs always created at init, this only gates the per-frame pass so menu toggles apply instantly)
 	r_ppPassthrough = ri.Cvar_Get( "r_ppPassthrough", "1", CVAR_ARCHIVE );	// HZM post-FX Phase-0 passthrough
 	r_ppBloom          = ri.Cvar_Get( "r_ppBloom",          "1",   CVAR_ARCHIVE );	// HZM post-FX bloom (live-tunable)

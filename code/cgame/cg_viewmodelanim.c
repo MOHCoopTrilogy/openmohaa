@@ -481,7 +481,13 @@ static float CoopVMCrossblend(dtiki_t *pTiki, int index)
     if (!pBlend) {
         pBlend = cgi.Cvar_Get("coop_vmBlend", "0.12", CVAR_ARCHIVE); // 0 = vanilla hard cuts
     }
-    if (cgi.anim->g_iLastVMAnim == VM_ANIM_FIRE || cgi.anim->g_iLastVMAnim == VM_ANIM_FIRE_SECONDARY) {
+    // FIRE is exempt because it restarts every shot and blending each into the last would smear
+    // the discharge snap. RELOAD_SINGLE and LADDERSTEP are exempt for a sharper reason: they 
+    // restart against THEMSELVES - once per shell, once per rung - so a floor would cross-fade an
+    // animation with a time-shifted copy of itself and average the hand positions into mush.
+    if (cgi.anim->g_iLastVMAnim == VM_ANIM_FIRE || cgi.anim->g_iLastVMAnim == VM_ANIM_FIRE_SECONDARY
+        || cgi.anim->g_iLastVMAnim == VM_ANIM_RELOAD_SINGLE
+        || cgi.anim->g_iLastVMAnim == VM_ANIM_LADDERSTEP) {
         return authored;
     }
     if (authored < pBlend->value) {

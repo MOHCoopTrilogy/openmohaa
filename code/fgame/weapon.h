@@ -196,6 +196,10 @@ protected:
     //
     float m_fMovementSpeed;
     float m_fMaxFireMovement;
+    // HZM coop [user 2026-08-21] movement-spread penalty state. Sampled at each shot; rises
+    // instantly with speed and SETTLES over time, so stopping is not instantly accurate.
+    float m_fCoopMoveSpread;
+    float m_fCoopMoveSpreadTime;
     float m_fZoomMovement;
     //
     // Special sounds

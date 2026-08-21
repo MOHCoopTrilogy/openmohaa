@@ -821,7 +821,7 @@ void CG_Init(clientGameImport_t *imported, int serverMessageNum, int serverComma
     // forced max-injury effect to disk.
     {
         static const char *const hzmClearFx[] = {
-            "r_ppHeat", "r_ppSuppress", "r_ppHit", "r_ppRainWet", "coop_dbnoView",
+            "r_ppHeat", "r_ppSuppress", "r_ppHit", "r_ppRainWet", "coop_dbnoView", "coop_medkitView",
             // bug-1307: the scripted-suppression floor and one-shot bump. Without these a
             // disconnect mid-set-piece leaves a permanently forced blur - bug-1202 again.
             "coop_suppHold", "coop_suppBump"
