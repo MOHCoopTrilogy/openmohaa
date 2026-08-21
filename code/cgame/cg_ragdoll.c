@@ -349,7 +349,6 @@ static cvar_t  *rag_buriedmax = NULL;
 static cvar_t  *rag_feet     = NULL;
 static cvar_t  *rag_limits   = NULL;
 static cvar_t  *rag_self     = NULL;
-static cvar_t  *rag_twist    = NULL;
 
 static void RagCvars(void)
 {
@@ -412,10 +411,6 @@ static void RagCvars(void)
         // already tied together. 0 = off, 1 = full anatomical radii, 0.85 leaves a little
         // slack so a corpse can still lie with its arm against its chest.
         rag_self = cgi.Cvar_Get("coop_ragdollSelf", "0.85", CVAR_TEMP);
-        // how far the chest may rotate relative to the hips, in degrees. A real spine does
-        // about 35; without a bound the shoulder line can wind around the spine forever
-        // with every bone still the right length. 0 = off.
-        rag_twist = cgi.Cvar_Get("coop_ragdollTwist", "35", CVAR_TEMP);
     }
 }
 
@@ -815,55 +810,7 @@ static void RagLimitFrames(ragSim_t *s, float T0[3][3], float T2[3][3], qboolean
 // about the spine axis, which is a rigid rotation and therefore preserves every distance inside
 // that set. The two torso-cross braces resist the same twist, so they agree with this rather
 // than fighting it - but they only slow it, they cannot bound it, which is why this exists.
-#define RAG_TWIST_SET ((1u << 3) | (1u << 4) | (1u << 5) | (1u << 6) | (1u << 7) | (1u << 8) | (1u << 9) | (1u << 10))
 
-static void RagTwistLimit(ragSim_t *s, float maxDeg, float k)
-{
-    float    T0[3][3], T2[3][3], R[3][3];
-    vec3_t   axis, l0, l2;
-    float    phi, lim, excess, d;
-
-    if (maxDeg <= 0.0f) {
-        return;
-    }
-    if (!RagBodyTriad(s->pt[1], s->pt[0], s->pt[13], s->pt[11], s->faceSign[0], T0)) {
-        return;
-    }
-    if (!RagBodyTriad(s->pt[3], s->pt[2], s->pt[8], s->pt[5], s->faceSign[1], T2)) {
-        return;
-    }
-    // twist is measured about the SPINE, so use the chest's own up axis as the reference: the
-    // two LEFT axes projected onto the plane perpendicular to it
-    VectorCopy(T2[2], axis);
-    VectorCopy(T0[1], l0);
-    VectorMA(l0, -DotProduct(l0, axis), axis, l0);
-    if (VectorNormalize(l0) < 0.001f) {
-        return;
-    }
-    VectorCopy(T2[1], l2);
-    VectorMA(l2, -DotProduct(l2, axis), axis, l2);
-    if (VectorNormalize(l2) < 0.001f) {
-        return;
-    }
-    phi = RagSignedAngle(l0, l2, axis);
-    lim = DEG2RAD(maxDeg);
-    if (phi > lim) {
-        excess = phi - lim;
-    } else if (phi < -lim) {
-        excess = phi + lim;
-    } else {
-        return;
-    }
-    d = -excess * k;
-    if (d > RAG_LIMIT_MAX_STEP) {
-        d = RAG_LIMIT_MAX_STEP;
-    } else if (d < -RAG_LIMIT_MAX_STEP) {
-        d = -RAG_LIMIT_MAX_STEP;
-    }
-    RagMat3FromAxisAngle(axis, d, R);
-    RagRotateSet(s, RAG_TWIST_SET, s->pt[2], R); // pivot at the chest, so the spine link survives
-    s->limCount++;
-}
 
 
 static qboolean RagCapture(centity_t *cent, entityState_t *ns, ragSim_t *s)
@@ -1604,9 +1551,6 @@ static void RagStep(ragSim_t *s, float dt)
             VectorMA(s->pt[b], corr, d, s->pt[b]);
         }
         RagLimitSweep(s, it); // the 18 angular limits, inside the iteration loop
-        if (rag_limits->integer) {
-            RagTwistLimit(s, rag_twist->value, 0.479f); // ... and the spine cannot wind up
-        }
         if (rag_self->value > 0.0f) {
             RagSelfCollide(s, rag_self->value); // ... then stop parts sharing space
         }
