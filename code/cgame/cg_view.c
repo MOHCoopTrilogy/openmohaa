@@ -823,6 +823,137 @@ static float    s_spStamMax = 5.0f;    // the max it was clamped against this fr
 static float    s_coopHit = 0.0f;
 
 // Bump the suppression intensity (clamped to 1). Called when an enemy round cracks past the listener.
+
+// HZM coop [user 2026-08-21] WEAPON HANDLING FOLEY.
+//
+// Almost every handling motion this file performs made no sound at all: sprinting, crouching, going
+// to sights, switching weapons, the idle inspect, the low-ammo mag check, bumping the muzzle into a
+// wall, landing, and pulling the trigger on an empty gun. The animation half was built; this is the
+// audible half.
+//
+// Anti-repetition is a no-immediate-repeat draw rather than a bag shuffle: with only four takes per
+// slot a bag guarantees a cycle, which on a repeated action (crouch-spam) reads as a fixed loop.
+// Rejecting only the previous index keeps it unpredictable while never doubling a take back to back.
+//
+// Channel is auto (S_StartLocalSound), so these never cut another cue and are never cut by one -
+// handling foley overlapping a reload is correct. Rate limiting therefore has to live here.
+static void CoopGunFoley(const char *act, int cooldownMs)
+{
+    static cvar_t *pOn = NULL;
+    static int     s_last[8];   // last index played, per action slot
+    static int     s_next[8];   // earliest time this slot may fire again
+    static unsigned s_seed = 2463534242u;
+    const char    *cls;
+    char           name[64];
+    int            slot, idx, iClass;
+
+    if (!pOn) {
+        pOn = cgi.Cvar_Get("coop_gunFoley", "1", CVAR_ARCHIVE);
+    }
+    if (pOn->value <= 0.0f || !cg.snap || cg.snap->ps.stats[STAT_HEALTH] <= 0
+        || cg.renderingThirdPerson) {
+        return;
+    }
+    // one cooldown slot per action, keyed off the first two characters - cheap and collision-free
+    // across the six action codes actually in use (hsoft hhard grab safe magck dry).
+    slot = ((act[0] + act[1] * 3) & 7);
+    if (cg.time < s_next[slot]) {
+        return;
+    }
+    s_next[slot] = cg.time + cooldownMs;
+
+    iClass = cg.snap->ps.stats[STAT_EQUIPPED_WEAPON];
+    if (iClass & WEAPON_CLASS_PISTOL) {
+        cls = "pistol";
+    } else if (iClass & WEAPON_CLASS_SMG) {
+        cls = "smg";
+    } else if (iClass & (WEAPON_CLASS_MG | WEAPON_CLASS_HEAVY)) {
+        cls = "mg";
+    } else {
+        cls = "rifle"; // also the fallback for anything untyped
+    }
+
+    s_seed ^= s_seed << 13;
+    s_seed ^= s_seed >> 17;
+    s_seed ^= s_seed << 5;
+    idx = (int)(s_seed % 4u) + 1;
+    if (idx == s_last[slot]) {
+        idx = (idx % 4) + 1; // never the same take twice running
+    }
+    s_last[slot] = idx;
+
+    Com_sprintf(name, sizeof(name), "coop_gf_%s_%s%02d", cls, act, idx);
+    cgi.S_StartLocalSound(name, qfalse);
+}
+
+// Per-frame edge detection for the handling events whose state is reachable globally. The rest are
+// hooked inline where their own state lives.
+static void CoopGunFoleyThink(void)
+{
+    static qboolean s_init = qfalse;
+    static float    s_pAds = 0.0f, s_pCrouch = 0.0f, s_pSprint = 0.0f;
+    static int      s_pWpn = -2, s_pAnim = -1;
+    float           ads, crouch;
+    int             iWpn, iAnim;
+
+    if (!cg.snap) {
+        return;
+    }
+    ads    = CG_AdsPoseFactor();
+    crouch = CG_AdsCrouchBlend();
+    iWpn   = (cg.snap->ps.activeItems[1] >= 0) ? cg.snap->ps.activeItems[1] : -1;
+    iAnim  = cg.snap->ps.iViewModelAnim;
+
+    // seed on the first live frame so a map load, a respawn or a 3P toggle cannot fire a burst of
+    // edges for transitions that happened while this was not running
+    if (!s_init) {
+        s_init    = qtrue;
+        s_pAds    = ads;
+        s_pCrouch = crouch;
+        s_pSprint = s_spEnvCur;
+        s_pWpn    = iWpn;
+        s_pAnim   = iAnim;
+        return;
+    }
+
+    if (ads > 0.5f && s_pAds <= 0.5f) {
+        CoopGunFoley("safe", 220);   // shouldering: a small mechanical settle
+    } else if (ads <= 0.5f && s_pAds > 0.5f) {
+        CoopGunFoley("hsoft", 220);
+    }
+    s_pAds = ads;
+
+    if (crouch > 0.5f && s_pCrouch <= 0.5f) {
+        CoopGunFoley("hsoft", 260);
+    } else if (crouch <= 0.5f && s_pCrouch > 0.5f) {
+        CoopGunFoley("hsoft", 260);
+    }
+    s_pCrouch = crouch;
+
+    // sprint: the weapon is thrown into the run carry, then settles coming out of it
+    if (s_spEnvCur > 0.55f && s_pSprint <= 0.55f) {
+        CoopGunFoley("hhard", 400);
+    } else if (s_spEnvCur <= 0.35f && s_pSprint > 0.35f) {
+        CoopGunFoley("hsoft", 400);
+    }
+    s_pSprint = s_spEnvCur;
+
+    if (iWpn != s_pWpn && s_pWpn != -2) {
+        CoopGunFoley("grab", 200);
+    }
+    s_pWpn = iWpn;
+
+    // dry fire: the viewmodel plays its fire animation with nothing left in the clip
+    if (iAnim != s_pAnim && (iAnim == VM_ANIM_FIRE || iAnim == VM_ANIM_FIRE_SECONDARY)
+        && cg.snap->ps.stats[STAT_MAXCLIPAMMO] > 0 && cg.snap->ps.stats[STAT_CLIPAMMO] == 0) {
+        CoopGunFoley("dry", 150);
+    }
+    if (iAnim != s_pAnim && iAnim == VM_ANIM_PULLOUT) {
+        CoopGunFoley("grab", 200);
+    }
+    s_pAnim = iAnim;
+}
+
 void CG_AddSuppression(float amount)
 {
     if (amount <= 0.0f) {
@@ -1859,6 +1990,7 @@ void CG_OffsetFirstPersonView(refEntity_t *pREnt, qboolean bUseWorldPosition)
                         if (s_inspEnd == 0 && cg.time > s_inspNext
                             && CoopWFeelStress() < 0.25f) { // only when genuinely calm
                             s_inspEnd = cg.time + 2200;
+                            CoopGunFoley("magck", 500); // turning it over in the hands
                         }
                     }
                     if (s_inspEnd != 0 && cg.time > s_inspEnd) {
@@ -2236,6 +2368,14 @@ void CG_OffsetFirstPersonView(refEntity_t *pREnt, qboolean bUseWorldPosition)
                 if (s_wcEnv < 0.0f) { s_wcEnv = 0.0f; }
                 if (s_wcEnv > 1.0f) { s_wcEnv = 1.0f; }
 
+                {
+                    // the muzzle meeting a wall is a hard mechanical event and had no sound
+                    static float s_wcPrev = 0.0f;
+                    if (s_wcEnv > 0.45f && s_wcPrev <= 0.45f) {
+                        CoopGunFoley("hhard", 450);
+                    }
+                    s_wcPrev = s_wcEnv;
+                }
                 if (s_wcEnv > 0.001f) {
                     float fBack = pWcBack ? pWcBack->value : 9.0f;
                     float fDip  = pWcDip ? pWcDip->value : 4.0f;
@@ -4486,6 +4626,8 @@ void CG_DrawActiveFrame(int serverTime, int frameTime, stereoFrame_t stereoView,
     CG_FeelStressAdvance(); // one shared "how rattled is the player" scalar, same rule
     CG_GunBloodDecay();     // blood on the weapon fades, and much faster in the rain
     CG_ActionFoleyThink();  // the mechanical layer, a few tens of ms behind the shot
+    CoopGunFoleyThink();    // handling foley: sprint, crouch, ADS, switch, dry fire
+    CoopGunFoleyThink();    // handling foley: sprint, crouch, ADS, switch, dry fire
     CG_UpdateScriptedAudioDucks();
     // HZM coop bug-1508 - throttled internally, safe to call every frame (see function banner).
     CG_SyncWussPk3Count();
