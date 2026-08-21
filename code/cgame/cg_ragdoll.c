@@ -195,6 +195,7 @@ struct ragSim_s {
     // silhouette while draping over whatever it actually landed on.
     byte     branch;               // 1 = settle, 0 = legacy free-fall (mode 3)
     vec3_t   goal[RAG_PTS];
+    vec3_t   goal0[RAG_PTS];       // the pose he actually died in - the anchor the rewrite is bounded against
     float    gravScale;            // 0 -> 1 over 250ms (no lurch at handoff)
     int      rampMs;
     vec3_t   driveDir0[RAG_PTS];   // capture OUTGOING (bone->child) directions
@@ -311,6 +312,7 @@ static cvar_t  *rag_impact   = NULL;
 static cvar_t  *rag_linear   = NULL;
 static cvar_t  *rag_anchor   = NULL;
 static cvar_t  *rag_stick    = NULL;
+static cvar_t  *rag_stickmax = NULL;
 
 static void RagCvars(void)
 {
@@ -356,6 +358,10 @@ static void RagCvars(void)
         // on, the pose itself is rewritten for the limb that moved: the body accumulates the
         // shape you shot it into. 0 = the old snap-back.
         rag_stick = cgi.Cvar_Get("coop_ragdollStick", "1", CVAR_TEMP);
+        // how far, in units, a limb's resting place may be rewritten away from the pose the man
+        // actually died in. Unbounded, every hit compounds and the corpse mangles into poses no
+        // body can hold; this keeps the damage visible but anatomically anchored.
+        rag_stickmax = cgi.Cvar_Get("coop_ragdollStickMax", "12", CVAR_TEMP);
     }
 }
 
@@ -968,10 +974,20 @@ static void RagShapeMatch(ragSim_t *s, float alpha)
             // actually is now, expressed in the body's own frame, so when the limp window closes
             // the pose being held IS the new one. Bone lengths are still enforced by the distance
             // links and the truss still forbids a collapse - only the limb's resting angle moves.
-            vec3_t rel, inv;
+            vec3_t rel, inv, want, dev;
+            float  devLen, cap = rag_stickmax->value;
             VectorSubtract(s->pt[i], s->pt[0], rel);
             RagMat3TransRotateVec(S, rel, inv); // inverse of the body rotation (row-vector)
-            VectorAdd(s->goal[0], inv, s->goal[i]);
+            VectorAdd(s->goal[0], inv, want);
+            // ... but never further than cap units from the pose he died in. Without this every
+            // hit compounds on the last and the body walks into positions no anatomy allows.
+            VectorSubtract(want, s->goal0[i], dev);
+            devLen = VectorLength(dev);
+            if (cap > 0.0f && devLen > cap) {
+                VectorScale(dev, cap / devLen, dev);
+                VectorAdd(s->goal0[i], dev, want);
+            }
+            VectorCopy(want, s->goal[i]);
         }
         if (s->limpMs[i] > 0) {
             // struck limb: essentially free at the instant of impact, easing back to the full
@@ -1508,6 +1524,7 @@ void CG_RagdollImpulse(const vec3_t pos, const vec3_t dir, float force, float ra
             ns->swingBone = -1;
             for (i = 0; i < RAG_PTS; i++) {
                 VectorCopy(ns->pt[i], ns->goal[i]);
+                VectorCopy(ns->pt[i], ns->goal0[i]);
             }
             if (rag_debug->integer) {
                 cgi.Printf("^~^~^ RAGDOLL re-armed ent=%d (shot after eviction)\n", es->number);
@@ -1805,6 +1822,7 @@ void CG_RagdollFrame(void)
                         VectorAdd(s->pt[q], ed, s->pt[q]);
                         VectorAdd(s->ptPrev[q], ed, s->ptPrev[q]);
                         VectorAdd(s->goal[q], ed, s->goal[q]);
+                        VectorAdd(s->goal0[q], ed, s->goal0[q]);
                     }
                     if (s->state == 2) { // being thrown wakes it, same as a mover
                         s->state     = 1;
@@ -2206,7 +2224,8 @@ static void RagPendingThink(ragPend_t *p)
         s->freezePose = (rag_test->integer == 2); // the drill must be reachable on the branch
                                                   // that actually ships (it used to require mode 3)
         for (i = 0; i < RAG_PTS; i++) {
-            VectorCopy(s->pt[i], s->goal[i]); // the authored pose is the target silhouette
+            VectorCopy(s->pt[i], s->goal[i]);  // the authored pose is the target silhouette
+            VectorCopy(s->pt[i], s->goal0[i]); // ... and the anchor the stick rewrite is bounded to
         }
         RagPush(s);
         if (rag_debug->integer) {
