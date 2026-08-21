@@ -1397,10 +1397,16 @@ void CG_OffsetFirstPersonView(refEntity_t *pREnt, qboolean bUseWorldPosition)
             // weapon switches), accumulate a kick (capped for sustained auto), then decay back to rest.
             // Holding breath (steady) softens the visual kick too.
             if (iWpn == s_lastWpn && s_lastClip >= 0 && iClip < s_lastClip && (s_lastClip - iClip) <= 4) {
-                if (bAds && pRecoil && pRecoil->value > 0.0f) {
-                    float fMax    = pRecoil->value * fClassKick * 6.0f;
+                // [user 2026-08-20] HIP FIRE KICKS TOO. This was gated on bAds, so the gun only
+                // recoiled while aiming - and most shooting in this game is from the hip, which is
+                // exactly where the weapon read as weightless. Hip kick is LARGER than ADS (the
+                // weapon is not braced against the shoulder) but decays out of a pose nobody is
+                // aiming with, so it costs no accuracy feel.
+                if (pRecoil && pRecoil->value > 0.0f) {
+                    float fHip    = bAds ? 1.0f : 1.35f;
+                    float fMax    = pRecoil->value * fClassKick * fHip * 6.0f;
                     float fBreath = s_breathSteady ? 0.5f : 1.0f;
-                    s_recoil += pRecoil->value * fClassKick * fBreath * (float)(s_lastClip - iClip);
+                    s_recoil += pRecoil->value * fClassKick * fBreath * fHip * (float)(s_lastClip - iClip);
                     if (s_recoil > fMax) { s_recoil = fMax; }
                 }
             }
@@ -1411,9 +1417,96 @@ void CG_OffsetFirstPersonView(refEntity_t *pREnt, qboolean bUseWorldPosition)
                 // gun kicks UP (muzzle climb) and BACK toward the camera, then recovers
                 VectorMA(pREnt->origin,  s_recoil * 0.8f, mat[2], pREnt->origin); // up
                 VectorMA(pREnt->origin, -s_recoil * 0.5f, mat[0], pREnt->origin); // back toward camera
-                // framerate-independent decay back to zero
-                s_recoil -= s_recoil * (cg.frametime / 1000.0f) * 9.0f;
-                if (s_recoil < 0.002f) { s_recoil = 0.0f; }
+                // ASYMMETRIC RECOVERY. A single fast decay reads as springy and light: real weight
+                // is a sharp kick and a SLOW return, and the heavier the weapon the slower it
+                // settles. Divide the recovery rate by the class kick, so a pistol snaps back at
+                // ~15/s and an MG crawls at ~6/s off the same one constant.
+                {
+                    float fRec = 9.0f / (fClassKick > 0.1f ? fClassKick : 1.0f);
+                    s_recoil -= s_recoil * (cg.frametime / 1000.0f) * fRec;
+                    if (s_recoil < 0.002f) {
+                        s_recoil = 0.0f;
+                    }
+                }
+            }
+
+            // HZM coop [user 2026-08-20] LANDING + FOOTFALL. Nothing sells a heavy object like it
+            // reacting to the body carrying it. A landing is detected from the predicted player
+            // state - a real downward speed that ends with the player on the ground - and drives a
+            // dip-and-settle on the gun scaled by both the fall speed and the weapon class. The
+            // footfall term is a slow bob that only exists while actually moving on the ground, so
+            // a standing player sees none of it.
+            {
+                static float s_landDip   = 0.0f;   // eased, units
+                static float s_lastVelZ  = 0.0f;
+                static int   s_lastGround = 1;
+                float        fDt2  = cg.frametime / 1000.0f;
+                int          bGround = (cg.predicted_player_state.groundEntityNum != ENTITYNUM_NONE);
+                float        fSpeed;
+
+                if (bGround && !s_lastGround && s_lastVelZ < -180.0f) {
+                    // touchdown: -180 ignores stepping off a kerb, a hard fall is -600 and up
+                    float f = (-s_lastVelZ - 180.0f) / 520.0f;
+                    if (f > 1.0f) {
+                        f = 1.0f;
+                    }
+                    s_landDip += f * 3.2f * fClassKick;
+                }
+                s_lastGround = bGround;
+                s_lastVelZ   = cg.predicted_player_state.velocity[2];
+
+                fSpeed = (float)sqrt(cg.predicted_player_state.velocity[0] * cg.predicted_player_state.velocity[0]
+                                     + cg.predicted_player_state.velocity[1] * cg.predicted_player_state.velocity[1]);
+                if (s_landDip > 0.001f) {
+                    VectorMA(pREnt->origin, -s_landDip, mat[2], pREnt->origin); // the gun drops
+                    VectorMA(pREnt->origin, -s_landDip * 0.35f, mat[0], pREnt->origin);
+                    s_landDip -= s_landDip * fDt2 * (7.0f / (fClassKick > 0.1f ? fClassKick : 1.0f));
+                    if (s_landDip < 0.002f) {
+                        s_landDip = 0.0f;
+                    }
+                }
+                if (bGround && fSpeed > 40.0f && !bScoped) {
+                    // footfall bob: amplitude from speed, frequency from speed, weight from class.
+                    // Halved in ADS so it never fights the sight picture.
+                    static cvar_t *pStep = NULL;
+                    float          amp, ph;
+                    if (!pStep) {
+                        pStep = cgi.Cvar_Get("cg_weaponFootfall", "1", CVAR_ARCHIVE);
+                    }
+                    if (pStep->value > 0.0f) {
+                        amp = (fSpeed / 300.0f) * 0.55f * fClassKick * pStep->value * (bAds ? 0.5f : 1.0f);
+                        if (amp > 1.2f) {
+                            amp = 1.2f;
+                        }
+                        ph = cg.time * 0.001f * (4.0f + fSpeed * 0.012f);
+                        VectorMA(pREnt->origin, amp * (float)sin(ph), mat[2], pREnt->origin);
+                        VectorMA(pREnt->origin, amp * 0.45f * (float)sin(ph * 0.5f), mat[1], pREnt->origin);
+                    }
+                }
+                // IDLE BREATHING. A slow drift that is always present out of ADS, grows when hurt,
+                // and is suppressed while holding breath. Small enough to be felt rather than seen.
+                if (!bScoped) {
+                    static cvar_t *pBr = NULL;
+                    float          hp, amp2, t2;
+                    if (!pBr) {
+                        pBr = cgi.Cvar_Get("cg_weaponBreath", "1", CVAR_ARCHIVE);
+                    }
+                    hp = (cg.snap && cg.snap->ps.stats[STAT_MAXHEALTH] > 0)
+                             ? (float)cg.snap->ps.stats[STAT_HEALTH] / (float)cg.snap->ps.stats[STAT_MAXHEALTH]
+                             : 1.0f;
+                    if (hp < 0.0f) {
+                        hp = 0.0f;
+                    } else if (hp > 1.0f) {
+                        hp = 1.0f;
+                    }
+                    amp2 = 0.30f * pBr->value * (1.0f + (1.0f - hp) * 1.6f) * (bAds ? 0.35f : 1.0f);
+                    if (s_breathSteady) {
+                        amp2 *= 0.15f;
+                    }
+                    t2 = cg.time * 0.001f * (1.15f + (1.0f - hp) * 0.9f); // hurt = faster breathing
+                    VectorMA(pREnt->origin, amp2 * (float)sin(t2), mat[2], pREnt->origin);
+                    VectorMA(pREnt->origin, amp2 * 0.4f * (float)sin(t2 * 0.7f), mat[1], pREnt->origin);
+                }
             }
 
             // HZM coop - WEAPON WEIGHT / LAG. The gun TRAILS the camera when you turn, then springs back to
