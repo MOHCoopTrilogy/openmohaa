@@ -3233,7 +3233,18 @@ static int CG_CalcFov(void)
         {
             static float s_adsZoomTgt = 1.0f;
             if (CG_AimingDownSights()) {
-                s_adsZoomTgt = fTarget;
+                // [user 2026-08-21] "holding shift when ADS used to be smooth to zoom, now its
+                // instant." Driving the zoom off the ADS factor fixed the in/out snap, but it also
+                // removed the only easing a change made WHILE ALREADY AIMING had. Holding breath
+                // multiplies fTarget by cg_breathZoom, and with the factor already at 1.0 that
+                // landed in a single frame. Ease the TARGET as well: the factor still owns going to
+                // and from the sights, and this owns anything that changes once you are there.
+                float kz = (cg.frametime > 0) ? ((float)cg.frametime / 1000.0f) * 8.0f : 0.0f;
+                if (kz > 1.0f) { kz = 1.0f; }
+                s_adsZoomTgt += (fTarget - s_adsZoomTgt) * kz;
+                if (s_adsZoomTgt > fTarget - 0.002f && s_adsZoomTgt < fTarget + 0.002f) {
+                    s_adsZoomTgt = fTarget;
+                }
             }
             s_adsZoomCur = 1.0f + (s_adsZoomTgt - 1.0f) * CG_AdsPoseFactor();
             if (s_adsZoomCur > 0.9995f) {

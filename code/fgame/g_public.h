@@ -373,6 +373,11 @@ typedef struct gameImport_s {
     void (*clearmodel)(gentity_t *ent);
     int (*TIKI_NumAnims)(dtiki_t *tiki);
     int (*TIKI_NumSurfaces)(dtiki_t *tiki);
+    // HZM coop [2026-08-21] how many SHADER VARIANTS a surface actually has. The gore system
+    // writes a skin-offset tier to every surface, and a surface with fewer variants than the
+    // tier selects a shader that does not exist and renders as nothing. fgame cannot read
+    // dtiki_t (incomplete type there), so the count has to come across the interface.
+    int (*TIKI_SurfaceNumSkins)(dtiki_t *tiki, int surfaceIdx);
     int (*TIKI_NumTags)(dtiki_t *tiki);
     void (*TIKI_CalculateBounds)(dtiki_t *tiki, float scale, vec3_t mins, vec3_t maxs);
     void *(*TIKI_GetSkeletor)(dtiki_t *tiki, int entNum);

@@ -2463,11 +2463,45 @@ void Sentient::CoopGoreUpdateSkinTier(void)
     {
         int headSurf = m_bCoopHeadGore ? gi.Surface_NameToNum(edict->tiki, "head") : -1;
         for (i = 0; i < numsurfaces; i++) {
+            int surfTier;
+
             if (i == headSurf) {
                 continue;
             }
+            // [user 2026-08-21] CLAMP THE TIER TO WHAT THIS SURFACE CAN ACTUALLY DISPLAY.
+            //
+            // Reported as enemies with no body - first blamed on stale NODRAW bits surviving entity
+            // recycling, then on the model composite rebuild. Both were wrong. A live coop_surfscan
+            // over a map with an invisible enemy standing in it returned only TWO hidden surfaces,
+            // both helmet surfaces on a corpse, which ruled the whole NODRAW theory out.
+            //
+            // The real mechanism is here. This loop wrote one tier across EVERY surface, but only
+            // body surfaces were authored with four shader variants. Gear was not: across the 36
+            // human models, 172 gear surfaces carry one or two variants. A surface asked for skin
+            // index 2 when it only has one selects a shader that does not exist and renders as
+            // nothing - so equipment popped off any enemy that took real damage.
+            //
+            // Four models are worse, having no gore variants on the BODY either:
+            // german_afrika_private_nowrap, _headwrap, german_afrika_grenadier_nowrap and
+            // allied_oss_man_disguised. The first three are exactly what officer.scr spawns as elite
+            // and grenadier reinforcements in the Afrika theatre, which is why this presented as
+            // "an officer and their reinforcement specifically". Their tunic and pants vanish the
+            // moment they are wounded.
+            //
+            // Clamping per surface fixes all of it with no new art: a surface displays the highest
+            // gore tier it was actually authored for, and nothing is ever asked for a skin it does
+            // not have. It also explains why coop_goreSkins 0 never helped - turning the feature off
+            // stops this loop writing, but does not clear bits already set on a body.
+            surfTier = gi.TIKI_SurfaceNumSkins(edict->tiki, i) - 1;
+            if (surfTier > tier) {
+                surfTier = tier;
+            }
+            if (surfTier < 0) {
+                surfTier = 0;
+            }
             edict->s.surfaces[i] =
-                (edict->s.surfaces[i] & ~(MDL_SURFACE_SKINOFFSET_BIT0 | MDL_SURFACE_SKINOFFSET_BIT1)) | tier;
+                (edict->s.surfaces[i] & ~(MDL_SURFACE_SKINOFFSET_BIT0 | MDL_SURFACE_SKINOFFSET_BIT1))
+                | surfTier;
         }
     }
 }

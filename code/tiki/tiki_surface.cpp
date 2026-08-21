@@ -52,6 +52,18 @@ int TIKI_Surface_NameToNum(dtiki_t *pmdl, const char *name)
 TIKI_Surface_NumToName
 ===============
 */
+// HZM coop [2026-08-21] how many shader variants this surface actually has. The gore system
+// writes a skin-offset tier across every surface, and a surface with fewer variants than the tier
+// selects a shader that does not exist and renders as nothing. Returns 0 on a bad index so a caller
+// clamping against it degrades to "no tier" rather than to garbage.
+int TIKI_Surface_NumSkins(dtiki_t *pmdl, int num)
+{
+    if (!pmdl || num < 0 || num >= pmdl->num_surfaces) {
+        return 0;
+    }
+    return pmdl->surfaces[num].numskins;
+}
+
 const char *TIKI_Surface_NumToName(dtiki_t *pmdl, int num)
 {
     if (num < 0 || num >= pmdl->num_surfaces) {

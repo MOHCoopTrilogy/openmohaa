@@ -1030,6 +1030,14 @@ int PF_Surface_NameToNum( dtiki_t *tiki, const char *name )
 PF_Surface_NumToName
 ===============
 */
+int PF_Surface_NumSkins( dtiki_t *tiki, int num )
+{
+    if (!tiki) {
+        return 0;
+    }
+    return TIKI_Surface_NumSkins( tiki, num );
+}
+
 const char *PF_Surface_NumToName( dtiki_t *tiki, int num )
 {
     if (!tiki) {
@@ -1813,6 +1821,7 @@ void SV_InitGameProgs( void ) {
 	import.clearmodel					= PF_clearmodel;
 	import.TIKI_NumAnims				= PF_NumAnims;
 	import.TIKI_NumSurfaces				= PF_NumSurfaces;
+	import.TIKI_SurfaceNumSkins			= PF_Surface_NumSkins;
 	import.TIKI_NumTags					= PF_NumTags;
 	import.TIKI_CalculateBounds			= PF_CalculateBounds;
 	import.TIKI_GetSkeletor				= PF_GetSkeletor;

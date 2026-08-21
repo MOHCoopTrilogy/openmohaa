@@ -29,6 +29,7 @@ extern "C" {
 #endif
 
     int         TIKI_Surface_NameToNum(dtiki_t *pmdl, const char *name);
+    int TIKI_Surface_NumSkins(dtiki_t *pmdl, int num);
     const char *TIKI_Surface_NumToName(dtiki_t *pmdl, int num);
 
 #ifdef __cplusplus
