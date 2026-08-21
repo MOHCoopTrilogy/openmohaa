@@ -232,6 +232,9 @@ struct ragSim_s {
     vec3_t   driveDir0[RAG_PTS];   // capture OUTGOING (bone->child) directions
     byte     driveOk[RAG_PTS];
     byte     contact[RAG_PTS];     // 2-substep memory of touching the world
+    byte     contactFloor[RAG_PTS]; // ...and whether that contact was FLOOR-like. Only a floor
+                                    // contact means the body has come to rest ON something; a
+                                    // wall it is merely leaning against has not settled it.
     short    limpMs[RAG_PTS];      // >0 = recently struck: the shape-match yields on this point
     short    limpMax[RAG_PTS];     // the window that limpMs is counting down FROM (see the ramp)
     float    ptRadius[RAG_PTS];    // per-point collision radius, clamped to capture clearance
@@ -1270,7 +1273,10 @@ static void RagBodyRotationAdvance(ragSim_t *s)
         return;
     }
     for (i = 0; i < RAG_PTS; i++) {
-        if (s->contact[i]) {
+        // FLOOR contacts only - see the note in RagResolveHit. A corpse propped against a wall
+        // reports plenty of contact while not having settled at all, and latching the body rotation
+        // there freezes it in whatever orientation it was jammed in.
+        if (s->contact[i] && s->contactFloor[i]) {
             nContact++;
         }
     }
@@ -1655,8 +1661,22 @@ static void RagResolveHit(ragSim_t *s, int i, const trace_t *tr)
         VectorCopy(pos, s->pt[i]);
         VectorCopy(pos, s->ptPrev[i]);
         s->contact[i] = 2; // resting on the world: the shape-match yields here
+        // [user 2026-08-21] "bodies still clip and then turn upside down standing up on head after
+        // death (this guy was behind cover - a full wall)".
+        //
+        // Record WHAT it came to rest on. The body-rotation lock latches permanently once three
+        // points report contact, and RagShapeMatch then re-fits the authored pose to that locked
+        // orientation forever - so if it latches while the corpse is jammed against a WALL, the
+        // body is held in that orientation for the rest of its life, which is how a dead man ends
+        // up standing on his head. Leaning on a wall is not settling; only a floor-like contact is.
+        //
+        // This became reachable on walls when the resting gate was widened from
+        // normal[2] > 0.7 to any surface (so bodies could settle on sandbags and slopes) - that fix
+        // is right, but it let wall contacts vote in the rotation latch, which they must not.
+        s->contactFloor[i] = (tr->plane.normal[2] > 0.5f) ? 1 : 0;
         return;
     }
+    s->contactFloor[i] = 0; // not a resting contact this time
     VectorScale(vn, -0.1f, vn); // restitution
     // steep contacts kept 75% of their tangential speed, which is what let a body grind around a
     // prop forever. Still lighter than a floor, but no longer near-frictionless.
