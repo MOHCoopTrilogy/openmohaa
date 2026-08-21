@@ -747,7 +747,25 @@ qboolean CG_EntityShadow(centity_t *cent, refEntity_t *model)
             {
                 float elr = elDeg * ((float)M_PI / 180.0f);
                 float azr = azDeg * ((float)M_PI / 180.0f);
+                // [user 2026-08-20] "shadows are looking gigantic again". The length is
+                // 1 + len/tan(elevation), and tan collapses as the sun drops: at the 0.17rad
+                // (9.7deg) floor this reaches 9.5x the model radius, which on a low-sun map is a
+                // shadow the size of a truck. Clamp the RESULT rather than the elevation, so a
+                // low sun still gives a long shadow but never an absurd one, and fade it as it
+                // stretches - a real grazing shadow is long AND faint, not long and black.
                 float stretch = 1.0f + sLen->value / tan(elr < 0.17f ? 0.17f : elr);
+                {
+                    static cvar_t *sMax = NULL;
+                    float          cap;
+                    if (!sMax) {
+                        sMax = cgi.Cvar_Get("coop_shadowStretchMax", "3.0", CVAR_ARCHIVE);
+                    }
+                    cap = sMax->value > 1.0f ? sMax->value : 1.0f;
+                    if (stretch > cap) {
+                        alpha  *= cap / stretch; // longer than we allow => proportionally fainter
+                        stretch = cap;
+                    }
+                }
                 vec3_t sunH, pos;
                 sunH[0] = (float)cos(azr);
                 sunH[1] = (float)sin(azr);

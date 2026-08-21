@@ -977,6 +977,16 @@ static qboolean RagCapture(centity_t *cent, entityState_t *ns, ragSim_t *s)
     for (i = 0; i < RAG_PTS; i++) {
         int p = s_ragBones[i].parent;
         int r, c;
+        if (s->simChan[i] < 0) {
+            // seeded foot on a footless model (241 of 1626 human tiks): it has no channel, and
+            // mat0[-1] reads 12 floats of entOrigin/entAxis - benign only by accident today, and
+            // if that accident ever changes the rot0 sandwich stops cancelling and the offset
+            // scales by ~1e6 with RagSane none the wiser, since it only checks pt[].
+            RagMat3Identity(s->rot0[i]);
+            s->restLen[i] = 0;
+            VectorSet(s->restDir[i], 0, 0, 1);
+            continue;
+        }
         for (r = 0; r < 3; r++) {
             for (c = 0; c < 3; c++) {
                 s->rot0[i][r][c] = s->mat0[s->simChan[i]][r][c];

@@ -101,53 +101,218 @@ static int   s_dizzyStart = 0;
 // eases up (fast rise, like the gun being hefted), and eases back down once the reload anim
 // ends - so it tracks single-loaders (RELOAD_SINGLE loops) and interrupted reloads for free.
 // coop_reloadSway = peak pitch in degrees (0 disables).
-static float s_reloadLift = 0.0f;
+static float s_reloadLift = 0.0f;   // eased pitch, degrees; advanced once per frame
+static float s_reloadRoll = 0.0f;   // roll companion, eased separately
 
-static void CG_ApplyReloadSway(vec3_t vAngles)
+// HZM coop [user 2026-08-20] DYNAMIC RELOAD FEEL. v1 timed the entire camera excursion off a
+// hardcoded 900ms while the viewmodel reload clips actually run 0.63s (shotgun fill) to 4.80s
+// (bazooka). So on EVERY gun the camera reached full lift in the first 19-56% of the reload and
+// then PARKED there - up to 2.5 seconds of motionless held camera on a Kar98 - which is precisely
+// why "no reload feels different from the last one". The phase is now normalised against the
+// animation's REAL length, read once per animation instance: Garand 2.00s, Kar98 3.37s, Thompson
+// 2.77s diverge with no per-gun table and no randomness.
+static void CG_ReloadFeelAdvance(void)
 {
-    static cvar_t *pRS = NULL;
-    float          fTarget, fRate, fDt;
-    int            iAnim;
+    static cvar_t *pRS = NULL, *pWt = NULL, *pRetime = NULL, *pMax = NULL, *pDbg = NULL;
+    static int     s_iLastSlot = -1;
+    static float   s_fAnimLen  = 0.9f; // seconds, cached per animation instance
+    static float   s_fWeight   = 1.0f; // per-class amplitude, latched on the edge (also
+                                       // scales the handling shake below)
+    float          fTarget, fRate, fDt, k, fPhase, fPeak;
+    int            iAnim, iSlot, iClass;
+    qboolean       bAlive;
 
     if (!pRS) {
-        pRS = cgi.Cvar_Get("coop_reloadSway", "1.6", CVAR_ARCHIVE);
+        pRS     = cgi.Cvar_Get("coop_reloadSway", "1.6", CVAR_ARCHIVE);
+        pWt     = cgi.Cvar_Get("coop_reloadWeight", "1", CVAR_ARCHIVE);
+        pRetime = cgi.Cvar_Get("coop_reloadRetime", "1", CVAR_ARCHIVE);
+        pMax    = cgi.Cvar_Get("coop_reloadSwayMax", "3.0", CVAR_ARCHIVE);
+        pDbg    = cgi.Cvar_Get("coop_reloadDebug", "0", 0); // never archive a diagnostic (TRAPS T7)
     }
     if (pRS->value <= 0.0f || !cg.snap) {
-        s_reloadLift = 0.0f;
+        s_reloadLift = s_reloadRoll = 0.0f;
+        s_iLastSlot  = -1;
         return;
     }
-    // [user 2026-08-19 v2] "follow the motions: unloading moves the camera up, mag in moves it
-    // up slightly more, cocking brings it back down to baseline" - phase-mapped to the three
-    // reload viewmodel states: RELOAD(6) ramps the lift over ~0.9s (two perceived steps: mag
-    // out, then seat), RELOAD_SINGLE(7) holds a partial lift per shell, RELOAD_END(8) - the
-    // cock/rechamber - pulls DOWN fast through baseline (slight undershoot) and settles.
-    {
-        static int s_iLastVMA     = -1;
-        static int s_iVMAStart    = 0;
-        iAnim = cg.snap->ps.iViewModelAnim;
-        if (iAnim != s_iLastVMA) {
-            s_iLastVMA  = iAnim;
-            s_iVMAStart = cg.time;
-        }
-        if (iAnim == 6) { // VM_ANIM_RELOAD: mag out -> up, mag in -> slightly more
-            float fPhase = (cg.time - s_iVMAStart) * (1.0f / 900.0f);
-            if (fPhase > 1.0f) {
-                fPhase = 1.0f;
+
+    // a spectator keeps STAT_HEALTH at max, so health alone is not "alive"
+    bAlive = (qboolean)(cg.snap->ps.stats[STAT_HEALTH] > 0
+                        && !(cg.snap->ps.pm_flags & (PMF_SPECTATING | PMF_INTERMISSION)));
+
+    iAnim  = cg.snap->ps.iViewModelAnim;
+    iSlot  = cgi.anim ? cgi.anim->g_iCurrentVMAnimSlot : -1;
+    iClass = cg.snap->ps.stats[STAT_EQUIPPED_WEAPON];
+
+    // ANIMATION-START EDGE. The slot advances on every (re)start - a new state, a weapon change,
+    // and a forced restart per shell - so per-shell pumping comes free; the edge is only needed
+    // to refresh the cached length and weight.
+    if (iSlot != s_iLastSlot) {
+        s_iLastSlot = iSlot;
+        s_fAnimLen  = 0.9f;
+        s_fWeight   = 1.0f;
+
+        if (pRetime->integer && iSlot >= 0 && cg.pPlayerFPSModel && cgi.anim) {
+            int   idx  = cgi.anim->g_VMFrameInfo[iSlot].index;
+            int   idle = cgi.Anim_NumForName(cg.pPlayerFPSModel, "idle");
+            float len  = (idx >= 0) ? cgi.Anim_Time(cg.pPlayerFPSModel, idx) : 0.0f;
+            // the viewmodel code SILENTLY substitutes "idle" when <prefix>_reload does not
+            // resolve; normalising against an idle length would make the ramp crawl with no
+            // visible diagnostic, so fall back to the old constant and band-limit the absurd
+            if (idx >= 0 && idx != idle && len > 0.2f && len < 6.0f) {
+                s_fAnimLen = len;
             }
-            fTarget = pRS->value * (0.62f + 0.38f * fPhase);
-        } else if (iAnim == 7) { // VM_ANIM_RELOAD_SINGLE: shell-by-shell partial lift
-            fTarget = pRS->value * 0.7f;
-        } else if (iAnim == 8) { // VM_ANIM_RELOAD_END: the cock - snap down past baseline
-            fTarget = pRS->value * -0.28f;
-        } else {
-            fTarget = 0.0f;
         }
-        fDt   = cg.frametime * 0.001f;
-        fRate = (iAnim == 8) ? 11.0f : ((fTarget > s_reloadLift) ? 7.0f : 4.5f);
-        s_reloadLift += (fTarget - s_reloadLift) * fRate * fDt;
+        if (pWt->integer) {
+            // the same per-class weights the shipped weapon-lag spring uses: an already-networked
+            // signal, so a Thompson and a BAR diverge without inventing a 69-gun table
+            if (iClass & WEAPON_CLASS_PISTOL) {
+                s_fWeight = 0.55f;
+            } else if (iClass & WEAPON_CLASS_SMG) {
+                s_fWeight = 0.80f;
+            } else if (iClass & WEAPON_CLASS_RIFLE) {
+                s_fWeight = 1.10f;
+            } else if (iClass & WEAPON_CLASS_MG) {
+                s_fWeight = 1.50f;
+            } else if (iClass & WEAPON_CLASS_HEAVY) {
+                s_fWeight = 1.35f;
+            }
+        }
+        if (pDbg->integer && iAnim >= VM_ANIM_RECHAMBER && iAnim <= VM_ANIM_PUTAWAY) {
+            cgi.Printf("^~^~^ WFEEL state=%d slot=%d len=%.3f class=0x%x wt=%.2f peak=%.2f\n", iAnim,
+                       iSlot, s_fAnimLen, iClass, s_fWeight, pRS->value * s_fWeight);
+        }
     }
-    vAngles[0] -= s_reloadLift;          // pitch up with the lifted gun
-    vAngles[2] += s_reloadLift * 0.3f;   // a touch of roll so it reads as body motion
+
+    // PHASE from the viewmodel's own duration counter: reset on the same edge and only ever
+    // accumulated, so it is monotone within an instance
+    fPhase = (cgi.anim && s_fAnimLen > 0.0f)
+                 ? (float)cgi.anim->g_iCurrentVMDuration * 0.001f / s_fAnimLen
+                 : 1.0f;
+    if (fPhase < 0.0f) {
+        fPhase = 0.0f;
+    } else if (fPhase > 1.0f) {
+        fPhase = 1.0f;
+    }
+    fPeak = pRS->value * s_fWeight;
+
+    if (!bAlive || cg.renderingThirdPerson || (cg.snap->ps.pm_flags & PMF_CAMERA_VIEW)) {
+        // in 3P/cutscene/dead the duration counter does not advance either, so decay the envelope
+        // out rather than tracking a frozen phase that would snap on the way back to first person
+        fTarget = 0.0f;
+        fRate   = 4.5f;
+    } else if (iAnim == VM_ANIM_RELOAD) {
+        // two perceived beats across the WHOLE animation, then the hands come back down BEFORE the
+        // state ends - this is the fix for the parked plateau
+        if (fPhase < 0.28f) {
+            fTarget = fPeak * (0.62f * (fPhase / 0.28f));
+        } else if (fPhase < 0.62f) {
+            fTarget = fPeak * (0.62f + 0.38f * ((fPhase - 0.28f) / 0.34f));
+        } else {
+            fTarget = fPeak * (1.00f - 0.75f * ((fPhase - 0.62f) / 0.38f));
+        }
+        fRate = (fTarget > s_reloadLift) ? 7.0f : 4.5f;
+    } else if (iAnim == VM_ANIM_RELOAD_SINGLE) {
+        // per-shell PUMP rather than a flat hold: rises and falls inside each shell's own clip
+        fTarget = fPeak * 0.70f * (float)sin(3.14159265f * fPhase);
+        fRate   = (fTarget > s_reloadLift) ? 9.0f : 6.0f;
+    } else if (iAnim == VM_ANIM_RELOAD_END) {
+        // the cock. v1 parked at a flat negative target for the whole state, and reload_end runs
+        // about a second - so it was a three-quarter-second downward STARE. Impulse and return.
+        float dd = 1.0f - fPhase;
+        fTarget  = fPeak * -0.28f * dd * dd;
+        fRate    = 11.0f;
+    } else if (iAnim == VM_ANIM_PULLOUT) {
+        // [user 2026-08-20] "camera movement to go along with pulling out guns... make it feel
+        // like it has weight". Bringing a weapon up is the clearest weight cue in the game: the
+        // muzzle climbs into view, overshoots as the arms decelerate, and settles. A BAR should
+        // cost more to raise than a pistol, which is exactly what the class weight already says.
+        // Rise fast, overshoot at ~0.55, settle by the end.
+        if (fPhase < 0.55f) {
+            fTarget = fPeak * 0.85f * (fPhase / 0.55f);
+        } else {
+            fTarget = fPeak * 0.85f * (1.0f - (fPhase - 0.55f) / 0.45f) * 0.55f;
+        }
+        fRate = (fTarget > s_reloadLift) ? 9.0f : 5.5f;
+    } else if (iAnim == VM_ANIM_PUTAWAY) {
+        // stowing: the muzzle drops away, so the view settles DOWNWARD and recovers as it clears
+        fTarget = fPeak * -0.45f * (float)sin(3.14159265f * fPhase);
+        fRate   = 8.0f;
+    } else if (iAnim == VM_ANIM_RECHAMBER) {
+        // working a bolt: a short sharp dip and return, sized off the same weight
+        float dd = 1.0f - fPhase;
+        fTarget  = fPeak * -0.34f * dd * dd;
+        fRate    = 12.0f;
+    } else {
+        fTarget = 0.0f;
+        fRate   = 4.5f;
+    }
+
+    fDt = cg.frametime * 0.001f;
+    k   = fRate * fDt;
+    if (k > 1.0f) {
+        k = 1.0f; // MANDATORY. Unclamped this DIVERGES: the frame clamp is 200ms on a listen host
+                  // but 5000ms for a client of a remote server, which at rate 11 gives k = 55 and
+                  // a camera dive of about -21 degrees.
+    }
+    s_reloadLift += (fTarget - s_reloadLift) * k;
+    s_reloadRoll += (fTarget * 0.30f - s_reloadRoll) * k * 0.8f; // roll lags the pitch slightly
+
+    // [user 2026-08-20] "a slight camera shake too... make things feel less stiff". A single
+    // clean arc is what reads as mechanical, so overlay a small tremor while the hands are busy.
+    // Two incommensurable sine terms rather than a random number: it cannot jitter frame to frame,
+    // it cannot be re-rolled by a hitch, and it costs nothing. Scaled by the SAME class weight, so
+    // a BAR shakes and a pistol barely does, and folded into the eased value AFTER the clamp
+    // above so it can never push past coop_reloadSwayMax by more than its own small amplitude.
+    if (fTarget != 0.0f || fabs(s_reloadLift) > 0.01f) {
+        static cvar_t *pShake = NULL;
+        float          t, amp;
+        if (!pShake) {
+            pShake = cgi.Cvar_Get("coop_weaponShake", "0.22", CVAR_ARCHIVE);
+        }
+        if (pShake->value > 0.0f) {
+            t   = cg.time * 0.001f;
+            amp = pShake->value * s_fWeight * (0.35f + 0.65f * (fabs(fTarget) / (fPeak + 0.001f)));
+            s_reloadLift += amp * ((float)sin(t * 17.3f) * 0.6f + (float)sin(t * 27.9f) * 0.4f);
+            s_reloadRoll += amp * 0.5f * (float)sin(t * 21.1f);
+        }
+    }
+
+    if (s_reloadLift > pMax->value) {
+        s_reloadLift = pMax->value;
+    } else if (s_reloadLift < -pMax->value) {
+        s_reloadLift = -pMax->value;
+    }
+    if (fabs(s_reloadLift) < 0.004f && fabs(fTarget) < 0.004f) {
+        s_reloadLift = s_reloadRoll = 0.0f;
+    }
+}
+
+static void CG_ApplyReloadFeel(vec3_t vAngles)
+{
+    float fLift = s_reloadLift, fRoll = s_reloadRoll;
+
+    if (fLift == 0.0f && fRoll == 0.0f) {
+        return;
+    }
+    // ADS and the native scope are separate predicates - CG_AimingDownSights returns FALSE while
+    // STAT_INZOOM, so the sniper (the worst case) needs the second term or it goes undamped.
+    // Scale AFTER the ease, never inside the target, or releasing ADS mid-reload steps.
+    if (CG_AimingDownSights() || cg.snap->ps.stats[STAT_INZOOM]) {
+        static cvar_t *pAds = NULL;
+        float          fCap = 0.30f;
+        if (!pAds) {
+            pAds = cgi.Cvar_Get("coop_reloadSwayAds", "0.15", CVAR_ARCHIVE);
+        }
+        fLift *= pAds->value;
+        fRoll = 0.0f; // zero roll under sights: it tilts the sight picture
+        if (fLift > fCap) {
+            fLift = fCap;
+        } else if (fLift < -fCap) {
+            fLift = -fCap;
+        }
+    }
+    vAngles[0] -= fLift;
+    vAngles[2] += fRoll;
 }
 
 static void CG_ApplyShellShock(vec3_t vAngles)
@@ -1515,6 +1680,17 @@ void CG_OffsetFirstPersonView(refEntity_t *pREnt, qboolean bUseWorldPosition)
         }
     }
 
+    // reload feel is applied HERE, not at the CG_CalcViewValues tail. The camera pitch is
+    // baked into the ARMS bone controller earlier in the frame, so a write at the tail is
+    // picked up by the gun and the IRON SIGHTS follow the lie; a write here reaches only
+    // the camera, because the view axis is rebuilt from these angles right after we return
+    // (the same route the scope sway already uses). This site is also reachable only in
+    // live first person, alive and non-cutscene, so it inherits those gates instead of
+    // hand-written ones that would have to stay in lockstep with two 3P deciders.
+    if (!bUseWorldPosition && cgi.Cvar_Get("coop_reloadHook", "1", CVAR_ARCHIVE)->integer) {
+        CG_ApplyReloadFeel(cg.refdefViewAngles);
+    }
+
     VectorCopy(origin, cg.playerHeadPos);
 }
 
@@ -2640,7 +2816,10 @@ static int CG_CalcViewValues(void)
     // HZM coop [user 2026-08-19] shell-shock dizziness sways the FINAL view angles for every
     // path (bug-1942: the first hook landed inside the PMF_CAMERA_VIEW camera_posofs branch,
     // which never runs in normal first-person play - the effect was stone dead).
-    CG_ApplyReloadSway(cg.refdefViewAngles); // HZM coop [user 2026-08-19] reload camera follow
+    CG_ReloadFeelAdvance(); // state advances on every view path, every frame
+    if (cgi.Cvar_Get("coop_reloadHook", "1", CVAR_ARCHIVE)->integer == 0) {
+        CG_ApplyReloadFeel(cg.refdefViewAngles); // v1 placement, kept as the rollback
+    } // HZM coop [user 2026-08-19] reload camera follow
     CG_ApplyShellShock(cg.refdefViewAngles);
     AnglesToAxis(cg.refdefViewAngles, cg.refdef.viewaxis);
 
