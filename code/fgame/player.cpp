@@ -3726,6 +3726,55 @@ void Player::Pain(Event *ev)
         return;
     }
 
+    /*
+    HZM coop [user 2026-08-21] SEVERITY-TIERED PAIN.
+
+    This function ended in an UNCONDITIONAL Sound("player_pain"), and the engine resolves that by
+    PREFIX (Alias_ListFindRandomRange), drawing UNIFORMLY across the pool. So a 5-damage graze and a
+    near-fatal hit produced the identical sound. The 24 real takes make it worse rather than better:
+    one actor, all peak-normalised to -0.0 dBFS, so they are the same LOUDNESS as well as the same
+    intensity. Nothing in the audio ever told the player how badly they had just been hit.
+
+    The earlier plan was to sort the takes into tiers, which was wrong twice over: they are
+    IMA-ADPCM and of roughly equal intensity so any sort is arbitrary, and splitting 24 takes three
+    ways would cut each tier's variety to a third. You do not need to SORT them - you need to PLAY
+    them differently. ubersound/coop_paintiers.scr (generated) therefore carries ALL 24 takes in
+    each of three tiers at different volume/pitch/rolloff: quieter and higher for a graze, louder,
+    lower and carrying further for a grave hit.
+
+    NAMING. The tier prefixes deliberately do NOT start with "player_pain". Sound() matches by
+    prefix, so a name like player_painlt01 would ALSO be drawn by Sound("player_pain") and would
+    quadruple the base pool for any other caller. No bare "coop_hurt" alias exists either, so
+    nothing can draw ACROSS tiers.
+
+    Thresholds are a PERCENT of max_health, not absolute damage, so they follow coop_health instead
+    of silently re-tiering when the server changes it. `damage` is already in scope here
+    (ev->GetFloat(2) at the top of this function) - no new plumbing.
+
+    coop_painTiers 0 restores the retail single-pool behaviour exactly.
+    */
+    const char *pszPain = "player_pain";
+    {
+        static cvar_t *pTierOn = NULL, *pTierLo = NULL, *pTierHi = NULL;
+
+        if (!pTierOn) { pTierOn = gi.Cvar_Get("coop_painTiers",  "1",  CVAR_ARCHIVE); }
+        if (!pTierLo) { pTierLo = gi.Cvar_Get("coop_painTierLo", "5",  CVAR_ARCHIVE); }
+        if (!pTierHi) { pTierHi = gi.Cvar_Get("coop_painTierHi", "15", CVAR_ARCHIVE); }
+
+        if (pTierOn->integer > 0) {
+            float fMax = (max_health > 0.0f) ? max_health : 100.0f;
+            float fPct = (damage / fMax) * 100.0f;
+
+            if (fPct >= pTierHi->value) {
+                pszPain = "coop_hurthv";
+            } else if (fPct >= pTierLo->value) {
+                pszPain = "coop_hurtmd";
+            } else {
+                pszPain = "coop_hurtlt";
+            }
+        }
+    }
+
     if (g_voiceChat->integer) {
         if (m_voiceType == PVT_ALLIED_MANON) {
             //
@@ -3733,10 +3782,10 @@ void Player::Pain(Event *ev)
             //
             Sound("manon_pain", CHAN_DIALOG, -1, 160, NULL, -1, 1, 0, 1, 1200);
         } else {
-            Sound("player_pain");
+            Sound(pszPain);
         }
     } else {
-        Sound("player_pain");
+        Sound(pszPain);
     }
 }
 

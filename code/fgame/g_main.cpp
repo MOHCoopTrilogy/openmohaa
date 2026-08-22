@@ -290,6 +290,16 @@ void G_InitGame(int levelTime, int randomSeed)
     gi.Cvar_Get("coop_aiRetargetMs", "5000", 0);
     gi.Cvar_Get("coop_goreDripCorpseTime", "12", CVAR_ARCHIVE);
     gi.Cvar_Get("coop_tinnitusBlast", "1", CVAR_ARCHIVE);
+    /* [user 2026-08-21] severity-tiered player pain (Player::Pain). Registered HERE and
+       deliberately NOT seeded in coop_defaults.cfg: an engine default and a cfg seed for the
+       same CVAR_ARCHIVE cvar are ONE decision in two files, and changing only one is a silent
+       no-op - that is how coop_decapMax sat at 16 for three days after the engine was
+       corrected to 32 (bug-2017), and how a stale archived coop_mg42AiSpread 45 survived
+       (bug-1940). One home, so there is nothing to drift. Thresholds are a PERCENT of
+       max_health so they track coop_health. */
+    gi.Cvar_Get("coop_painTiers",  "1",  CVAR_ARCHIVE);
+    gi.Cvar_Get("coop_painTierLo", "5",  CVAR_ARCHIVE);
+    gi.Cvar_Get("coop_painTierHi", "15", CVAR_ARCHIVE);
 
     /* HZM [user 2026-08-15, bug-1811] The dynamic-AI switches had NO engine registration at all -
        they existed only as `seta` lines in autoexec.cfg, and three scripts test them by string
