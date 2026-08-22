@@ -47,7 +47,14 @@ static cvar_t *s_pGunVis = NULL;
 
 static void CoopGunVisNote(int *pState, int bHidden, const char *why, int bUnarmed)
 {
-    if (!s_pGunVis) { s_pGunVis = cgi.Cvar_Get("coop_gunVisTrace", "0", 0); }
+    /* HZM coop [user 2026-08-22, bug-2048] DEFAULT ON. This probe is EDGE-TRIGGERED - it prints
+       only when visibility actually changes, so on a normal session that is a handful of lines,
+       and zero while nothing is wrong. Left at 0 it was never armed once across two full capture
+       sessions, so when the user asked why the gun vanishes there was no evidence at all and I
+       spent the investigation guessing between four paths - which is the exact failure this
+       probe was written to prevent. A diagnostic that has to be switched on in advance only ever
+       catches bugs you already knew about. */
+    if (!s_pGunVis) { s_pGunVis = cgi.Cvar_Get("coop_gunVisTrace", "1", CVAR_ARCHIVE); }
     if (!s_pGunVis->integer) { *pState = bHidden; return; }
     if (*pState == bHidden)  { return; }
     *pState = bHidden;

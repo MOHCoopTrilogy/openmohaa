@@ -478,6 +478,26 @@ void VehicleTurretGun::TurretEndUsed(void)
     if (owner->IsSubclassOfPlayer()) {
         Player *player = (Player *)owner.Pointer();
 
+        // HZM coop [user 2026-08-22, bug-2048] "why my gun will randomly just disappear
+        // occasionally... any gun at all, and then come back."
+        //
+        // TurretBeginUsed zooms the gunner to pin his fov (ToggleZoom(80), ~line 987) and
+        // NOTHING here undid it: this override does not call ZoomOff, and unlike PortableTurret
+        // it does not chain to TurretGun::P_TurretEndUsed, which is where the matching ZoomOff
+        // lives (weapturret.cpp:1836/1852). Player::ExitTurret does not clear it either.
+        //
+        // So m_iInZoomMode stayed -1 after dismount, postthink kept writing a non-zero
+        // stats[STAT_INZOOM] (player.cpp:8681), and the client hides EVERY viewmodel surface on
+        // that flag alone (cg_modelanim.c:2127). The gun vanishes - and because this is PLAYER
+        // state rather than weapon state, it happens with whatever you are carrying, which is
+        // what "any gun at all" meant. It only came back when something else happened to clear
+        // zoom: death, a full vehicle exit, or detaching a weapon that has its own zoom value.
+        //
+        // Mirrors the balanced pair TurretGun already has. Unconditional on purpose: ZoomOff is
+        // idempotent (SetFov(selectedfov) + m_iInZoomMode = 0), and a conditional here is what
+        // the bug was.
+        player->ZoomOff();
+
         RemoveUserCamera();
         player->ExitTurret();
         P_DeleteViewModel();
