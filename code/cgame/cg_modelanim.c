@@ -43,6 +43,18 @@ qboolean cg_bCoopMuteVisualCmds = qfalse;
    reset and the probe goes silent after its first print. coop_gunVisTrace 1. */
 static int s_coopGunVis  = -1;   /* -1 unknown, 0 shown, 1 hidden - WEAPON */
 static int s_coopArmsVis = -1;   /* -1 unknown, 0 shown, 1 hidden - ARMS   */
+/* [user 2026-08-22, bug-2049] THE BLIND SPOT. The two probes above sit inside the surface-hide
+   branches, so they only ever see a model that IS being drawn and is choosing to blank its
+   surfaces. They cannot see a model that is never SUBMITTED - and the whole
+   R_AddRefEntityToScene call is wrapped in `!(renderfx & RF_DONTDRAW) && !bCoopHideDraw`.
+   A model skipped there vanishes with the arms, together, for as long as the flag holds, and
+   logs NOTHING.
+   That is exactly what the user reports and exactly what the probe kept missing: nine GUNVIS
+   edges captured across a session in which the gun visibly vanished several more times than
+   that, with the parent-miss DPrintf confirmed at zero under developer 2. Four hypotheses were
+   tested and refuted against the code before instrumenting this one - which is the lesson, not
+   the hypotheses. */
+static int s_coopDrawVis = -1;   /* -1 unknown, 0 submitted, 1 SKIPPED - whole viewmodel */
 static cvar_t *s_pGunVis = NULL;
 
 static void CoopGunVisNote(int *pState, int bHidden, const char *why, int bUnarmed)
@@ -2549,6 +2561,31 @@ void CG_ModelAnim(centity_t *cent, qboolean bDoShaderTime)
     }
 
     model.reType = RT_MODEL;
+    /* [user 2026-08-22, bug-2049] Record whether the LOCAL player's first-person model is
+       actually submitted this frame. Edge-triggered like the other two, and scoped to the local
+       player in first person so it can never spam on world entities. renderfx is printed raw
+       because RF_DONTDRAW is set by the script `hide` command - if that bit is the one set, the
+       question becomes WHO hid the player, which is a script search rather than an engine one. */
+    if (s1->number == cg.snap->ps.clientNum && !bThirdPerson) {
+        int bSkipped = ((s1->renderfx & RF_DONTDRAW) || bCoopHideDraw) ? 1 : 0;
+
+        if (s_coopDrawVis != bSkipped) {
+            if (!s_pGunVis) { s_pGunVis = cgi.Cvar_Get("coop_gunVisTrace", "1", CVAR_ARCHIVE); }
+            if (s_pGunVis->integer) {
+                cgi.Printf("^~^~^ GUNVIS t=%d %s renderfx=0x%x dontdraw=%d hidedraw=%d "
+                           "inzoom=%d unarmed=%d health=%d pmflags=0x%x\n",
+                           cg.time, bSkipped ? "SKIP-DRAW" : "DO-DRAW",
+                           s1->renderfx,
+                           (s1->renderfx & RF_DONTDRAW) ? 1 : 0,
+                           bCoopHideDraw ? 1 : 0,
+                           cg.snap ? cg.snap->ps.stats[STAT_INZOOM] : -1,
+                           (s1->eFlags & EF_UNARMED) ? 1 : 0,
+                           cg.snap ? cg.snap->ps.stats[STAT_HEALTH] : -1,
+                           cg.snap ? cg.snap->ps.pm_flags : 0);
+            }
+            s_coopDrawVis = bSkipped;
+        }
+    }
     if (!(s1->renderfx & RF_DONTDRAW) && !bCoopHideDraw) {
         cgi.R_Model_GetHandle(model.hModel);
         if (VectorCompare(model.origin, vec3_origin)) {
