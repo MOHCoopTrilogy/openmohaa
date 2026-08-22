@@ -305,6 +305,14 @@ movement on the server game.
         int       debugLevel;  // if set, diagnostic output will be printed
         qboolean  noFootsteps; // if the game is setup for no footsteps by the server
         qboolean  alwaysAllowLean;
+        // HZM coop [user 2026-08-22] WALL-COVER LEAN (Phase 2). 0 = none, 1 = lean LEFT,
+        // -1 = lean RIGHT. Filled identically by the server (player.cpp) and the client
+        // predictor (cg_predict.c) - pmove_t is local to each, so no protocol change. The lean
+        // itself is ps->fLeanAngle, which is already replicated AND already client-predicted,
+        // and - the whole reason this approach was chosen - CANNOT move the collision hull. The
+        // old wall cover moved the body with setOrigin() and that is what caused bug-463.
+        int       coopCoverLeanSide;
+        float     coopCoverLeanMax;
 
         int framecount;
 

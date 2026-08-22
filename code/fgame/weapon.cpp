@@ -2075,10 +2075,20 @@ void Weapon::Shoot(Event *ev)
                 if (ownerPtr && ownerPtr->IsSubclassOfPlayer()) {
                     Player *pBf = static_cast<Player *>(ownerPtr.Pointer());
 
-                    if (pBf->IsCoopBlindfiring() && pBf->IsCoopCoverWall()) {
+                    // [user 2026-08-22, bug-2028] MANDATORY SIDE GUARD. GetCoopCoverSide() can now
+                    // report 0 = NONE (no reachable opening on either flank), and 0 must mean "do
+                    // not steer" - not "treat as LEFT", which is exactly what the old
+                    // (side < 0) ? -1 : +1 collapse did with a value that was permanently 1. That
+                    // swung the burst 50 degrees and pushed the muzzle 20u INTO the wall the
+                    // player is leaning on, which is what bug-305 was filed for.
+                    if (pBf->IsCoopBlindfiring() && pBf->IsCoopCoverWall()
+                        && pBf->GetCoopCoverSide() != 0) {
                         cvar_t *pYawC = gi.Cvar_Get("coop_blindfireYaw", "50", CVAR_ARCHIVE);
                         cvar_t *pOutC = gi.Cvar_Get("coop_blindfireOut", "20", CVAR_ARCHIVE);
                         float   fSide = (pBf->GetCoopCoverSide() < 0) ? -1.0f : 1.0f;
+                        // never push the muzzle further out than the edge we actually measured -
+                        // a flat 20u on a 10u-deep jamb is a muzzle inside the masonry
+                        float   fEdgeLim = pBf->GetCoopCoverEdge() + 6.0f;
                         float   fRad  = DEG2RAD(fSide * (pYawC ? pYawC->value : 50.0f));
                         float   fCos  = cos(fRad);
                         float   fSin  = sin(fRad);
@@ -2097,7 +2107,15 @@ void Weapon::Shoot(Event *ev)
 
                         // slide the fire origin toward the corner so rounds clear the wall edge
                         vSideDir = Vector(0.0f - pBf->GetCoopCoverNormal()[1], pBf->GetCoopCoverNormal()[0], 0);
-                        pos += vSideDir * (fSide * (pOutC ? pOutC->value : 20.0f));
+                        {
+                            float fOut = (pOutC ? pOutC->value : 20.0f);
+                            // clamp to the edge we actually measured: a flat 20u on a shallow
+                            // jamb puts the muzzle inside the masonry
+                            if (fOut > fEdgeLim) {
+                                fOut = fEdgeLim;
+                            }
+                            pos += vSideDir * (fSide * fOut);
+                        }
                         pos += pBf->GetCoopCoverNormal() * 8;
                     }
                 }

@@ -2403,7 +2403,12 @@ Player::Player()
     m_bCoopShoulderAim = false; // HZM coop - 3P shoulder-aim stage (userinfo mirror)
     m_bCoopView3p      = false; // HZM coop - client view mode (u_view3p userinfo mirror)
     m_vCoopCoverNormal = vec_zero; // HZM coop - anchored cover OUT normal [215]
-    m_iCoopCoverSide   = 1;        // HZM coop - 1 = opening LEFT, -1 = RIGHT [215]
+    m_iCoopCoverSide   = 0;        // HZM coop - 0 = NONE. Never assume a side (bug-2028)
+    m_fCoopCoverEdge      = 0.0f;
+    m_iCoopCoverSideWant  = 0;
+    m_fCoopCoverSideDwell = 0.0f;
+    m_fCoopCoverLastYaw   = 0.0f;
+    m_iCoopCoverSideSent  = -99;   // impossible value: forces one send on first evaluation
     m_bCoopCoverPeek   = false;    // HZM coop - RMB peek-aim from cover [215]
     m_fCoopVehTurretTime = -10.0f; // HZM coop - vehicle-turret manning stamp [219]
     m_fCoopProbeTime   = -10.0f;   // HZM coop - GUNNERPROBE throttle [221]
@@ -4286,6 +4291,31 @@ void Player::SetMoveInfo(pmove_t *pm, usercmd_t *ucmd)
         pm->leanAdd          = 6.f;
         pm->leanRecoverSpeed = 8.5f;
         pm->leanSpeed        = 2.f;
+
+        // HZM coop [user 2026-08-22] WALL-COVER LEAN (Phase 2), server half. MUST stay paired
+        // with the identical block in cg_predict.c - if the two disagree the predictor and the
+        // server produce different fLeanAngle and the view judders. Ships behind
+        // coop_coverLean, DEFAULT 0: the plan gates Phase 2 on a Phase 1 playtest that has not
+        // happened yet, and this touches SHARED pmove, so a mistake here would affect every
+        // player rather than only those using cover.
+        {
+            static cvar_t *pLean = NULL, *pLeanMax = NULL;
+
+            if (!pLean)    { pLean    = gi.Cvar_Get("coop_coverLean",    "0",  CVAR_ARCHIVE); }
+            if (!pLeanMax) { pLeanMax = gi.Cvar_Get("coop_coverLeanMax", "28", CVAR_ARCHIVE); }
+
+            pm->coopCoverLeanSide = 0;
+            pm->coopCoverLeanMax  = 0.0f;
+            if (pLean->integer > 0 && m_bCoopCoverWall && m_bCoopCoverPeek && m_iCoopCoverSide != 0) {
+                pm->coopCoverLeanSide = m_iCoopCoverSide;
+                // scale the lean by the edge we measured - a shallow jamb leans less, so the
+                // silhouette never swings past cover that is not there
+                pm->coopCoverLeanMax = pLeanMax->value;
+                if (m_fCoopCoverEdge > 0.0f && m_fCoopCoverEdge < 48.0f) {
+                    pm->coopCoverLeanMax = pLeanMax->value * (m_fCoopCoverEdge / 48.0f);
+                }
+            }
+        }
     } else {
         pm->alwaysAllowLean = qtrue;
         if (g_gametype->integer != GT_SINGLE_PLAYER) {
@@ -13798,11 +13828,11 @@ void Player::TickCoopCover()
         // ANCHORED (m_vCoopCoverNormal) so the SUSTAIN check is view-independent: the mouse can
         // orbit (free-look) and the RMB peek can aim anywhere without breaking the pose - only
         // physically leaving the wall (or moving) drops it.
-        // HZM coop: WALL (standing back-to-wall) cover REMOVED - it was buggy and could crash
-        // (the entry view-snap + the peek step-out that setOrigin()'s the body toward a corner
-        // could shove the player into geometry). Crouch/LOW cover is kept. This guard disables the
-        // whole wall-detection block so wallValid stays false and m_bCoopCoverWall can never engage.
-        if (false)
+        // [user 2026-08-22] WALL COVER RE-ENABLED (was `if (false)`). The two faults named in the
+        // old tombstone are both gone rather than re-hidden: the peek step-out setOrigin is
+        // DELETED (see below), and the entry view-snap is NOT restored - the normal is anchored
+        // and the view is left alone, so nothing yanks the camera on entry. The side probe is
+        // replaced by a solver with a real NONE state (bug-2028).
         {
             Vector vStart = origin + Vector(0, 0, 48);
 
@@ -13831,9 +13861,10 @@ void Player::TickCoopCover()
                 );
                 if (!trace.startsolid && trace.fraction < 1.0f && trace.plane.normal[2] < 0.7f
                     && trace.plane.normal[2] > -0.7f && DotProduct(trace.plane.normal, vFwd) < -0.5f) {
-                    Vector va = GetViewAngles();
-                    va[YAW]   = vectoyaw(trace.plane.normal);
-                    SetViewAngles(va);
+                    // [user 2026-08-22] NO ENTRY VIEW-SNAP. The original yanked the yaw to the
+                    // wall normal on entry; it was half the reported "crash-prone" feel and it
+                    // fights free-look. The normal is ANCHORED instead, so the pose is
+                    // view-independent and the mouse stays the player's.
                     m_vCoopCoverNormal  = Vector(trace.plane.normal);
                     m_vCoopCoverBaseOrg = origin;
                     wallValid           = qtrue;
@@ -13852,31 +13883,182 @@ void Player::TickCoopCover()
                 }
             }
 
-            // OPEN-SIDE probe (wall cover only): step sideways along the wall and re-trace toward
-            // it - no wall there means that is the corner to shoot/peek around. Drives the left vs
-            // right blind-fire anim (COOP_COVER_OPENRIGHT) + the bullet steering in Weapon::Shoot.
-            // Left wins ties; a long unbroken wall keeps the previous side.
+            // [user 2026-08-22] OPEN-SIDE SOLVER. "It needs to be smart enough to know which side
+            // you are wanting to blindfire and pop out of cover from... think of a doorway, you
+            // could be in cover on either side."
+            //
+            // The old probe took ONE 44u sample per side, accepted the first hit, let LEFT win
+            // every tie, and had no way to say "neither" - so in a doorway (both sides open) it
+            // always answered LEFT, and against unbroken wall it kept whatever it last said.
+            // Combined with an init of 1 and writers that only ran here, that is bug-2028: a side
+            // that was permanently "LEFT" and would have steered blindfire into the wall.
+            //
+            // Three changes: SCAN outward (the edge can be at any distance, and that distance is
+            // worth knowing - it scales the lean and the muzzle slide), check HEAD height too (a
+            // waist-high recess is not something you can pop out of), and allow NONE.
             if (wallValid) {
-                // left of the OUT facing (flat normal): perp = (-y, x, 0)
-                Vector vLeft = Vector(0.0f - m_vCoopCoverNormal[1], m_vCoopCoverNormal[0], 0);
+                static cvar_t *pScanMin = NULL, *pScanMax = NULL, *pScanStep = NULL;
+                static cvar_t *pHeadZ = NULL, *pDead = NULL, *pCommit = NULL, *pMaxDelta = NULL;
+                Vector   vLeft = Vector(0.0f - m_vCoopCoverNormal[1], m_vCoopCoverNormal[0], 0);
+                Vector   vFwdFlat, vSideDir;
+                float    fEdge[2];
+                qboolean bOpen[2];
+                int      iSideOf[2] = {1, -1}; // index 0 = LEFT, 1 = RIGHT
+                int      k, iWant;
+                float    fIntent, fYawNow, fYawDelta;
 
-                trace = G_Trace(
-                    vStart + vLeft * 44, vec_zero, vec_zero,
-                    vStart + vLeft * 44 - m_vCoopCoverNormal * (fWallD + 24), this, MASK_SOLID, false,
-                    "Player::TickCoopCover side-left"
-                );
-                if (trace.fraction >= 1.0f && !trace.startsolid) {
-                    m_iCoopCoverSide = 1; // opening on the LEFT
-                } else {
-                    trace = G_Trace(
-                        vStart - vLeft * 44, vec_zero, vec_zero,
-                        vStart - vLeft * 44 - m_vCoopCoverNormal * (fWallD + 24), this, MASK_SOLID, false,
-                        "Player::TickCoopCover side-right"
-                    );
-                    if (trace.fraction >= 1.0f && !trace.startsolid) {
-                        m_iCoopCoverSide = -1; // opening on the RIGHT
+                if (!pScanMin)  { pScanMin  = gi.Cvar_Get("coop_coverSideScanMin",    "16",   CVAR_ARCHIVE); }
+                if (!pScanMax)  { pScanMax  = gi.Cvar_Get("coop_coverSideScanMax",    "72",   CVAR_ARCHIVE); }
+                if (!pScanStep) { pScanStep = gi.Cvar_Get("coop_coverSideScanStep",   "14",   CVAR_ARCHIVE); }
+                if (!pHeadZ)    { pHeadZ    = gi.Cvar_Get("coop_coverSideHeadZ",      "62",   CVAR_ARCHIVE); }
+                if (!pDead)     { pDead     = gi.Cvar_Get("coop_coverSideIntentDead", "0.25", CVAR_ARCHIVE); }
+                if (!pCommit)   { pCommit   = gi.Cvar_Get("coop_coverSideCommitMs",   "180",  CVAR_ARCHIVE); }
+                if (!pMaxDelta) { pMaxDelta = gi.Cvar_Get("coop_coverSideMaxDelta",   "10",   CVAR_ARCHIVE); }
+
+                // ---- STEP 1+2: find the edge, then prove the silhouette can clear it ----------
+                for (k = 0; k < 2; k++) {
+                    float d;
+
+                    fEdge[k] = -1.0f;
+                    bOpen[k] = qfalse;
+                    vSideDir = vLeft * (float)iSideOf[k];
+
+                    for (d = pScanMin->value; d <= pScanMax->value; d += pScanStep->value) {
+                        Vector  vBase = origin + vSideDir * d;
+                        Vector  vChestFrom = vBase + Vector(0, 0, 48);
+                        trace_t tChest = G_Trace(
+                            vChestFrom, vec_zero, vec_zero,
+                            vChestFrom - m_vCoopCoverNormal * (fWallD + 24), this, MASK_SOLID, false,
+                            "Player::TickCoopCover side-scan-chest"
+                        );
+
+                        if (tChest.startsolid) {
+                            break; // jammed laterally - that is not an edge, it is a corner we are in
+                        }
+                        if (tChest.fraction >= 1.0f) {
+                            Vector  vHeadFrom = vBase + Vector(0, 0, pHeadZ->value);
+                            trace_t tHead     = G_Trace(
+                                vHeadFrom, vec_zero, vec_zero,
+                                vHeadFrom - m_vCoopCoverNormal * (fWallD + 24), this, MASK_SOLID, false,
+                                "Player::TickCoopCover side-scan-head"
+                            );
+
+                            if (tHead.fraction >= 1.0f) {
+                                fEdge[k] = d; // wall gone at BOTH heights = a real opening
+                            }
+                            break;
+                        }
+                    }
+
+                    if (fEdge[k] >= 0.0f) {
+                        // full player hull, laterally: a gap the body cannot fit through is
+                        // scenery, not a pop-out
+                        Vector  vWant  = origin + vSideDir * (fEdge[k] + 8.0f);
+                        trace_t tSweep = G_Trace(
+                            origin, mins, maxs, vWant, this, MASK_PLAYERSOLID, false,
+                            "Player::TickCoopCover side-sweep"
+                        );
+
+                        bOpen[k] = (!tSweep.startsolid && tSweep.fraction >= 0.85f) ? qtrue : qfalse;
                     }
                 }
+
+                // ---- STEP 3: score ------------------------------------------------------------
+                AngleVectors(GetViewAngles(), vFwdFlat, NULL, NULL);
+                vFwdFlat[2] = 0;
+                vFwdFlat.normalize();
+                fIntent = DotProduct(vFwdFlat, vLeft); // + = looking left, - = looking right
+
+                if (bOpen[0] && !bOpen[1]) {
+                    iWant = 1;
+                } else if (bOpen[1] && !bOpen[0]) {
+                    iWant = -1;
+                } else if (!bOpen[0] && !bOpen[1]) {
+                    iWant = 0; // NONE - the value that never existed
+                } else {
+                    // the doorway: both jambs are poppable, so the player's LOOK is the intent
+                    if (fIntent > pDead->value) {
+                        iWant = 1;
+                    } else if (fIntent < 0.0f - pDead->value) {
+                        iWant = -1;
+                    } else if (fEdge[0] + 8.0f < fEdge[1]) {
+                        iWant = 1; // no intent expressed: nearer edge wins
+                    } else if (fEdge[1] + 8.0f < fEdge[0]) {
+                        iWant = -1;
+                    } else {
+                        iWant = m_iCoopCoverSide; // dead heat: do not change
+                    }
+                }
+                m_iCoopCoverSideWant = iWant;
+
+                // ---- STEP 4: commit, with hysteresis ------------------------------------------
+                // The side drives an ANIMATION and (Phase 2) the camera shoulder. Flipping either
+                // mid-burst or mid-peek strobes, so both states LATCH it.
+                fYawNow   = GetViewAngles()[YAW];
+                fYawDelta = AngleSubtract(fYawNow, m_fCoopCoverLastYaw);
+                if (fYawDelta < 0.0f) {
+                    fYawDelta = 0.0f - fYawDelta;
+                }
+                m_fCoopCoverLastYaw = fYawNow;
+
+                if (iWant == m_iCoopCoverSide) {
+                    m_fCoopCoverSideDwell = 0.0f;
+                } else if (m_bCoopBlindfire || m_fCoopPeekFrac > 0.01f) {
+                    m_fCoopCoverSideDwell = 0.0f; // latched mid-action
+                } else {
+                    m_fCoopCoverSideDwell += level.frametime;
+                    if (fYawDelta > pMaxDelta->value) {
+                        m_fCoopCoverSideDwell = 0.0f; // still swinging - wait for a decision
+                    }
+                    if (m_fCoopCoverSideDwell >= pCommit->value * 0.001f) {
+                        m_iCoopCoverSide      = iWant;
+                        m_fCoopCoverSideDwell = 0.0f;
+                    }
+                }
+
+                if (m_iCoopCoverSide == 1) {
+                    m_fCoopCoverEdge = fEdge[0];
+                } else if (m_iCoopCoverSide == -1) {
+                    m_fCoopCoverEdge = fEdge[1];
+                } else {
+                    m_fCoopCoverEdge = 0.0f;
+                }
+                if (m_fCoopCoverEdge < 0.0f) {
+                    m_fCoopCoverEdge = 0.0f;
+                }
+
+                // ---- publish the side to this client (change-only) -----------------------------
+                // The predictor needs the side to synthesise the lean, and there is NO free pmove
+                // bit to carry it (0..15 are all allocated and net_pm_flags is a hard 16-bit
+                // netfield). Same per-client change-only stufftext pattern as coop_vaultView:
+                // sending only on change costs nothing per frame, and a dropped command
+                // self-corrects on the next change instead of sticking.
+                if (m_iCoopCoverSide != m_iCoopCoverSideSent) {
+                    m_iCoopCoverSideSent = m_iCoopCoverSide;
+                    gi.SendServerCommand(edict - g_entities,
+                                         "stufftext \"set coop_coverSide %d\"", m_iCoopCoverSide);
+                }
+
+                // ---- probe P1/P2 --------------------------------------------------------------
+                {
+                    static cvar_t *pPr = NULL;
+
+                    if (!pPr) {
+                        pPr = gi.Cvar_Get("coop_coverProbe", "0", 0);
+                    }
+                    if (pPr->integer) {
+                        gi.Printf(
+                            "^~^~^ COVERSIDE want=%d have=%d edgeL=%.0f edgeR=%.0f openL=%d openR=%d "
+                            "intent=%.2f dwell=%.2f\n",
+                            iWant, m_iCoopCoverSide, fEdge[0], fEdge[1], (int)bOpen[0], (int)bOpen[1],
+                            fIntent, m_fCoopCoverSideDwell
+                        );
+                    }
+                }
+            } else {
+                // no valid wall pose = no side. Never leave a stale one standing (bug-2028).
+                m_iCoopCoverSide = 0;
+                m_fCoopCoverEdge = 0.0f;
             }
         }
 
@@ -13952,15 +14134,19 @@ void Player::TickCoopCover()
         }
     }
 
-    // PEEK STEP-OUT [216]: physically slide the body toward the detected corner while peeking
-    // (that IS the pop-out - camera, muzzle and silhouette all clear the doorframe), and slide
-    // back into the pose on release. Eased, collision-traced with the player bbox, and the
-    // sustain check above runs from the stored base so the displacement can't break cover.
+    // [user 2026-08-22] THE PEEK STEP-OUT IS DELETED, not disabled.
+    //
+    // It was the real cause of bug-463: a per-frame server setOrigin() easing the collision hull
+    // toward the corner while the client predictor pushed back, which is what shoved players into
+    // geometry. The `if (false)` above hid it for three days by making m_bCoopCoverWall
+    // unreachable; the code stayed live and would have re-armed the instant the guard came off.
+    //
+    // Phase 2 replaces displacement with ps->fLeanAngle - already replicated, already
+    // client-predicted in shared pmove, and structurally UNABLE to move the collision hull.
+    // Lean, do not teleport. m_fCoopPeekFrac survives as the pure 0..1 envelope.
     {
-        cvar_t *pStep = gi.Cvar_Get("coop_peekStep", "30", CVAR_ARCHIVE);
-        cvar_t *pOut2 = gi.Cvar_Get("coop_peekOut", "8", CVAR_ARCHIVE);
-        float   fTgt  = (m_bCoopCoverPeek && m_bCoopCoverWall) ? 1.0f : 0.0f;
-        float   fRate = 6.0f * level.frametime;
+        float fTgt  = (m_bCoopCoverPeek && m_bCoopCoverWall) ? 1.0f : 0.0f;
+        float fRate = 6.0f * level.frametime;
 
         if (fRate > 1.0f) {
             fRate = 1.0f;
@@ -13968,20 +14154,6 @@ void Player::TickCoopCover()
         m_fCoopPeekFrac += (fTgt - m_fCoopPeekFrac) * fRate;
         if (m_fCoopPeekFrac < 0.01f && fTgt == 0.0f) {
             m_fCoopPeekFrac = 0.0f;
-        }
-
-        if ((m_bCoopCoverWall || m_fCoopPeekFrac > 0.0f) && m_bCoopCoverRequested) {
-            Vector vLeft2(0.0f - m_vCoopCoverNormal[1], m_vCoopCoverNormal[0], 0);
-            float  fSide2 = (m_iCoopCoverSide < 0) ? -1.0f : 1.0f;
-            Vector vWant  = m_vCoopCoverBaseOrg + vLeft2 * (fSide2 * (pStep ? pStep->value : 30.0f) * m_fCoopPeekFrac)
-                         + m_vCoopCoverNormal * ((pOut2 ? pOut2->value : 8.0f) * m_fCoopPeekFrac);
-            trace_t tSlide = G_Trace(
-                origin, mins, maxs, vWant, this, MASK_PLAYERSOLID, false, "Player::TickCoopCover peekslide"
-            );
-
-            if (!tSlide.startsolid) {
-                setOrigin(tSlide.endpos);
-            }
         }
     }
 

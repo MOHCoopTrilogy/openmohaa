@@ -639,6 +639,26 @@ void CG_PredictPlayerState(void)
         cg_pmove.leanAdd = 6.f;
         cg_pmove.leanRecoverSpeed = 8.5f;
         cg_pmove.leanSpeed = 2.f;
+
+        // HZM coop [user 2026-08-22] WALL-COVER LEAN (Phase 2), client half. Paired with the
+        // block in player.cpp - both must compute the same thing or prediction fights the
+        // server. PMF_COOP_COVER is replicated; the SIDE is not a netfield (there is no free
+        // pmove bit - 0..15 are all allocated and net_pm_flags is a hard 16-bit field), so the
+        // server stuffs coop_coverSide on change and the predictor reads it here.
+        {
+            static cvar_t *pLean = NULL, *pLeanMax = NULL, *pSide = NULL;
+
+            if (!pLean)    { pLean    = cgi.Cvar_Get("coop_coverLean",    "0",  CVAR_ARCHIVE); }
+            if (!pLeanMax) { pLeanMax = cgi.Cvar_Get("coop_coverLeanMax", "28", CVAR_ARCHIVE); }
+            if (!pSide)    { pSide    = cgi.Cvar_Get("coop_coverSide",    "0",  0); }
+
+            cg_pmove.coopCoverLeanSide = 0;
+            cg_pmove.coopCoverLeanMax  = 0.0f;
+            if (pLean->integer > 0 && (cg.snap->ps.pm_flags & PMF_COOP_COVER) && pSide->integer != 0) {
+                cg_pmove.coopCoverLeanSide = pSide->integer;
+                cg_pmove.coopCoverLeanMax  = pLeanMax->value;
+            }
+        }
     } else {
         cg_pmove.alwaysAllowLean = qtrue;
         if (cgs.gametype != GT_SINGLE_PLAYER) {

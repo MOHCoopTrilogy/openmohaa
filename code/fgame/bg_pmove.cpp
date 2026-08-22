@@ -1354,6 +1354,20 @@ void PmoveSingle(pmove_t *pmove)
 
     pml.frametime = pml.msec * 0.001;
 
+    // HZM coop [user 2026-08-22] WALL-COVER LEAN. Synthesise the lean BUTTONS from the cover
+    // side instead of inventing a parallel lean path: everything below - the ease in, the clamp
+    // to leanMax, the recover, the replication of ps->fLeanAngle and its client prediction - then
+    // works unchanged and stays in lockstep by construction. Runs identically on the server and
+    // in the client predictor because both fill coopCoverLeanSide the same way.
+    if (pm->coopCoverLeanSide != 0) {
+        pm->cmd.buttons &= ~(BUTTON_LEAN_LEFT | BUTTON_LEAN_RIGHT);
+        pm->cmd.buttons |= (pm->coopCoverLeanSide > 0) ? BUTTON_LEAN_LEFT : BUTTON_LEAN_RIGHT;
+        pm->alwaysAllowLean = qtrue;   // peeking while shuffling must not cancel the pose
+        if (pm->coopCoverLeanMax > 0.0f) {
+            pm->leanMax = pm->coopCoverLeanMax;
+        }
+    }
+
     if ((pm->cmd.buttons & (BUTTON_LEAN_LEFT | BUTTON_LEAN_RIGHT)
          && (pm->cmd.buttons & (BUTTON_LEAN_LEFT | BUTTON_LEAN_RIGHT)) != (BUTTON_LEAN_LEFT | BUTTON_LEAN_RIGHT))
         && (!pm->cmd.forwardmove || pm->alwaysAllowLean) && (!pm->cmd.rightmove || pm->alwaysAllowLean)

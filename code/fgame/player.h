@@ -410,7 +410,16 @@ public:
     Vector m_vCoopNavLast;       // last node dropped
     int    m_iCoopNavCount;
     Vector m_vCoopCoverNormal;   // anchored cover OUT normal (wall: away from wall; low: back at player) [215]
-    int    m_iCoopCoverSide;     // 1 = opening LEFT of the pose, -1 = RIGHT [215]
+    // [user 2026-08-22] 1 = opening LEFT, -1 = RIGHT, **0 = NONE/unknown**. The 0 is the whole
+    // point: before Phase 1 this had no unknown value, initialised to 1, and its only writers sat
+    // inside the disabled wall-cover block - so it read "opening LEFT" forever and any consumer
+    // that trusted it aimed into the wall (bug-2028, the never-closed half of bug-305).
+    int    m_iCoopCoverSide;
+    float  m_fCoopCoverEdge;     // measured distance to the committed side's edge, 0 = none
+    int    m_iCoopCoverSideWant; // solver output, before hysteresis
+    float  m_fCoopCoverSideDwell;// seconds the solver has wanted Want instead of the committed side
+    float  m_fCoopCoverLastYaw;  // for the "still swinging the mouse" reset
+    int    m_iCoopCoverSideSent; // last side published to this client (change-only stufftext)
     bool   m_bCoopCoverPeek;     // RMB peek-aim from cover (real aiming, cover held) [215]
     float  m_fCoopVehTurretTime; // level.time stamp while manning a VEHICLE turret (jeep .30cal pose) [219]
     float  m_fCoopProbeTime;     // GUNNERPROBE diagnostic throttle [221 - REMOVE after bug-309 closes]
@@ -1063,6 +1072,7 @@ public:
     bool  CoopBlindfireAllowShot();
     bool  IsCoopCoverWall() const { return m_bCoopCoverWall; }
     int   GetCoopCoverSide() const { return m_iCoopCoverSide; }
+    float GetCoopCoverEdge() const { return m_fCoopCoverEdge; } // measured edge distance, 0 = none
     const Vector& GetCoopCoverNormal() const { return m_vCoopCoverNormal; }
     void  FireWeapon(int number, firemode_t mode) override;
     void  SetInvulnerable();
