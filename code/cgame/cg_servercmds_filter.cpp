@@ -49,6 +49,21 @@ static const char *whiteListedVariables[] = {
     "cg_3rd_person",
     "cg_cameraverticaldisplacement",
 
+    // HZM coop [user 2026-08-21] "there is seemingly no difference between the two when you use the
+    // '/' key... but if you enable it in control settings you get locked to the free cam version of
+    // third person regardless of what you hit with '/'. Notwithstanding first person that works fine."
+    //
+    // The three-mode view cycle (1P -> free cam -> chase) has existed in thirdperson.scr all along and
+    // is correct. It switches modes by stuffing BOTH cg_3rd_person and cg_freecam - but only
+    // cg_3rd_person was on this list, so every "set cg_freecam" the server sent was silently dropped.
+    //
+    // That single omission produces the exact three symptoms reported. Free cam and chase differ ONLY
+    // by cg_freecam, so with it frozen both modes rendered identically ("no difference"). The archived
+    // value became the only thing that ever set it, so a player who once ticked the options box could
+    // never get back out ("locked to the free cam version"). And first person kept working because it
+    // is the one mode that turns on cg_3rd_person alone, which was whitelisted.
+    "cg_freecam",
+
     // HZM coop - allow the server to mix client audio for scripted cinematics (e.g. m3l1a Omaha
     // ramp-drop): duck effects/ambient so the music takes over, then restore. Without these the
     // server-stuffed volume changes are silently filtered on the client.

@@ -246,7 +246,13 @@ qboolean CG_CheckCaptureKey(int key, qboolean down, unsigned int time)
     // Same decider + swallow pattern as the wheel steal above: the MOUSE3 bind never fires while the
     // shoulder view is up, and works normally the moment ADS is released.
     if (key == K_MOUSE3) {
-        if (CG_AdsShoulderWheelActive()) {
+        // [user 2026-08-21] "using middle mouse to switch shoulders in ANY view (behind cover, any
+        // third person view)". The swap used to be claimed ONLY while shoulder-aiming, so in plain
+        // chase or behind cover the key fell through to its normal bind and the shoulder never moved.
+        // Any third-person view has a side offset to swap now (it is signed at the cg_view.c framing
+        // site), so claim the key whenever one is actually on screen. First person is untouched: with
+        // no third-person camera up, MOUSE3 keeps whatever the player bound it to.
+        if (CG_AdsShoulderWheelActive() || cg.renderingThirdPerson) {
             if (down) {
                 cvar_t *pRight = cgi.Cvar_Get("cg_adsShoulderRight", "1", CVAR_ARCHIVE);
                 cgi.Cvar_Set("cg_adsShoulderRight", pRight->integer ? "0" : "1");

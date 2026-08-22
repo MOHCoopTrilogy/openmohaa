@@ -654,6 +654,7 @@ const adsGunTune_t *CG_FindAdsTune(const char *wpn);
     void  CG_NoteFleshImpact(const vec3_t pos); // HZM coop - a bullet hit a body here (any shooter)
     float CG_GunBlood(void);                // HZM coop - 0..1 blood on the view weapon; rain washes it off
     qboolean CG_GetStamina(float *outFrac); // HZM coop - sprint pool 0..1; FIRST PERSON ONLY (mirror only advances there)
+    float    CG_GetLandingSeverity(void);   // HZM coop - 0..1 shared landing latch (cg_view.c); 0 = no recent landing
     float CG_AdsShoulderFrac(void); // HZM coop - shoulder-stage camera envelope 0..1 (2D ADS effects follow the camera ease)
     qboolean CG_AdsShoulderWheelActive(void); // HZM coop - wheel steals ADS-stage events this frame (FALSE for scoped rifles)
     qboolean CG_FreecamCaptureActive(void); // HZM coop - free-cam orbit owns the mouse this frame (crosshair hides: camera != aim)

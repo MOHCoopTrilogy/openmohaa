@@ -1739,7 +1739,21 @@ typedef enum
 //   4. MAX_GAMESTATE_CHARS (98304) - the text pool, already ~75% of msgBuffer[MAX_MSGLEN]; +320
 //      sound paths is ~13KB, still inside it. Going to the 2048 wire cap would need this raised,
 //      which in turn needs MAX_MSGLEN raised. Not attempted.
-#define	MAX_SOUNDS			1600	// raised 512->1024->1280->1600 (HZM coop); sound_index is 11 bits in MSG_*Sounds
+#define	MAX_SOUNDS			2048	// raised 512->1024->1280->1600->2048 (HZM coop). 2048 is the HARD ceiling:
+                                    // sound_index is 11 bits in MSG_*Sounds, so anything above this
+                                    // needs a wire change. [2026-08-21] raised because the live log
+                                    // showed 151 SV_FindIndex overflows across 58 distinct sounds -
+                                    // rain loops, AI dialogue and the player pain pool were all being
+                                    // dropped, and a sound with no index simply never plays.
+                                    //
+                                    // WATCH FOR (bug-1183): the last raise caused "Server
+                                    // disconnected for unknown reason" on spawn. A configstring set
+                                    // AFTER the gamestate is sent reaches the client as a RELIABLE
+                                    // COMMAND, so a bigger cap means more LATE registrations, not just
+                                    // more sounds. The mitigation is precaching (aliascache) so
+                                    // registration happens at load; coop_pain.scr was switched to it
+                                    // in the same change. If spawn disconnects reappear, this is the
+                                    // first thing to revert.
 
 // HZM (engine-limits audit): constraint 3 above was a COMMENT only - nothing stopped a future
 // MAX_SOUNDS raise from silently overflowing the wire field, which is the exact failure mode

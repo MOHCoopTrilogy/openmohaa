@@ -1700,6 +1700,16 @@ void R_Register( void )
 	r_loadftx = ri.Cvar_Get("r_loadftx", "0", CVAR_LATCH);
 
 	r_ext_multisample = ri.Cvar_Get("r_ext_multisample", "0", CVAR_ARCHIVE | CVAR_LATCH);
+	// HZM coop [2026-08-21, bug-1995] REGISTER THE FBO MSAA CVAR HERE TOO, even though gl1 does not use
+	// it. The Advanced Graphics MSAA readout has to linkcvar ONE name, and it must be
+	// r_ext_framebuffer_multisample: under gl2 that is the only honest record, because gl2 clamps
+	// r_ext_multisample to a max of 4 and picking 8x snapped the label back to 4x (bug-1152). But gl2
+	// registers it in renderergl2/tr_init.c only, so under gl1 the label resolved an UNREGISTERED cvar
+	// and silently displayed "Off" - which is precisely how a session concluded MSAA was disabled and
+	// began repointing the label, nearly reintroducing bug-1152. Registering it on both renderers makes
+	// the one label truthful under either. The MSAA pulldown already sets both cvars on every pick, so
+	// gl1 keeps taking its actual value from r_ext_multisample above; this is a display mirror only.
+	ri.Cvar_Get("r_ext_framebuffer_multisample", "0", CVAR_ARCHIVE | CVAR_LATCH);
 	r_noborder = ri.Cvar_Get("r_noborder", "0", CVAR_ARCHIVE | CVAR_LATCH);
 	// HZM: when r_fullscreen is 1, this picks Borderless Window (1, SDL_WINDOW_FULLSCREEN_DESKTOP) vs
 	// Exclusive Fullscreen (0, SDL_WINDOW_FULLSCREEN). Read by name in sdl_glimp.c. Default 0 = old behaviour.

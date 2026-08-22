@@ -476,6 +476,9 @@ int CG_GetVMAnimPrefixIndex()
 // The animation being blended AWAY from. g_iLastVMAnim has already been overwritten with the
 // INCOMING animation by the time the first crossblend call site runs, so testing it alone would
 // catch entering ADS and miss leaving it - which is the direction actually complained about.
+// HZM coop - client-only viewmodel anim id for the lower/raise idle gesture. NOT a server value.
+#define COOP_VM_ANIM_IDLELOWER 15
+
 static int s_iCoopPrevVMAnim = -1;
 
 static float CoopVMCrossblend(dtiki_t *pTiki, int index)
@@ -575,6 +578,101 @@ void CG_ViewModelAnimation(refEntity_t *pModel)
         cgi.anim->g_iLastVMAnimChanged = cg.snap->ps.iViewModelAnimChanged;
     }
 
+    /*
+    HZM coop [user 2026-08-21] IDLE WEAPON HANDLING - "occassional animations play in relationship to
+    the way each gun reloads. Adjusting the slide or bolt on a weapon, things like that."
+
+    Deliberately NOT procedural. Every weapon already ships a `rechamber` animation - the bolt/slide
+    gesture, authored for that specific gun by the people who made it - so the right move is to PLAY
+    it occasionally rather than fake bone motion. A Kar98 works its bolt, a pistol works its slide,
+    and each looks correct because it is that weapon's own art.
+
+    The viewmodel is client-only, so cgame can choose a clip without the server's involvement. The
+    hard rule is that a REAL animation change must always win: this only injects when bAnimChanged is
+    already false, i.e. the server said nothing this frame. The moment the server fires, reloads or
+    switches weapons, its change lands normally on the block above and the flourish is simply
+    abandoned mid-gesture - which is correct, because whatever the player just did matters more.
+
+    Gated hard on being genuinely idle and calm: CoopWFeelStress() is the project's single stress
+    scalar (suppression, hurt, winded, speed), and nobody inspects their bolt while being shot at.
+    Interval is long and re-rolled every time so it never becomes a visible loop.
+
+    If a weapon has no `rechamber` row, the existing -1 fallback substitutes "idle" and this is a
+    harmless no-op for that gun - no detection needed.
+    */
+    if (!bAnimChanged && cg.snap && cg.snap->ps.stats[STAT_HEALTH] > 0) {
+        static cvar_t *pBolt     = NULL;
+        static int     s_iBoltAt = 0;      // when the next flourish may start
+        static int     s_iBoltEnd = 0;     // when the current one reverts
+        static unsigned s_boltSeed = 1664525u;
+        static int     s_iBoltLast = 0;
+        static int     s_iBoltPick  = VM_ANIM_RECHAMBER;   // which gesture the current run chose
+
+        // [user 2026-08-21] "We need to get rid of the bolt idle animations they are funky. Undo
+        // those. Just keep the inspect anim." DEFAULTED OFF.
+        //
+        // Injecting an authored animation client-side was always going to sit awkwardly: the clip
+        // was authored as part of a reload or a draw, with its own entry and exit poses, and playing
+        // it standalone from idle means blending into and out of the middle of a gesture. The
+        // PROCEDURAL inspect has no such problem - it moves the weapon from wherever it actually is.
+        //
+        // Kept behind the cvar rather than deleted: the plumbing (client-only anim id, the server-
+        // change-always-wins rule, the calm/idle gating) is sound and was not the thing that felt
+        // wrong. coop_idleBolt 1 brings it back if it is ever worth revisiting with better clips.
+        if (!pBolt) { pBolt = cgi.Cvar_Get("coop_idleBolt", "0", CVAR_ARCHIVE); }
+
+        /* re-seed after any gap (third person, death, cutscene) so a stale timer cannot fire the
+           instant the player returns to a live first-person view */
+        if (s_iBoltLast == 0 || (cg.time - s_iBoltLast) > 500) {
+            s_iBoltAt  = cg.time + 12000;
+            s_iBoltEnd = 0;
+        }
+        s_iBoltLast = cg.time;
+
+        if (pBolt->integer > 0) {
+            float    fSpeed;
+            qboolean bCalm;
+
+            fSpeed = (float)sqrt(cg.predicted_player_state.velocity[0] * cg.predicted_player_state.velocity[0]
+                                 + cg.predicted_player_state.velocity[1] * cg.predicted_player_state.velocity[1]);
+            bCalm  = (CoopWFeelStress() < 0.22f && fSpeed < 20.0f
+                      && !CG_AimingDownSights() && !cg.snap->ps.stats[STAT_INZOOM]
+                      && cg.snap->ps.iViewModelAnim == VM_ANIM_IDLE) ? qtrue : qfalse;
+
+            if (s_iBoltEnd != 0) {
+                /* a flourish is running - end it on its own clock, or the moment calm breaks */
+                if (cg.time >= s_iBoltEnd || !bCalm) {
+                    s_iBoltEnd                     = 0;
+                    s_boltSeed                     = s_boltSeed * 1664525u + 1013904223u;
+                    s_iBoltAt                      = cg.time + 22000 + (int)(s_boltSeed % 26000u);
+                    bAnimChanged                   = qtrue;
+                    s_iCoopPrevVMAnim              = cgi.anim->g_iLastVMAnim;
+                    cgi.anim->g_iLastVMAnim        = VM_ANIM_IDLE;
+                } else {
+                    cgi.anim->g_iLastVMAnim = s_iBoltPick;   // hold whichever gesture we started
+                }
+            } else if (bCalm && s_iBoltAt != 0 && cg.time >= s_iBoltAt) {
+                // Two gestures, chosen at random. `rechamber` is the bolt/slide work and exists on
+                // ELEVEN bolt-action rifles only; every SMG, pistol, MG and the shotgun has none, so
+                // for those it silently degrades to idle via the -1 fallback and nothing happens.
+                // `idlelower` is retail cut content (viewmodel/lower_rifle_stand.skc, authored and
+                // never wired) and is now defined for EVERY weapon, so it is the one that gives the
+                // Thompson and the pistols an idle at all. Picking between them means bolt guns get
+                // both and everything else effectively gets the lower - at the cost of the occasional
+                // no-op cycle on a gun with no rechamber, which is invisible.
+                s_boltSeed = s_boltSeed * 1664525u + 1013904223u;
+                s_iCoopPrevVMAnim              = cgi.anim->g_iLastVMAnim;
+                cgi.anim->g_iLastVMAnim        = ((s_boltSeed >> 9) & 1u)
+                                                     ? VM_ANIM_RECHAMBER : COOP_VM_ANIM_IDLELOWER;
+                s_iBoltPick                    = cgi.anim->g_iLastVMAnim;
+                s_iBoltEnd                     = cg.time
+                                                 + ((cgi.anim->g_iLastVMAnim == COOP_VM_ANIM_IDLELOWER)
+                                                        ? 1500 : 1100);
+                bAnimChanged                   = qtrue;
+            }
+        }
+    }
+
     if (bAnimChanged) {
         switch (cgi.anim->g_iLastVMAnim) {
         case VM_ANIM_CHARGE:
@@ -588,6 +686,13 @@ void CG_ViewModelAnimation(refEntity_t *pModel)
             break;
         case VM_ANIM_RECHAMBER:
             pszAnimSuffix = "rechamber";
+            break;
+        case COOP_VM_ANIM_IDLELOWER:
+            // HZM coop [user 2026-08-21] the lower/raise idle gesture. CLIENT-ONLY: this value is
+            // never networked - the server has no idea it exists - it is only ever written locally
+            // by the idle-flourish block below. It reuses id 15, the last value the 4-bit
+            // iNetViewModelAnim field could ever carry, so it cannot collide with a real server anim.
+            pszAnimSuffix = "idlelower";
             break;
         case VM_ANIM_RELOAD:
             pszAnimSuffix = "reload";

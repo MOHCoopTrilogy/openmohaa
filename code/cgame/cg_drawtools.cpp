@@ -452,6 +452,21 @@ void CG_DrawOverlayMiddle(qhandle_t handle, float fAlpha)
     cgi.R_DrawStretchPic(iWidthOffset, iHalfWidth, iHalfWidth, iHalfWidth, 0.0, 1.0, 1.0, 0.0, handle);
     cgi.R_DrawStretchPic(iWidthOffset + iHalfWidth, iHalfWidth, iHalfWidth, iHalfWidth, 1.0, 1.0, 0.0, 0.0, handle);
 
+    // [2026-08-21] DO NOT "FIX" THESE PILLARS WITHOUT READING THIS.
+    //
+    // They look like a hardcoded opaque black letterbox - (vidWidth - vidHeight)/2 per side, 420px
+    // each at 1920x1080 - and an audit of this function reported exactly that. It is WRONG.
+    // cgs.media.lagometerShader is "gfx/2d/blank", whose shader declares:
+    //     blendFunc GL_SRC_ALPHA GL_ONE_MINUS_SRC_ALPHA
+    //     alphaGen oneMinusVertex        <- INVERTED
+    // and color[3] is still fAlpha here, left over from the overlay draw above. So the rendered
+    // alpha is (1 - fAlpha): at full zoom the pillars are fully TRANSPARENT, and they are only
+    // visible while the scope fades in and out. There is no 44% of black screen to reclaim.
+    //
+    // Which means the real reason a scope does not show a proper surround is NOT these quads - it is
+    // that the scene is rendered ONCE, at the zoomed fov, so the periphery is magnified exactly as
+    // much as the lens. Fixing that needs a second scene render at normal fov with the zoomed image
+    // composited into a circular mask. Do that; do not touch these.
     color[0] = 0.0;
     color[1] = 0.0;
     color[2] = 0.0;
@@ -509,7 +524,33 @@ void CG_DrawZoomOverlay()
         weaponstring = CG_ConfigString(CS_WEAPONS + cg.snap->ps.activeItems[1]);
     }
 
-    if (!Q_stricmp(weaponstring, "Spy Camera")) {
+    // [user 2026-08-21] VARIANT-SAFE: a binocular or camera skin variant would otherwise fall
+    // through to the default zoom type.
+    {
+        static char vb[64];
+        if (CoopStripSkinSuffix(weaponstring, vb, sizeof(vb))) {
+            weaponstring = vb;
+        }
+    }
+    // [user 2026-08-21] "Im seeing the texture over my screen problem we once solved before."
+    //
+    // bDrawOverlay is initialised qtrue above and ONLY the final else-branch ever clears it, so the
+    // Spy Camera / Binoculars / Bombing Run arms below drew their overlay whenever that item was the
+    // ACTIVE ITEM - not while actually looking through it. Binoculars and the coop Bombing Run reward
+    // take the FULL-SCREEN overlay (zoomType 3), so simply having one selected pasted a texture over
+    // the whole view and left it there.
+    //
+    // The variant-safe strip added directly above widened the blast radius the same day: a binocular
+    // SKIN VARIANT used to fail the whole-string compare and fall through to the else-branch, which is
+    // INZOOM-gated and therefore behaved correctly by accident. Stripping the suffix made variants
+    // match here and inherit the ungated path.
+    //
+    // This is a ZOOM overlay, so gate every type on actually being zoomed. The generic arm keeps its
+    // extra <= 30 test (that distinguishes a rifle scope from a wide binocular fov); the dedicated
+    // arms only need "is the zoom live at all".
+    if (!cg.snap->ps.stats[STAT_INZOOM]) {
+        bDrawOverlay = qfalse;
+    } else if (!Q_stricmp(weaponstring, "Spy Camera")) {
         zoomType = 2;
     } else if (!Q_stricmp(weaponstring, "Binoculars") || !Q_stricmp(weaponstring, "Bombing Run")) {
         // HZM coop: the "Bombing Run" weapon is a binoculars reskin - use the
@@ -2299,6 +2340,153 @@ static void CG_DrawGl2PostFxFallback(void)
     }
 }
 
+/*
+=================================================================================================
+HZM coop [user 2026-08-21] DIRECTIONAL DAMAGE INDICATOR.
+
+The data was already on the wire and unused. STAT_DAMAGEDIR is written by Player::Pain
+(player.cpp:3704) as Vector::toYaw() * 10 - a WORLD yaw in tenths of a degree - and published every
+frame by Player::UpdateStats. Nothing client-side has ever read it. There is even a deliberate +-1
+nudge in Player::Pain so that a repeat hit from an identical bearing still registers as a CHANGE,
+which is direct evidence the field was designed for a consumer that was never written.
+
+That nudge is exact, not approximate: toYaw() truncates to whole degrees before the x10, so the stat
+is always a multiple of 10 and the equality test at player.cpp:3706 cannot be defeated by float
+error. Repeat hits alternate B <-> B+1. So triggering on CHANGE is sound; triggering on "non-zero"
+would not be, because damage_yaw is latched and never decayed.
+
+FOUR THINGS THAT WOULD OTHERWISE MAKE THIS LIE, all found in review before shipping:
+
+ 1. VEHICLES PUBLISH A DIFFERENT UNIT. Vehicle::EventDamage (vehicle.cpp:6023) writes
+    AngleSubtract(camera_yaw, dir_yaw) + 180.5 - whole DEGREES, already VIEW-RELATIVE, and skipping
+    the nudge. Reading that as tenths collapses every bearing into a 36 degree smear and then
+    subtracts the view yaw a second time. A passenger still goes through Player::Pain, so the two
+    encodings can interleave on the same stat frame to frame. Suppressed entirely while the player
+    is glued to a vehicle or a turret.
+
+ 2. FALL / DROWN / SCRIPTED DAMAGE HAS NO BEARING. player.cpp:7111 passes vec_zero as the direction,
+    and Vector::toYaw() returns 0.0 for a zero vector, so every fall would draw a confident arrow at
+    world yaw 180. A stat of exactly 0 is therefore treated as "no bearing" and draws nothing.
+
+ 3. THE SCREEN SENSE IS MIRRORED. MOHAA yaw is counter-clockwise-positive; screen angles are
+    clockwise-positive. Worked example: player at yaw 0, attacker at +Y (yaw 90) -> damage travels
+    -Y -> dirYaw 270 -> AngleSubtract(270+180, 0) = +90, which Player::Pain itself classifies as
+    PAIN_LEFT. Feeding +90 straight to a screen angle puts the wedge on the RIGHT. Negated below.
+
+ 4. IT MUST NOT FIRE WHILE SPECTATING. CG_Draw2D has no gate of its own, and while following another
+    player cg.snap->ps is THEIR playerstate - so their hits would drive an indicator measured against
+    OUR view angles. The predicate is copied from cg_view.c, which carries the warning that
+    'health <= 0' alone is not enough because Player::Spectator() leaves health at max.
+
+Drawn from small quads on the "*white" handle rather than an art asset: there is no rotated-2D
+primitive in the cgame import table (R_DrawStretchPic and R_DrawBox are all there is), so a rotating
+wedge would otherwise need a pre-rotated sprite sheet.
+=================================================================================================
+*/
+#define COOP_DMGIND_SLOTS 4
+
+static void CG_DrawDamageIndicator(void)
+{
+    static cvar_t *pOn = NULL, *pTime = NULL, *pRadius = NULL;
+    static int     s_lastDir  = -1;
+    static int     s_slotDir[COOP_DMGIND_SLOTS];
+    static int     s_slotTime[COOP_DMGIND_SLOTS];
+    static int     s_slotNext = 0;
+    static qboolean s_init = qfalse;
+    static qhandle_t hWhite = 0;
+    playerState_t *ps;
+    int            i, dir, life;
+    float          cx, cy, rad;
+
+    if (!pOn)     { pOn     = cgi.Cvar_Get("coop_dmgIndicator", "1", CVAR_ARCHIVE); }
+    if (!pTime)   { pTime   = cgi.Cvar_Get("coop_dmgIndicatorTime", "1200", CVAR_ARCHIVE); }
+    if (!pRadius) { pRadius = cgi.Cvar_Get("coop_dmgIndicatorRadius", "0.17", CVAR_ARCHIVE); }
+
+    if (!s_init) {
+        for (i = 0; i < COOP_DMGIND_SLOTS; i++) { s_slotDir[i] = -1; s_slotTime[i] = 0; }
+        s_init = qtrue;
+    }
+    if (!hWhite) { hWhite = cgi.R_RegisterShaderNoMip("*white"); }
+    if (pOn->integer <= 0 || !cg.snap) {
+        return;
+    }
+    ps = &cg.snap->ps;
+
+    // ---- gate (fix 4, plus fix 1) ----------------------------------------------------------
+    // Re-seed the change detector whenever the gate is shut, so re-entering does not fire on the
+    // delta that accumulated while we were not looking.
+    if (ps->stats[STAT_HEALTH] <= 0
+        || (ps->pm_flags & (PMF_SPECTATING | PMF_INTERMISSION | PMF_CAMERA_VIEW | PMF_TURRET
+                            | PMF_NO_MOVE | PMF_FROZEN))) {
+        s_lastDir = ps->stats[STAT_DAMAGEDIR];
+        for (i = 0; i < COOP_DMGIND_SLOTS; i++) { s_slotDir[i] = -1; }
+        return;
+    }
+
+    // ---- edge detect ------------------------------------------------------------------------
+    dir = ps->stats[STAT_DAMAGEDIR];
+    if (dir != s_lastDir) {
+        s_lastDir = dir;
+        if (dir != 0) {                      // fix 2: 0 means "no bearing", not "due south"
+            s_slotDir[s_slotNext]  = dir;
+            s_slotTime[s_slotNext] = cg.time;
+            s_slotNext = (s_slotNext + 1) % COOP_DMGIND_SLOTS;
+        }
+    }
+
+    life = pTime->integer;
+    if (life < 100) { life = 100; }
+
+    cx  = cgs.glconfig.vidWidth * 0.5f;
+    cy  = cgs.glconfig.vidHeight * 0.5f;
+    rad = cgs.glconfig.vidHeight * pRadius->value;
+
+    for (i = 0; i < COOP_DMGIND_SLOTS; i++) {
+        float  age, a, rel, mid, step;
+        vec4_t col;
+        int    seg;
+
+        if (s_slotDir[i] < 0) {
+            continue;
+        }
+        age = (float)(cg.time - s_slotTime[i]) / (float)life;
+        if (age >= 1.0f || age < 0.0f) {
+            s_slotDir[i] = -1;
+            continue;
+        }
+        a = 1.0f - age;
+        a *= a;                              // ease out: hold, then fade
+
+        // world bearing of the ATTACKER: the stat carries the direction the damage TRAVELLED, so
+        // +180 turns it back toward the source (the same convention Player::Pain uses before it
+        // classifies front/left/right/rear). Then subtract our own yaw, and NEGATE for screen
+        // handedness (fix 3).
+        rel = (float)s_slotDir[i] * 0.1f + 180.0f - cg.refdefViewAngles[YAW];
+        while (rel > 180.0f)  { rel -= 360.0f; }
+        while (rel < -180.0f) { rel += 360.0f; }
+        mid = -rel * (float)(M_PI / 180.0);
+
+        col[0] = 0.85f;
+        col[1] = 0.08f;
+        col[2] = 0.06f;
+        col[3] = a * 0.85f;
+        cgi.R_SetColor(col);
+
+        // a ~44 degree arc built from 11 short quads - thicker in the middle so it reads as a wedge
+        step = (float)(M_PI / 180.0) * 4.0f;
+        for (seg = -5; seg <= 5; seg++) {
+            float ang = mid + seg * step;
+            float t   = 1.0f - (float)(seg < 0 ? -seg : seg) / 6.0f;   // 1 at centre
+            float w   = 3.0f + 5.0f * t;
+            float px  = cx + (float)sin(ang) * rad;
+            float py  = cy - (float)cos(ang) * rad;
+            cgi.R_DrawStretchPic(px - w * 0.5f, py - w * 0.5f, w, w, 0, 0, 1, 1,
+                                 hWhite);
+        }
+    }
+    cgi.R_SetColor(NULL);
+}
+
 void CG_Draw2D(void)
 {
     CG_UpdateHudFade();
@@ -2318,6 +2506,7 @@ void CG_Draw2D(void)
     CG_DrawVote();
     CG_DrawInstantMessageMenu();
     CG_DrawCrosshair();
+    CG_DrawDamageIndicator();
     CG_DrawCoopIcons();
     CG_DrawMGHeat();
     CG_DrawMagazines();

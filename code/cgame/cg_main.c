@@ -824,7 +824,11 @@ void CG_Init(clientGameImport_t *imported, int serverMessageNum, int serverComma
             "r_ppHeat", "r_ppSuppress", "r_ppHit", "r_ppRainWet", "coop_dbnoView", "coop_medkitView",
             // bug-1307: the scripted-suppression floor and one-shot bump. Without these a
             // disconnect mid-set-piece leaves a permanently forced blur - bug-1202 again.
-            "coop_suppHold", "coop_suppBump"
+            "coop_suppHold", "coop_suppBump",
+            // [2026-08-21] coop_vaultView is a COUNTER, so a stale value is not a stuck view -
+            // but zeroing it on a fresh connect keeps the client edge-detector in step with a
+            // server that starts its own counter at 0 again.
+            "coop_vaultView"
         };
         int i;
         for (i = 0; i < (int)(sizeof(hzmClearFx) / sizeof(hzmClearFx[0])); i++) {

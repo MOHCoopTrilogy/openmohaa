@@ -375,6 +375,12 @@ public:
     bool  m_bCoopLimping;
     bool  m_bCoopWounded; // HZM coop - bug-1324: health-fraction test WITHOUT the ground term; gates sprint
     int   m_iCoopLimpSent;
+    // HZM coop - VAULT: a monotonically increasing counter, stuffed to the owning client as
+    // coop_vaultView on every successful vault. A COUNTER rather than a 0/1 flag because the vault
+    // is an INSTANT - a single-frame velocity assignment with no server-side duration - so there is
+    // no "off" state to send. cgame edge-detects the change and owns the envelope, which means one
+    // reliable command per vault instead of two, and no risk of a stuck "on".
+    int   m_iCoopVaultSent;
     // HZM coop - client is in the 3P over-the-shoulder AIM stage (a pure client concept: cg_adsStage
     // cvar + camera envelopes), mirrored to the server via the u_shoulderaim userinfo key so the
     // aimed-walk slowdown applies ONLY to the shoulder stage (FP irons keep normal ADS speed).

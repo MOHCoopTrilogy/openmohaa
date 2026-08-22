@@ -2393,6 +2393,7 @@ Player::Player()
     m_bCoopLimping    = false;   // HZM coop - low-health limp (bug-1291)
     m_bCoopWounded    = false;   // HZM coop - bug-1324
     m_iCoopLimpSent   = -1;      // force the first coop_limpView stuff, whatever its value
+    m_iCoopVaultSent  = 0;       // HZM coop - vault pulse counter (see player.h)
     m_iCoopCoverSent  = -1;      // HZM coop - same for coop_coverView
     m_iCoopBfButtons  = 0;       // HZM coop - semi-auto blindfire edge tracking
     m_bCoopBfShotDone = false;
@@ -14728,6 +14729,24 @@ void Player::Postthink(void)
                     if (trChest.fraction >= 1.0f) {
                         s_fVaultOk[client->ps.clientNum] = level.time + 0.8f;
                         velocity                         = vFwd * 150.0f + Vector(0, 0, 310.0f);
+
+                        // HZM coop [user 2026-08-21] "Vaulting still doesn't seem like im really
+                        // moving over something, feels more like sliding and its between the camera
+                        // and animation."
+                        //
+                        // It slid because NOTHING presented it. The whole mechanic is the velocity
+                        // line above - there was no camera work, no viewmodel work, and no state a
+                        // client could even observe: no free pm_flags bit (all 16 are allocated) and
+                        // no free viewmodel anim id worth spending. So tell the owning client
+                        // directly, the same way limp/DBNO/cover already do.
+                        //
+                        // The counter is the message. An instant has no duration to describe, so
+                        // cgame treats any CHANGE as "a vault just happened" and runs its own
+                        // envelope; nothing has to be turned back off, and a dropped or duplicated
+                        // command degrades to a missed or doubled flourish rather than a stuck view.
+                        m_iCoopVaultSent++;
+                        gi.SendServerCommand(edict - g_entities,
+                                             "stufftext \"set coop_vaultView %d\"", m_iCoopVaultSent);
                     }
                 }
             }

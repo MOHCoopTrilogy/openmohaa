@@ -25,6 +25,12 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 // Absolute ceilings for the view-weapon recoil offset, in world units. Constants rather
 // than multiples of the per-shot kick, so that "can this reach the camera?" has an answer
 // that does not depend on weapon class, cvar values, or how long the trigger was held.
+// HZM coop - how long the vault flourish runs, ms. The server-side vault is an INSTANT
+// (one velocity assignment), so this duration is invented client-side and is the only
+// thing that gives the move a shape. ~420ms is about how long the ballistic arc from
+// vFwd*150 + z*310 actually takes to clear a chest-high obstacle.
+#define COOP_VAULT_MS 420
+
 #define RECOIL_MAX_UNITS 3.0f
 #define RECOIL_MAX_BACK  1.1f
 #include "cg_parsemsg.h"
@@ -169,6 +175,14 @@ static float    s_fRollBase = 0.0f;
 static qboolean s_bRollBase = qfalse;
 static vec3_t   s_vFeelExempt = {0, 0, 0};
 static vec3_t   s_vFeelBase = {0, 0, 0};
+// Surface-visibility probe published by cg_modelanim.c at submit time: 2 bits per surface
+// (exists, hidden) for lefthand / garandhand / viewsleeves / triggerhand / sleeves.
+extern int      g_iCoopSurfMask;
+static vec3_t   s_vTraceVM   = {0, 0, 0};   // final viewmodel origin, published for coop_adsTrace
+static qboolean s_bTraceVMok = qfalse;
+static vec3_t   s_vTraceBone[8] = {{0,0,0},{0,0,0},{0,0,0},{0,0,0},
+                                   {0,0,0},{0,0,0},{0,0,0},{0,0,0}}; // eyes/spine/hand/gun/LClav/LArm/RClav/RArm
+static qboolean s_bTraceBone = qfalse;
 static qboolean s_bFeelBase = qfalse;
 // HZM coop [user 2026-08-21] "slight fov snap when shooting". A small, fast fov widening on
 // discharge. Set by the shot detector, consumed in CG_CalcFov. Kept SMALL and SHORT: fov is the
@@ -558,6 +572,7 @@ static void CG_OffsetThirdPersonView(void)
     vec3_t        camera_offset;
     float         fCamDist, fCamSide, fCamHeight, fCamVert;
     qboolean      bTurret3p;
+    qboolean      bMinDistTrip; // camera closer than REQUESTED (a real wall), not merely close
 
     // [user 2026-08-07] lift the eye BEFORE the chase camera is derived from it, so third person
     // gets the same cover raise as first person.
@@ -581,7 +596,10 @@ static void CG_OffsetThirdPersonView(void)
     // framing while s_adsShoulderEnv is up (ADS held), then collapse toward the head as s_adsFpEnv rises
     // (mouse-wheel-up handoff into first-person irons). Live-tune cg_adsShoulderDist/Side/Up.
     fCamDist   = cg_cameradist->value;
-    fCamSide   = cg_camerasideoffset->value;
+    // [user 2026-08-21] SIGNED, so MOUSE3 swaps shoulders in EVERY third-person view - plain chase
+    // and behind cover - not only while shoulder-aiming. The sign is eased in CG_UpdateAdsStage and
+    // runs unconditionally, so the swap sweeps rather than cuts wherever it is used.
+    fCamSide   = cg_camerasideoffset->value * s_shoulderSideSign;
     fCamHeight = cg_cameraheight->value;
     fCamVert   = cg_cameraverticaldisplacement->value;
     // HZM coop - FREE CAM framing: while the free orbit is up, pull the camera out to cg_freecamDist and
@@ -700,6 +718,33 @@ static void CG_OffsetThirdPersonView(void)
 
     AngleVectors(target_angles, forward, right, NULL);
 
+    // HZM coop [user 2026-08-21] SWAP SHOULDERS ON AN ARC, NOT THROUGH THE BODY.
+    // "using middle mouse to switch shoulders in ANY view... camera should move from left to right
+    // behind the player so you should effectively see the back of your player as it moves, right now
+    // it shifts over and kinda just warps."
+    //
+    // The side offset was already eased, so the swap was not a teleport - but easing it alone moves
+    // the camera in a STRAIGHT LATERAL LINE from +side to -side, and that line passes straight through
+    // the player's head at the midpoint. The model is drawn from the inside for a frame or two and the
+    // eye reads the whole move as a glitch rather than as travel, which is why an eased swap still
+    // looked like a warp.
+    //
+    // A real camera would swing AROUND the player. Bulging the chase distance by how far through the
+    // swap we are turns the straight chord into an arc that bows out behind: fully out at either
+    // shoulder the bulge is zero and framing is exactly as before, at the halfway point the camera is
+    // furthest back and centred, looking at the back of the soldier. One extra term, no new state -
+    // the existing eased sign already carries the progress.
+    {
+        static cvar_t *pShArc = NULL;
+        float          fArc;
+
+        if (!pShArc) { pShArc = cgi.Cvar_Get("cg_adsShoulderArc", "26", CVAR_ARCHIVE); }
+        fArc = 1.0f - fabs(s_shoulderSideSign);   // 0 at either shoulder, 1 mid-sweep
+        if (fArc > 0.001f) {
+            fCamDist += fArc * pShArc->value;
+        }
+    }
+
     VectorMA(target_position, -fCamDist, forward, new_vieworg);
 
     new_vieworg[2] += fCamVert;
@@ -743,7 +788,39 @@ static void CG_OffsetThirdPersonView(void)
     if (delta[2] < CAMERA_MINIMUM_DISTANCE) {
         delta[2] = 0;
     }
-    if (VectorLength(delta) < CAMERA_MINIMUM_DISTANCE) {
+    // HZM coop [user 2026-08-21] THE ADS JOLT. Gate this fallback on OBSTRUCTION, not PROXIMITY.
+    //
+    // Stock premise: with cg_cameradist 65 the only way the camera ends up within 40 units of the head
+    // is a wall, so crank the pitch up to 90 and look down at the player from above. That premise is
+    // invalidated by our own staged ADS blend, which DELIBERATELY drives fCamDist toward 2.0 as the
+    // shoulder view flies in to the eye (see the s_adsFpEnv block above). So this fires on the blend
+    // itself - measured at s_adsFpEnv ~0.057 flying in, about 6ms after the wheel, and releasing again
+    // around ~0.31 on the way out. While it holds, the camera sits fCamDist units straight UP; when it
+    // releases, the view snaps from pivot+38.9*z to pivot-38.9*forward in a single frame with no ease.
+    // That is a ~55 unit teleport, and it is the jolt.
+    //
+    // It also explains the older "scrolling up to go ads puts the camera behind the players head"
+    // report, which was previously attributed to cover ordering and fixed there without touching this.
+    //
+    // Seven earlier fixes missed it because they all targeted the ANIMATION half - crossblend, zoom
+    // timing, pose easing. This is neither animation nor the 3P->1P flip: the world FOV and the weapon
+    // shift are both driven by CG_AdsPoseFactor and are provably continuous across the flip.
+    //
+    // The honest question is not "is the camera close?" but "is the camera closer than we ASKED for?".
+    // new_vieworg still holds the requested position here (the trace above wrote target_position, not
+    // new_vieworg), so the request is free to measure. During ADS the request shrinks with the blend,
+    // so the blend can never trip this; a real wall still trips it at any stage, and the primary
+    // MASK_CAMERASOLID traces above are untouched, so the camera still cannot pass through geometry.
+    {
+        vec3_t vWant;
+        float  fWant, fLimit;
+
+        VectorSubtract(new_vieworg, cg.playerHeadPos, vWant);
+        fWant  = VectorLength(vWant) * 0.9f;
+        fLimit = (fWant < CAMERA_MINIMUM_DISTANCE) ? fWant : (float)CAMERA_MINIMUM_DISTANCE;
+        bMinDistTrip = (VectorLength(delta) < fLimit) ? qtrue : qfalse;
+    }
+    if (bMinDistTrip) {
         VectorNormalize(delta);
         /*
       // see if we are going straight up
@@ -877,7 +954,17 @@ static void CoopGunFoley(const char *act, int cooldownMs)
     }
     // one cooldown slot per action, keyed off the first two characters - cheap and collision-free
     // across the six action codes actually in use (hsoft hhard grab safe magck dry).
-    slot = ((act[0] + act[1] * 3) & 7);
+    // [2026-08-21] The old hash ((act[0] + act[1]*3) & 7) was NOT collision-free as its comment
+    // claimed: "hhard" and "magck" both land on slot 0, so the wall-bump/sprint-start cue and the
+    // idle inspect shared a cooldown AND a no-repeat index and silently suppressed each other.
+    // An explicit table cannot drift the way an ad-hoc hash can.
+    if      (!strcmp(act, "hsoft")) { slot = 0; }
+    else if (!strcmp(act, "hhard")) { slot = 1; }
+    else if (!strcmp(act, "grab"))  { slot = 2; }
+    else if (!strcmp(act, "safe"))  { slot = 3; }
+    else if (!strcmp(act, "magck")) { slot = 4; }
+    else if (!strcmp(act, "dry"))   { slot = 5; }
+    else                            { slot = 6; }
     if (cg.time < s_next[slot]) {
         return;
     }
@@ -938,7 +1025,17 @@ static void CoopGunFoleyThink(void)
     }
 
     if (ads > 0.5f && s_pAds <= 0.5f) {
-        CoopGunFoley("safe", 220);   // shouldering: a small mechanical settle
+        // [2026-08-21] "safe" takes were only ever sliced for the RIFLE class - there is no
+        // coop_gf_pistol_safeNN / smg / mg. Asking for one made Alias_FindRandom return NULL and the
+        // sound layer then tried to register the alias NAME as a file path: silence on ADS-in for
+        // three of the four weapon classes, plus a registration warning. Route the classes that have
+        // no safety take to the soft handling take, which every class does have.
+        {
+            int iCls = cg.snap->ps.stats[STAT_EQUIPPED_WEAPON];
+            CoopGunFoley((iCls & (WEAPON_CLASS_PISTOL | WEAPON_CLASS_SMG | WEAPON_CLASS_MG
+                                  | WEAPON_CLASS_HEAVY)) ? "hsoft" : "safe",
+                         220);   // shouldering: a small mechanical settle
+        }
     } else if (ads <= 0.5f && s_pAds > 0.5f) {
         CoopGunFoley("hsoft", 220);
     }
@@ -973,6 +1070,163 @@ static void CoopGunFoleyThink(void)
         CoopGunFoley("grab", 200);
     }
     s_pAnim = iAnim;
+}
+
+/*
+=================================================================================================
+HZM coop [user 2026-08-21] LANDING SEVERITY - ONE detector, three consumers.
+
+Before this, three separate places each re-detected a landing, on THREE DIFFERENT SIGNALS with
+different gates, and could edge on different frames:
+
+  * the weapon dip      - groundEntityNum + velZ < -180, gated on CoopWeaponFeelOn, NO reseed
+  * the camera absorb   - the same expression, but additionally force-refreshing its own history
+                          whenever !walking, which can destroy its edge on the touchdown frame and
+                          make it miss a landing the weapon dip catches
+  * the landing sound   - cg.bFPSOnGround != ps.walking, a different variable entirely, with no
+                          velocity threshold at all, running even in third person and while dead
+
+and the weapon dip carried the bug the camera's 250ms reseed was written to fix: die airborne with
+s_lastVelZ ~ -700 and that value survives into the respawn, firing a full-strength slam.
+
+Severity is now computed HERE, by whoever runs first in the frame, and latched with a timestamp;
+the other two read the latch. Deliberately NOT advanced from CG_DrawActiveFrame like the ADS and
+stress envelopes: those run three stages upstream of CG_PredictPlayerState, and a landing is an
+EDGE, not an envelope - velocity[2] goes -700 to 0 in a single frame, so a one-frame-stale read is
+1.0 versus 0.0. It also must not carry the `if (cg.frametime <= 0) return;` guard those use, because
+landing on a zero-dt frame would then silently drop the whole effect on exactly the frames the
+network is worst.
+
+TIERS: 0 light / 1 medium / 2 hard. The thresholds are impact speed, not damage - a survivable drop
+from a roof should still read as heavy.
+=================================================================================================
+*/
+static float s_landSev  = 0.0f;   // 0..1, latched at touchdown
+static int   s_landTime = 0;      // cg.time of that touchdown
+static int   s_landTier = 0;      // 0/1/2
+static int   s_landSeen = 0;      // last frame this ran, for the staleness reseed
+
+static void CoopLandingDetect(void)
+{
+    static float    s_lvVelZ  = 0.0f;
+    static qboolean s_lvGround = qtrue;
+    static qboolean s_lvInit   = qfalse;
+    qboolean bGround;
+    float    vz;
+
+    if (!cg.snap) {
+        return;
+    }
+    if (s_landSeen == cg.time) {
+        return;                       // already computed by an earlier consumer this frame
+    }
+
+    bGround = (cg.predicted_player_state.groundEntityNum != ENTITYNUM_NONE) ? qtrue : qfalse;
+    vz      = cg.predicted_player_state.velocity[2];
+
+    // STALENESS RESEED, matching the camera-motion block: these statics only advance on the live
+    // first-person path, so third person, death, spectating and cutscenes freeze them. Without this
+    // a player who died mid-fall returns with s_lvVelZ still at -700 and lands a phantom slam.
+    if (!s_lvInit || (cg.time - s_landSeen) > 250) {
+        s_lvInit   = qtrue;
+        s_lvGround = bGround;
+        s_lvVelZ   = vz;
+        s_landSev  = 0.0f;
+        s_landTier = 0;
+        s_landSeen = cg.time;
+        return;
+    }
+    s_landSeen = cg.time;
+
+    if (bGround && !s_lvGround && s_lvVelZ < -180.0f) {
+        float f = (-s_lvVelZ - 180.0f) / 520.0f;
+        if (f > 1.0f) { f = 1.0f; }
+        s_landSev  = f;
+        s_landTime = cg.time;
+        s_landTier = (f >= 0.72f) ? 2 : ((f >= 0.32f) ? 1 : 0);
+    }
+    s_lvGround = bGround;
+    s_lvVelZ   = vz;
+}
+
+// Severity of the landing that happened within the last `windowMs`, else 0. Consumers read this
+// rather than re-detecting, so all three fire on the same frame with the same number.
+static float CoopLandingSeverity(int windowMs)
+{
+    if (!s_landTime || (cg.time - s_landTime) > windowMs) {
+        return 0.0f;
+    }
+    return s_landSev;
+}
+
+static int CoopLandingTier(int windowMs)
+{
+    if (!s_landTime || (cg.time - s_landTime) > windowMs) {
+        return 0;
+    }
+    return s_landTier;
+}
+
+// Exposed for the LANDING SOUND, which lives in cg_modelanim.c. That is the third consumer of the
+// same event; it used to detect on cg.bFPSOnGround != ps.walking - a different variable, with no
+// velocity threshold at all - so it could fire on a frame neither of the other two agreed with, and
+// it played at a hardcoded volume 1.0 whether you stepped off a kerb or fell off a roof.
+float CG_GetLandingSeverity(void)
+{
+    return CoopLandingSeverity(150);
+}
+
+/*
+HZM coop [user 2026-08-21] VAULT ENVELOPE - one definition, two consumers (viewmodel + camera).
+Edge-detects the coop_vaultView COUNTER the server stuffs on each vault. The vault itself is an
+instant - a single-frame velocity assignment with no server-side duration - so the shape is invented
+here and this function is the only place that knows it. Returns 0..1.
+*/
+static float CoopVaultEnv(void)
+{
+    static cvar_t *pVault = NULL, *pVaultAmt = NULL;
+    static int     s_vaultSeen = -1;
+    static int     s_vaultAt   = 0;
+    static int     s_lastLook  = 0;
+    float          fV = 0.0f, t;
+
+    if (!pVault)    { pVault    = cgi.Cvar_Get("coop_vaultView", "0", 0); }
+    if (!pVaultAmt) { pVaultAmt = cgi.Cvar_Get("coop_vaultAmount", "1.0", CVAR_ARCHIVE); }
+
+    // STALENESS RESYNC. This function only advances on the live first-person path, so third person,
+    // death, spectating and cutscenes freeze s_vaultSeen. Vault while in third person, come back, and
+    // the counter has moved - which would read as an edge and fire a flourish for a vault that
+    // finished seconds ago. If we have not looked recently, resync WITHOUT firing. Same discipline as
+    // the camera-motion and sprint reseeds.
+    if (s_lastLook && (cg.time - s_lastLook) > 250) {
+        s_vaultSeen = pVault->integer;
+        s_vaultAt   = 0;
+    }
+    s_lastLook = cg.time;
+
+    if (pVault->integer != s_vaultSeen) {
+        if (s_vaultSeen >= 0) {
+            s_vaultAt = cg.time;   // a real edge, not the first frame we looked at the cvar
+        }
+        s_vaultSeen = pVault->integer;
+    }
+    if (!s_vaultAt) {
+        return 0.0f;
+    }
+    if (cg.time - s_vaultAt >= COOP_VAULT_MS) {
+        s_vaultAt = 0;
+        return 0.0f;
+    }
+    // fast down over the first 30%, then a slower eased return. Asymmetric on purpose: equal in and
+    // out reads as a bob rather than as letting go of the gun and re-gripping it.
+    t = (float)(cg.time - s_vaultAt) / (float)COOP_VAULT_MS;
+    if (t < 0.30f) {
+        fV = t / 0.30f;
+    } else {
+        fV = 1.0f - ((t - 0.30f) / 0.70f);
+        fV *= fV;
+    }
+    return fV * pVaultAmt->value;
 }
 
 void CG_AddSuppression(float amount)
@@ -1513,6 +1767,94 @@ void CG_OffsetFirstPersonView(refEntity_t *pREnt, qboolean bUseWorldPosition)
 
     VectorCopy(trace.endpos, origin);
     VectorSubtract(origin, vOldOrigin, vDelta);
+
+    // HZM coop [user 2026-08-21] WEAPON MASS: let the gun TRAIL the camera instead of being welded
+    // to it. This line used to hand the viewmodel 100% of the camera excursion every frame - head
+    // bob, lean, the collision traces, everything - so the gun was rigidly locked to the eye and
+    // could not read as having any weight of its own.
+    //
+    // The obvious idea (add a bigger, phase-lagged bob to the viewmodel) is a NO-OP, and it is worth
+    // recording why so it is not tried again: the camera bob and the viewmodel's own sway are both
+    // sin() of the SAME variable, cg.fCurrentViewBobPhase, so they are the same frequency by
+    // construction. Two co-frequency sinusoids sum to a single sinusoid at that frequency - changing
+    // the lag rotates the resultant and changes nothing about how correlated the two are. With the
+    // amplitudes as shipped (0.03 vs 0.005, a 6:1 ratio) the existing M_PI/10 lag moves the result by
+    // about 2.5 degrees. Invisible.
+    //
+    // The only lever that actually decouples them is this transfer. Handing over a FRACTION and
+    // feeding the remainder through a one-pole lag makes the weapon's response depend on both the
+    // amplitude and the FREQUENCY of the camera move: slow moves still carry the gun almost exactly,
+    // while fast ones (bob, a flinch, a hard landing) leave it behind for a beat and let it catch up.
+    // That frequency dependence is what mass looks like.
+    //
+    // Applied BEFORE the feel-budget base capture below, so it costs nothing from the 9u/4u jitter
+    // ceiling and cannot starve the landing dip or weapon lag. Full transfer at coop_weaponMass 0
+    // reproduces the old behaviour exactly.
+    {
+        static cvar_t *pMass = NULL, *pMassRate = NULL;
+        static vec3_t  s_vMassLag = {0, 0, 0};
+        float          fMass, fDtM, kM;
+
+        if (!pMass)     { pMass     = cgi.Cvar_Get("coop_weaponMass",     "0.35", CVAR_ARCHIVE); }
+        if (!pMassRate) { pMassRate = cgi.Cvar_Get("coop_weaponMassRate", "14.0", CVAR_ARCHIVE); }
+
+        fMass = pMass->value;
+        if (fMass < 0.0f) { fMass = 0.0f; }
+        if (fMass > 0.9f) { fMass = 0.9f; }   // never fully decouple: the gun must not swim
+
+        // [user 2026-08-21] THIS WAS THE "SHOULDER POP". The user identified it by bisection after
+        // five of my theories failed - camera motion, the 3P flip, the min-distance fallback, the
+        // animation root and the surface pop were all measured out, and the cause was a filter I had
+        // added BETWEEN those things, which is why probing either side never saw it.
+        //
+        // vDelta is NOT a per-frame motion. It is the TOTAL camera offset for this frame (bob, lean,
+        // collision traces) - and that total includes the ADS pose change. So low-passing it made the
+        // arms trail the aim transition by roughly 110ms and lurch as they caught up: the shoulders
+        // moving while the camera holds still, exactly as reported.
+        //
+        // Scale the effect out with the ADS pose. Mass is a hip-fire and movement quality - it is
+        // what makes a carried weapon feel heavy - but while aiming the weapon must track the view
+        // exactly or the sight picture swims. Using the eased pose factor means there is no step at
+        // either end: full mass at the hip, none at the sights, and a smooth ramp between.
+        fMass *= (1.0f - CG_AdsPoseFactor());
+        if (fMass < 0.0f) { fMass = 0.0f; }
+
+        // dt clamped like every other integrator in this file - cg.frametime is unbounded for a
+        // client of a remote server, and an unclamped k would overshoot the target on a hitch.
+        fDtM = cg.frametime / 1000.0f;
+        if (fDtM > 0.1f) { fDtM = 0.1f; }
+        kM = fDtM * pMassRate->value;
+        if (kM > 1.0f) { kM = 1.0f; }
+
+        // [user 2026-08-21] "spawned in and my gun is violently shaking nonstop" - the first version
+        // of this shipped an OSCILLATOR. It did:
+        //     s_vMassLag += fMass * vDelta;   then bled s_vMassLag back into vDelta
+        // which is precisely the pattern TRAPS bans after bug-1984: writing a PERIODIC term into a
+        // state variable that an exponential ease then tracks. vDelta carries the head bob, so the
+        // accumulator was fed a sine every frame and pumped. It was also dimensionally wrong -
+        // vDelta is a POSITION offset (origin - vOldOrigin, both from this frame), not a per-frame
+        // increment, so accumulating it had no meaning in the first place.
+        //
+        // The correct filter TRACKS the target instead of accumulating it. s_vMassLag is a plain
+        // one-pole low-pass of vDelta, so it is bounded by vDelta's own range and cannot pump; the
+        // weapon then gets a blend of the instantaneous offset and the lagged one. fMass 0 reproduces
+        // the old rigid transfer exactly, fMass 1 would be fully lagged.
+        if (fMass > 0.001f && cg.frametime > 0) {
+            vec3_t vBlend;
+
+            s_vMassLag[0] += (vDelta[0] - s_vMassLag[0]) * kM;
+            s_vMassLag[1] += (vDelta[1] - s_vMassLag[1]) * kM;
+            s_vMassLag[2] += (vDelta[2] - s_vMassLag[2]) * kM;
+
+            vBlend[0] = vDelta[0] * (1.0f - fMass) + s_vMassLag[0] * fMass;
+            vBlend[1] = vDelta[1] * (1.0f - fMass) + s_vMassLag[1] * fMass;
+            vBlend[2] = vDelta[2] * (1.0f - fMass) + s_vMassLag[2] * fMass;
+            VectorCopy(vBlend, vDelta);
+        } else {
+            VectorCopy(vDelta, s_vMassLag);   // stay tracked so re-enabling cannot step
+        }
+    }
+
     VectorAdd(pREnt->origin, vDelta, pREnt->origin);
 
     if (!bUseWorldPosition) {
@@ -1758,13 +2100,16 @@ void CG_OffsetFirstPersonView(refEntity_t *pREnt, qboolean bUseWorldPosition)
                 int          bGround = (cg.predicted_player_state.groundEntityNum != ENTITYNUM_NONE);
                 float        fSpeed;
 
-                if (bGround && !s_lastGround && s_lastVelZ < -180.0f) {
-                    // touchdown: -180 ignores stepping off a kerb, a hard fall is -600 and up
-                    float f = (-s_lastVelZ - 180.0f) / 520.0f;
-                    if (f > 1.0f) {
-                        f = 1.0f;
-                    }
-                    s_landDip += f * 3.2f * fClassKick;
+                // [2026-08-21] consume the SHARED latch instead of re-detecting. This is the first
+                // consumer in the frame, so it is the one that computes it. The old local detector
+                // had no staleness reseed and carried the die-airborne-then-respawn phantom slam.
+                CoopLandingDetect();
+                if (s_landTime == cg.time && s_landSev > 0.0f) {
+                    // TIER depth: a hop, a drop and a fall should not all dip the same amount.
+                    // 1.0 / 1.35 / 1.8 on top of the existing severity ramp, so light landings are
+                    // unchanged and only the harder ones grow.
+                    static const float kTierDepth[3] = {1.0f, 1.35f, 1.8f};
+                    s_landDip += s_landSev * 3.2f * fClassKick * kTierDepth[s_landTier];
                 }
                 s_lastGround = bGround;
                 s_lastVelZ   = cg.predicted_player_state.velocity[2];
@@ -1822,6 +2167,37 @@ void CG_OffsetFirstPersonView(refEntity_t *pREnt, qboolean bUseWorldPosition)
                 // The alive test is a SAFETY, not decoration: medkit.scr clears the flag on all four
                 // of its exit paths, but if a player is ever removed mid-heal the clear cannot run,
                 // and a permanently invisible weapon is a far worse bug than a missing animation.
+                // HZM coop [user 2026-08-21] VAULT - the HANDS half.
+                //
+                // "Vaulting still doesn't seem like im really moving over something, feels more like
+                // sliding and its between the camera and animation." It slid because nothing
+                // presented it: the entire mechanic server-side is one velocity assignment, with no
+                // camera work, no viewmodel work, and no observable state.
+                //
+                // The server now stuffs coop_vaultView as an incrementing COUNTER on each vault (an
+                // instant has no duration to describe, so there is no "off" to send). Any change is
+                // an edge: latch the time and run the whole envelope here. A dropped or duplicated
+                // command therefore degrades to a missed or doubled flourish, never a stuck view.
+                //
+                // Shape: the gun drops hard and fast as both hands go to the obstacle, holds while
+                // you cross, then comes back up more slowly than it left. Asymmetric on purpose -
+                // equal in and out reads as a bob rather than as letting go and re-gripping.
+                //
+                // Registered as an AUTHORED STOW (mirrored into s_vFeelExempt) exactly like the
+                // medkit below. It is a deliberate large pose, not jitter, so the 9u/4u budget must
+                // not scale it - clamping only this half is what desynchronised the camera and the
+                // gun in the DBNO regression.
+                {
+                    float fV = CoopVaultEnv();
+
+                    if (fV > 0.001f) {
+                        VectorMA(pREnt->origin, -fV * 22.0f, mat[2], pREnt->origin);
+                        VectorMA(pREnt->origin, -fV * 9.0f,  mat[0], pREnt->origin);
+                        VectorMA(s_vFeelExempt, -fV * 22.0f, mat[2], s_vFeelExempt);
+                        VectorMA(s_vFeelExempt, -fV * 9.0f,  mat[0], s_vFeelExempt);
+                    }
+                }
+
                 {
                     static cvar_t *pMed = NULL;
                     static float   s_medStow = 0.0f;
@@ -2045,9 +2421,233 @@ void CG_OffsetFirstPersonView(refEntity_t *pREnt, qboolean bUseWorldPosition)
                         if (e < 0.0f) {
                             e = 0.0f;
                         }
-                        VectorMA(pREnt->origin,  e * 2.2f, mat[2], pREnt->origin); // raise
-                        VectorMA(pREnt->origin,  e * 1.6f, mat[0], pREnt->origin); // AWAY from the eye
-                        VectorMA(pREnt->origin,  e * 1.4f, mat[1], pREnt->origin); // and turn it over
+                        // [user 2026-08-21] "when the inspection of gun happens its a little too low,
+                        // it should turn but be raised up closer to I guess where the eyes are."
+                        // The raise was 2.2u, which barely lifts it off the resting carry - the gun
+                        // rolled to show its side while still sitting at hip-ish height, so it read
+                        // as the gun twitching rather than being brought up for a look.
+                        // coop_inspectRaise is that lift, and the forward push scales with it so a
+                        // bigger raise does not bring the receiver back toward the near clip plane.
+                        {
+                            static cvar_t *pRaise = NULL;
+                            float          fUp;
+
+                            if (!pRaise) {
+                                pRaise = cgi.Cvar_Get("coop_inspectRaise", "5.5", CVAR_ARCHIVE);
+                            }
+                            // [user 2026-08-21] "I think we should also have the gun come towards the
+                            // player too with that, almost like we are rolling it and bringing it
+                            // towards us to see the side of the gun better."
+                            //
+                            // HISTORY THAT MATTERS: an early version DID pull toward the eye and was
+                            // reverted, because on a long gun the stock came through the near clip
+                            // plane and you saw inside the receiver ("makes the back of the gun clip
+                            // into the camera"). It then pushed AWAY, which is safe but reads as
+                            // holding the gun out at arm's length rather than bringing it up to look.
+                            //
+                            // What changed is the RAISE. At the old 2.2u lift the weapon was still at
+                            // carry height and directly ahead, so any rearward travel met the camera.
+                            // Lifted to ~5-7u it sits above that line and can be drawn in without the
+                            // stock reaching the near plane. So the pull is back, as a TUNABLE with a
+                            // conservative default: coop_inspectPull, positive = toward the eye. If a
+                            // long gun clips again, lower it - the clipping is real, not hypothetical.
+                            static cvar_t *pPull = NULL;
+                            float          fPull;
+
+                            if (!pPull) {
+                                pPull = cgi.Cvar_Get("coop_inspectPull", "5.5", CVAR_ARCHIVE);
+                            }
+                            fUp   = pRaise->value;
+                            fPull = pPull->value;
+                            // heavier guns are the long ones - draw them in less, they clip sooner
+                            // Was scaled down hard by weapon weight, which pushed exactly the guns
+                            // the user inspects most (STG44 is in the MG class) furthest away. Keep a
+                            // mild reduction for clip safety on long guns, not a big one.
+                            fPull *= (1.05f - 0.10f * fClassKick);
+                            if (fPull < 0.0f) { fPull = 0.0f; }
+
+                            VectorMA(pREnt->origin, e * fUp,    mat[2], pREnt->origin); // raise toward the eyes
+                            VectorMA(pREnt->origin, e * -fPull, mat[0], pREnt->origin); // and IN toward the player
+
+                            // [user 2026-08-21, bug-2016] "no it still goes way off to the right side
+                            // ... you can barely see the gun when its being inspected. Which control
+                            // should I adjust" - and the answer was that NO control would fix it,
+                            // because the inspect was fighting the feel budget and losing.
+                            //
+                            // The budget clamps the summed viewmodel offset to 9u, UNIFORMLY scaling
+                            // every layer. The inspect alone asks ~9.4u (5.5 up, 5.5 back, 6.5 left)
+                            // and shares that 9u with breathing, sway, bob and mass lag. So raising
+                            // coop_inspectCentre raised the total LENGTH, which raised the scale-down
+                            // factor, which cancelled most of the gain: the control saturated. That is
+                            // exactly why turning it up did not move the gun.
+                            //
+                            // The fix is the one the budget already provides for deliberate large
+                            // poses: register as an AUTHORED STOW, like the medkit stow, the weapon
+                            // collision retract and the DBNO eye drop. Exempt offsets are subtracted
+                            // before the clamp and added back after, so they pass through intact.
+                            //
+                            // The RAISE and the CENTRE are exempted - they frame the shot and are the
+                            // two the user is asking for. The PULL is deliberately NOT: the 4u rearward
+                            // cap is the guard that stops a long gun's stock coming through the near
+                            // clip plane, and the history comment above records that clipping as real,
+                            // not hypothetical. Keeping the pull inside the budget keeps that guard.
+                            VectorMA(s_vFeelExempt, e * fUp, mat[2], s_vFeelExempt);
+                            // [user 2026-08-21, with a reference image] The target is the weapon held
+                            // CLOSE and CENTRED with its left flank toward the eye. The view weapon
+                            // rests to the RIGHT of screen centre, so bringing it into frame means
+                            // moving it LEFT - mat[1] is the left vector here (AngleVectorsLeft at the
+                            // basis build), so this is positive. The old fixed 1.4 was far too small
+                            // to centre anything; it is now the tunable that frames the shot.
+                            {
+                                static cvar_t *pCtr = NULL;
+                                if (!pCtr) { pCtr = cgi.Cvar_Get("coop_inspectCentre", "6.5", CVAR_ARCHIVE); }
+                                VectorMA(pREnt->origin, e * pCtr->value, mat[1], pREnt->origin);
+                                // authored stow - see the note on the raise above. Without this the
+                                // centring is the first thing the 9u clamp scales away.
+                                VectorMA(s_vFeelExempt, e * pCtr->value, mat[1], s_vFeelExempt);
+                            }
+                        }
+
+                        // [user 2026-08-21] "for gun idle animation maybe rotating the gun so you are
+                        // seeing the left side of it/showcasing it may be another anim we could do".
+                        //
+                        // The inspect only ever TRANSLATED - raise, push out, drift sideways - which
+                        // reads as the gun being moved rather than being looked at. Turning it is what
+                        // showcases it, and it costs nothing extra: this is the same eased envelope,
+                        // so the raise and the turn are one gesture.
+                        //
+                        // ROTATION IS FREE OF THE FEEL BUDGET, which clamps pREnt->origin only. It is
+                        // also free of the camera: this function derives the view angles from
+                        // pREnt->axis EARLY (AxisCopy near the top), so rotating it here - at the end,
+                        // after that read - moves the weapon and provably not the view. Same reason
+                        // the per-gun ADS sight rotation is safe.
+                        //
+                        // Yaw about the weapon's own up axis brings the LEFT flank toward the eye; a
+                        // little roll stops it looking like a turntable. Scaled by the same class
+                        // weight as the translation, so a long heavy gun turns less than a pistol.
+                        {
+                            static cvar_t *pInspRot = NULL;
+                            float          fYaw, fRoll;
+                            int            iRow;
+
+                            if (!pInspRot) {
+                                pInspRot = cgi.Cvar_Get("coop_inspectTurn", "1.25", CVAR_ARCHIVE);
+                            }
+                            // [user 2026-08-21] "thats not what I meant, I think I mean the gun would
+                            // ROLL to the right so that the left side of the gun is facing upward
+                            // more. Youre basically looking at the left side of the gun."
+                            //
+                            // First pass yawed about the weapon's UP axis, which swings the muzzle
+                            // across your view - the gun turns to point sideways. Wrong gesture. The
+                            // one asked for is a ROLL about the weapon's own FORWARD axis, which
+                            // keeps the barrel pointing where it was and rotates the receiver so the
+                            // left flank tips up into view. That is how you actually look at a gun
+                            // you are holding.
+                            //
+                            // Roll leads; a small yaw remains only to angle it slightly toward the
+                            // eye rather than presenting a flat side-on profile. NEGATIVE
+                            // coop_inspectTurn rolls the other way if the flank tips away instead of
+                            // toward you - the sign depends on the rig's handedness, which is not
+                            // something to guess at.
+                            fRoll = e * 42.0f * pInspRot->value;
+                            fYaw  = e * 8.0f  * pInspRot->value;
+
+                            // [user 2026-08-21] "when the idle side gun view comes up its practically
+                            // off screen... all the way to the right. which is a problem with most of
+                            // the guns."
+                            //
+                            // Rotating pREnt->axis rotates the model about the ENTITY ORIGIN, which
+                            // sits at the player - not at the gun. The weapon hangs off
+                            // tag_weapon_right, well forward and to the right of that origin, so a
+                            // 42 degree roll swept it through a large arc and flung it off screen.
+                            // The further the tag is from the origin the worse the swing, which is
+                            // why it affected most weapons rather than one.
+                            //
+                            // Rotate about the WEAPON'S OWN POSITION instead: sample the tag's world
+                            // position before and after the rotation and translate the entity by the
+                            // difference, so the gun spins in place rather than orbiting the player.
+                            // TIKI_Orientation returns a MODEL-space offset, so it is unaffected by
+                            // the axis change - the two samples differ only through the axis, which
+                            // is exactly the correction needed.
+                            if (fRoll > 0.05f || fRoll < -0.05f) {
+                                static int    s_iWpnTag  = -2;
+                                static int    s_iWpnTiki = 0;
+                                vec3_t        vUp, vFwd, vTmp, vBefore, vAfter, vFix, vTagOfs;
+                                orientation_t oW;
+                                int           r;
+
+                                if (s_iWpnTiki != (int)(size_t)pREnt->tiki) {
+                                    s_iWpnTag  = cgi.Tag_NumForName(pREnt->tiki, "tag_weapon_right");
+                                    s_iWpnTiki = (int)(size_t)pREnt->tiki;
+                                }
+
+                                // Capture the tag's MODEL-space offset ONCE. It does not depend on
+                                // the axis, so the before/after difference must come from applying
+                                // the SAME offset through the old and new axis. Re-querying after the
+                                // rotation (as a first attempt did) risks a cached result and yields
+                                // a zero correction - which is exactly "the fix did nothing".
+                                VectorClear(vBefore);
+                                VectorClear(vTagOfs);
+                                if (s_iWpnTag >= 0) {
+                                    oW = cgi.TIKI_Orientation(pREnt, s_iWpnTag);
+                                    VectorCopy(oW.origin, vTagOfs);
+                                    for (r = 0; r < 3; r++) {
+                                        VectorMA(vBefore, vTagOfs[r], pREnt->axis[r], vBefore);
+                                    }
+                                }
+
+                                VectorCopy(mat[0], vFwd);
+                                for (iRow = 0; iRow < 3; iRow++) {
+                                    RotatePointAroundVector(vTmp, vFwd, pREnt->axis[iRow], fRoll);
+                                    VectorCopy(vTmp, pREnt->axis[iRow]);
+                                }
+                                VectorCopy(mat[2], vUp);
+                                for (iRow = 0; iRow < 3; iRow++) {
+                                    RotatePointAroundVector(vTmp, vUp, pREnt->axis[iRow], fYaw);
+                                    VectorCopy(vTmp, pREnt->axis[iRow]);
+                                }
+
+                                if (s_iWpnTag >= 0) {
+                                    VectorClear(vAfter);
+                                    for (r = 0; r < 3; r++) {
+                                        VectorMA(vAfter, vTagOfs[r], pREnt->axis[r], vAfter);
+                                    }
+                                    VectorSubtract(vBefore, vAfter, vFix);
+                                    VectorAdd(pREnt->origin, vFix, pREnt->origin);
+                                }
+
+                                // [2026-08-21] WHERE DOES THE GUN ACTUALLY END UP ON SCREEN?
+                                // Framing was being tuned by eye across a round trip each time. This
+                                // projects the weapon tag into normalised screen space, so the values
+                                // can be computed instead of guessed: sx/sy are -1..1 with 0,0 dead
+                                // centre. sx near +1 means it is off the right edge - the exact
+                                // complaint - and the correction is then arithmetic, not another try.
+                                {
+                                    static cvar_t *pTr2 = NULL;
+                                    if (!pTr2) { pTr2 = cgi.Cvar_Get("coop_adsTrace", "0", 0); }
+                                    if (pTr2->integer && s_iWpnTag >= 0) {
+                                        vec3_t vW, vRel, vF2, vR2, vU2;
+                                        float  fd, sx, sy;
+
+                                        VectorCopy(pREnt->origin, vW);
+                                        for (r = 0; r < 3; r++) {
+                                            VectorMA(vW, vTagOfs[r], pREnt->axis[r], vW);
+                                        }
+                                        VectorSubtract(vW, cg.refdef.vieworg, vRel);
+                                        AngleVectors(cg.refdefViewAngles, vF2, vR2, vU2);
+                                        fd = DotProduct(vRel, vF2);
+                                        if (fd > 0.5f) {
+                                            float ta = (float)tan(cg.refdef.fov_x * 0.5f * M_PI / 180.0);
+                                            float tb = (float)tan(cg.refdef.fov_y * 0.5f * M_PI / 180.0);
+                                            sx = DotProduct(vRel, vR2) / (fd * (ta > 0.001f ? ta : 1.0f));
+                                            sy = DotProduct(vRel, vU2) / (fd * (tb > 0.001f ? tb : 1.0f));
+                                            cgi.Printf("^~^~^ INSPECT e=%.2f sx=%.3f sy=%.3f dist=%.1f "
+                                                       "roll=%.1f\n", e, sx, sy, fd, fRoll);
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
 
                     // ---- SPRINT-TO-FIRE ----------------------------------------------------------
@@ -2277,6 +2877,7 @@ void CG_OffsetFirstPersonView(refEntity_t *pREnt, qboolean bUseWorldPosition)
             {
                 static qboolean s_spInit = qfalse;
                 static float    s_spEnv  = 0.0f;   // 0 = rest, 1 = fully lowered; eased in/out
+                static int      s_spLastRun = 0;   // see the staleness reseed immediately below
                 cvar_t  *pSpOn   = cgi.Cvar_Get("coop_sprint", "1", CVAR_ARCHIVE);
                 cvar_t  *pSpStam = cgi.Cvar_Get("coop_sprintStamina", "5", CVAR_ARCHIVE);
                 cvar_t  *pSpRegen= cgi.Cvar_Get("coop_sprintRegen", "0.6", CVAR_ARCHIVE);
@@ -2292,6 +2893,20 @@ void CG_OffsetFirstPersonView(refEntity_t *pREnt, qboolean bUseWorldPosition)
                 qboolean bWantSprint = qfalse;
                 usercmd_t scmd;
                 float    fEnvTarget, k;
+
+                // [2026-08-21] STALENESS RESEED. These statics advance ONLY on the live first-person
+                // path, so third person, death, spectating and cutscene cameras all freeze them. The
+                // camera-motion block below has carried a 250ms reseed for exactly this reason since
+                // a player who died airborne came back and got a full-strength landing slam; the
+                // sprint envelope never got the same treatment. Without it, sprinting into an ADS
+                // handoff or a death leaves s_spEnv near 1.0 and the client stamina mirror drifting
+                // upward while the server drains it, so the lowered-gun pose can reappear at full
+                // amplitude on a player who is walking. Re-seed rather than carry a stale envelope.
+                if (s_spInit && (cg.time - s_spLastRun) > 250) {
+                    s_spEnv  = 0.0f;
+                    s_spStam = fMaxStam;
+                }
+                s_spLastRun = cg.time;
 
                 if (fMaxStam < 0.1f) { fMaxStam = 0.1f; }
                 if (s_spStam > fMaxStam) { s_spStam = fMaxStam; } // clamp mirror to current max
@@ -2338,11 +2953,59 @@ void CG_OffsetFirstPersonView(refEntity_t *pREnt, qboolean bUseWorldPosition)
                     float fBack = pLowBack ? pLowBack->value : 1.4f;
                     float fTilt = pLowTilt ? pLowTilt->value : 1.2f;
                     // a slow run bob so the lowered gun sways with the stride
-                    float fBob  = (float)sin(cg.time * 0.001f * 8.0f) * 0.25f + 1.0f; // 0.75 .. 1.25
+                    // [2026-08-21] DRIVE THE SPRINT DIP OFF THE GAIT, not off the wall clock.
+                    //
+                    // This was sin(cg.time * 0.001f * 8.0f) - the time*frequency form this project
+                    // banned after bug-1983/1984/1985. It was benign in the narrow sense that the
+                    // frequency is a hard constant so the phase cannot teleport, but it is a
+                    // free-running 1.273 Hz oscillator with no relationship to the stride: at sprint
+                    // speed the gait runs about 1.47 Hz, so the two BEAT at ~0.2 Hz and the sprint
+                    // dip swells and fades on a ~5 second cycle that matches nothing on screen. It
+                    // also never scaled with speed, which is most of why sprinting read as "the gun
+                    // is tilted down" rather than "I am running".
+                    //
+                    // cg.fCurrentViewBobPhase is the integrated stride phase the camera bob already
+                    // uses, and fabs(sin(phase - 0.94)) is the project's established one-lobe-per-
+                    // FOOTSTEP shaper (see the vertical head-bob term). Sharing that one oscillator
+                    // means the dip is locked to the footfalls and can never beat against them.
+                    float fBob  = (float)fabs(sin(cg.fCurrentViewBobPhase - 0.94)) * 0.5f + 0.75f;
 
                     VectorMA(pREnt->origin, -s_spEnv * fDip * fBob, mat[2], pREnt->origin); // dip DOWN
                     VectorMA(pREnt->origin, -s_spEnv * fBack,       mat[0], pREnt->origin); // pull BACK
                     VectorMA(pREnt->origin, -s_spEnv * fTilt,       mat[1], pREnt->origin); // slight side dip
+
+                    // [user 2026-08-21] "is there a way to make first person sprinting look like we
+                    // are actually sprinting with our gun, right now it kinda just tilts down".
+                    //
+                    // The lowered carry pose above is a STATIC offset - it says "gun is down" and
+                    // nothing else, which is exactly what reads as a tilt rather than a run. This is
+                    // the moving half: the weapon swings across and pumps fore/aft with the stride,
+                    // the way a carried rifle does when someone runs.
+                    //
+                    // Deliberately placed HERE, beside the dip, rather than in CG_CalcViewModelMovement
+                    // where it would sit outside the feel budget. Splitting one effect across two
+                    // independent ceilings means the clamp scales the dip and not the pump, so their
+                    // ratio would drift with landing/lag/tremor activity that has nothing to do with
+                    // sprinting. One budget owns both halves.
+                    //
+                    // Driven from the SAME fabs(sin(phase - 0.94)) footfall shaper as the dip, so the
+                    // two are one oscillator and cannot beat. The lateral term uses the raw sine (it
+                    // alternates with the foot, left then right); the fore/aft term uses the folded
+                    // one at double rate, which is the actual pump. Sized small: the whole sprinting
+                    // sum is already near the 9-unit ceiling with the dip, weapon lag and footfall.
+                    {
+                        static cvar_t *pPump = NULL;
+                        float          fSwing, fPump;
+
+                        if (!pPump) { pPump = cgi.Cvar_Get("coop_sprintPump", "1.0", CVAR_ARCHIVE); }
+                        if (pPump->value > 0.001f) {
+                            fSwing = (float)sin(cg.fCurrentViewBobPhase - 0.94) * s_spEnv * pPump->value;
+                            fPump  = (fBob - 1.0f) * s_spEnv * pPump->value;
+                            VectorMA(pREnt->origin, fSwing * 1.15f, mat[1], pREnt->origin); // across
+                            VectorMA(pREnt->origin, fPump  * 1.60f, mat[0], pREnt->origin); // fore/aft
+                            VectorMA(pREnt->origin, fSwing * 0.35f, mat[2], pREnt->origin); // slight lift
+                        }
+                    }
                 }
             }
 
@@ -2500,6 +3163,136 @@ void CG_OffsetFirstPersonView(refEntity_t *pREnt, qboolean bUseWorldPosition)
     //   * total magnitude is bounded too, so the weapon cannot be flung out of frame sideways.
     // Measured worst case before this: ~14 units back and ~16 down in ordinary play (sprint into a
     // wall, land, crouch, hurt), ~25 back with the medkit stow also running.
+    // [2026-08-21] publish the final viewmodel origin for the ADS trace. The first trace pass
+    // measured the CAMERA and found it perfectly still (dPos 0.00 on every frame) while the user
+    // still saw a jolt - because the complaint is about the GUN, which is this entity, not the eye.
+    // HZM coop [user 2026-08-21] VIEWMODEL ANTI-POP - the actual "ADS jolt", finally measured.
+    //
+    // A live trace (coop_adsTrace) settled a bug that survived nine reasoned fixes. Every single ADS
+    // entry produced this, on the exact frame the viewmodel animation index changed from idle to the
+    // ADS pose:
+    //     pose=0.610  vmanim=1  z=-21.98  dVM=0.001
+    //     pose=0.856  vmanim=2  z=+23.35  dVM=45.533   <- one frame
+    // Three entries, three jumps: 45.5, 40.3 and 42.4 units. The CAMERA meanwhile never moved at all
+    // (dPos 0.00 on every frame), and the pose factor decayed as a clean exponential - which is
+    // exactly why nothing aimed at the camera, the 3P flip, the zoom clock or the crossblend ever
+    // touched it. The two animations simply place the weapon at origins ~40 units apart, and the
+    // crossblend interpolates the POSE while the origin snaps.
+    //
+    // Fixed generically rather than per-animation, because NOTHING in this system legitimately moves
+    // the weapon 40 units in one frame. Every authored large offset - the medkit stow at 26u, the
+    // weapon-collision retract, the DBNO drop at 50u - is EASED, so its per-frame delta is small. A
+    // single-frame step past the threshold is by definition a discontinuity, so absorb it into an
+    // offset and bleed that off over ~120ms. Small deltas pass through completely untouched, so this
+    // cannot flatten any motion that was already smooth.
+    //
+    // Runs before the feel-budget capture below, so the absorbed offset is not itself clamped and
+    // cannot steal amplitude from the landing dip or weapon lag.
+    if (pREnt) {
+        static cvar_t *pPop = NULL, *pPopRate = NULL;
+        static vec3_t  s_vPopPrev = {0, 0, 0};
+        static vec3_t  s_vPopOfs  = {0, 0, 0};
+        static int     s_iPopLast = 0;
+
+        // [user 2026-08-21] DEFAULTED OFF after testing: "vmantipop was how it was before" - i.e. with
+        // it ON the transition was WORSE. Smoothing a 45-unit step does not remove it, it converts a
+        // one-frame pop into a ~110ms SLIDE of the whole weapon, which is more visible, not less.
+        // The jump is a DATA problem (two authorings of the STG44 aim pose with roots ~45u apart,
+        // see fps_anims_mg.txt mp44_charge), and it is fixed there. Kept as a tunable because the
+        // filter itself is sound for a genuine one-frame discontinuity - just not for this one.
+        if (!pPop)     { pPop     = cgi.Cvar_Get("coop_vmAntiPop", "0", CVAR_ARCHIVE); }
+        if (!pPopRate) { pPopRate = cgi.Cvar_Get("coop_vmAntiPopRate", "9.0", CVAR_ARCHIVE); }
+
+        if (pPop->value > 0.0f && s_iPopLast && (cg.time - s_iPopLast) < 250 && cg.frametime > 0) {
+            vec3_t vStep;
+            float  fStep;
+
+            VectorSubtract(pREnt->origin, s_vPopPrev, vStep);
+            fStep = VectorLength(vStep);
+            if (fStep > pPop->value) {
+                // absorb the WHOLE step: the gun stays where it was this frame, then catches up
+                VectorAdd(s_vPopOfs, vStep, s_vPopOfs);
+            }
+            {
+                float k = (cg.frametime / 1000.0f) * pPopRate->value;
+                if (k > 1.0f) { k = 1.0f; }
+                VectorMA(s_vPopOfs, -k, s_vPopOfs, s_vPopOfs);
+            }
+        } else {
+            VectorClear(s_vPopOfs);
+        }
+        VectorCopy(pREnt->origin, s_vPopPrev);   // track the RAW target, not the corrected one
+        s_iPopLast = cg.time;
+        VectorSubtract(pREnt->origin, s_vPopOfs, pREnt->origin);
+
+        VectorCopy(pREnt->origin, s_vTraceVM);
+        s_bTraceVMok = qtrue;
+
+        // [user 2026-08-21] MEASURE WHERE THINGS ACTUALLY RENDER, not an intermediate.
+        //
+        // Every previous trace sampled an INPUT to the render - the camera origin, the entity
+        // origin - and something downstream could compensate for either. That is how a confident
+        // 45-unit measurement turned out not to be the thing on screen.
+        //
+        // TIKI_Orientation returns a bone's position AFTER the pose is applied, so with the entity
+        // origin and axis it gives the real world position of that bone. ForceUpdatePose has already
+        // run by the time this function is called (cg_modelanim.c hits it before the call site), so
+        // the pose here is the current one.
+        //
+        // The reported symptom is RELATIVE - "my body jumps upwards but camera stays put" - so what
+        // matters is each bone MINUS the eyes bone, which is where the camera sits. If that gap
+        // steps on one frame, that is the jolt, and which bone it is says whether it is the torso,
+        // the arms or the weapon.
+        {
+            static cvar_t *pTr = NULL;
+            static int     s_iBoneTag[8] = {-2, -2, -2, -2, -2, -2, -2, -2};
+            static int     s_iBoneTiki   = 0;
+            // [2026-08-21] The user says SHOULDERS. Earlier probes sampled spine, hand and gun and never
+                // a shoulder bone at all, which is a gap rather than a result. Clavicle and upper arm
+                // are the shoulders; Spine2 is the upper torso they hang off.
+                const char    *kBones[8] = {"eyes bone", "Bip01 Spine1", "Bip01 R Hand", "tag_weapon_right",
+                                            "Bip01 L Clavicle", "Bip01 L UpperArm",
+                                            "Bip01 R Clavicle", "Bip01 R UpperArm"};
+            int            b;
+
+            if (!pTr) { pTr = cgi.Cvar_Get("coop_adsTrace", "0", 0); }
+            if (pTr->integer && pREnt->tiki) {
+                if (s_iBoneTiki != (int)(size_t)pREnt->tiki) {
+                    for (b = 0; b < 8; b++) {
+                        s_iBoneTag[b] = cgi.Tag_NumForName(pREnt->tiki, kBones[b]);
+                    }
+                    s_iBoneTiki = (int)(size_t)pREnt->tiki;
+                }
+                for (b = 0; b < 8; b++) {
+                    VectorClear(s_vTraceBone[b]);
+                    if (s_iBoneTag[b] >= 0) {
+                        orientation_t o = cgi.TIKI_Orientation(pREnt, s_iBoneTag[b]);
+                        int           r;
+
+                        VectorCopy(pREnt->origin, s_vTraceBone[b]);
+                        for (r = 0; r < 3; r++) {
+                            VectorMA(s_vTraceBone[b], o.origin[r], pREnt->axis[r], s_vTraceBone[b]);
+                        }
+                    }
+                }
+                s_bTraceBone = qtrue;
+
+                {
+                    static int s_iDumped = 0;
+                    if (s_iDumped != (int)(size_t)pREnt->tiki) {
+                        int k;
+                        s_iDumped = (int)(size_t)pREnt->tiki;
+                        for (k = 0; k < NUM_BONE_CONTROLLERS; k++) {
+                            int         tg   = pREnt->bone_tag ? pREnt->bone_tag[k] : -1;
+                            const char *nm   = (tg >= 0) ? cgi.Tag_NameForNum(pREnt->tiki, tg) : "<unset>";
+                            cgi.Printf("^~^~^ ADSSLOT %d tag=%d fpsBone='%s'\n",
+                                       k, tg, nm ? nm : "<null>");
+                        }
+                    }
+                }
+            }
+        }
+    }
     if (pREnt && s_bFeelBase) {
         vec3_t vFeel;
         float  back, len;
@@ -2594,12 +3387,20 @@ void CG_OffsetFirstPersonView(refEntity_t *pREnt, qboolean bUseWorldPosition)
         // The weapon already dips on landing; the camera did not flinch at all, which is most of why
         // a hard fall reads as the floor moving rather than the body arriving. Modelled as a damped
         // spring so it COMPRESSES and recovers (a knee) instead of easing linearly (a lift).
-        if (bGnd && !s_lastGnd2 && s_lastVelZ2 < -180.0f) {
-            float f = (-s_lastVelZ2 - 180.0f) / 520.0f;
-            if (f > 1.0f) {
-                f = 1.0f;
-            }
-            s_camLandV -= f * 62.0f * scale;
+        // [2026-08-21] READ THE SHARED LATCH, do not re-detect. This block used to run its own copy
+        // of the same test, but it also force-refreshes s_lastGnd2/s_lastVelZ2 whenever !walking
+        // (above) - and airborne IS !walking, so if `walking` had not yet flipped true on the
+        // touchdown frame its edge was destroyed and it missed landings the weapon dip caught. One
+        // detector, one number, same frame for all three consumers.
+        //
+        // TIER: 1.0 / 1.45 / 2.0 on the impulse. Note the ceiling that actually binds is
+        // CoopCamClamp(camOfs, 4.5) below, NOT the +-6 state clamp - raising that state clamp is a
+        // no-op, which is why the hard tier also lifts the clamp for the duration of the landing
+        // (see the CoopCamClamp call site) rather than just asking for a bigger number here.
+        CoopLandingDetect();
+        if (s_landTime == cg.time && s_landSev > 0.0f) {
+            static const float kTierKick[3] = {1.0f, 1.45f, 2.0f};
+            s_camLandV -= s_landSev * 62.0f * scale * kTierKick[s_landTier];
         }
         s_lastGnd2  = bGnd;
         s_lastVelZ2 = cg.predicted_player_state.velocity[2];
@@ -2621,6 +3422,23 @@ void CG_OffsetFirstPersonView(refEntity_t *pREnt, qboolean bUseWorldPosition)
                 s_camLand = s_camLandV = 0.0f;
             }
             camOfs[2] += s_camLand;
+
+            // HZM coop [user 2026-08-21] VAULT - the BODY half, paired with the hands half on the
+            // viewmodel. The player is already rising ballistically from the server's velocity
+            // assignment, so ADDING lift here would just make it floatier - the opposite of the
+            // complaint. Instead the eye LAGS the rise: hold the camera slightly below where the
+            // ballistic arc has already put it, then let it catch up. That is what hauling your own
+            // weight over something feels like, as against being levitated over it.
+            //
+            // Translation only, deliberately. A pitch or roll flourish here would look good and lie:
+            // any angular layer on refdefViewAngles moves the crosshair off the true aim by about
+            // 20 pixels per degree, and a vault ends with you looking at whatever is on the far side
+            // of the obstacle - the exact moment the reticle must be honest.
+            //
+            // Small on purpose: this goes through CoopCamClamp with every other camera term, and the
+            // vault frequently ends in a landing, so it must leave room for the landing tier rather
+            // than eating the whole budget just before one.
+            camOfs[2] -= CoopVaultEnv() * 2.6f;
         }
 
         // ---- CROUCH / STAND, ON THE CAMERA -----------------------------------------------------
@@ -2744,7 +3562,25 @@ void CG_OffsetFirstPersonView(refEntity_t *pREnt, qboolean bUseWorldPosition)
         }
 
         // ---- THE CEILING -----------------------------------------------------------------------
-        CoopCamClamp(camOfs, 4.5f);
+        // [2026-08-21] LANDING TIER HEADROOM. 4.5 is the ceiling on the SUM of every camera term
+        // (crouch, bob, roll-bank, turn lag, landing), and it is what actually binds - the landing
+        // spring's own +-6 state clamp never gets to matter. So a hard landing has to be given room
+        // here or it cannot be deeper than a light one no matter what impulse it is handed.
+        //
+        // Lifted only for the ~450ms a landing is live, and only by the tier: light landings keep
+        // the normal ceiling exactly. It is a temporary widening of a shared budget rather than a
+        // permanent raise, so the other camera terms are unaffected outside the landing window.
+        {
+            float fClampMax = 4.5f;
+            int   iTier     = CoopLandingTier(450);
+
+            if (iTier == 1) {
+                fClampMax = 5.6f;
+            } else if (iTier == 2) {
+                fClampMax = 7.2f;
+            }
+            CoopCamClamp(camOfs, fClampMax);
+        }
         // TRACED. This runs after the MASK_PLAYERSOLID height/lateral traces earlier in the
         // function, so an unclipped offset could punch the eye through a floor, a low ceiling or
         // a waterline - the rule this file states for its own dip block and which the DBNO eye
@@ -2761,6 +3597,26 @@ void CG_OffsetFirstPersonView(refEntity_t *pREnt, qboolean bUseWorldPosition)
                     f = 0.0f;
                 }
                 VectorScale(camOfs, f, camOfs);
+            }
+        }
+        // [2026-08-21] CARRY THE EXTRA LANDING DEPTH TO THE GUN TOO, and exempt it.
+        //
+        // camOfs moves the CAMERA only. That is fine at the normal 4.5 ceiling because the effect is
+        // small, but a hard-landing dip that is genuinely deep would sink the eye while the weapon
+        // stayed put - so the gun climbs the screen exactly as it did in the DBNO eye-drop
+        // regression. Hand the weapon the same vertical drop, and mirror it into s_vFeelExempt so
+        // the 9u/4u jitter budget treats it as an authored pose rather than clamping it and
+        // desynchronising the two halves again (that is what broke three shipped features once).
+        //
+        // Only the portion BEYOND the normal ceiling is transferred: the everyday camera motion
+        // (bob, crouch, turn lag) should keep moving the eye relative to the gun, which is what
+        // makes it read as a head rather than a tripod.
+        if (pREnt && camOfs[2] < 0.0f) {
+            float fExtra = -camOfs[2] - 4.5f;
+
+            if (fExtra > 0.0f) {
+                pREnt->origin[2] -= fExtra;
+                s_vFeelExempt[2] -= fExtra;
             }
         }
         VectorAdd(origin, camOfs, origin);
@@ -2836,6 +3692,15 @@ static qboolean CG_ActiveWeaponHasScope(void)
     wpn = CG_ConfigString(CS_WEAPONS + cg.snap->ps.activeItems[1]);
     if (!wpn || !wpn[0]) {
         return qfalse;
+    }
+    // [user 2026-08-21] VARIANT-SAFE - a scoped rifle SKIN is "<Base Gun> (<Finish>)" and would
+    // otherwise not register as scoped at all, which silently re-enables the staged shoulder ADS on
+    // a sniper (bug-256 forces it off for exactly these guns).
+    {
+        static char vb[64];
+        if (CoopStripSkinSuffix(wpn, vb, sizeof(vb))) {
+            wpn = vb;
+        }
     }
     return (!Q_stricmp(wpn, "KAR98 - Sniper") || !Q_stricmp(wpn, "Springfield '03 Sniper")
             || !Q_stricmp(wpn, "Enfield L42A1") || !Q_stricmp(wpn, "SVT 40") || !Q_stricmp(wpn, "G 43")
@@ -4659,7 +5524,6 @@ void CG_DrawActiveFrame(int serverTime, int frameTime, stereoFrame_t stereoView,
     CG_GunBloodDecay();     // blood on the weapon fades, and much faster in the rain
     CG_ActionFoleyThink();  // the mechanical layer, a few tens of ms behind the shot
     CoopGunFoleyThink();    // handling foley: sprint, crouch, ADS, switch, dry fire
-    CoopGunFoleyThink();    // handling foley: sprint, crouch, ADS, switch, dry fire
     CG_UpdateScriptedAudioDucks();
     // HZM coop bug-1508 - throttled internally, safe to call every frame (see function banner).
     CG_SyncWussPk3Count();
@@ -4835,6 +5699,114 @@ void CG_DrawActiveFrame(int serverTime, int frameTime, stereoFrame_t stereoView,
 
     // finish up the rest of the refdef
     CG_SetupPortalSky();
+
+    // HZM coop [user 2026-08-21] ADS TRANSITION TRACE - coop_adsTrace 1.
+    //
+    // Nine attempts at the "leaving ADS jolts" report have now failed, every one of them reasoned
+    // from static reading. Two of those attempts were built on premises that turned out to be false
+    // (that ADS is the `charge` animation - only 24 of 481 weapon tikis declare one, none of them a
+    // rifle; and that the third-person min-distance fallback was firing - which cannot even run for a
+    // player whose cg_3rd_person is 0). Stop theorising and MEASURE.
+    //
+    // This runs at the very end of the frame, after CG_AddPacketEntities has let
+    // CG_OffsetFirstPersonView rebuild the view, so cg.refdef.vieworg is final. It records the
+    // frame-to-frame movement of the actual camera. Whatever frame the jolt happens on, dPos spikes
+    // on that frame - that is true regardless of which subsystem caused it, which is the entire point
+    // of measuring instead of guessing. Everything else on the line is context to identify the cause.
+    if (cg.snap) {
+        static cvar_t *pTrace = NULL;
+        static vec3_t  s_vPrevView = {0, 0, 0};
+        static vec3_t  s_vPrevVM   = {0, 0, 0};
+        static float   s_fPrevYaw = 0.0f, s_fPrevPitch = 0.0f;
+        static qboolean s_bPrev = qfalse;
+
+        if (!pTrace) { pTrace = cgi.Cvar_Get("coop_adsTrace", "0", 0); }
+        if (pTrace->integer) {
+            vec3_t   vD;
+            float    dPos, dYaw, dPitch;
+            qboolean bAds = CG_AimingDownSights();
+
+            VectorSubtract(cg.refdef.vieworg, s_vPrevView, vD);
+            dPos   = VectorLength(vD);
+            dYaw   = cg.refdefViewAngles[YAW]   - s_fPrevYaw;
+            dPitch = cg.refdefViewAngles[PITCH] - s_fPrevPitch;
+            while (dYaw >  180.0f) { dYaw -= 360.0f; }
+            while (dYaw < -180.0f) { dYaw += 360.0f; }
+
+            // print while ADS is held, and for the whole release transition; a big dPos while
+            // standing still with no input is the jolt frame.
+            // [2026-08-21] QUIET MODE. The previous version printed EVERY frame, which with
+            // logfile 2 (flush per line) is ~70 synchronous disk writes a second - and the thing it
+            // was measuring was frame hitches. The instrument was a suspect in its own reading.
+            // Now it prints only on a HITCH or an ANIM CHANGE: a few dozen lines instead of 1537, so
+            // if reload still stalls at near-zero logging overhead, that result means something.
+            {
+                static int s_iPrevAnim = -1;
+                static int s_iPrevMask = -1;
+                int        iNowAnim    = cg.snap->ps.iViewModelAnim;
+                float      fP          = CG_AdsPoseFactor();
+                qboolean   bHitch      = (cg.frametime > 55) ? qtrue : qfalse;
+                qboolean   bAnimEdge   = (iNowAnim != s_iPrevAnim) ? qtrue : qfalse;
+                qboolean   bSurfEdge   = (g_iCoopSurfMask != s_iPrevMask) ? qtrue : qfalse;
+                /* EVERY frame while an ADS transition is live - that is the window the jolt is in,
+                   and it is short, so the volume stays sane while nothing is missed inside it. */
+                qboolean   bInTrans    = (fP > 0.004f && fP < 0.996f) ? qtrue : qfalse;
+
+                s_iPrevAnim = iNowAnim;
+                s_iPrevMask = g_iCoopSurfMask;
+                if (bHitch || bAnimEdge || bSurfEdge || bInTrans) {
+                {
+                    vec3_t vVM;
+                    float  dVM = 0.0f;
+
+                    if (s_bTraceVMok) {
+                        vec3_t vD2;
+                        VectorSubtract(s_vTraceVM, s_vPrevVM, vD2);
+                        dVM = VectorLength(vD2);
+                    }
+                    (void)vVM;
+                    // Bone positions RELATIVE TO THE EYES BONE. The camera sits on that bone, so
+                    // these are literally "how far is my body from my viewpoint" - and the reported
+                    // symptom is relative ("body jumps upwards but camera stays put"), so a step in
+                    // THESE is the jolt. Which of the three moves says whether it is torso, arms or
+                    // weapon, which none of the earlier traces could distinguish.
+                    {
+                        vec3_t vSp, vHd, vWp;
+
+                        VectorSubtract(s_vTraceBone[1], s_vTraceBone[0], vSp);
+                        VectorSubtract(s_vTraceBone[2], s_vTraceBone[0], vHd);
+                        VectorSubtract(s_vTraceBone[3], s_vTraceBone[0], vWp);
+                        {
+                            vec3_t vLC, vLA, vRC, vRA;
+
+                            VectorSubtract(s_vTraceBone[4], s_vTraceBone[0], vLC);
+                            VectorSubtract(s_vTraceBone[5], s_vTraceBone[0], vLA);
+                            VectorSubtract(s_vTraceBone[6], s_vTraceBone[0], vRC);
+                            VectorSubtract(s_vTraceBone[7], s_vTraceBone[0], vRA);
+                            cgi.Printf("^~^~^ ADSTRACE t=%d dt=%d ads=%d pose=%.3f vmanim=%d "
+                                       "surf=0x%03x fovx=%.2f yaw=%.2f pit=%.2f dPos=%.2f dVM=%.2f "
+                                       "spZ=%.2f hdZ=%.2f gnZ=%.2f "
+                                       "LclavZ=%.2f LarmZ=%.2f RclavZ=%.2f RarmZ=%.2f "
+                                       "Larm=%.1f,%.1f,%.1f Rarm=%.1f,%.1f,%.1f\n",
+                                       cg.time, cg.frametime, (int)bAds, CG_AdsPoseFactor(),
+                                       cg.snap->ps.iViewModelAnim, g_iCoopSurfMask,
+                                       cg.refdef.fov_x, cg.refdefViewAngles[YAW],
+                                       cg.refdefViewAngles[PITCH], dPos, dVM,
+                                       vSp[2], vHd[2], vWp[2],
+                                       vLC[2], vLA[2], vRC[2], vRA[2],
+                                       vLA[0], vLA[1], vLA[2], vRA[0], vRA[1], vRA[2]);
+                        }
+                    }
+                    VectorCopy(s_vTraceVM, s_vPrevVM);
+                }
+                }
+            }
+            s_bPrev = bAds;
+        }
+        VectorCopy(cg.refdef.vieworg, s_vPrevView);
+        s_fPrevYaw   = cg.refdefViewAngles[YAW];
+        s_fPrevPitch = cg.refdefViewAngles[PITCH];
+    }
 
     cg.refdef.time = cg.time;
     memcpy(cg.refdef.areamask, cg.snap->areamask, sizeof(cg.refdef.areamask));

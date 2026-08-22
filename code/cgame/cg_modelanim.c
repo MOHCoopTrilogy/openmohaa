@@ -1363,6 +1363,271 @@ const adsGunTune_t *CG_FindAdsTune(const char *wpn)
 CG_ModelAnim
 ===============
 */
+/*
+=================================================================================================
+HZM coop [user 2026-08-21] PROCEDURAL FINGER LIFE.
+
+"make the right hand fingers sometimes move to grip stronger, rest off the trigger and just
+animate them in general and make them not seem so static all of the time. randomize it."
+
+They are not just static-LOOKING - they are literally static. Measuring every finger channel across
+197 base-game viewmodel animations found idle_rifle and fire_rifle_stand at 0.00000 variance on all
+30 finger channels: the grip is a frozen baked pose, and even firing only moves the wrist. So there
+is no animation here to fight, and nothing to author over.
+
+HOW IT WORKS. refEntity_t::bone_tag / bone_quat are per-bone override slots, applied client-side
+through cgi.ForceUpdatePose -> skeletor_c::SetPose. The blend is ADDITIVE - the animation evaluates
+first and the controller quaternion post-multiplies (skeletorbones.cpp) - and it PROPAGATES TO
+CHILDREN, so one controller on Bip01 R Finger1 curls that whole finger. Rotation is about the bone's
+own origin, in MODEL space (same convention as the stock head/torso controllers).
+
+WHY THIS IS SAFE FOR THE ADS WORK. tag_weapon_right is a SIBLING of the fingers - both hang off
+Bip01 R Hand - not a descendant. Finger rotation therefore cannot move the weapon and cannot disturb
+the per-gun sight alignment in s_adsGunTune. Server hitboxes are untouched too: TIKI_GetSkeletor
+caches per (entnum, tiki) and the FPS tiki differs from the world tiki, so the viewmodel has its own
+skeletor. (Note: _research/ragdoll_r13_spec.md bans bone_quat writes because a SHARED skeletor would
+deflect SV_TraceDeep hitboxes. That reasoning is about world entities; this is viewmodel-only, so it
+is a deliberate documented exception rather than an oversight.)
+
+SLOTS ARE SCARCE. NUM_BONE_CONTROLLERS is 5, hardcoded, and raising it means editing the exe and
+breaking the protocol. HEAD_TAG/TORSO_TAG/ARMS_TAG are 0/1/2, and ARMS_TAG carries view pitch into
+the viewmodel - clobbering it would break arm pitch. So this NEVER takes a slot the engine is
+already using: it copies the incoming array and fills only entries whose bone_tag is < 0, in
+priority order. If only two are free, the trigger finger and the grip still get them.
+
+INDEX SPACE TRAP. Bone indices must be resolved against the FPS TIKI, not reused from
+s1->bone_tag - those were computed on the world tiki, a merged multi-skd model with a completely
+different bone table.
+
+garandhand (Garand / Springfield / KAR98 / KAR98 Sniper) is a rigid mesh with NO finger bones, so on
+those four the left hand cannot move. This only drives the RIGHT hand, which always can.
+=================================================================================================
+*/
+#define COOP_FINGER_SLOTS 6
+
+static void CoopFingerLife(refEntity_t *pModel)
+{
+    static cvar_t *pOn = NULL, *pAmt = NULL, *pAxis = NULL, *pRest = NULL;
+    static int     s_iTag[COOP_FINGER_SLOTS];
+    static qboolean s_bTags = qfalse;
+    static int     s_iTiki  = 0;
+    static int     s_iHeadTag = -1;   // the one slot we may borrow while inert
+    static vec3_t  s_vAng[NUM_BONE_CONTROLLERS];
+    static vec4_t  s_qOut[NUM_BONE_CONTROLLERS];
+    static int     s_iTagOut[NUM_BONE_CONTROLLERS];
+    static float   s_fPhase   = 0.0f;   // integrated, never time*frequency
+    static float   s_fGrip    = 0.0f;   // eased 0..1 grip event magnitude
+    static float   s_fGripDir = 1.0f;   // +1 = squeeze tighter, -1 = loosen / stretch out
+    static int     s_iGripAt  = 0;      // when the next squeeze fires
+    static int     s_iLast    = 0;
+    static unsigned s_seed    = 2463534242u;
+    static float   s_fFade    = 0.0f;   // master, fades out where the anim owns the fingers
+
+    // INTERLEAVED BY HAND. Controller slots are scarce (5 total, ARMS_TAG already holds one), and
+    // this fills only the ones the engine left free - so the order decides what survives when there
+    // are just two. Trigger finger first because it is the one the eye tracks, then the left index
+    // so BOTH hands get life before either gets a second finger.
+    //
+    // [user 2026-08-21] "Can we do anything with the left hands fingers?" - yes: lefthand (374 verts)
+    // is weighted to all 15 left finger bones. No detection needed for the four rifles that swap in
+    // garandhand instead, because that mesh has NO finger weights at all - writing the controller is
+    // simply a no-op there rather than something that needs gating.
+    const char *kNames[COOP_FINGER_SLOTS] = {
+        "Bip01 R Finger1",  // right index / trigger - the one that reads
+        "Bip01 L Finger1",  // left index            - support-hand life
+        "Bip01 R Finger2",  // right middle          - grip
+        "Bip01 L Finger2",  // left middle           - grip
+        "Bip01 R Finger0",  // right thumb           - slow drift
+        "Bip01 L Finger0"   // left thumb            - slow drift, out of phase
+    };
+    float fDt, fAmt, fTrig, fWantFade;
+    int   i, iSlot, iAnim;
+
+    if (!pOn)   { pOn   = cgi.Cvar_Get("coop_fingerLife", "1", CVAR_ARCHIVE); }
+    if (!pAmt)  { pAmt  = cgi.Cvar_Get("coop_fingerAmount", "1.0", CVAR_ARCHIVE); }
+    if (!pRest) { pRest = cgi.Cvar_Get("coop_fingerTrigRest", "3.5", CVAR_ARCHIVE); }
+    // [user 2026-08-21] "fingeraxis2 looks best" - ROLL is the curl axis on this rig. Confirmed by
+    // eye, not derived: which model-space axis curls a finger is a property of how the skeleton was
+    // authored and there is no way to know it without looking.
+    if (!pAxis) { pAxis = cgi.Cvar_Get("coop_fingerAxis", "2", CVAR_ARCHIVE); }
+
+    if (pOn->integer <= 0 || !pModel->tiki || !cg.snap) {
+        return;
+    }
+
+    // resolve bone indices ONCE per model - and re-resolve if the tiki changed
+    if (!s_bTags || s_iTiki != (int)(size_t)pModel->tiki) {
+        for (i = 0; i < COOP_FINGER_SLOTS; i++) {
+            s_iTag[i] = cgi.Tag_NumForName(pModel->tiki, (char *)kNames[i]);
+        }
+        s_iHeadTag = cgi.Tag_NumForName(pModel->tiki, "Bip01 Head");
+        s_iTiki = (int)(size_t)pModel->tiki;
+        s_bTags = qtrue;
+    }
+
+    // ---- timing ---------------------------------------------------------------------------
+    fDt = (cg.time - s_iLast) / 1000.0f;
+    if (s_iLast == 0 || fDt < 0.0f || fDt > 0.25f) {
+        fDt = 0.0f;                      // first frame, or a hitch / 3P gap: advance nothing
+    }
+    s_iLast = cg.time;
+
+    // A reload, pullout or putaway DOES animate the fingers (36 of 36 reload anims do). Fade the
+    // override out there so it cannot fight authored motion, and back in when idle owns them again.
+    iAnim     = cg.snap->ps.iViewModelAnim;
+    fWantFade = (iAnim == VM_ANIM_RELOAD || iAnim == VM_ANIM_RELOAD_SINGLE
+                 || iAnim == VM_ANIM_RELOAD_END || iAnim == VM_ANIM_PULLOUT
+                 || iAnim == VM_ANIM_PUTAWAY || iAnim == VM_ANIM_RECHAMBER)
+                    ? 0.0f : 1.0f;
+    s_fFade += (fWantFade - s_fFade) * (fDt * 6.0f > 1.0f ? 1.0f : fDt * 6.0f);
+
+    // integrated phase for the idle drift - never cg.time * frequency (bug-1983/1984/1985)
+    s_fPhase += fDt * 1.35f;
+    if (s_fPhase > 62831.85f) { s_fPhase -= 62831.85f; }
+
+    // ---- randomised grip re-settle -----------------------------------------------------------
+    // Fires every 4-11s, ramps in fast and relaxes slowly, so it reads as adjusting a hold rather
+    // than as a pulse. The interval is re-rolled each time, so it never settles into a visible loop.
+    if (s_iGripAt == 0) {
+        s_iGripAt = cg.time + 3000;
+    }
+    if (cg.time >= s_iGripAt) {
+        s_seed ^= s_seed << 13;
+        s_seed ^= s_seed >> 17;
+        s_seed ^= s_seed << 5;
+        s_iGripAt = cg.time + 4000 + (int)(s_seed % 7000u);
+        s_fGrip   = 1.0f;
+        // [user 2026-08-21] "sorta squeezing the grip that the hand is holding or
+        // loosening/stretching fingers occassionally makes sense" - so the event has a DIRECTION,
+        // re-rolled each time. Squeeze is the common case; a stretch is the occasional shake-out.
+        // Biased 2:1 toward squeezing, because a hand that keeps splaying open reads as nervous
+        // rather than as adjusting a hold.
+        s_fGripDir = ((s_seed >> 11) % 3u) ? 1.0f : -1.0f;
+    }
+    if (s_fGrip > 0.0f) {
+        s_fGrip -= fDt * (s_fGripDir > 0.0f ? 1.7f : 1.15f);   // squeeze ~600ms, stretch ~870ms
+        if (s_fGrip < 0.0f) { s_fGrip = 0.0f; }
+    }
+
+    // ---- trigger discipline ------------------------------------------------------------------
+    // At rest the index finger lies OFF the trigger (extended); it curls on as the weapon comes up,
+    // driven by the same eased ADS pose factor the sight alignment uses, so finger and gun are one
+    // motion rather than two. Firing adds a short extra squeeze.
+    fTrig = 1.0f - CG_AdsPoseFactor();    // 1 = resting off the trigger, 0 = on it
+    if (iAnim == VM_ANIM_FIRE || iAnim == VM_ANIM_FIRE_SECONDARY) {
+        fTrig = -0.35f;                   // past neutral: pulled through
+    }
+
+    fAmt = pAmt->value * s_fFade;
+    if (fAmt <= 0.001f) {
+        return;                           // nothing to add - leave the incoming controllers alone
+    }
+
+    // ---- build the output arrays -------------------------------------------------------------
+    // Copy what the engine already set, then fill ONLY free entries. This is what keeps ARMS_TAG
+    // (view pitch into the viewmodel) intact.
+    for (i = 0; i < NUM_BONE_CONTROLLERS; i++) {
+        s_iTagOut[i] = pModel->bone_tag ? pModel->bone_tag[i] : -1;
+        if (pModel->bone_quat) {
+            s_qOut[i][0] = pModel->bone_quat[i][0];
+            s_qOut[i][1] = pModel->bone_quat[i][1];
+            s_qOut[i][2] = pModel->bone_quat[i][2];
+            s_qOut[i][3] = pModel->bone_quat[i][3];
+        } else {
+            s_qOut[i][0] = 0.0f; s_qOut[i][1] = 0.0f; s_qOut[i][2] = 0.0f; s_qOut[i][3] = 1.0f;
+        }
+    }
+
+    iSlot = 0;
+    for (i = 0; i < COOP_FINGER_SLOTS; i++) {
+        float fDeg;
+        int   iAxis;
+
+        if (s_iTag[i] < 0) {
+            continue;                     // this rig has no such bone
+        }
+        // [user 2026-08-21] BORROWING AN INERT SLOT, so the left hand can move at all.
+        //
+        // A live probe (ADSSLOT) showed all four other controllers hold REAL bones on the FPS rig -
+        // Head, Spine2, Spine1 and Pelvis - not the meaningless world-model leftovers I had assumed,
+        // so taking one blindly would break a working controller. But two facts narrow it:
+        //   * a controller whose quaternion is IDENTITY is applying no rotation - it is doing nothing
+        //   * Bip01 Head has NO geometry under it on the first-person model, which draws arms,
+        //     sleeves, hands and the weapon; there is no head to mis-rotate even if it were used
+        // So borrow the HEAD slot only while it is inert, and yield it back the instant it is not.
+        // Spine1 (arm pitch) and Pelvis (skeleton root - rotating it would move everything) are
+        // never touched regardless of what their quats say.
+        while (iSlot < NUM_BONE_CONTROLLERS) {
+            qboolean bFree = (s_iTagOut[iSlot] < 0) ? qtrue : qfalse;
+
+            if (!bFree && s_iHeadTag >= 0 && s_iTagOut[iSlot] == s_iHeadTag) {
+                float qw = s_qOut[iSlot][3];
+                float qx = s_qOut[iSlot][0], qy = s_qOut[iSlot][1], qz = s_qOut[iSlot][2];
+
+                if (qx > -0.001f && qx < 0.001f && qy > -0.001f && qy < 0.001f
+                    && qz > -0.001f && qz < 0.001f && (qw > 0.999f || qw < -0.999f)) {
+                    bFree = qtrue;        // head controller is inert this frame - safe to borrow
+                }
+            }
+            if (bFree) {
+                break;
+            }
+            iSlot++;
+        }
+        if (iSlot >= NUM_BONE_CONTROLLERS) {
+            break;                        // out of slots - the remaining fingers simply stay still
+        }
+
+        switch (i) {
+        case 0:  // RIGHT index / trigger
+            // [user 2026-08-21] "might need to even have it further inside the trigger area versus
+            // coming out cause it looks just a tad weird with a pistol." The first pass swung 9
+            // degrees OUT at rest, which reads as pointing away from the weapon rather than resting
+            // inside the guard. coop_fingerTrigRest is that resting angle, and it is deliberately
+            // small - NEGATIVE values curl further in, past neutral, if you want it tucked.
+            fDeg = fTrig * pRest->value + s_fGrip * 2.0f;
+            break;
+        case 1:  // LEFT index - the support hand is where a stretch reads naturally
+            fDeg = s_fGrip * s_fGripDir * 5.5f + (float)sin(s_fPhase + 0.8f) * 1.0f;
+            break;
+        case 2:  // right middle - grip squeeze plus a little drift
+            fDeg = s_fGrip * 6.0f + (float)sin(s_fPhase) * 0.9f;
+            break;
+        case 3:  // left middle - trails the left index slightly so the hand rolls through the
+                 // gesture finger by finger instead of clenching as one block
+            fDeg = s_fGrip * s_fGripDir * 6.0f + (float)sin(s_fPhase - 0.9f) * 0.8f;
+            break;
+        case 4:  // right thumb - slow, out of phase so a hand never moves as one block
+            fDeg = (float)sin(s_fPhase * 0.63f + 1.9f) * 1.4f + s_fGrip * 2.5f;
+            break;
+        default: // left thumb - follows the hand, at about a third the travel
+            fDeg = (float)sin(s_fPhase * 0.55f + 3.4f) * 1.3f + s_fGrip * s_fGripDir * 2.2f;
+            break;
+        }
+        fDeg *= fAmt;
+
+        // Which model-space axis curls a finger is a property of how the rig was built, so it is
+        // tunable rather than guessed: 0 = pitch, 1 = yaw, 2 = roll. If fingers splay sideways
+        // instead of curling, change coop_fingerAxis.
+        iAxis = pAxis->integer;
+        if (iAxis < 0 || iAxis > 2) { iAxis = 0; }
+
+        s_vAng[iSlot][0] = 0.0f;
+        s_vAng[iSlot][1] = 0.0f;
+        s_vAng[iSlot][2] = 0.0f;
+        s_vAng[iSlot][iAxis] = fDeg;
+
+        EulerToQuat(s_vAng[iSlot], s_qOut[iSlot]);
+        s_iTagOut[iSlot] = s_iTag[i];
+        iSlot++;
+    }
+
+    pModel->bone_tag  = s_iTagOut;
+    pModel->bone_quat = s_qOut;
+}
+
+int g_iCoopSurfMask = 0;   // HZM coop surface probe: 2 bits per surface (exists, hidden)
+
 void CG_ModelAnim(centity_t *cent, qboolean bDoShaderTime)
 {
     entityState_t *s1;
@@ -1943,7 +2208,17 @@ void CG_ModelAnim(centity_t *cent, qboolean bDoShaderTime)
         if (cg.bFPSOnGround != cg.predicted_player_state.walking) {
             cg.bFPSOnGround = cg.predicted_player_state.walking;
             if (cg.predicted_player_state.walking) {
-                CG_LandingSound(cent, &model, 1.0, 1);
+                {
+                    // [2026-08-21] TIERED VOLUME. Was a hardcoded 1.0 for every landing. Reads the
+                    // shared severity latch so it agrees with the camera dip and the weapon dip on
+                    // the same frame; falls back to a normal-strength landing if the latch is cold
+                    // (this hook also runs in third person and while dead, where the first-person
+                    // detector does not advance, so it must never go silent just because the latch
+                    // has nothing for it).
+                    float fSev = CG_GetLandingSeverity();
+                    float fVol = (fSev > 0.0f) ? (0.55f + fSev * 0.65f) : 1.0f;
+                    CG_LandingSound(cent, &model, fVol, 1);
+                }
             } else {
                 if (cent->iNextLandTime < cg.time) {
                     CG_Footstep(0, cent, &model, 1, 1);
@@ -2005,6 +2280,10 @@ void CG_ModelAnim(centity_t *cent, qboolean bDoShaderTime)
 
             CG_ViewModelAnimation(&model);
             model.renderfx |= RF_FRAMELERP;
+            // must run BEFORE ForceUpdatePose - that is what applies the bone controllers - and
+            // AFTER the tiki has been swapped to the FPS model, so the bone indices resolve against
+            // the right skeleton.
+            CoopFingerLife(&model);
             cgi.ForceUpdatePose(&model);
 
             if ((cent->currentState.eFlags & EF_UNARMED) || cg_drawviewmodel->integer <= 1
@@ -2024,6 +2303,17 @@ void CG_ModelAnim(centity_t *cent, qboolean bDoShaderTime)
                     weaponstring = CG_ConfigString(CS_WEAPONS + cg.snap->ps.activeItems[1]);
                 }
 
+                // [user 2026-08-21] VARIANT-SAFE. A skin variant is named "<Base Gun> (<Finish>)",
+                // so a whole-string compare against a base name misses all 247 of them. This is the
+                // fourth site to need it, after the ADS tune, the viewmodel anim prefix and the
+                // third-person magazine - so it is worth stating the rule plainly: ANY comparison
+                // against a weapon name must strip the suffix first.
+                {
+                    char vbase[64];
+                    if (CoopStripSkinSuffix(weaponstring, vbase, sizeof(vbase))) {
+                        weaponstring = vbase;
+                    }
+                }
                 if (!Q_stricmp(weaponstring, "M1 Garand") || !Q_stricmp(weaponstring, "Springfield '03 Sniper")
                     || !Q_stricmp(weaponstring, "Mauser KAR 98K") || !Q_stricmp(weaponstring, "KAR98 - Sniper")) {
                     // show the garand hands
@@ -2060,9 +2350,105 @@ void CG_ModelAnim(centity_t *cent, qboolean bDoShaderTime)
                 // reload, or weapon switch the vm anim changes away from charge, so the support hand
                 // re-appears to work the bolt / magazine (bolt rifles like the Kar98 need this).
                 {
-                    cvar_t *pHideOff = cgi.Cvar_Get("cg_adsHideOffHand", "1", CVAR_ARCHIVE);
-                    if (pHideOff && pHideOff->integer && CG_AimingDownSights()
-                        && cg.snap->ps.iViewModelAnim == VM_ANIM_CHARGE) {
+                    // [user 2026-08-21] "my shoulders seem to jump in first person where I am coming
+                    // out of ADS and after reloading" - and, almost certainly, the long-running
+                    // "leaving ADS is a jolt" report as well.
+                    //
+                    // THE JOLT WAS NEVER MOTION. A live trace showed the camera perfectly still
+                    // (dPos 0.00 on every frame of the transition) and the ADS pose factor decaying
+                    // as a clean exponential. Nothing moved. What changed was GEOMETRY: this block
+                    // NODRAWs a whole arm and the sleeve, and the gate was CG_AimingDownSights(),
+                    // which is the raw BUTTON state. Release the button and the arm reappears in a
+                    // single frame while the pose still has ~350ms of travel left - an arm popping
+                    // into existence mid-transition, which no amount of camera or blend smoothing
+                    // could ever have fixed. That is why nine fixes aimed at motion did nothing.
+                    //
+                    // Gate on the EASED pose factor instead, with hysteresis: hide once the weapon is
+                    // genuinely up (>0.80) and do not restore until it is nearly back down (<0.12).
+                    // The pop still exists - MDL_SURFACE_NODRAW is binary and a surface cannot fade -
+                    // but it now happens when the arm is back where it belongs and mostly occluded by
+                    // the weapon, instead of at the most visible moment of the whole animation.
+                    //
+                    // The anim condition stays: during a bolt rechamber, reload or switch the vm anim
+                    // leaves charge and the support hand MUST return to work the bolt (Kar98 et al).
+                    // That pop is motivated by an action on screen, so it reads as intent.
+                    // [user 2026-08-21] "my left hand disappears with the thompson when I go down
+                    // ADS" - then, importantly: "I had specifically enabled that for specific weapons
+                    // when in ADS before specifically... it was waaaay back when we did ads tuning."
+                    //
+                    // The record backs that up. autoexec.cfg documents cg_adsHideOffHand 1 as a
+                    // DELIBERATE global default: "the raised aim poses bake the off-hand for a
+                    // different gun's foregrip, so on many weapons it hovers off the gun; hiding it
+                    // leaves a clean trigger-hand + gun sight picture."
+                    //
+                    // A first pass here made it opt-IN with an empty default, which silently disabled
+                    // a working feature on every weapon to fix one. Inverted: this is now an opt-OUT.
+                    // Hiding stays on by default exactly as tuned, and only the named weapons keep
+                    // their support hand. Add one when its hand looks correct without hiding:
+                    //     cg_adsHideOffHandSkip "Thompson,Sten Gun"
+                    cvar_t *pHideOff  = cgi.Cvar_Get("cg_adsHideOffHand", "1", CVAR_ARCHIVE);
+                    cvar_t *pHideSkip = cgi.Cvar_Get("cg_adsHideOffHandSkip", "Thompson", CVAR_ARCHIVE);
+                    static qboolean s_bOffHandHidden = qfalse;
+                    float           fAdsPose         = CG_AdsPoseFactor();
+                    qboolean        bSkipThisGun     = qfalse;
+                    qboolean        bHandBusy        = qfalse;
+
+                    if (pHideSkip && pHideSkip->string && pHideSkip->string[0]
+                        && cg.snap->ps.activeItems[1] >= 0) {
+                        const char *pszWeap = CG_ConfigString(CS_WEAPONS + cg.snap->ps.activeItems[1]);
+                        char        szBase[64];
+
+                        // variant-safe: a skin variant is "<Base Gun> (<Finish>)", so a raw compare
+                        // would miss every one of them.
+                        if (CoopStripSkinSuffix(pszWeap, szBase, sizeof(szBase))) {
+                            pszWeap = szBase;
+                        }
+                        if (pszWeap && pszWeap[0] && strstr(pHideSkip->string, pszWeap)) {
+                            bSkipThisGun = qtrue;
+                        }
+                    }
+
+                    if (fAdsPose > 0.80f) {
+                        s_bOffHandHidden = qtrue;
+                    } else if (fAdsPose < 0.12f) {
+                        s_bOffHandHidden = qfalse;
+                    }
+                    // [user 2026-08-21, MEASURED] THE SHOULDER POP.
+                    //
+                    // This used to require iViewModelAnim == VM_ANIM_CHARGE. A live trace killed that:
+                    //     t=46275  vmanim=2  pose=0.547   <- aiming
+                    //     t=46992  vmanim=1  pose=0.549   <- vmanim ALREADY back to idle
+                    // The server flips the anim index to IDLE the instant the aim button is released,
+                    // while the eased pose factor still has half its travel left. So the CHARGE term
+                    // went false at pose ~0.55 and an entire arm plus the sleeve popped back into
+                    // existence mid-transition - which is why the pose-based hysteresis added earlier
+                    // did nothing at all: the anim term was overriding it every time. The same term
+                    // fires the moment a reload starts, which is the other event the user reported.
+                    //
+                    // The anim check does earn its place - the support hand MUST come back to work a
+                    // bolt or a magazine - so test for THAT rather than for CHARGE. Returning to idle
+                    // is not a reason to un-hide; starting a reload is. The pose hysteresis now
+                    // actually governs the transition, so the hand reappears at pose < 0.12, with the
+                    // weapon back at the hip where the change is least visible.
+                    {
+                        // [user 2026-08-21] "on one of the loads the hand didnt even pull the
+                        // slide/rail back on the stg44" - this read cg.snap->ps.iViewModelAnim, the
+                        // SERVER's value. The coop idle flourish injects `rechamber` CLIENT-side, so
+                        // the server still says IDLE, bHandBusy stayed false, and the support hand
+                        // remained hidden while a bolt-pull animation played: the gesture with no
+                        // hand performing it. Read what is actually PLAYING (g_iLastVMAnim, which the
+                        // flourish writes) and fall back to the server value if the anim system has
+                        // not been initialised yet.
+                        int iVA = (cgi.anim && cgi.anim->g_iLastVMAnim >= 0)
+                                      ? cgi.anim->g_iLastVMAnim : cg.snap->ps.iViewModelAnim;
+
+                        bHandBusy = (iVA == VM_ANIM_RELOAD || iVA == VM_ANIM_RELOAD_SINGLE
+                                     || iVA == VM_ANIM_RELOAD_END || iVA == VM_ANIM_RECHAMBER
+                                     || iVA == VM_ANIM_PULLOUT || iVA == VM_ANIM_PUTAWAY)
+                                        ? qtrue : qfalse;
+                    }
+                    if (pHideOff && pHideOff->integer && !bSkipThisGun && s_bOffHandHidden
+                        && !bHandBusy) {
                         iSurfaceNum = cgi.Surface_NameToNum(model.tiki, "lefthand");
                         if (iSurfaceNum >= 0) {
                             model.surfaces[iSurfaceNum] |= MDL_SURFACE_NODRAW;
@@ -2128,6 +2514,29 @@ void CG_ModelAnim(centity_t *cent, qboolean bDoShaderTime)
         }
 
         // add to refresh list
+        // HZM coop [user 2026-08-21] SURFACE PROBE. Publish which of the hand/sleeve surfaces are
+        // actually NODRAW at SUBMIT time - after every system that writes them has had its say.
+        // Two of them do: the retail garand-hand swap (which SHOWS lefthand or garandhand by weapon)
+        // and the coop ADS off-hand hide (which hides lefthand, garandhand AND viewsleeves). The
+        // reported "shoulders jump" is not motion - the camera measured dead still and the bones
+        // moved ~1 unit - so geometry appearing is the remaining candidate, and this records exactly
+        // which surface flips and at what ADS pose.
+        {
+            static const char *kProbeSurf[5] = {"lefthand", "garandhand", "viewsleeves",
+                                                "triggerhand", "sleeves"};
+            int p;
+
+            g_iCoopSurfMask = 0;
+            for (p = 0; p < 5; p++) {
+                int sn = cgi.Surface_NameToNum(model.tiki, kProbeSurf[p]);
+                if (sn >= 0) {
+                    g_iCoopSurfMask |= (1 << (p * 2));                       /* exists */
+                    if (model.surfaces[sn] & MDL_SURFACE_NODRAW) {
+                        g_iCoopSurfMask |= (1 << (p * 2 + 1));               /* hidden */
+                    }
+                }
+            }
+        }
         cgi.R_AddRefEntityToScene(&model, s1->parent);
     }
 
