@@ -145,6 +145,12 @@ typedef struct {
 	
 	int         *bone_tag;
 	vec4_t      *bone_quat;
+	// HZM coop [user 2026-08-22] how many controllers bone_tag/bone_quat actually point at.
+	// refEntity_t is a RENDER-LOCAL struct - it never goes on the wire - so this can exceed the
+	// networked NUM_BONE_CONTROLLERS for entities the client owns outright (the first-person
+	// viewmodel). 0 means "unset": every caller that does not set it keeps the historical 5, so
+	// no existing path changes behaviour.
+	int         bone_count;
 	
 	// renderer use only
 	struct tikiFrame_s   *of,

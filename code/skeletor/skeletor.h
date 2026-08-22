@@ -131,7 +131,8 @@ public:
     qboolean                         LoadSKB(const char *);
     float                            GetRadius();
     float                            GetCentroidRadius(float *centroid);
-    void SetPose(const frameInfo_t *frameInfo, const int *contIndices, const vec4_t *contValues, float actionWeight);
+    void SetPose(const frameInfo_t *frameInfo, const int *contIndices, const vec4_t *contValues, float actionWeight,
+                 int numControllers = 0); // HZM coop: 0 = the historical NUM_BONE_CONTROLLERS
     void SetEyeTargetPos(const float *pEyeTargetPos);
     int  GetBoneParent(int boneIndex);
     static class ChannelNameTable *ChannelNames();

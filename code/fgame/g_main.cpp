@@ -912,7 +912,8 @@ void G_UpdatePoseInternal(gentity_t *edict)
     }
 
     gi.TIKI_SetPoseInternal(
-        edict->tiki, edict->s.number, edict->s.frameInfo, edict->s.bone_tag, edict->s.bone_quat, edict->s.actionWeight
+        edict->tiki, edict->s.number, edict->s.frameInfo, edict->s.bone_tag, edict->s.bone_quat, edict->s.actionWeight,
+        NUM_BONE_CONTROLLERS // entityState arrays are a WIRE size - never more than the networked count
     );
 }
 

@@ -350,7 +350,8 @@ void AddToBounds(SkelVec3 *bounds, SkelVec3 *newBounds)
 }
 
 void skeletor_c::SetPose(
-    const frameInfo_t *frameInfo, const int *contIndices, const vec4_t *contValues, float actionWeight
+    const frameInfo_t *frameInfo, const int *contIndices, const vec4_t *contValues, float actionWeight,
+    int numControllers
 )
 {
     skelAnimDataGameHeader_t *animData;
@@ -378,7 +379,15 @@ void skeletor_c::SetPose(
     }
 
     if (contIndices && contValues) {
-        for (contNum = 0; contNum < 5; contNum++) {
+        // HZM coop [user 2026-08-22] was a hardcoded 5. The skeletor has NO structural limit -
+        // controllers are stored PER BONE (m_bone[boneNum]->m_controller below), so this literal
+        // was only ever the bound on how far to read the CALLER's arrays. Entities whose arrays
+        // come from entityState_t stay at 5 (that is a wire-format size); the local viewmodel
+        // supplies more. 0 keeps every unconverted caller on the old behaviour.
+        if (numControllers <= 0) {
+            numControllers = NUM_BONE_CONTROLLERS;
+        }
+        for (contNum = 0; contNum < numControllers; contNum++) {
             boneNum = contIndices[contNum];
             // Added in 2.0.
             //  Make sure the bone is a valid channel

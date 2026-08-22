@@ -229,7 +229,7 @@ typedef struct {
 
     orientation_t (*TIKI_OrientationInternal)(dtiki_t* tiki, int entNum, int tagNum, float scale);
     qboolean(*TIKI_IsOnGroundInternal)(dtiki_t* tiki, int entNum, int tagNum, float thresHold);
-    void (*TIKI_SetPoseInternal)(void* skeletor, const frameInfo_t* frameInfo, const int* boneTag, const vec4_t *boneQuat, float actionWeight);
+    void (*TIKI_SetPoseInternal)(void* skeletor, const frameInfo_t* frameInfo, const int* boneTag, const vec4_t *boneQuat, float actionWeight, int numControllers);
     void* (*TIKI_Alloc)(size_t size);
     float (*GetRadiusInternal)(dtiki_t* tiki, int entNum, float scale);
     float (*GetCentroidRadiusInternal)(dtiki_t* tiki, int entNum, float scale, vec3_t centroid);

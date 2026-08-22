@@ -1781,7 +1781,8 @@ void R_UpdatePoseInternal(refEntity_t *model)
         model->frameInfo,
         model->bone_tag,
         model->bone_quat,
-        model->actionWeight
+        model->actionWeight,
+        model->bone_count
     );
 }
 
@@ -1801,7 +1802,8 @@ void RE_ForceUpdatePose(refEntity_t *model)
         model->frameInfo,
         model->bone_tag,
         model->bone_quat,
-        model->actionWeight
+        model->actionWeight,
+        model->bone_count
     );
 }
 

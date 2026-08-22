@@ -1110,10 +1110,10 @@ qboolean PF_TIKI_IsOnGroundInternal( dtiki_t *tiki, int entnum, int num, float t
 PF_SetPoseInternal
 ===============
 */
-void PF_SetPoseInternal( dtiki_t *tiki, int entnum, const frameInfo_t *frameInfo, int *bone_tag, vec4_t *bone_quat, float actionWeight )
+void PF_SetPoseInternal( dtiki_t *tiki, int entnum, const frameInfo_t *frameInfo, int *bone_tag, vec4_t *bone_quat, float actionWeight, int numControllers )
 {
 	assert(tiki);
-	TIKI_SetPoseInternal( TIKI_GetSkeletor( tiki, entnum ), frameInfo, bone_tag, bone_quat, actionWeight );
+	TIKI_SetPoseInternal( TIKI_GetSkeletor( tiki, entnum ), frameInfo, bone_tag, bone_quat, actionWeight, numControllers );
 }
 
 /*

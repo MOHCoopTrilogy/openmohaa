@@ -2316,7 +2316,8 @@ void R_UpdatePoseInternal(refEntity_t *model)
         model->frameInfo,
         model->bone_tag,
         model->bone_quat,
-        model->actionWeight
+        model->actionWeight,
+        model->bone_count
     );
     g_skeldiagPoseRan = 1; // actually (re)computed the pose this frame
 }
@@ -2337,7 +2338,8 @@ void RE_ForceUpdatePose(refEntity_t *model)
         model->frameInfo,
         model->bone_tag,
         model->bone_quat,
-        model->actionWeight
+        model->actionWeight,
+        model->bone_count
     );
 }
 

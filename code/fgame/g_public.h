@@ -417,7 +417,8 @@ typedef struct gameImport_s {
     void *(*TIKI_TransformInternal)(dtiki_t *tiki, int entNum, int tagNum);
     qboolean (*TIKI_IsOnGroundInternal)(dtiki_t *tiki, int entNum, int num, float threshold);
     void (*TIKI_SetPoseInternal)(
-        dtiki_t *tiki, int entNum, const frameInfo_t *frameInfo, int *boneTag, vec4_t *boneQuat, float actionWeight
+        dtiki_t *tiki, int entNum, const frameInfo_t *frameInfo, int *boneTag, vec4_t *boneQuat, float actionWeight,
+        int numControllers
     );
     const char *(*CM_GetHitLocationInfo)(int location, float *radius, float *offset);
     const char *(*CM_GetHitLocationInfoSecondary)(int location, float *radius, float *offset);

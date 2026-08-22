@@ -1431,6 +1431,8 @@ garandhand (Garand / Springfield / KAR98 / KAR98 Sniper) is a rigid mesh with NO
 those four the left hand cannot move. This only drives the RIGHT hand, which always can.
 =================================================================================================
 */
+// HZM coop [user 2026-08-22] viewmodel-only controller budget - see CoopFingerLife.
+#define COOP_VM_BONE_CONTROLLERS 8
 #define COOP_FINGER_SLOTS 6
 
 static void CoopFingerLife(refEntity_t *pModel)
@@ -1440,9 +1442,15 @@ static void CoopFingerLife(refEntity_t *pModel)
     static qboolean s_bTags = qfalse;
     static int     s_iTiki  = 0;
     static int     s_iHeadTag = -1;   // the one slot we may borrow while inert
-    static vec3_t  s_vAng[NUM_BONE_CONTROLLERS];
-    static vec4_t  s_qOut[NUM_BONE_CONTROLLERS];
-    static int     s_iTagOut[NUM_BONE_CONTROLLERS];
+    // HZM coop [user 2026-08-22] COOP_VM_BONE_CONTROLLERS, not NUM_BONE_CONTROLLERS. The
+    // networked 5 is a WIRE size (entityState_t sizes three arrays by it, two of them
+    // hand-enumerated netfields), so raising THAT is a protocol change costing every entity
+    // forever to benefit one local model. The VIEWMODEL is not networked: refEntity_t carries
+    // POINTERS, and the skeletor stores controllers per-bone with no structural limit - the
+    // old cap was a hardcoded 5 in its read loop, now the caller's count.
+    static vec3_t  s_vAng[COOP_VM_BONE_CONTROLLERS];
+    static vec4_t  s_qOut[COOP_VM_BONE_CONTROLLERS];
+    static int     s_iTagOut[COOP_VM_BONE_CONTROLLERS];
     static float   s_fPhase   = 0.0f;   // integrated, never time*frequency
     static float   s_fGrip    = 0.0f;   // eased 0..1 grip event magnitude
     static float   s_fGripDir = 1.0f;   // +1 = squeeze tighter, -1 = loosen / stretch out
@@ -1554,9 +1562,11 @@ static void CoopFingerLife(refEntity_t *pModel)
     // ---- build the output arrays -------------------------------------------------------------
     // Copy what the engine already set, then fill ONLY free entries. This is what keeps ARMS_TAG
     // (view pitch into the viewmodel) intact.
-    for (i = 0; i < NUM_BONE_CONTROLLERS; i++) {
-        s_iTagOut[i] = pModel->bone_tag ? pModel->bone_tag[i] : -1;
-        if (pModel->bone_quat) {
+    for (i = 0; i < COOP_VM_BONE_CONTROLLERS; i++) {
+        // only the first NUM_BONE_CONTROLLERS can hold anything the engine set up; the extra
+        // entries start empty and exist purely for the fingers to claim
+        s_iTagOut[i] = (pModel->bone_tag && i < NUM_BONE_CONTROLLERS) ? pModel->bone_tag[i] : -1;
+        if (pModel->bone_quat && i < NUM_BONE_CONTROLLERS) {
             s_qOut[i][0] = pModel->bone_quat[i][0];
             s_qOut[i][1] = pModel->bone_quat[i][1];
             s_qOut[i][2] = pModel->bone_quat[i][2];
@@ -1585,7 +1595,7 @@ static void CoopFingerLife(refEntity_t *pModel)
         // So borrow the HEAD slot only while it is inert, and yield it back the instant it is not.
         // Spine1 (arm pitch) and Pelvis (skeleton root - rotating it would move everything) are
         // never touched regardless of what their quats say.
-        while (iSlot < NUM_BONE_CONTROLLERS) {
+        while (iSlot < COOP_VM_BONE_CONTROLLERS) {
             qboolean bFree = (s_iTagOut[iSlot] < 0) ? qtrue : qfalse;
 
             if (!bFree && s_iHeadTag >= 0 && s_iTagOut[iSlot] == s_iHeadTag) {
@@ -1602,7 +1612,7 @@ static void CoopFingerLife(refEntity_t *pModel)
             }
             iSlot++;
         }
-        if (iSlot >= NUM_BONE_CONTROLLERS) {
+        if (iSlot >= COOP_VM_BONE_CONTROLLERS) {
             break;                        // out of slots - the remaining fingers simply stay still
         }
 
@@ -1650,8 +1660,9 @@ static void CoopFingerLife(refEntity_t *pModel)
         iSlot++;
     }
 
-    pModel->bone_tag  = s_iTagOut;
-    pModel->bone_quat = s_qOut;
+    pModel->bone_tag   = s_iTagOut;
+    pModel->bone_quat  = s_qOut;
+    pModel->bone_count = COOP_VM_BONE_CONTROLLERS;
 }
 
 int g_iCoopSurfMask = 0;   // HZM coop surface probe: 2 bits per surface (exists, hidden)
