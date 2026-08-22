@@ -359,7 +359,11 @@ static void RagCvars(void)
         rag_debug    = cgi.Cvar_Get("r_ragdollDebug", "0", CVAR_TEMP);
         // ARCHIVE, not TEMP: a player's "off" has to survive a relaunch (CVAR_TEMP is
         // explicitly non-archived). Still defaults 0 - dark until the look is signed off.
-        coop_ragdoll = cgi.Cvar_Get("coop_ragdoll", "0", CVAR_ARCHIVE);
+        // [user 2026-08-21] ON BY DEFAULT from v1.4.1. Safe to flip without a migration: the cvar
+// first existed on 2026-08-19, two days AFTER v1.3.1 was cut, so no shipped client has it
+// archived at 0 and this default reaches every updating player. (Had any build shipped it,
+// CVAR_ARCHIVE would mean the saved config beat this and a one-shot migration was needed.)
+        coop_ragdoll = cgi.Cvar_Get("coop_ragdoll", "1", CVAR_ARCHIVE);
         rag_test     = cgi.Cvar_Get("coop_ragdollTest", "0", CVAR_TEMP);
         // 0 = OFF, 1 = SETTLE (authored death anim plays out, then physics drapes the corpse
         // onto the geometry), 3 = the old arm-at-EF_DEAD behaviour, kept as the live A/B.
