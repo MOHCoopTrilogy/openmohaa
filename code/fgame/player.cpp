@@ -4747,10 +4747,38 @@ void Player::ClientMove(usercmd_t *ucmd)
             // the BAR's, the heaviest) so movement is consistent + a touch slower, instead of varying per
             // weapon. coop_weaponMoveSpeed <= 0 falls back to each weapon's own movementspeed (vanilla).
             static cvar_t *pWMS = NULL;
+            static cvar_t *pWByClass = NULL;
             float          fwms;
-            if (!pWMS) { pWMS = gi.Cvar_Get("coop_weaponMoveSpeed", "0.89", CVAR_ARCHIVE); }
+            if (!pWMS)      { pWMS      = gi.Cvar_Get("coop_weaponMoveSpeed", "0.89", CVAR_ARCHIVE); }
+            // [user 2026-08-22] WEIGHT AFFECTS YOUR LEGS, not just your hands. The weapon-weight
+            // system already scales recoil, sway and recovery per class; this extends the same
+            // model to movement so a BAR feels heavy to CARRY as well as to fire.
+            //
+            // Derived from GetWeaponClass(), NOT from the tiki's movementspeed field, and that is
+            // deliberate: only 79 of 551 weapon tiks declare movementspeed at all, and OUR OWN
+            // overrides are among the ones that do not - our bar.tik has none, so falling back to
+            // the tiki value would have run the BAR at 1.0, FASTER than a pistol, and every skin
+            // variant would inherit the same hole. One class table covers all 481 of our tiks and
+            // every future variant for free, and it is the SAME class split the recoil feel uses,
+            // so the two can never drift apart.
+            //
+            // Multipliers are chosen against the old uniform 0.89 so the average player speed is
+            // roughly unchanged: pistols gain a little, rifles sit near where everyone was, MGs
+            // and heavies pay for it.
+            if (!pWByClass) { pWByClass = gi.Cvar_Get("coop_weaponMoveByClass", "1", CVAR_ARCHIVE); }
             if (!IsZoomed()) {
-                fwms = (pWMS && pWMS->value > 0.0f) ? pWMS->value : pWeap->GetMovementSpeed();
+                if (pWByClass && pWByClass->integer) {
+                    int iWC = pWeap->GetWeaponClass();
+
+                    if (iWC & WEAPON_CLASS_PISTOL)     { fwms = 0.98f; }
+                    else if (iWC & WEAPON_CLASS_SMG)   { fwms = 0.94f; }
+                    else if (iWC & WEAPON_CLASS_RIFLE) { fwms = 0.89f; }
+                    else if (iWC & WEAPON_CLASS_MG)    { fwms = 0.78f; }
+                    else if (iWC & WEAPON_CLASS_HEAVY) { fwms = 0.74f; }
+                    else                               { fwms = 0.92f; } // grenades, items, untyped
+                } else {
+                    fwms = (pWMS && pWMS->value > 0.0f) ? pWMS->value : pWeap->GetMovementSpeed();
+                }
                 client->ps.speed = (float)client->ps.speed * fwms;
             } else {
                 client->ps.speed = (float)client->ps.speed * pWeap->GetZoomMovement();
