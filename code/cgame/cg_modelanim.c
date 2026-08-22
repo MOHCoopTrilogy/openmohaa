@@ -33,6 +33,34 @@ static qboolean cg_forceModelAllowed = qfalse;
 // the hidden gun keeps firing audio but never spawns its muzzle flash at the player's eyes.
 qboolean cg_bCoopMuteVisualCmds = qfalse;
 
+/* HZM coop [user 2026-08-21] GUNVIS PROBE. "random times now where my gun will just disappear,
+   any gun at all, and then come back."
+
+   There are FOUR independent paths that can blank the weapon or the arms, and guessing between
+   them has a poor record on this project. So record WHICH one fired, with the state that decided
+   it. Both probes are EDGE-TRIGGERED off a single shared visibility state per subject - one
+   variable, not a hidden flag and a shown flag, because two independent latches can never both
+   reset and the probe goes silent after its first print. coop_gunVisTrace 1. */
+static int s_coopGunVis  = -1;   /* -1 unknown, 0 shown, 1 hidden - WEAPON */
+static int s_coopArmsVis = -1;   /* -1 unknown, 0 shown, 1 hidden - ARMS   */
+static cvar_t *s_pGunVis = NULL;
+
+static void CoopGunVisNote(int *pState, int bHidden, const char *why, int bUnarmed)
+{
+    if (!s_pGunVis) { s_pGunVis = cgi.Cvar_Get("coop_gunVisTrace", "0", 0); }
+    if (!s_pGunVis->integer) { *pState = bHidden; return; }
+    if (*pState == bHidden)  { return; }
+    *pState = bHidden;
+    cgi.Printf("^~^~^ GUNVIS t=%d %s inzoom=%d unarmed=%d drawvm=%d health=%d vmanim=%d pmflags=0x%x\n",
+               cg.time, why,
+               cg.snap ? cg.snap->ps.stats[STAT_INZOOM] : -1,
+               bUnarmed,
+               cg_drawviewmodel ? cg_drawviewmodel->integer : -1,
+               cg.snap ? cg.snap->ps.stats[STAT_HEALTH] : -1,
+               cg.snap ? cg.snap->ps.iViewModelAnim : -1,
+               cg.snap ? cg.snap->ps.pm_flags : 0);
+}
+
 /*
 ===============
 CG_GetPlayerModelTiki
@@ -2091,6 +2119,9 @@ void CG_ModelAnim(centity_t *cent, qboolean bDoShaderTime)
         for (i = 0; i < MAX_MODEL_SURFACES; i++) {
             model.surfaces[i] |= MDL_SURFACE_NODRAW;
         }
+        CoopGunVisNote(&s_coopGunVis, 1, "HIDE-WEAPON", (s1->eFlags & EF_UNARMED) ? 1 : 0);
+    } else if (s1->parent == cg.snap->ps.clientNum && s1->parent != ENTITYNUM_NONE) {
+        CoopGunVisNote(&s_coopGunVis, 0, "SHOW-WEAPON", (s1->eFlags & EF_UNARMED) ? 1 : 0);
     }
 
     if (!(s1->renderfx & RF_DONTDRAW) && !bCoopHideDraw && (model.renderfx & RF_SHADOW)) {
@@ -2183,6 +2214,17 @@ void CG_ModelAnim(centity_t *cent, qboolean bDoShaderTime)
          * build tree can't produce). It gets the eagle icon. */
         if (cent->currentState.renderfx & RF_ADDITIVE_DLIGHT) {
             iconType = 2; /* officer -> Reichsadler eagle */
+        } else if (cent->currentState.renderfx & RF_LIGHTSTYLE_DLIGHT) {
+            /* HZM coop [user 2026-08-21] SURRENDERED OVERRIDE: "the allied icon (same as
+             * paratroopers) once they surrender". A surrendered german is still team german
+             * until converted, so EF_AXIS is still set and the branch below would give him
+             * the swastika - the opposite of what the icon must say ("this one is yours").
+             * Script signals with +lightstyledynamiclight, the same reuse trick as the
+             * officer's additive bit: visually inert without an attached dlight, and only
+             * ever applied to map light entities otherwise - which can never carry
+             * RF_COOP_BOSS, so this combination is unambiguous. Conversion removes the bit
+             * and flips the team, after which the star draws through the normal path. */
+            iconType = 0; /* surrendered -> allied star, despite EF_AXIS */
         } else if (cent->currentState.eFlags & EF_AXIS) {
             iconType = 1; /* axis -> swastika */
         } else {
@@ -2289,10 +2331,12 @@ void CG_ModelAnim(centity_t *cent, qboolean bDoShaderTime)
             if ((cent->currentState.eFlags & EF_UNARMED) || cg_drawviewmodel->integer <= 1
                 || cg.snap->ps.stats[STAT_INZOOM] || cg.snap->ps.stats[STAT_HEALTH] <= 0) {
                 // unarmed or zooming, hide the arms
+                CoopGunVisNote(&s_coopArmsVis, 1, "HIDE-ARMS", (cent->currentState.eFlags & EF_UNARMED) ? 1 : 0);
                 for (i = 0; i < MAX_MODEL_SURFACES; i++) {
                     model.surfaces[i] |= MDL_SURFACE_NODRAW;
                 }
             } else {
+                CoopGunVisNote(&s_coopArmsVis, 0, "SHOW-ARMS", (cent->currentState.eFlags & EF_UNARMED) ? 1 : 0);
                 // show/hide the garand hand depending if it's a rifle or not
                 // so the hand can hold the rifle correctly
 
