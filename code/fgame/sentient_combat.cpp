@@ -1459,6 +1459,13 @@ void Sentient::GetNewActiveWeaponHand(Event *ev)
     ev->AddInteger(GetNewActiveWeaponHand());
 }
 
+void Sentient::CoopHasItem(Event *ev)
+{
+    // HZM coop bug-2027 - see the event declaration in sentient.cpp. FindItem already
+    // checks external name, then model path, so both alias forms scripts use just work.
+    ev->AddInteger(FindItem(ev->GetString(1)) != NULL ? 1 : 0);
+}
+
 void Sentient::GetActiveWeap(Event *ev)
 {
     weaponhand_t weaponhand;

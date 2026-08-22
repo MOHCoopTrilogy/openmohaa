@@ -623,6 +623,22 @@ Event EV_Sentient_GetActiveWeap
     "gets currently active weapon in a given hand",
     EV_RETURN
 );
+/* HZM coop [user 2026-08-21, bug-2027] NON-PERTURBING INVENTORY QUERY. The spawn-kit
+   backfill needed to know whether a weapon actually survived the engine's one-primary
+   pickup rule before paying for a re-give (gametype flip + item give + model load = the
+   reported per-spawn hitch). The only prior probe was the KITHOLD diagnostic, which USES
+   each weapon and reads the active one back - it perturbs the hand, so it was dev-gated.
+   This reads the inventory directly via FindItem (external name OR model path) and touches
+   nothing. */
+Event EV_Sentient_CoopHasItem
+(
+    "coop_hasitem",
+    EV_DEFAULT,
+    "s",
+    "itemname",
+    "returns 1 if the sentient's inventory holds the item (external name or model path), else 0",
+    EV_RETURN
+);
 Event EV_Sentient_Client_Landing
 (
     "_client_landing",
@@ -738,6 +754,7 @@ CLASS_DECLARATION(Animate, Sentient, NULL) {
     {&EV_Sentient_GetForceDropWeapon,     &Sentient::EventGetForceDropWeapon      },
 
     {&EV_Sentient_GetActiveWeap,          &Sentient::GetActiveWeap                },
+    {&EV_Sentient_CoopHasItem,            &Sentient::CoopHasItem                  },
     {&EV_Sentient_GetNewActiveWeap,       &Sentient::GetNewActiveWeaponOld        },
     {&EV_Sentient_GetNewActiveWeapon,     &Sentient::GetNewActiveWeapon           },
     {&EV_Sentient_GetNewActiveWeaponHand, &Sentient::GetNewActiveWeaponHand       },

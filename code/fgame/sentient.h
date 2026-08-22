@@ -403,6 +403,7 @@ public:
     // Custom openmohaa stuff
     //
     void GetActiveWeap(Event *ev);
+    void CoopHasItem(Event *ev); // HZM coop bug-2027: non-perturbing inventory query
     void GetNewActiveWeaponOld(Event *ev);
     void GetNewActiveWeapon(Event *ev);
     void GetNewActiveWeaponHand(Event *ev);
