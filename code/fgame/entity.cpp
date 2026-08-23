@@ -1478,10 +1478,25 @@ Event EV_NoTarget
 (
     "notarget",
     EV_DEFAULT,
-    "b",
+    "B",
     "setNoTarget",
-    "flag an entity as no target.",
+    "flag an entity as no target. With no argument, TOGGLES (console-cheat parity).",
     EV_NORMAL
+);
+
+// [bug-2064] READ THE FLAG BACK. FL_NOTARGET had no getter, so four attempts to hold it on a
+// glued player were all verified by proxy (census "engaging", player health) and all four drew
+// the wrong conclusion. A getter makes the state directly observable from script and from the
+// probe bus. EV_GETTER lives in its own command list (scriptmaster.cpp:616), so this name cannot
+// collide with the EV_NORMAL command above.
+Event EV_GetNoTarget
+(
+    "notarget",
+    EV_DEFAULT,
+    NULL,
+    NULL,
+    "Returns 1 when this entity is flagged FL_NOTARGET, else 0.",
+    EV_GETTER
 );
 
 Event EV_Entity_SetDHack
@@ -1695,6 +1710,7 @@ CLASS_DECLARATION(SimpleEntity, Entity, NULL) {
     {&EV_ShootableOnly,                &Entity::EventShootableOnly       },
     {&EV_SetShaderTime,                &Entity::SetShaderTime            },
     {&EV_NoTarget,                     &Entity::NoTarget                 },
+    {&EV_GetNoTarget,                  &Entity::GetNoTarget              },
     /*
     {&EV_Entity_GetZone,               &Entity::GetZone                  },
     {&EV_Entity_Zone,                  &Entity::GetZone                  },
@@ -6479,11 +6495,27 @@ qboolean Entity::GetTagPositionAndOrientation(str tagname, orientation_t *new_or
 
 void Entity::NoTarget(Event *ev)
 {
+    // [bug-2064] The argument is now OPTIONAL so that this handler and Player::NoTargetCheat -
+    // which share the script command name "notarget" - behave identically no matter which of the
+    // two wins Event::normalCommandList (scriptmaster.cpp:616 is last-write-wins over an
+    // unordered map, so the winner is a build detail, not a decision).
+    //   notarget <bool>  -> SET, deterministic. This is what every script caller wants.
+    //   notarget         -> toggle, matching the console cheat and coop_mod/developer.scr:812.
+    if (ev->NumArgs() < 1) {
+        flags ^= FL_NOTARGET;
+        return;
+    }
+
     if (ev->GetBoolean(1)) {
         flags |= FL_NOTARGET;
     } else {
         flags &= ~FL_NOTARGET;
     }
+}
+
+void Entity::GetNoTarget(Event *ev)
+{
+    ev->AddInteger((flags & FL_NOTARGET) ? 1 : 0);
 }
 
 void Entity::GetZone(Event *ev)

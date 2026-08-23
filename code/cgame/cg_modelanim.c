@@ -1734,6 +1734,49 @@ void CG_ModelAnim(centity_t *cent, qboolean bDoShaderTime)
     // The cg_view.c half of that experiment was reverted but this half was missed = the "camera stuck in my
     // body" regression. Restored to stock: turrets are first person, own body not drawn.
 
+    /* HZM coop [user 2026-08-22, bug-2049] THE LOCKSTEP PROBE, and it is deliberately placed
+       OUTSIDE every bThirdPerson branch. Three probes today were blind because they sat INSIDE
+       the condition they needed to observe - SKIP-DRAW was gated on !bThirdPerson, the wall-cover
+       probe registered its cvar only inside the wallValid branch. A probe belongs outside the
+       branch it measures.
+       WHAT THIS TESTS. The whole first-person viewmodel branch is wrapped in `if (!bThirdPerson)`
+       (~line 2303), so when this flag flips true the gun AND both hands vanish together and the
+       world body is drawn instead - which from a first-person camera is nothing where the gun was.
+       That is the reported symptom exactly, and no existing probe can see it.
+       The flag is decided here from cg.snap->ps.pm_flags (line ~1720). The CAMERA decides the same
+       thing at cg_view.c:4820 from cg.predicted_player_state.pm_flags. Both sites carry comments
+       insisting they are in lockstep; they read DIFFERENT SOURCES. cg.snap advances at snapshot
+       rate, predicted_player_state every render frame. On any frame they disagree about
+       PMF_COOP_COVER the camera stays first person while the viewmodel is not drawn.
+       PMF_COOP_COVER started toggling far more often today, because wall cover was re-enabled -
+       which is why the flicker started when it did. Recording both sources settles it. */
+    {
+        static int  s_iLastTP  = -1;
+        static int  s_iLastSnap = -1;
+        static int  s_iLastPred = -1;
+        static cvar_t *s_pTrace = NULL;
+
+        if (s1->number == cg.snap->ps.clientNum) {
+            int iSnapCover = (cg.snap->ps.pm_flags & PMF_COOP_COVER) ? 1 : 0;
+            int iPredCover = (cg.predicted_player_state.pm_flags & PMF_COOP_COVER) ? 1 : 0;
+
+            if (!s_pTrace) { s_pTrace = cgi.Cvar_Get("coop_gunVisTrace", "1", CVAR_ARCHIVE); }
+            if (s_pTrace->integer
+                && (s_iLastTP != (int)bThirdPerson || s_iLastSnap != iSnapCover
+                    || s_iLastPred != iPredCover)) {
+                s_iLastTP   = (int)bThirdPerson;
+                s_iLastSnap = iSnapCover;
+                s_iLastPred = iPredCover;
+                cgi.Printf("^~^~^ GUNVIS t=%d LOCKSTEP 3p=%d snapCover=%d predCover=%d "
+                           "agree=%d adsFP=%d snapFlags=0x%x predFlags=0x%x\n",
+                           cg.time, (int)bThirdPerson, iSnapCover, iPredCover,
+                           (iSnapCover == iPredCover) ? 1 : 0,
+                           CG_AdsForceFirstPerson() ? 1 : 0,
+                           cg.snap->ps.pm_flags, cg.predicted_player_state.pm_flags);
+            }
+        }
+    }
+
     if ((cg.snap->ps.pm_flags & PMF_INTERMISSION) && s1->number == cg.snap->ps.clientNum && !bThirdPerson) {
         // Don't render the first-person model during intermission
         return;

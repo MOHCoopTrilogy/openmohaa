@@ -2338,7 +2338,25 @@ void CG_OffsetFirstPersonView(refEntity_t *pREnt, qboolean bUseWorldPosition)
 
                     if (!pInsp) { pInsp = cgi.Cvar_Get("coop_idleInspect", "1", CVAR_ARCHIVE); }
                     if (!pS2F)  { pS2F  = cgi.Cvar_Get("coop_sprintToFire", "1", CVAR_ARCHIVE); }
-                    if (!pLowA) { pLowA = cgi.Cvar_Get("coop_lowAmmoTell", "1", CVAR_ARCHIVE); }
+                    // [user 2026-08-22] RETIRED. "I don't think low ammo tell works honestly might
+                    // as well turn it off too." The user is right, and the arithmetic says why: at full
+                    // strength (empty clip) it is a 0.9 unit lateral cant plus a 0.45 unit bob, inside a
+                    // feel budget of 9 units - about a tenth of the smallest thing that budget was written
+                    // to bound. It was never going to be legible, so it is cost without signal.
+                    //
+                    // Default flipped to 0, AND a stale archived 1 is cleared once - the same fossil problem
+                    // as coop_idleBolt (TRAPS T7 / bug-1990). This shipped default-ON, so every existing
+                    // player carries `seta coop_lowAmmoTell "1"` in their saved config, and Cvar_Get keeps an
+                    // existing value while updating only the reset string - a default change alone would
+                    // reach nobody who has already played. pLowA is a static, so the clear runs once per
+                    // session and `coop_lowAmmoTell 1` still works at the console afterwards if this is ever
+                    // revisited with an amplitude that can actually be seen.
+                    if (!pLowA) {
+                        pLowA = cgi.Cvar_Get("coop_lowAmmoTell", "0", CVAR_ARCHIVE);
+                        if (pLowA->integer) {
+                            cgi.Cvar_Set("coop_lowAmmoTell", "0");
+                        }
+                    }
 
                     // GetUserCmd returns qfalse WITHOUT writing ucmd when the command has wrapped
                     // out of CMD_BACKUP, so the struct must be zeroed first or buttons is stack
@@ -3796,6 +3814,83 @@ static void CG_UpdateAdsStage(void)
         float          fSignTgt;
         if (!pRight) { pRight = cgi.Cvar_Get("cg_adsShoulderRight", "1", CVAR_ARCHIVE); }
         fSignTgt = pRight->integer ? 1.0f : -1.0f;
+
+        // HZM coop [user 2026-08-22, bug-2055 phase 2] COVER PROPOSES, THE PLAYER DISPOSES.
+        // "the camera keeps going behind me instead of looking at me and the opening."
+        // Nothing was ever wired: the shoulder side came only from the archived preference, so in
+        // cover the camera sat on whichever shoulder the player normally uses regardless of which
+        // way the opening faced. This is the override designed in wallcover_plan_v1 §5.4 and never
+        // built - which is why fixing the side solver alone would NOT have fixed the camera, and
+        // why this symptom would have come straight back.
+        //
+        // THREE RULES, each with a bug behind it:
+        //  1. NEVER write cg_adsShoulderRight. It is CVAR_ARCHIVE and it is the player's standing
+        //     preference; gameplay code silently rewriting a saved setting is its own defect
+        //     ("a setting is a promise", 21-user-preferences.md). Override the TARGET, not the cvar.
+        //  2. NEVER re-target mid-sweep. The arc term (fArc, ~line 742) bows the camera out behind
+        //     the player during a shoulder sweep; starting a swap on top of an ADS fly-in composes
+        //     two eases into one motion and reads as the warp bug-1992 was filed for. So the
+        //     override only takes effect while both envelopes are at rest.
+        //  3. An explicit MOUSE3 swap WINS for the rest of that cover session - the player's
+        //     deliberate act always beats the automatic pick. The latch clears when cover drops,
+        //     so the auto-pick resumes next time you take cover.
+        //
+        // coop_coverSide arrives as a change-only stufftext from player.cpp. It is integer-valued
+        // with no embedded quote (T8.1) and the whole coop_ namespace is prefix-allowed by
+        // cg_servercmds_filter.cpp:173, so the wire is sound - the same form coop_coverView already
+        // uses successfully.
+        {
+            static cvar_t *pCovAuto = NULL, *pCovSide = NULL;
+            static int     s_coverManual   = 0;   // player overrode the auto-pick this cover session
+            static int     s_wasCovered    = 0;
+            static float   s_lastSignTgt   = 0.0f;
+            int            bCovered, iSide;
+
+            if (!pCovAuto) { pCovAuto = cgi.Cvar_Get("coop_coverAutoShoulder", "1", CVAR_ARCHIVE); }
+            if (!pCovSide) { pCovSide = cgi.Cvar_Get("coop_coverSide", "0", 0); }
+
+            bCovered = (cg.snap && (cg.snap->ps.pm_flags & PMF_COOP_COVER)) ? 1 : 0;
+            iSide    = pCovSide->integer;
+
+            // leaving cover clears the manual latch, so the auto-pick is armed again next time
+            if (!bCovered && s_wasCovered) {
+                s_coverManual = 0;
+            }
+            // MOUSE3 while covered = a deliberate swap. Detect it as a change to the archived
+            // preference rather than hooking the key, so it cannot fight cg_ui.cpp's key claim.
+            if (bCovered && s_wasCovered && fSignTgt != s_lastSignTgt) {
+                s_coverManual = 1;
+            }
+            s_wasCovered  = bCovered;
+            s_lastSignTgt = fSignTgt;
+
+            // [bug-2055 phase 2] PROVE THE WIRE. wallcover_plan_v1 §5.4 flagged coop_coverSide as
+            // unverified on the client: it is stuffed change-only from the server and only the
+            // predictor has ever read it, so nothing has ever confirmed it ARRIVES. Everything
+            // above is dead code if it does not. Edge-triggered, so it costs one line per side
+            // change and nothing while covered. Pairs with the server's COVERSIDE have= field:
+            // server have=N with no matching client line here means the wire dropped it.
+            {
+                static int s_sideSeen = -99;
+
+                if (iSide != s_sideSeen) {
+                    s_sideSeen = iSide;
+                    if (cgi.Cvar_Get("coop_coverProbe", "1", 0)->integer) {
+                        cgi.Printf("^~^~^ COVERSIDE-CLIENT side=%d covered=%d manual=%d "
+                                   "shEnv=%.2f fpEnv=%.2f\n",
+                                   iSide, bCovered, s_coverManual, s_adsShoulderEnv, s_adsFpEnv);
+                    }
+                }
+            }
+
+            if (pCovAuto->integer && bCovered && !s_coverManual && iSide != 0
+                && s_adsShoulderEnv <= 0.003f && s_adsFpEnv <= 0.003f) {
+                // side +1 = opening on the LEFT  -> put the camera on the LEFT shoulder  (-1)
+                // side -1 = opening on the RIGHT -> put the camera on the RIGHT shoulder (+1)
+                fSignTgt = -(float)iSide;
+            }
+        }
+
         step     = dt * rate * 0.6f;
         if (step > 1.0f) { step = 1.0f; }
         s_shoulderSideSign += (fSignTgt - s_shoulderSideSign) * step;
@@ -4649,7 +4744,21 @@ static int CG_CalcViewValues(void)
             cvar_t *pALR = cgi.Cvar_Get("cg_adsLeanRoll", "1.0", CVAR_ARCHIVE);
             fLeanRollScale = pALR ? pALR->value : 0.25f;
         }
-        cg.refdefViewAngles[2] += ps->fLeanAngle * 0.1 * fLeanRollScale;
+        // HZM coop [user 2026-08-22, bug-2055 phase 2] SUPPRESS THE LEAN ROLL IN 3P COVER.
+        // In first person a lean roll is right - the head tilts with the body. In a third-person
+        // chase it rolls the WHOLE WORLD around a body the player can see is not tilting, which
+        // reads as a camera bug rather than a lean. Scaled, not cut, and behind a cvar so it is a
+        // live-tunable feel decision instead of a guess (wallcover_plan_v1 §5.5).
+        {
+            static cvar_t *pCovRoll = NULL;
+            float          fRoll = fLeanRollScale;
+
+            if (!pCovRoll) { pCovRoll = cgi.Cvar_Get("coop_coverLeanRoll", "0.25", CVAR_ARCHIVE); }
+            if (cg.renderingThirdPerson && cg.snap && (cg.snap->ps.pm_flags & PMF_COOP_COVER)) {
+                fRoll *= pCovRoll->value;
+            }
+            cg.refdefViewAngles[2] += ps->fLeanAngle * 0.1 * fRoll;
+        }
     }
 
     // HZM coop - INJURED SWAY: when hurt, the view drifts in a slow, woozy figure-eight (NOT a jolt/shake).

@@ -619,7 +619,30 @@ void CG_ViewModelAnimation(refEntity_t *pModel)
         // Kept behind the cvar rather than deleted: the plumbing (client-only anim id, the server-
         // change-always-wins rule, the calm/idle gating) is sound and was not the thing that felt
         // wrong. coop_idleBolt 1 brings it back if it is ever worth revisiting with better clips.
-        if (!pBolt) { pBolt = cgi.Cvar_Get("coop_idleBolt", "0", CVAR_ARCHIVE); }
+        // [user 2026-08-22] CLEAR THE FOSSIL. "I do remember asking to remove the bolting anim. I
+        // really just want the gun side view because it works." Defaulting it off did NOT remove it:
+        // CVAR_ARCHIVE means the value lives in the player's saved config, Cvar_Get on an existing
+        // cvar keeps that value and only updates the reset string, and coop_defaults.cfg execs
+        // BEFORE the saved config so it cannot override one either. The user's omconfig.cfg still
+        // carried `seta coop_idleBolt "1"` from the day it was being tested, so the 08-21 removal
+        // never reached the machine that asked for it - and their log proves it kept firing (20x
+        // garand_idlelower, 18x thompson_idlelower, 13x thompson_rechamber "Couldn't find view model
+        // animation"). That is TRAPS T7 / bug-1990: a value in a saved config is a fossil, not a
+        // decision, and a removal has to actively clear it.
+        //
+        // So clear it ONCE per session, here, at the only place that knows the feature is retired.
+        // pBolt is a static, so this runs exactly once and never again - which deliberately leaves
+        // `coop_idleBolt 1` working at the console for the rest of that session if the gesture is
+        // ever revisited with clips that exist. It also stops the value being written back as 1.
+        //
+        // NOT REMOVED, and not the same thing as the INSPECT: coop_idleInspect (cg_view.c) is the
+        // procedural gun side-view the user explicitly wants kept, and is untouched by this.
+        if (!pBolt) {
+            pBolt = cgi.Cvar_Get("coop_idleBolt", "0", CVAR_ARCHIVE);
+            if (pBolt->integer) {
+                cgi.Cvar_Set("coop_idleBolt", "0");
+            }
+        }
 
         /* re-seed after any gap (third person, death, cutscene) so a stale timer cannot fire the
            instant the player returns to a live first-person view */

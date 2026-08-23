@@ -643,6 +643,7 @@ public:
     void EventShootableOnly(Event *ev);
     void SetShaderTime(Event *ev);
     void NoTarget(Event *ev);
+    void GetNoTarget(Event *ev);
 
     //
     // Custom openmohaa features

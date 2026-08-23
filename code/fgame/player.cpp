@@ -212,9 +212,9 @@ Event EV_Player_DevNoTargetCheat
 (
     "notarget",
     EV_CHEAT,
-    NULL,
-    NULL,
-    "Toggles the notarget cheat.",
+    "B",
+    "bValue",
+    "Toggles the notarget cheat. With an argument, SETS it instead (parity with EV_NoTarget).",
     EV_NORMAL
 );
 Event EV_Player_DevNoClipCheat
@@ -7012,6 +7012,29 @@ void Player::Kill(Event *ev)
 void Player::NoTargetCheat(Event *ev)
 {
     const char *msg;
+
+    // [bug-2064] THIS EVENT SHADOWS Entity::NoTarget FOR PLAYERS, AND IT IS A TOGGLE.
+    // Both this event and EV_NoTarget (entity.cpp) are declared EV_NORMAL under the command name
+    // "notarget", and ScriptMaster builds the script command table as a plain name -> eventnum
+    // map with last-write-wins (scriptmaster.cpp:616). On this build THIS one wins for Player
+    // targets, so every script `player notarget 1` reached here, DISCARDED ITS ARGUMENT, and
+    // flipped the flag. Measured on three consecutive live m1l1 runs of one identical build: the
+    // scripted intro ride emitted "notarget ON" / "notarget OFF" / "notarget ON" every single
+    // time - the two spawn-time asserts cancelled each other, so the player rode the whole intro
+    // targetable, and the ride-end clear then turned the flag back ON and left it there.
+    // That is why four separate attempts to hold FL_NOTARGET through that ride all failed, and
+    // why the failures looked intermittent rather than systematic.
+    // An explicit argument now SETS, exactly as Entity::NoTarget does, and stays silent - the
+    // cheat message belongs to the console form. No argument keeps the original toggle, so the
+    // `notarget` console command and coop_mod/developer.scr:812 behave exactly as before.
+    if (ev->NumArgs() >= 1) {
+        if (ev->GetBoolean(1)) {
+            flags |= FL_NOTARGET;
+        } else {
+            flags &= ~FL_NOTARGET;
+        }
+        return;
+    }
 
     flags ^= FL_NOTARGET;
     if (!(flags & FL_NOTARGET)) {
@@ -13889,6 +13912,25 @@ void Player::TickCoopCover()
                 );
                 if (!trace.startsolid && trace.fraction < 1.0f && trace.plane.normal[2] < 0.7f
                     && trace.plane.normal[2] > -0.7f && DotProduct(trace.plane.normal, vFwd) < -0.5f) {
+                    // [user 2026-08-22, bug-2056] BACK TO THE WALL. Removing the entry view-snap
+                    // (note below) left the player FACING the wall, which is not what taking cover
+                    // looks like and is not what any downstream code assumed. User: "when I take
+                    // cover I am facing the wall, not back against the wall".
+                    // Turn the BODY only - setAngles, never SetViewAngles - so the pose is right
+                    // and the mouse stays the player's. Taking the VIEW is what "fights free-look"
+                    // meant. One-time, on entry, behind a switch so it can be dropped live.
+                    {
+                        static cvar_t *pSnap = NULL;
+
+                        if (!pSnap) { pSnap = gi.Cvar_Get("coop_coverSnapBody", "1", CVAR_ARCHIVE); }
+                        if (pSnap->integer) {
+                            Vector vFace = Vector(trace.plane.normal).toAngles();
+                            Vector vNow  = angles;
+
+                            vNow[YAW] = vFace[YAW];
+                            setAngles(vNow);
+                        }
+                    }
                     // [user 2026-08-22] NO ENTRY VIEW-SNAP. The original yanked the yaw to the
                     // wall normal on entry; it was half the reported "crash-prone" feel and it
                     // fights free-look. The normal is ANCHORED instead, so the pose is
@@ -13927,10 +13969,41 @@ void Player::TickCoopCover()
             if (wallValid) {
                 static cvar_t *pScanMin = NULL, *pScanMax = NULL, *pScanStep = NULL;
                 static cvar_t *pHeadZ = NULL, *pDead = NULL, *pCommit = NULL, *pMaxDelta = NULL;
-                Vector   vLeft = Vector(0.0f - m_vCoopCoverNormal[1], m_vCoopCoverNormal[0], 0);
+                // [user 2026-08-22, bug-2056] PLAYER'S LEFT, NOT THE WALL'S. This was derived
+                // purely from the wall normal, which is consistent in WORLD terms (it always
+                // points away from the wall) but says nothing about which way the PLAYER is
+                // facing. There are two entry paths and they leave the player facing opposite
+                // ways: entering while facing the wall (player.cpp ~13890, dot(normal,fwd)<-0.5)
+                // leaves forward roughly -normal, while backing in (dot>+0.5) leaves it +normal.
+                // So a wall-derived "left" was the player's left only when they had backed in -
+                // and mirrored when they walked up facing it, which is the normal way anyone
+                // takes cover. User: "when I take cover I am facing the wall, not back against
+                // the wall... I think lean technically works... but its leaning the wrong side."
+                // The lean and the blindfire offset are BODY actions, so the side has to be
+                // expressed relative to the body. Compute the opening in world space as before,
+                // then flip it into the player's frame.
+                Vector   vWallLeft = Vector(0.0f - m_vCoopCoverNormal[1], m_vCoopCoverNormal[0], 0);
+                Vector   vLeft     = vWallLeft;
+                {
+                    Vector vBodyFwd, vBodyRight;
+
+                    AngleVectors(GetViewAngles(), vBodyFwd, vBodyRight, NULL);
+                    vBodyFwd[2] = 0;
+                    vBodyFwd.normalize();
+                    // MOHAA's AngleVectors right vector points to the player's RIGHT, so the
+                    // player's left is -right. If the wall-derived left disagrees with the body's
+                    // left, the player entered facing the wall and every side is mirrored.
+                    vBodyRight[2] = 0;
+                    vBodyRight.normalize();
+                    if (DotProduct(vWallLeft, vBodyRight) > 0.0f) {
+                        vLeft = vWallLeft * -1.0f;
+                    }
+                }
                 Vector   vFwdFlat, vSideDir;
                 float    fEdge[2];
                 qboolean bOpen[2];
+                qboolean bSweepSolid[2];   // [bug-2055] did the hull sweep START in contact?
+                float    fSweepFrac[2];    // [bug-2055] ...and if not, how far did it get?
                 int      iSideOf[2] = {1, -1}; // index 0 = LEFT, 1 = RIGHT
                 int      k, iWant;
                 float    fIntent, fYawNow, fYawDelta;
@@ -13947,8 +14020,10 @@ void Player::TickCoopCover()
                 for (k = 0; k < 2; k++) {
                     float d;
 
-                    fEdge[k] = -1.0f;
-                    bOpen[k] = qfalse;
+                    fEdge[k]       = -1.0f;
+                    bOpen[k]       = qfalse;
+                    bSweepSolid[k] = qfalse;
+                    fSweepFrac[k]  = -1.0f;   // -1 = the sweep never ran (no edge found)
                     vSideDir = vLeft * (float)iSideOf[k];
 
                     for (d = pScanMin->value; d <= pScanMax->value; d += pScanStep->value) {
@@ -13981,13 +14056,27 @@ void Player::TickCoopCover()
                     if (fEdge[k] >= 0.0f) {
                         // full player hull, laterally: a gap the body cannot fit through is
                         // scenery, not a pop-out
-                        Vector  vWant  = origin + vSideDir * (fEdge[k] + 8.0f);
+                        // [bug-2055] START OFF THE WALL. 4864 of 6271 measured samples read
+                        // `edgeL=44 edgeR=58 openL=0 openR=0` - both edges FOUND, both judged
+                        // unfittable, because the sweep began at the player's own origin while he
+                        // was pressed against the wall and started in contact. With no side,
+                        // blindfire has no direction: "blindfire occurred on the wrong side".
+                        Vector  vFrom  = origin + m_vCoopCoverNormal * 12.0f;
+                        Vector  vWant  = vFrom + vSideDir * (fEdge[k] + 8.0f);
                         trace_t tSweep = G_Trace(
-                            origin, mins, maxs, vWant, this, MASK_PLAYERSOLID, false,
+                            vFrom, mins, maxs, vWant, this, MASK_PLAYERSOLID, false,
                             "Player::TickCoopCover side-sweep"
                         );
 
-                        bOpen[k] = (!tSweep.startsolid && tSweep.fraction >= 0.85f) ? qtrue : qfalse;
+                        bOpen[k] = (!tSweep.startsolid && tSweep.fraction >= 0.70f) ? qtrue : qfalse;
+                        // [bug-2055 phase 1] RECORD WHY, NOT JUST WHETHER. startsolid and
+                        // "swept but not far enough" are different failures with different fixes
+                        // (move the start point vs relax the fraction), and the probe could not
+                        // tell them apart - so the previous pass had to guess. It guessed the
+                        // start point, shipped the 12u normal offset above, and was never
+                        // re-measured. These two fields make the next playtest decide it.
+                        bSweepSolid[k] = tSweep.startsolid ? qtrue : qfalse;
+                        fSweepFrac[k]  = tSweep.fraction;
                     }
                 }
 
@@ -14072,13 +14161,20 @@ void Player::TickCoopCover()
                     static cvar_t *pPr = NULL;
 
                     if (!pPr) {
-                        pPr = gi.Cvar_Get("coop_coverProbe", "0", 0);
+                        // [bug-2055 phase 1] DEFAULT ON. Left at 0 it was not armed for the one playtest that
+                        // mattered - the user took cover, reported it broken, and the log held ZERO
+                        // COVERSIDE samples, so the only distribution we have is from a build two
+                        // fixes ago. Same failure as the gun-visibility probe (bug-2048). Flags 0,
+                        // never CVAR_ARCHIVE, so it cannot fossilise into a saved config (TRAPS T7).
+                        pPr = gi.Cvar_Get("coop_coverProbe", "1", 0);
                     }
                     if (pPr->integer) {
                         gi.Printf(
-                            "^~^~^ COVERSIDE want=%d have=%d edgeL=%.0f edgeR=%.0f openL=%d openR=%d "
+                            "^~^~^ COVERSIDE wall=1 want=%d have=%d edgeL=%.0f edgeR=%.0f "
+                            "openL=%d openR=%d ssL=%d ssR=%d frL=%.2f frR=%.2f "
                             "intent=%.2f dwell=%.2f\n",
                             iWant, m_iCoopCoverSide, fEdge[0], fEdge[1], (int)bOpen[0], (int)bOpen[1],
+                            (int)bSweepSolid[0], (int)bSweepSolid[1], fSweepFrac[0], fSweepFrac[1],
                             fIntent, m_fCoopCoverSideDwell
                         );
                     }
@@ -14087,6 +14183,26 @@ void Player::TickCoopCover()
                 // no valid wall pose = no side. Never leave a stale one standing (bug-2028).
                 m_iCoopCoverSide = 0;
                 m_fCoopCoverEdge = 0.0f;
+                // [bug-2055 phase 1] SILENCE WAS AMBIGUOUS. The probe only ever printed from
+                // inside the wallValid branch, so "no COVERSIDE lines" could mean the solver is
+                // fine and no wall was ever detected, OR the wall detect never succeeded at all -
+                // two opposite diagnoses. bug-2055 hit exactly that and had to reason around it.
+                // A wall=0 line makes the distinction free. Rate-limited because this branch runs
+                // every tick the player is in cover without a wall.
+                {
+                    static cvar_t *pPrNo   = NULL;
+                    static float   s_nextNo = 0.0f;
+
+                    if (!pPrNo) { pPrNo = gi.Cvar_Get("coop_coverProbe", "1", 0); }
+                    // level.time restarts at 0 on every map load while this static does not, so a
+                    // stale future stamp would silence the probe for up to the PREVIOUS map's
+                    // length - the same staleness trap the camera/sprint/vault reseeds all carry.
+                    if (level.time < s_nextNo) { s_nextNo = 0.0f; }
+                    if (pPrNo->integer && level.time >= s_nextNo) {
+                        s_nextNo = level.time + 0.5f;
+                        gi.Printf("^~^~^ COVERSIDE wall=0 (no valid wall pose this tick)\n");
+                    }
+                }
             }
         }
 

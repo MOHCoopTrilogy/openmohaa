@@ -692,6 +692,38 @@ void CG_AddPacketEntities(void)
         }
     }
 
+    /* HZM coop [user 2026-08-22, bug-2049] SIXTH PATH. The gun kept vanishing with NOTHING logged
+       after four probes had been added for it - not the surface hides, not RF_DONTDRAW /
+       bCoopHideDraw, not CG_ModelAnim's parent-miss (measured at zero under developer 2), not
+       snapshot overflow (limits matched, warning never fired).
+       Everything below CG_ModelAnim was instrumented; the gap was ABOVE it. This loop only ever
+       walks cg.snap->entities, and the dispatch is a switch on eType - so if the local player's
+       entity is absent from the snapshot for a frame, or its eType is not one of the four cases
+       that call CG_ModelAnim, the viewmodel is simply never submitted and no probe downstream can
+       possibly see it. Edge-triggered, so a normal session prints nothing. */
+    {
+        static cvar_t *s_pGV     = NULL;
+        static int     s_iLastOK = -1;
+        int            iSeen = 0, iType = -1, i;
+
+        if (!s_pGV) { s_pGV = cgi.Cvar_Get("coop_gunVisTrace", "1", CVAR_ARCHIVE); }
+        if (s_pGV->integer && cg.snap) {
+            for (i = 0; i < cg.snap->numEntities; i++) {
+                if (cg.snap->entities[i].number == cg.snap->ps.clientNum) {
+                    iSeen = 1;
+                    iType = cg.snap->entities[i].eType;
+                    break;
+                }
+            }
+            if (s_iLastOK != iSeen) {
+                s_iLastOK = iSeen;
+                cgi.Printf("^~^~^ GUNVIS t=%d %s eType=%d nEnts=%d clientNum=%d\n",
+                           cg.time, iSeen ? "SELF-IN-SNAP" : "SELF-MISSING-FROM-SNAP",
+                           iType, cg.snap->numEntities, cg.snap->ps.clientNum);
+            }
+        }
+    }
+
     // HZM coop - global dynamic precipitation (brush-less, sky-gated). No-op unless coop_dynRainGlobal is set
     // by the weather script + rain density is > 0. Renders once per frame around the player.
     CG_RainGlobal();
