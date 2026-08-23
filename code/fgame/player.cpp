@@ -14159,6 +14159,7 @@ void Player::TickCoopCover()
                 // ---- probe P1/P2 --------------------------------------------------------------
                 {
                     static cvar_t *pPr = NULL;
+                    static float   s_nextPr = 0.0f;
 
                     if (!pPr) {
                         // [bug-2055 phase 1] DEFAULT ON. Left at 0 it was not armed for the one playtest that
@@ -14168,7 +14169,15 @@ void Player::TickCoopCover()
                         // never CVAR_ARCHIVE, so it cannot fossilise into a saved config (TRAPS T7).
                         pPr = gi.Cvar_Get("coop_coverProbe", "1", 0);
                     }
-                    if (pPr->integer) {
+                    // [bug-2072] RATE-LIMITED, because this ships. GUNVIS could default ON safely
+                    // because it is EDGE-triggered - a handful of lines a session. This one is
+                    // per-tick by design (the 78%-both-closed distribution is the whole point), so
+                    // unbounded it would put a debug print in every player's console for as long as
+                    // they hold cover. 4/sec keeps the distribution readable and the volume sane.
+                    // Same staleness reseed as the wall=0 line: level.time restarts on map load.
+                    if (level.time < s_nextPr) { s_nextPr = 0.0f; }
+                    if (pPr->integer && level.time >= s_nextPr) {
+                        s_nextPr = level.time + 0.25f;
                         gi.Printf(
                             "^~^~^ COVERSIDE wall=1 want=%d have=%d edgeL=%.0f edgeR=%.0f "
                             "openL=%d openR=%d ssL=%d ssR=%d frL=%.2f frR=%.2f "
