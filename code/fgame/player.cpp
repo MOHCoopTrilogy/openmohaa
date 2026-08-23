@@ -4696,7 +4696,13 @@ void Player::ClientMove(usercmd_t *ucmd)
         // Replaces the walk-slow value the BUTTON_RUN-clear branch above just set (Shift = walk key). When
         // sprint is disabled or stamina is exhausted, m_bCoopSprinting is false so we keep vanilla behavior.
         if (m_bCoopSprinting) {
-            cvar_t *pMult = gi.Cvar_Get("coop_sprintMult", "1.3", CVAR_ARCHIVE);
+            // [user 2026-08-23] 1.3 -> 1.15. Friend feedback: sprint is too fast on every gun. Note the
+            // reporter was running an ARCHIVED 1.9 (a tuning fossil; 1.9 was never shipped and is not
+            // in coop_defaults.cfg), and this is a SERVER cvar, so the host's value applied to both
+            // players - most of what they were feeling was that. 1.15 verified in live play. Lowering
+            // the multiplier scales every class down together and leaves the weight spread
+            // (coop_weaponMoveByClass 0.98..0.74) intact, which is the part they wanted kept.
+            cvar_t *pMult = gi.Cvar_Get("coop_sprintMult", "1.15", CVAR_ARCHIVE);
             float   mult  = pMult ? pMult->value : 1.3f;
             if (mult < 1.0f) { mult = 1.0f; } // sprint is never slower than run
             client->ps.speed = sv_runspeed->value * mult;
@@ -14264,8 +14270,29 @@ void Player::TickCoopCover()
     {
         bool bWasPeek = m_bCoopCoverPeek;
 
-        m_bCoopCoverWall = (m_bCoopCoverRequested && wallValid) ? true : false;
-        m_bCoopCoverLow  = (m_bCoopCoverRequested && lowValid) ? true : false;
+        // [user 2026-08-23, bug-2055] WALL AND LOW ARE MUTUALLY EXCLUSIVE, AND THE TYPE LATCHES.
+        // "I think its triggering standing wall cover when I am in crouch wall cover and then hold
+        // right mouse to aim over shoulder." Correct, and the mechanism is this pair of lines:
+        // both flags were computed independently from the same request, so BOTH could be true.
+        // Peeking from low cover raises you to standing height (COVER_LOW_PEEK entry is
+        // modheight "stand"), which makes the standing wall test start passing MID-SESSION - so
+        // crouch cover silently promoted itself to wall cover the moment you aimed.
+        // Whichever type you established is now held until you actually leave cover; when neither
+        // is established yet and both are geometrically valid, being crouched picks LOW.
+        bool bWallOk = (m_bCoopCoverRequested && wallValid);
+        bool bLowOk  = (m_bCoopCoverRequested && lowValid);
+
+        if (m_bCoopCoverLow && bLowOk) {
+            bWallOk = false;                 // already in low - wall may not take over
+        } else if (m_bCoopCoverWall && bWallOk) {
+            bLowOk = false;                  // already at a wall - low may not take over
+        } else if (bWallOk && bLowOk) {
+            if (client->ps.pm_flags & PMF_DUCKED) { bWallOk = false; }  // fresh + crouched -> LOW
+            else                                  { bLowOk  = false; }
+        }
+
+        m_bCoopCoverWall = bWallOk;
+        m_bCoopCoverLow  = bLowOk;
 
         // PEEK (RMB while covered): pop out and AIM for real - the torso leaves COVER_TORSO for
         // the normal aim chain (statemap COOP_COVER_PEEK edge), the cgame shoulder-ADS camera
@@ -14274,16 +14301,29 @@ void Player::TickCoopCover()
         m_bCoopCoverPeek =
             ((m_bCoopCoverWall || m_bCoopCoverLow) && (last_ucmd.buttons & BUTTON_COOPADS)) ? true : false;
         if (bWasPeek && !m_bCoopCoverPeek && (m_bCoopCoverWall || m_bCoopCoverLow)) {
-            Vector va = GetViewAngles();
+            // [user 2026-08-23, bug-2055] TURN THE BODY, NEVER THE VIEW.
+            // This used to SetViewAngles() on RMB release, which yanked the player's camera round
+            // to the wall normal. User, live: "let go and now the camera faces the opposite
+            // direction (away from the wall)... the camera is facing the wrong way entirely."
+            // A 180 degree view snap, and it takes the mouse off the player for that frame.
+            //
+            // The correct rule was already written down 350 lines up, in the cover body-snap:
+            // "Turn the BODY only - setAngles, never SetViewAngles - so the pose is right and the
+            // mouse stays the player's. Taking the VIEW is what fights free-look." It was applied
+            // there and not here - one entry point gated, the feature not gated (TRAPS T3).
+            //
+            // Body only now. The pose returns to the wall; where you are LOOKING stays yours.
+            Vector vBody = angles;
 
             if (m_bCoopCoverWall) {
-                va[YAW] = vectoyaw(m_vCoopCoverNormal); // face out from the wall again
+                vBody[YAW] = vectoyaw(m_vCoopCoverNormal); // back to the wall, facing out
             } else {
-                Vector vIn = Vector(0, 0, 0) - m_vCoopCoverNormal;
-                va[YAW]    = vectoyaw(vIn); // face the low obstacle again
+                Vector vIn  = Vector(0, 0, 0) - m_vCoopCoverNormal;
+                vBody[YAW]  = vectoyaw(vIn); // face the low obstacle again
             }
-            va[PITCH] = 0;
-            SetViewAngles(va);
+            vBody[PITCH] = 0;
+            vBody[ROLL]  = 0;
+            setAngles(vBody);
         }
     }
 
