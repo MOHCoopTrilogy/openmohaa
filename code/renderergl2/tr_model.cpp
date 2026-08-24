@@ -1317,7 +1317,8 @@ void R_AddSkelSurfaces(trRefEntity_t *ent)
 
             // use a custom shader if specified
             if (!(ent->e.customShader) || (ent->e.renderfx & RF_CUSTOMSHADERPASS)) {
-                int iShaderNum = ent->e.skinNum + (*bsurf & 3);
+                // [bug-2080] 3-bit per-surface index - see MDL_SURFACE_SKININDEX in q_shared.h
+                int iShaderNum = ent->e.skinNum + MDL_SURFACE_SKININDEX(*bsurf);
 
                 if (iShaderNum >= dsurf->numskins) {
                     iShaderNum = 0;
@@ -1332,7 +1333,7 @@ void R_AddSkelSurfaces(trRefEntity_t *ent)
             // st0img=- (stage image failed/disabled), def=1 (fell to default), a nodraw/transparent
             // sort/blend, or an unexpected rgbGen/alphaGen. Correlate with SKELDRAW ext (geometry ok).
             if (diagFirst && tiki->a && tiki->a->bIsCharacter && shader) {
-                int            lsn = ent->e.skinNum + (*bsurf & 3);
+                int            lsn = ent->e.skinNum + MDL_SURFACE_SKININDEX(*bsurf);
                 shaderStage_t *s0;
                 const char    *img;
                 if (lsn >= dsurf->numskins) {
@@ -1351,29 +1352,13 @@ void R_AddSkelSurfaces(trRefEntity_t *ent)
             }
 
             if (!personalModel) {
-                if ((*bsurf & 0x40) && (dsurf->numskins > 1)) {
-                    int iShaderNum = ent->e.skinNum + (*bsurf & 2);
-
-                    // HZM [user 07-31]: OUT-OF-BOUNDS GUARD. dsurf->hShader[] is MAX_TIKI_SHADER(4)
-                    // wide but only the first numskins entries are ever initialised by the TIKI
-                    // loader; the rest are garbage handles. The `numskins > 1` test above is NOT
-                    // sufficient because this branch reads BOTH iShaderNum and iShaderNum+1, and
-                    // iShaderNum = skinNum + (bsurf & 2) reaches 2 whenever the surface carries
-                    // SKINOFFSET_BIT1 - which the coop gore tier system now sets on every damaged
-                    // actor (Sentient::.. writes tier into SKINOFFSET_BIT0|BIT1). On a 2-skin model
-                    // that resolved hShader[2]/hShader[3] to arbitrary shaders, which is the
-                    // reported "clothes turn white / get replaced with flesh-like textures, and it
-                    // randomizes as you keep shooting the body". The non-crossfade path below has
-                    // always clamped the same way; this one just never did. Latent in gl1 too.
-                    if (iShaderNum + 1 >= dsurf->numskins) {
-                        iShaderNum = 0;
-                    }
-
-                    R_AddDrawSurf((surfaceType_t *)surface, tr.shaders[dsurf->hShader[iShaderNum]], 0, 0, 0, 0);
-                    R_AddDrawSurf((surfaceType_t *)surface, tr.shaders[dsurf->hShader[iShaderNum + 1]], 0, 0, 0, 0);
-                } else {
-                    R_AddDrawSurf((surfaceType_t *)surface, shader, 0, 0, 0, 0);
-                }
+                // [bug-2080] The crossfade double-draw that stood here is GONE with the bit that
+                // drove it. It fired on (*bsurf & 0x40), which is now skin-offset bit 2, so every
+                // glove index 4-7 would have drawn the surface twice with two adjacent shaders.
+                // Nothing is lost: zero TIKIs in AA/SH/BT ask for crossfade and no script sets it,
+                // so this branch has never executed in this game. The out-of-bounds guard it
+                // carried (bug from 07-31) is preserved by the single clamped path above.
+                R_AddDrawSurf((surfaceType_t *)surface, shader, 0, 0, 0, 0);
             }
 
             if ((ent->e.customShader) && (ent->e.renderfx & RF_CUSTOMSHADERPASS)) {

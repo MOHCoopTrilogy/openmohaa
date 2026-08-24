@@ -959,7 +959,9 @@ void R_AddSkelSurfaces(trRefEntity_t *ent)
 
             // use a custom shader if specified
             if (!(ent->e.customShader) || (ent->e.renderfx & RF_CUSTOMSHADERPASS)) {
-                int iShaderNum = ent->e.skinNum + (*bsurf & 3);
+                // [bug-2080] 3-bit per-surface index (bits 0,1,6). skinNum is still added so the
+                // stock per-entity behaviour is untouched; it is simply 0 on every player and actor.
+                int iShaderNum = ent->e.skinNum + MDL_SURFACE_SKININDEX(*bsurf);
 
                 if (iShaderNum >= dsurf->numskins) {
                     iShaderNum = 0;
@@ -970,22 +972,12 @@ void R_AddSkelSurfaces(trRefEntity_t *ent)
             }
 
             if (!personalModel) {
-                if ((*bsurf & 0x40) && (dsurf->numskins > 1)) {
-                    int iShaderNum = ent->e.skinNum + (*bsurf & 2);
-
-                    // HZM [user 07-31]: same out-of-bounds guard as the gl2 twin - hShader[] is
-                    // MAX_TIKI_SHADER(4) wide but only numskins entries are initialised, and this
-                    // branch reads iShaderNum AND iShaderNum+1 with skinNum + (bsurf & 2) able to
-                    // reach 2 once the coop gore tier sets SKINOFFSET_BIT1 on a damaged actor.
-                    if (iShaderNum + 1 >= dsurf->numskins) {
-                        iShaderNum = 0;
-                    }
-
-                    R_AddDrawSurf((surfaceType_t *)surface, tr.shaders[dsurf->hShader[iShaderNum]], 0);
-                    R_AddDrawSurf((surfaceType_t *)surface, tr.shaders[dsurf->hShader[iShaderNum + 1]], 0);
-                } else {
-                    R_AddDrawSurf((surfaceType_t *)surface, shader, 0);
-                }
+                // [bug-2080] The crossfade double-draw that stood here is GONE with the bit that
+                // drove it. It fired on (*bsurf & 0x40), which is now skin-offset bit 2, so every
+                // glove index 4-7 would have drawn the surface twice with two adjacent shaders.
+                // Nothing is lost: zero TIKIs in AA/SH/BT ask for crossfade and no script sets it,
+                // so this branch has never executed in this game.
+                R_AddDrawSurf((surfaceType_t *)surface, shader, 0);
             }
 
             if ((ent->e.customShader) && (ent->e.renderfx & RF_CUSTOMSHADERPASS)) {

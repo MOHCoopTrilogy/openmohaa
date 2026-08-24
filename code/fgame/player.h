@@ -425,6 +425,7 @@ public:
     float  m_fCoopProbeTime;     // GUNNERPROBE diagnostic throttle [221 - REMOVE after bug-309 closes]
     int    m_iCoopSpeedBase;     // SPEEDPROBE: ps.speed before the ADS/weapon mults [222 - REMOVE with probe]
     int    m_iCoopVarCoverLast;  // last coop_incover entity-var value pushed to script (change-gated) [235]
+    int    m_iCoopCoverTypeLast;  // last coop_incover entity-var value pushed to script (change-gated) [235]
     // HZM coop - LOBBY INPUT bridge: while in the pre-mission lobby, read A/D (rightmove) + F (BUTTON_USE)
     // from the usercmd and publish self.coop_lobbyInput (31=next uniform, 32=prev, 33=ready) so the lobby
     // script reacts with NO client key binds - works for every client (host + remote), nothing to restore.

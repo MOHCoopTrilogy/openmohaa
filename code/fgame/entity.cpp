@@ -4368,8 +4368,20 @@ void Entity::SurfaceCommand(const char *surf_name, const char *token)
         mask = MDL_SURFACE_SKINOFFSET_BIT1;
     } else if (!Q_stricmp(token, "nodraw")) {
         mask = MDL_SURFACE_NODRAW;
+    } else if (!Q_stricmp(token, "skin4")) {
+        // HZM coop [bug-2080] The third skin-offset bit, reachable from script the same way skin1
+        // and skin2 are: `surface hand "+skin4"`. Compose freely - skin4|skin1 selects index 5.
+        // NOTE the quotes: an unquoted +/- argument is valid TIKI but a SCRIPT parse-killer
+        // (unexpected TOKEN_PLUS) that takes the whole file down with balanced braces - TRAPS,
+        // bugs 533 and 1308.
+        mask = MDL_SURFACE_SKINOFFSET_BIT2;
     } else if (!Q_stricmp(token, "crossfade")) {
-        mask = MDL_SURFACE_CROSSFADE_SKINS;
+        // [bug-2080] RETIRED. This used to set bit 6, which is now skin-offset bit 2. Accepting it
+        // silently would hand a caller a glove index instead of a crossfade. Nothing in AA, SH, BT
+        // or this mod ever used it (all paks scanned), so this warns rather than doing something.
+        warning("SurfaceCommand", "crossfade is retired - bit 6 is now skin-offset bit 2 (skin4).");
+        action = FLAG_IGNORE;
+        mask   = 0;
     } else {
         mask = 0;
         warning("SurfaceCommand", "Unknown token %s.", token);

@@ -930,7 +930,8 @@ qboolean TIKI_LoadSetupCase(
                 break;
             }
 
-            if (loadsurfaces[currentSurface].numskins > 3) {
+            // [bug-2080] was > 3; MAX_TIKI_SHADER is now 8, so the last valid index is 7.
+            if (loadsurfaces[currentSurface].numskins > MAX_TIKI_SHADER - 1) {
                 TIKI_Error(
                     "TIKI_ParseSetup: Too many skins defined for surface %s in %s.\n",
                     loadsurfaces[currentSurface].name,

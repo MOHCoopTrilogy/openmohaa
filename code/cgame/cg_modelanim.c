@@ -2393,6 +2393,44 @@ void CG_ModelAnim(centity_t *cent, qboolean bDoShaderTime)
             model.hModel = cg.hPlayerFPSModelHandle;
             memset(model.surfaces, 0, sizeof(model.surfaces));
 
+            // HZM coop [user 2026-08-23, bug-2080] RE-APPLY THE ARMORY GLOVE IN FIRST PERSON.
+            //
+            // The memset directly above is why 1P needs its own line at all. The third-person glove
+            // rides in the player entity's per-surface bits, but this function swaps to a DIFFERENT
+            // tiki (<skin>_fps.tik) whose surface indices do not correspond, so it clears the array
+            // wholesale - correctly. Without re-applying here, a player would see gloved hands on
+            // their own body in third person and bare hands down the sights, which is worse than
+            // having no gloves at all.
+            //
+            // The index arrives as coop_gloveIdx, a plain integer with no embedded quote, which the
+            // server pushes on change. The whole coop_ namespace is prefix-allowed by
+            // cg_servercmds_filter.cpp:173, so the wire is the same proven one coop_coverSide uses.
+            //
+            // Bit layout must match MDL_SURFACE_SKININDEX in q_shared.h exactly: bits 0-1 carry the
+            // low two, bit 6 the high one. Writing the composed byte rather than calling the macro
+            // in reverse keeps the two definitions adjacent in review.
+            {
+                static cvar_t *pGloveIdx = NULL;
+                int            g;
+
+                if (!pGloveIdx) {
+                    pGloveIdx = cgi.Cvar_Get("coop_gloveIdx", "0", 0);
+                }
+                g = pGloveIdx->integer;
+                if (g > 0 && g <= 7 && model.tiki) {
+                    static const char *kHandSurfaces[3] = {"triggerhand", "lefthand", "garandhand"};
+                    int                bits             = (g & 3) | ((g & 4) << 4);
+                    int                i;
+
+                    for (i = 0; i < 3; i++) {
+                        int sn = cgi.Surface_NameToNum(model.tiki, kHandSurfaces[i]);
+                        if (sn >= 0 && sn < MAX_MODEL_SURFACES) {
+                            model.surfaces[sn] = (byte)bits;
+                        }
+                    }
+                }
+            }
+
             CG_ViewModelAnimation(&model);
             model.renderfx |= RF_FRAMELERP;
             // must run BEFORE ForceUpdatePose - that is what applies the bone controllers - and

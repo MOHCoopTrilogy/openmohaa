@@ -303,6 +303,33 @@ void CL_Draw3DModel(
         }
     }
 
+    // HZM coop [user 2026-08-23, bug-2082] SHOW THE ARMORY GLOVE ON THE PREVIEW MODEL.
+    // "I still dont see any gloves applying to the model viewer in the armory itself when I go
+    // through the selector." Correct, and it could not have: a helmet is an ATTACHED MODEL, which
+    // this widget already supports via modelattachcvar, but a glove is a SKIN INDEX on a surface the
+    // model already owns - and nothing here ever wrote one. No new URC command is needed though,
+    // because this function already reaches into ent.surfaces[] for the helmet nodraw a few lines
+    // above; the glove is the same kind of write on a different surface.
+    //
+    // The index arrives in coop_loGlove, which the generated page cfgs (ui/loadout/glove/gNN.cfg)
+    // set as you page through - so the preview follows the SELECTOR rather than what is currently
+    // worn, which is what makes it a preview. Bit layout must match MDL_SURFACE_SKININDEX in
+    // q_shared.h: bits 0-1 low, bit 6 high.
+    if (ent.tiki && ent.tiki->num_surfaces > 0) {
+        int g = Cvar_Get("coop_loGlove", "0", 0)->integer;
+
+        if (g > 0 && g <= 7) {
+            int bits = (g & 3) | ((g & 4) << 4);
+
+            for (int s = 0; s < ent.tiki->num_surfaces && s < MAX_MODEL_SURFACES; s++) {
+                if (!Q_stricmp(ent.tiki->surfaces[s].name, "hand")) {
+                    ent.surfaces[s] = (byte)((ent.surfaces[s] & ~0x43) | bits);
+                    break;
+                }
+            }
+        }
+    }
+
     re.AddRefEntityToScene(&ent, ENTITYNUM_NONE);
 
     // Drop the attached models onto their tags (after the base is in the scene). ForceUpdatePose inside the

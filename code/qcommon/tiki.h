@@ -54,7 +54,15 @@ class Archiver;
 // fixing it - they are raised together, and TIKI_MAX_COMMANDS carries the reciprocal note.
 #define MAX_TIKI_LOAD_FRAME_CLIENT_COMMANDS 256
 
-#define MAX_TIKI_LOAD_SHADERS               4
+// HZM coop [user 2026-08-23, bug-2082] MUST TRACK MAX_TIKI_SHADER. There are TWO shader-array
+// constants and raising only the runtime one (tiki/tiki_shared.h) corrupts memory: the parser
+// guard at tiki_parse.cpp is written against MAX_TIKI_SHADER, so with that at 8 and this at 4
+// it strncpy's a 64-byte shader name into shader[4..7] of a 4-wide array - straight over
+// numskins, flags and damage_multiplier in the same struct. The corrupted numskins is then the
+// loop bound in TIKI_SetupIndividualSurface, and TIKI_Error only Com_Printf's rather than
+// aborting, so the game hangs printing the same line ~2 billion times. That is exactly what
+// happened loading Omaha with the glove content in: 800+ identical lines and a freeze.
+#define MAX_TIKI_LOAD_SHADERS               8
 
 // HZM: Max distinct surfaces parsed from a model's setup/$case blocks into the
 // stack array loadsurfaces[] in TIKI_LoadTikiModel. Was a bare hardcoded 24 with

@@ -2089,7 +2089,35 @@ void Weapon::Shoot(Event *ev)
                         // never push the muzzle further out than the edge we actually measured -
                         // a flat 20u on a 10u-deep jamb is a muzzle inside the masonry
                         float   fEdgeLim = pBf->GetCoopCoverEdge() + 6.0f;
-                        float   fRad  = DEG2RAD(fSide * (pYawC ? pYawC->value : 50.0f));
+                        // [user 2026-08-23, bug-2055] STEER TOWARD THE MEASURED OPENING, DO NOT
+                        // ADD A FIXED OFFSET TO WHEREVER THE PLAYER HAPPENS TO BE LOOKING.
+                        // "blind fire doesnt actually shoot through the opening either."
+                        // The fixed 50 degrees assumed the player faces straight OUT of the wall
+                        // and needs a full correction to reach the opening. Cover entry now turns
+                        // them most of the way there already (coop_coverFaceOpen), so the two
+                        // double-counted and the burst swung past the jamb into the return wall.
+                        // Compute the angle to the along-wall direction and rotate by THAT, capped
+                        // at coop_blindfireYaw. Self-correcting: face the opening squarely and the
+                        // steering does nothing; face straight out and it does the full turn.
+                        float   fYawCap = (pYawC ? pYawC->value : 50.0f);
+                        float   fWant;
+                        {
+                            Vector vN     = pBf->GetCoopCoverNormal();
+                            Vector vAlong = Vector(0.0f - vN[1], vN[0], 0.0f);   // up x out = LEFT
+                            Vector vFwdFlat;
+
+                            if (fSide < 0.0f) { vAlong = vAlong * -1.0f; }       // side -1 = RIGHT
+                            vAlong.normalize();
+                            vFwdFlat = Vector(forward[0], forward[1], 0.0f);
+                            if (vFwdFlat.length() > 0.01f) { vFwdFlat.normalize(); }
+
+                            // signed angle from current aim to the opening direction
+                            fWant = AngleSubtract(vectoyaw(vAlong), vectoyaw(vFwdFlat));
+                            if (fWant >  fYawCap) { fWant =  fYawCap; }
+                            if (fWant < -fYawCap) { fWant = -fYawCap; }
+                        }
+
+                        float   fRad  = DEG2RAD(fWant);
                         float   fCos  = cos(fRad);
                         float   fSin  = sin(fRad);
                         vec3_t  vTmp;

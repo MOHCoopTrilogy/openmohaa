@@ -2414,7 +2414,8 @@ Player::Player()
     m_fCoopProbeTime   = -10.0f;   // HZM coop - GUNNERPROBE throttle [221]
     m_pCoopBotTarget   = NULL;     // HZM coop - bot combat drive (dev/test, coop_botInput) target cache
     m_iCoopBotRetarget = 0;        // HZM coop - bot combat drive next-rescan stamp
-    m_iCoopVarCoverLast = -1;      // HZM coop - force the first coop_incover var push [235]
+    m_iCoopVarCoverLast = -1;
+    m_iCoopCoverTypeLast = -1;   // [bug-2090] force the first coop_coverType push      // HZM coop - force the first coop_incover var push [235]
     m_bCoopLobbyInputOn   = false; // HZM coop - lobby usercmd input bridge stays off until the lobby enables it
     m_iCoopLobbyRightPrev = 0;
     m_bCoopLobbyUsePrev   = false;
@@ -4301,7 +4302,11 @@ void Player::SetMoveInfo(pmove_t *pm, usercmd_t *ucmd)
         {
             static cvar_t *pLean = NULL, *pLeanMax = NULL;
 
-            if (!pLean)    { pLean    = gi.Cvar_Get("coop_coverLean",    "0",  CVAR_ARCHIVE); }
+            if (!pLean)    { pLean    = // [user 2026-08-23] SHIPS ON. "I am good with coop lean cover on." It defaulted to 0, so the
+        // lean out of wall cover reached nobody but the one machine that had it archived at 1 -
+        // which meant even a working side solver would have produced no lean for any player.
+        // Found by the config-fossil sweep (docs/tools/config_fossils.py), not by testing.
+        gi.Cvar_Get("coop_coverLean",    "1",  CVAR_ARCHIVE); }
             if (!pLeanMax) { pLeanMax = gi.Cvar_Get("coop_coverLeanMax", "28", CVAR_ARCHIVE); }
 
             pm->coopCoverLeanSide = 0;
@@ -4702,7 +4707,7 @@ void Player::ClientMove(usercmd_t *ucmd)
             // players - most of what they were feeling was that. 1.15 verified in live play. Lowering
             // the multiplier scales every class down together and leaves the weight spread
             // (coop_weaponMoveByClass 0.98..0.74) intact, which is the part they wanted kept.
-            cvar_t *pMult = gi.Cvar_Get("coop_sprintMult", "1.15", CVAR_ARCHIVE);
+            cvar_t *pMult = gi.Cvar_Get("coop_sprintMult", "1.05", CVAR_ARCHIVE);
             float   mult  = pMult ? pMult->value : 1.3f;
             if (mult < 1.0f) { mult = 1.0f; } // sprint is never slower than run
             client->ps.speed = sv_runspeed->value * mult;
@@ -8721,6 +8726,24 @@ void Player::UpdateStats(void)
         client->ps.pm_flags &= ~PMF_COOP_COVER;
     }
 
+    // HZM coop [user 2026-08-23, bug-2090] TELL THE CLIENT WHICH COVER IT IS.
+    // USER: "these need to be separately controlled. My crouch cover angle was perfect."
+    // PMF_COOP_COVER is set for BOTH the standing wall pose and the crouch pose, so any client-side
+    // work gated on that flag silently applies to both - which is how a wall-camera experiment
+    // damaged a crouch framing that was already right. There was no way for cgame to distinguish
+    // them at all; coop_coverSide was the only hint and it is a side, not a type, so it goes stale.
+    // 0 = not covered, 1 = WALL (standing, back to wall), 2 = LOW (crouch). Change-only push:
+    // integer payload, no embedded quote (TRAPS T8), and the coop_ prefix is allowed through
+    // cg_servercmds_filter.cpp:173 like every other script->client bridge.
+    {
+        int iCovType = m_bCoopCoverWall ? 1 : (m_bCoopCoverLow ? 2 : 0);
+
+        if (iCovType != m_iCoopCoverTypeLast) {
+            m_iCoopCoverTypeLast = iCovType;
+            gi.SendServerCommand(edict - g_entities, "stufftext \"set coop_coverType %d\"\n", iCovType);
+        }
+    }
+
     client->ps.stats[STAT_CROSSHAIR] =
         ((!client->ps.stats[STAT_INZOOM] || client->ps.stats[STAT_INZOOM] > 30)
          && (activeweap && !activeweap->IsSubclassOfInventoryItem() && activeweap->GetUseCrosshair()))
@@ -11007,6 +11030,58 @@ void Player::GibEvent(Event *ev)
 void Player::ArmorDamage(Event *ev)
 {
     int mod = ev->GetInteger(9);
+
+    // HZM coop [user 2026-08-23, bug-2083] DAMAGE ATTRIBUTION, at the only place it is knowable.
+    //
+    // "Do you have a way to tell what the hell is hurting me right now / Myself and the paradroopers
+    // are taking some kind of invisible damage." There was no way to answer that, and the FIRST
+    // attempt at one - a script `waittill damage` watcher in probe.scr - could never have worked:
+    // Entity::Damage posts EV_Damage, and the Unregister(STRING_DAMAGE) that would wake a script
+    // lives in Entity::DamageEvent, which PLAYERS OVERRIDE with this very function. Nothing on the
+    // Player path unregisters it. Worse, `self.fact` - which that watcher read for the attacker - is
+    // written only by aihandler.scr and global/pain.scr and never for a player, so every field would
+    // have come back WORLD / -1, the exact signature the probe treats as "invisible area hazard".
+    // It would have manufactured evidence for the hypothesis it existed to test.
+    //
+    // So it goes here instead, where the attacker, the inflictor and the means-of-death are already
+    // in hand as event arguments. Damage that merely HURTS leaves no other trace anywhere: XPKILL
+    // only fires on a kill, so a 15-per-tick hazard against 750hp is completely silent.
+    //
+    // mod is the means-of-death index (bg_public.h): 9 = MOD_EXPLOSION, which is what a script
+    // `radiusdamage` call lands as because it has no owner - that pair, attacker=WORLD with mod=9,
+    // is the fingerprint of an unattributable area hazard and is what makes this print worth having.
+    {
+        static cvar_t *pDmgPrb = NULL;
+
+        if (!pDmgPrb) {
+            pDmgPrb = gi.Cvar_Get("coop_dmgProbe", "0", 0);
+        }
+        if (pDmgPrb->integer) {
+            Entity     *pAtk = ev->GetEntity(1);
+            Entity     *pInf = ev->GetEntity(3);
+            const char *cAtk = pAtk ? pAtk->getClassname() : "WORLD";
+            const char *cInf = pInf ? pInf->getClassname() : "-";
+            const char *tAtk = (pAtk && pAtk->targetname.length()) ? pAtk->targetname.c_str() : "-";
+            float       fDist = pAtk ? (origin - pAtk->origin).length() : -1.0f;
+
+            gi.Printf(
+                "^~^~^ DMG victim=%d hp=%d dmg=%.0f mod=%d atk=%s atkTn=%s atkEnt=%d infl=%s "
+                "dist=%.0f at=%.0f %.0f %.0f\n",
+                entnum,
+                (int)health,
+                ev->GetFloat(2),
+                mod,
+                cAtk,
+                tAtk,
+                pAtk ? pAtk->entnum : -1,
+                cInf,
+                fDist,
+                origin.x,
+                origin.y,
+                origin.z
+            );
+        }
+    }
 
     if (g_gametype->integer != GT_SINGLE_PLAYER) {
         // players that are not allowed fighting mustn't take damage
@@ -13925,18 +14000,16 @@ void Player::TickCoopCover()
                     // Turn the BODY only - setAngles, never SetViewAngles - so the pose is right
                     // and the mouse stays the player's. Taking the VIEW is what "fights free-look"
                     // meant. One-time, on entry, behind a switch so it can be dropped live.
-                    {
-                        static cvar_t *pSnap = NULL;
-
-                        if (!pSnap) { pSnap = gi.Cvar_Get("coop_coverSnapBody", "1", CVAR_ARCHIVE); }
-                        if (pSnap->integer) {
-                            Vector vFace = Vector(trace.plane.normal).toAngles();
-                            Vector vNow  = angles;
-
-                            vNow[YAW] = vFace[YAW];
-                            setAngles(vNow);
-                        }
-                    }
+                    // [user 2026-08-23, bug-2055] THE PER-FRAME setAngles THAT USED TO SIT HERE IS
+                    // REMOVED. It was bug-2056's attempt at "back to the wall", written to the rule
+                    // "turn the BODY only, never the view" - but a player's body yaw is re-derived
+                    // from their own command angles every frame, so a bare setAngles is overwritten
+                    // before it is ever drawn. It was a per-frame NO-OP that read as a working
+                    // feature, which is worse than nothing: it is what a reader checks, finds
+                    // present, and concludes is not the problem.
+                    // The turn now happens ONCE on the rising edge of wall cover, further down,
+                    // and moves body AND view together the way this codebase actually rotates a
+                    // player (player.cpp:6201, :6277).
                     // [user 2026-08-22] NO ENTRY VIEW-SNAP. The original yanked the yaw to the
                     // wall normal on entry; it was half the reported "crash-prone" feel and it
                     // fights free-look. The normal is ANCHORED instead, so the pose is
@@ -14126,6 +14199,21 @@ void Player::TickCoopCover()
 
                 if (iWant == m_iCoopCoverSide) {
                     m_fCoopCoverSideDwell = 0.0f;
+                } else if (m_iCoopCoverSide == 0 && iWant != 0) {
+                    // [user 2026-08-23, bug-2055] FIRST ACQUISITION IS IMMEDIATE - no hysteresis.
+                    // The dwell exists to stop the side FLIP-FLOPPING between two real sides
+                    // mid-burst, which strobes an animation and the camera. Coming from NONE there
+                    // is nothing to strobe, and making the first acquisition wait 180ms broke the
+                    // feature outright: the cover ENTRY turn reads this side to decide which way to
+                    // face, and it runs on the rising edge - when the side was still 0. So the
+                    // player was always turned straight out of the wall and never toward the
+                    // opening. User: "camera is still facing away from the opening... I have to
+                    // move my mouse around to the opening."
+                    // It was self-reinforcing, too: the entry turn swings the view, that yaw delta
+                    // exceeds coop_coverSideMaxDelta, and the delta RESETS the dwell - so the turn
+                    // pushed away the very value it needed.
+                    m_iCoopCoverSide      = iWant;
+                    m_fCoopCoverSideDwell = 0.0f;
                 } else if (m_bCoopBlindfire || m_fCoopPeekFrac > 0.01f) {
                     m_fCoopCoverSideDwell = 0.0f; // latched mid-action
                 } else {
@@ -14291,9 +14379,117 @@ void Player::TickCoopCover()
             else                                  { bLowOk  = false; }
         }
 
+        // [user 2026-08-23, bug-2055] TURN THE PLAYER ONCE, ON ENTRY - BODY AND VIEW TOGETHER.
+        // User: "my characters body is still facing the wall though, not up against the wall, both
+        // when first getting behind cover and when aiming. I do not lean when I aim, I just aim
+        // straight into the wall in front of where my character is facing."
+        //
+        // bug-2056 tried to fix this with setAngles() alone, on the rule "turn the BODY only,
+        // never the view". That rule cannot work for a PLAYER: the body yaw is re-derived from the
+        // client's own command angles every frame, so a bare setAngles is overwritten immediately.
+        // It is an ACTOR technique. The two places this codebase actually rotates a player
+        // (player.cpp:6201, :6277) both do `setAngles(); v_angle.y = ...; SetViewAngles();` - body
+        // and view together - and that is the only thing that sticks.
+        //
+        // So do it deliberately and exactly ONCE, on the rising edge of wall cover. Pressing the
+        // cover key is an explicit act and a turn there reads as taking cover; the same turn on
+        // RMB release read as the camera being stolen, which is what was just removed. Skipped
+        // when already roughly back-to-wall (within 60 degrees) so it never snaps for no reason.
+        if (bWallOk && !m_bCoopCoverWall) {
+            static cvar_t *pSnapIn = NULL;
+
+            if (!pSnapIn) { pSnapIn = gi.Cvar_Get("coop_coverSnapBody", "1", CVAR_ARCHIVE); }
+            if (pSnapIn->integer) {
+                Vector vOut  = m_vCoopCoverNormal;   // points OUT of the wall, toward the player
+                Vector vFwdN;
+
+                AngleVectors(GetViewAngles(), vFwdN, NULL, NULL);
+                vFwdN[2] = 0; vFwdN.normalize();
+                vOut[2]  = 0; vOut.normalize();
+
+                // [user 2026-08-23] FACE THE OPENING, NOT STRAIGHT OUT FROM THE WALL.
+                // User, and the geometry is theirs: "if your back is up against a wall and you use
+                // lean into the doorway, you're not going to be leaning into the opening, you're
+                // going to be physically leaning AWAY from the opening. That's due to the fact
+                // that your back is to the wall to begin with."
+                //
+                // Exactly right, and it falls out of how the lean is built: the eye-shift rotates
+                // about the FORWARD axis (cg_view.c, pivot 28.7u below the eye), so the lateral
+                // travel is always perpendicular to where you are LOOKING. Facing straight out of
+                // the wall, leaning slides your eye along the wall face - more wall. Facing ALONG
+                // the wall toward the opening, the same lean swings your eye past the jamb, which
+                // is a peek.
+                //
+                // So bias the entry yaw toward the open side the solver found. coop_coverFaceOpen
+                // is the blend: 0 = straight out of the wall (old behaviour), 1 = fully along the
+                // wall at the opening. Default 0.65 - angled out AND down the wall, so you can see
+                // the room you are in and still lean into the doorway.
+                {
+                    static cvar_t *pFace = NULL;
+                    Vector         vAim = vOut;
+
+                    // [bug-2089] DEFAULT 0 - this entry turn is superseded. It set the body angle
+                    // ONCE, and the view-follows-body coupling overwrote it on the next mouse
+                    // input, which is why tuning it never held. The per-frame wall pin below
+                    // replaces it. Kept rather than deleted so it is one cvar away if needed.
+                    if (!pFace) { pFace = gi.Cvar_Get("coop_coverFaceOpen", "0.65", CVAR_ARCHIVE); }
+
+                    // m_iCoopCoverSide: +1 = opening LEFT, -1 = opening RIGHT (0 = none yet)
+                    if (m_iCoopCoverSide != 0 && pFace->value > 0.0f) {
+                        Vector vAlong;
+
+                        // along the wall = up x out, done by hand (CrossProduct here is the
+                        // 3-argument C macro, not a returning function)
+                        vAlong[0] = -vOut[1];
+                        vAlong[1] =  vOut[0];
+                        vAlong[2] =  0.0f;
+
+                        // [user 2026-08-23, bug-2086] RECONCILE THE FRAMES BEFORE USING THE SIGN.
+                        // vAlong is built from the wall NORMAL, so it is WORLD-space wall-left. But
+                        // m_iCoopCoverSide is deliberately expressed in the player's BODY frame -
+                        // see the flip at the top of the solver, which mirrors it when the player
+                        // walked up FACING the wall, because lean and blindfire are body actions.
+                        // Applying a body-frame sign to a world-frame vector is a 180 when those
+                        // two disagree, which is every normal approach: you walk at a wall, so you
+                        // face it, so the frames are opposite - and the entry turn spun the player
+                        // AWAY from the opening. Measured: probe reported edgeL=30 edgeR=-1 openL=1
+                        // (opening genuinely left, wire correct), and the user still ended up facing
+                        // "the opposite direction of the opening". Redo the same flip test here so
+                        // the sign means the same thing as the vector it multiplies.
+                        {
+                            Vector vbF, vbR;
+
+                            AngleVectors(GetViewAngles(), vbF, vbR, NULL);
+                            vbR[2] = 0.0f;
+                            vbR.normalize();
+                            if (DotProduct(vAlong, vbR) > 0.0f) { vAlong = vAlong * -1.0f; }
+                        }
+                        if (m_iCoopCoverSide < 0) { vAlong = vAlong * -1.0f; }
+                        vAlong.normalize();
+                        vAim = vOut * (1.0f - pFace->value) + vAlong * pFace->value;
+                        vAim[2] = 0;
+                        if (vAim.length() > 0.01f) { vAim.normalize(); } else { vAim = vOut; }
+                    }
+
+                    // only turn if we are not already facing that way (dot < 0.5 == >~60 deg off)
+                    AngleVectors(GetViewAngles(), vFwdN, NULL, NULL);
+                    vFwdN[2] = 0; vFwdN.normalize();
+                    if (DotProduct(vFwdN, vAim) < 0.5f) {
+                        Vector vNew = angles;
+
+                        vNew[YAW]   = vectoyaw(vAim);
+                        vNew[PITCH] = 0;
+                        vNew[ROLL]  = 0;
+                        setAngles(vNew);
+                        v_angle.y = vNew[YAW];
+                        SetViewAngles(v_angle);
+                    }
+                }
+            }
+        }
+
         m_bCoopCoverWall = bWallOk;
         m_bCoopCoverLow  = bLowOk;
-
         // PEEK (RMB while covered): pop out and AIM for real - the torso leaves COVER_TORSO for
         // the normal aim chain (statemap COOP_COVER_PEEK edge), the cgame shoulder-ADS camera
         // engages on the same button, and the anchored sustain above keeps the cover alive while

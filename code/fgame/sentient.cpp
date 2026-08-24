@@ -2479,10 +2479,39 @@ void Sentient::CoopGoreUpdateSkinTier(void)
     // the face straight back to the body's (lower) tier.
     {
         int headSurf = m_bCoopHeadGore ? gi.Surface_NameToNum(edict->tiki, "head") : -1;
+
+        // HZM coop [user 2026-08-23, bug-2080] THE PLAYER'S `hand` SURFACE IS EXEMPT, because the
+        // armory now stores a GLOVE INDEX in exactly the bits this loop writes.
+        //
+        // Without this the two systems fight and the glove loses. `hand` on a player TIK now carries
+        // up to 8 shaders (bare + gloves), so the clamp below computes surfTier = 7, clamps it to
+        // the damage tier, and writes it over the glove index - and because it WRITES rather than
+        // OR-accumulates, a player's gloves would step through the roster as they took hits. That
+        // is not a hypothetical: it is the same shape as the bug the clamp above was added to fix.
+        //
+        // PLAYERS ONLY, deliberately. 28 AI TIKs author the full four-skin gore ladder on `hand`
+        // (handsnew_skin2 / pt_hands_skin2 / knitgloves1_skin2 in coop_gore.shader, and the _blood3
+        // twins in coop_gore3.shader), and enemies do not wear armory gloves - so exempting every
+        // sentient would throw away bloodied AI hands for nothing.
+        //
+        // HONEST NOTE (adversarial review, 2026-08-23): this guard is currently UNREACHABLE. The
+        // function already returns for players ~110 lines above (IsSubclassOfPlayer, bug-792), so
+        // handSurf is always -1 and no player ever reached this loop in the first place. The
+        // mechanism the original version of this comment described therefore could not have
+        // happened. It is kept as a cheap invariant at the point where the damage WOULD be done, in
+        // the shape TRAPS recommends - bug-1814 records two guards in this project that silently
+        // stopped applying when an upstream filter moved. The reachable twin of this problem is in
+        // EventCoopGoreReset, which had no player early-out and did mangle the glove; that one is
+        // fixed rather than annotated.
+        int handSurf = -1;
+        if (isSubclassOf(Player)) {
+            handSurf = gi.Surface_NameToNum(edict->tiki, "hand");
+        }
+
         for (i = 0; i < numsurfaces; i++) {
             int surfTier;
 
-            if (i == headSurf) {
+            if (i == headSurf || i == handSurf) {
                 continue;
             }
             // [user 2026-08-21] CLAMP THE TIER TO WHAT THIS SURFACE CAN ACTUALLY DISPLAY.
@@ -2763,7 +2792,20 @@ void Sentient::CoopGoreTryWoundProp(int location, int meansofdeath, const Vector
     Vector         attachOfs;
 
     if (!pWounds) {
+        // [user 2026-08-23] CLEAR THE FOSSIL. The user asked for gore wounds back ON, and
+        // they were still off on their machine: coop_goreWounds is CVAR_ARCHIVE, their saved
+        // config carried `seta coop_goreWounds "0"`, and neither the shipped default of 1 nor
+        // coop_defaults.cfg's seed of 1 can beat that - Cvar_Get on an existing cvar keeps the
+        // saved value and only updates the reset string, and coop_defaults.cfg execs BEFORE the
+        // saved config. That is TRAPS T7, the same fossil that kept coop_idleBolt running after
+        // it was removed and made sprint feel wrong at an archived 1.9.
+        // ONCE per session, because pWounds is a static: a deliberate `coop_goreWounds 0` at
+        // the console still works for the rest of that session, it just stops a stale saved 0
+        // from silently overriding a decision the user actually asked for.
         pWounds = gi.Cvar_Get("coop_goreWounds", "1", CVAR_ARCHIVE);
+        if (!pWounds->integer) {
+            gi.cvar_set("coop_goreWounds", "1");
+        }
     }
 
     if (!com_blood->integer || !pWounds->integer || !edict->tiki) {
@@ -2930,7 +2972,18 @@ void Sentient::EventCoopGoreReset(Event *ev)
         if (numsurfaces > MAX_MODEL_SURFACES) {
             numsurfaces = MAX_MODEL_SURFACES;
         }
+        // HZM coop [user 2026-08-23, bug-2082] DO NOT CLEAR THE PLAYER'S GLOVE. This loop clears the
+        // low two skin bits on every surface, and on a player the `hand` surface now carries an
+        // ARMORY GLOVE INDEX in those bits plus bit 6. Clearing only the low two does not remove the
+        // glove, it CHANGES it: Seaman's (5) and Alpine Hands (6) would both collapse to Wool
+        // Mittens (4), on any heal while coop_gorePermanent is 0 - the canteen heal reaches this.
+        // Skipping the surface is right rather than also clearing bit 6, because the glove is not
+        // gore and a heal has no business undressing the player.
+        int handSurf = IsSubclassOfPlayer() ? gi.Surface_NameToNum(edict->tiki, "hand") : -1;
         for (i = 0; i < numsurfaces; i++) {
+            if (i == handSurf) {
+                continue;
+            }
             edict->s.surfaces[i] &= ~(MDL_SURFACE_SKINOFFSET_BIT0 | MDL_SURFACE_SKINOFFSET_BIT1);
         }
     }

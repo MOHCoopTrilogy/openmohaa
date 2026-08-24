@@ -745,7 +745,7 @@ static void CG_OffsetThirdPersonView(void)
         }
     }
 
-    VectorMA(target_position, -fCamDist, forward, new_vieworg);
+VectorMA(target_position, -fCamDist, forward, new_vieworg);
 
     new_vieworg[2] += fCamVert;
 

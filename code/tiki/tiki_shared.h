@@ -104,7 +104,9 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 #define TIKI_SURF_NOPICMIP  (1 << 9)
 
 #define MAX_SKELMODELS        12
-#define MAX_TIKI_SHADER       4
+// HZM coop [user 2026-08-23, bug-2080] 4 -> 8, to match the widened 3-bit per-surface skin index
+// (MDL_SURFACE_SKININDEX). Costs MAX_QPATH+4 bytes per extra slot per surface per loaded TIKI.
+#define MAX_TIKI_SHADER       8
 // HZM fix: raised 4095->8192 to match MAX_TIKI_LOAD_ANIMS (tiki.h), which was already raised for
 // the identical underlying problem (new_generic_human.tik-scale content exceeding 4095). This is
 // the session-wide SkeletorCache of distinct loaded .skc/.skd files - never resets except on a

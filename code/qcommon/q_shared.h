@@ -2144,7 +2144,33 @@ typedef struct {
 #define  MDL_SURFACE_SURFACETYPE_BIT0 ( 1 << 3 )
 #define  MDL_SURFACE_SURFACETYPE_BIT1 ( 1 << 4 )
 #define  MDL_SURFACE_SURFACETYPE_BIT2 ( 1 << 5 )
-#define  MDL_SURFACE_CROSSFADE_SKINS  ( 1 << 6 )
+// HZM coop [user 2026-08-23, bug-2080] BIT 6 RECLAIMED: was MDL_SURFACE_CROSSFADE_SKINS, now the
+// THIRD skin-offset bit, widening the per-surface skin index from 2 bits (0-3) to 3 bits (0-7).
+//
+// WHY. The armory needs a GLOVES row, and a glove is a shader swap on one surface (`hand`) - the
+// trilogy already ships nine of them. Two bits only allow four looks including bare hands.
+//
+// WHY NOT entityState.skinNum, which is 16 bits and unused on players. Because it is applied
+// PER-ENTITY to every surface (`iShaderNum = ent->e.skinNum + (*bsurf & 3)`), while our own gore
+// ladder gives player body surfaces THREE skins each - measured: pants/shirt/sleeve/us_top and
+// eleven more, across 76+ shipped player TIKs. Setting skinNum=2 for a glove would therefore render
+// an UNDAMAGED player's trousers at gore tier 2. That is precisely the "clothes turn white / get
+// replaced with flesh-like textures" class of bug the out-of-bounds guards below were written for.
+// A per-surface index cannot collide with another surface by construction, so this is the safe
+// mechanism and skinNum is left alone.
+//
+// WHY BIT 6 IS FREE, verified rather than assumed: zero TIKIs across AA + Spearhead + Breakthrough
+// mention crossfade (all paks scanned), no script in the mod sets it, and the only writers were the
+// `surface <x> +crossfade` token and the TIKI parser. The renderer branch it drove (a two-shader
+// double-draw) is removed with it, because that branch would otherwise fire for glove indices 4-7.
+//
+// The byte is networked as part of entityState.surfaces[], so this changes a wire SEMANTIC:
+// openmohaa.exe, cgame.dll, game.dll and BOTH renderer DLLs must ship together.
+#define  MDL_SURFACE_SKINOFFSET_BIT2  ( 1 << 6 )
+
+// The composed per-surface skin index. Bits 0-1 are contiguous, bit 6 supplies the high bit, so it
+// is shifted down by 4 to land at value 4. Range 0-7.
+#define  MDL_SURFACE_SKININDEX(b)  ( ( (b) & 3 ) | ( ( (b) & MDL_SURFACE_SKINOFFSET_BIT2 ) >> 4 ) )
 #define  MDL_SURFACE_SKIN_NO_DAMAGE   ( 1 << 7 )
 
 #define CROUCH_HEIGHT		36
