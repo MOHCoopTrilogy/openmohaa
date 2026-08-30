@@ -636,11 +636,28 @@ static void CG_OffsetThirdPersonView(void)
         if (!pShDist) { pShDist = cgi.Cvar_Get("cg_adsShoulderDist", "45", CVAR_ARCHIVE); }
         if (!pShSide) { pShSide = cgi.Cvar_Get("cg_adsShoulderSide", "26", CVAR_ARCHIVE); }
         if (!pShUp)   { pShUp   = cgi.Cvar_Get("cg_adsShoulderUp",   "20", CVAR_ARCHIVE); }
+        // [user 2026-08-27] "camera is too close when im ads in third person and turn to look
+        // behind me, so I cant really tell". The 45u shoulder framing is tuned for a standing
+        // player; lying down it sits almost on top of a body that is now 20u tall and sweeping
+        // through 180 degrees, so the flip is unreadable at the exact moment you need to see it.
+        // Prone (belly or back) pulls the camera back and lifts it.
+        {
+            static cvar_t *pPrDist = NULL, *pPrUp = NULL;
+            if (!pPrDist) { pPrDist = cgi.Cvar_Get("cg_adsShoulderProneDist", "85", CVAR_ARCHIVE); }
+            if (!pPrUp)   { pPrUp   = cgi.Cvar_Get("cg_adsShoulderProneUp",   "38", CVAR_ARCHIVE); }
+            if (cg.predicted_player_state.pm_flags & PMF_VIEW_PRONE) {
+                fCamDist   += (pPrDist->value - fCamDist)   * s_adsShoulderEnv;
+                fCamSide   += (pShSide->value * s_shoulderSideSign - fCamSide) * s_adsShoulderEnv;
+                fCamHeight += (pPrUp->value   - fCamHeight) * s_adsShoulderEnv;
+                fCamVert   += (0.0f           - fCamVert)   * s_adsShoulderEnv;
+            } else {
         fCamDist   += (pShDist->value - fCamDist)   * s_adsShoulderEnv;
         // side target is signed: MOUSE3 swaps shoulders (s_shoulderSideSign eased in CG_UpdateAdsStage)
         fCamSide   += (pShSide->value * s_shoulderSideSign - fCamSide) * s_adsShoulderEnv;
         fCamHeight += (pShUp->value   - fCamHeight) * s_adsShoulderEnv;
         fCamVert   += (0.0f           - fCamVert)   * s_adsShoulderEnv;
+            }
+        }
     }
     if (s_adsFpEnv > 0.001f) {
         // fly the camera in to (nearly) the head; the 3P->1P flip happens at cg_adsFpFlip of this ease
@@ -1391,10 +1408,15 @@ qboolean CG_GetFreeAim(float *outYaw, float *outPitch)
 
 // Returns breath info for the HUD. outFrac: 0..1 (breath remaining, or recharge progress while cooling
 // down). outCooldown: true while recharging.
+// [vet 2026-08-28] Forward declaration. The definition is at the bottom of this file but the first
+// call site is here, so MSVC fell back to an implicit `extern int` (C4013) while the real symbol is
+// static - it linked by luck, with the compiler guessing at a signature it could not see.
+static int CG_BreathHoldMs(void);
+
 qboolean CG_GetBreathState(float *outFrac, qboolean *outCooldown)
 {
     cvar_t *pHold   = cgi.Cvar_Get("cg_breathHoldTime", "7", CVAR_ARCHIVE);
-    int     iHoldMs = (int)((pHold ? pHold->value : 7.0f) * 1000.0f);
+    int     iHoldMs = CG_BreathHoldMs();
 
     if (iHoldMs < 100) {
         iHoldMs = 100;
@@ -1903,6 +1925,18 @@ void CG_OffsetFirstPersonView(refEntity_t *pREnt, qboolean bUseWorldPosition)
                                        && !(cg.snap->ps.pm_flags & PMF_CAMERA_VIEW)
                                        && (iClass & WEAPON_CLASS_RIFLE)) ? qtrue : qfalse;
             float        fClassKick = 1.0f;
+            // [user 2026-08-27] BRACED: a supported gun barely wanders and barely climbs. Sway takes
+            // the deepest cut because its dying is the strongest kinesthetic tell in every game that
+            // ships this - you FEEL the support before you read any icon.
+            float        fBrace     = CG_CoopBrace();
+            float        fBrSway    = 1.0f, fBrShove = 1.0f;
+            if (fBrace > 0.0f) {
+                cvar_t *pBrSway  = cgi.Cvar_Get("coop_braceSway", "0.10", CVAR_ARCHIVE);
+                cvar_t *pBrShove = cgi.Cvar_Get("coop_braceShove", "0.9", CVAR_ARCHIVE);
+                fBrSway  = 1.0f - fBrace * (1.0f - (pBrSway  ? pBrSway->value  : 0.10f));
+                fBrShove = 1.0f - fBrace * (1.0f - (pBrShove ? pBrShove->value : 0.9f));
+            }
+
 
             // per-class recoil feel: bigger guns climb harder
             if (iClass & WEAPON_CLASS_PISTOL)      { fClassKick = 0.6f; }
@@ -1910,6 +1944,16 @@ void CG_OffsetFirstPersonView(refEntity_t *pREnt, qboolean bUseWorldPosition)
             else if (iClass & WEAPON_CLASS_RIFLE)  { fClassKick = 1.35f; }
             else if (iClass & WEAPON_CLASS_MG)     { fClassKick = 1.5f; }
             else if (iClass & WEAPON_CLASS_HEAVY)  { fClassKick = 1.3f; }
+            // [bug-2133] applied AFTER the class chain - it used to sit before it and was simply
+            // overwritten, so the brace never damped the visible punch for any real firearm.
+            // [user 2026-08-27] per-gun weight on top of the per-class constant, from the same
+            // authored table - so two rifles in the same class no longer punch identically.
+            {
+                static cvar_t *pHW = NULL;
+                if (!pHW) { pHW = cgi.Cvar_Get("coop_kickHeft", "0.55", CVAR_ARCHIVE); }
+                fClassKick *= 1.0f + CoopGunHeft() * pHW->value;
+            }
+            fClassKick *= fBrShove;
 
             // HOLD BREATH (steady aim): while ADS, holding the run/walk key (Shift / BUTTON_RUN) suppresses
             // the sway for up to cg_breathHoldTime sec, then a cg_breathCooldown-sec recharge. Shift still
@@ -1918,7 +1962,7 @@ void CG_OffsetFirstPersonView(refEntity_t *pREnt, qboolean bUseWorldPosition)
             {
                 cvar_t   *pHold   = cgi.Cvar_Get("cg_breathHoldTime", "7", CVAR_ARCHIVE);
                 cvar_t   *pCool   = cgi.Cvar_Get("cg_breathCooldown", "5", CVAR_ARCHIVE);
-                int       iHoldMs = (int)((pHold ? pHold->value : 7.0f) * 1000.0f);
+                int       iHoldMs = CG_BreathHoldMs();
                 int       iCoolMs = (int)((pCool ? pCool->value : 5.0f) * 1000.0f);
                 usercmd_t bcmd;
                 qboolean  bShift;
@@ -1944,7 +1988,12 @@ void CG_OffsetFirstPersonView(refEntity_t *pREnt, qboolean bUseWorldPosition)
                         s_breathCooldownEnd = 0;
                         s_breathRemainMs    = iHoldMs; // recharge complete
                     }
-                } else if ((bAds || bScoped) && bShift && s_breathRemainMs > 0) {
+                // [bug-2133] the REAL ADS button, not the mount-forced predicate. CG_AimingDownSights
+                // now returns true while mounted, which silently handed mounted players a client-side
+                // breath hold the SERVER never granted: steady sway and the inhale cue with no actual
+                // accuracy behind it, quietly draining the hold budget so it was empty when they did
+                // press ADS. The pose and FOV consumers keep using bAds.
+                } else if (((bcmd.buttons & BUTTON_COOPADS) || bScoped) && bShift && s_breathRemainMs > 0) {
                     s_breathSteady = qtrue;
                     s_breathRemainMs -= dt;
                     if (s_breathRemainMs <= 0) {
@@ -2000,8 +2049,10 @@ void CG_OffsetFirstPersonView(refEntity_t *pREnt, qboolean bUseWorldPosition)
             if (bAds && !s_breathSteady && pSway && pSway->value > 0.0f) {
                 float fSpd = pSwaySpd ? pSwaySpd->value : 1.0f;
                 float t    = cg.time * 0.001f * fSpd;
-                VectorMA(pREnt->origin, sin(t * 1.1f) * pSway->value,        mat[1], pREnt->origin); // L/R
-                VectorMA(pREnt->origin, sin(t * 1.7f + 0.6f) * pSway->value * 0.7f, mat[2], pREnt->origin); // U/D
+                // [user 2026-08-27] braced: the wander dies back to a third. The gun going still is
+                // the strongest tell that the support took hold - stronger than any icon or sound.
+                VectorMA(pREnt->origin, sin(t * 1.1f) * pSway->value * fBrSway,        mat[1], pREnt->origin); // L/R
+                VectorMA(pREnt->origin, sin(t * 1.7f + 0.6f) * pSway->value * 0.7f * fBrSway, mat[2], pREnt->origin); // U/D
             }
 
             // SCOPE SWAY (snipers) - the gun is hidden behind the scope, so wobble the VIEW so the scope
@@ -2058,6 +2109,41 @@ void CG_OffsetFirstPersonView(refEntity_t *pREnt, qboolean bUseWorldPosition)
             s_lastClip = iClip;
             s_lastWpn  = iWpn;
 
+            // [user 2026-08-27] "bonus points would be if we could get the guns model up against the
+            // object that is triggering it". Push the weapon out along its own forward axis and settle
+            // it down while mounted: the gun visibly reaches the surface and rests on it instead of
+            // floating in the same place it always sits. Eased by the envelope, so it travels there
+            // over the mount rather than teleporting.
+            if (fBrace > 0.0f) {
+                // [user 2026-08-27] "your second hand on the weapon disappears when you brace". The
+                // 7u forward push was walking the weapon out past the support hand - the two are drawn
+                // as separate entities and only the one carrying this offset moved, so the off hand was
+                // left behind and clipped out. A much smaller push keeps them together; the sense of
+                // reaching the surface now comes from the settle rather than from raw travel.
+                // [user 2026-08-27] rest it against the REAL surface: the server publishes how far
+                // the support actually was, so the weapon reaches the sandbag it is on rather than a
+                // guessed constant. Clamped hard - the off hand is a separate entity and a long push
+                // walks the gun out of it (that was the vanishing-hand bug).
+                cvar_t *pFwd  = cgi.Cvar_Get("coop_braceGunFwd", "2.0", CVAR_ARCHIVE);
+                cvar_t *pDn   = cgi.Cvar_Get("coop_braceGunDown", "1.2", CVAR_ARCHIVE);
+                cvar_t *pRest = cgi.Cvar_Get("coop_braceRest", "0", 0);
+                cvar_t *pMax  = cgi.Cvar_Get("coop_braceGunReach", "4.5", CVAR_ARCHIVE);
+                float   fKick = CG_CoopBraceKick();
+                float   fReach = (pFwd ? pFwd->value : 2.0f);
+                if (pRest && pRest->integer > 0) {
+                    float fSurf = (float)pRest->integer * 0.12f; // nearer support = less reach needed
+                    if (fSurf > fReach) { fReach = fSurf; }
+                }
+                if (pMax && fReach > pMax->value) { fReach = pMax->value; }
+                VectorMA(pREnt->origin, fBrace * fReach, mat[0], pREnt->origin);
+                VectorMA(pREnt->origin, -fBrace * (pDn ? pDn->value : 1.2f),  mat[2], pREnt->origin);
+                // the settle: the weapon drops onto the surface and rebounds
+                if (fKick > 0.0f) {
+                    VectorMA(pREnt->origin, -fKick * 3.4f, mat[2], pREnt->origin);
+                    VectorMA(pREnt->origin, -fKick * 1.2f, mat[0], pREnt->origin);
+                }
+            }
+
             if (s_recoil > 0.0f) {
                 // gun kicks UP (muzzle climb) and BACK toward the camera, then recovers. The
                 // backward term saturates INDEPENDENTLY of the cap above: muzzle climb may grow
@@ -2074,6 +2160,12 @@ void CG_OffsetFirstPersonView(refEntity_t *pREnt, qboolean bUseWorldPosition)
                 // ~15/s and an MG crawls at ~6/s off the same one constant.
                 {
                     float fRec = 9.0f / (fClassKick > 0.1f ? fClassKick : 1.0f);
+                    // [user 2026-08-27] BRACED RECOIL, portrayed rather than removed. A rested gun
+                    // still jolts - the round does not care what the bipod is on - but the support
+                    // absorbs it instead of the shooter, so the recovery is fast and lands back on
+                    // the SAME point of aim. Keeping the kick and tripling the return rate is what
+                    // reads as braced; deleting the kick would just read as a broken gun.
+                    fRec *= 1.0f + fBrace * 2.2f;
                     s_recoil -= s_recoil * (cg.frametime / 1000.0f) * fRec;
                     if (s_recoil < 0.002f) {
                         s_recoil = 0.0f;
@@ -2149,7 +2241,22 @@ void CG_OffsetFirstPersonView(refEntity_t *pREnt, qboolean bUseWorldPosition)
                         // the longer the map ran. Integrate the phase instead: frequency then
                         // sets the RATE and may change freely without moving the current
                         // position. The breathing term below had the same bug, keyed on health.
-                        s_stepPhase += fDt2 * (4.0f + fSpeed * 0.012f);
+                        // [user 2026-08-27] LOCK THE GUN BOB TO THE BOOTS. This integrator ran on its
+                        // own clock, so the weapon bobbed at one rate while the footstep sounds fired
+                        // on another - the two drifted in and out of phase and the walk never quite
+                        // felt like it belonged to the body. The engine already has the right clock on
+                        // the wire: ps.bobCycle is the 0-255 phase pmove steps footfalls from (it fires
+                        // one when bit 128 flips), so reading it makes the gun move WITH the stride
+                        // instead of near it. Falls back to the old integrator if locking is off.
+                        {
+                            static cvar_t *pLock = NULL;
+                            if (!pLock) { pLock = cgi.Cvar_Get("coop_bobLock", "1", CVAR_ARCHIVE); }
+                            if (pLock->integer && cg.snap) {
+                                s_stepPhase = ((float)cg.snap->ps.bobCycle / 256.0f) * 2.0f * M_PI;
+                            } else {
+                                s_stepPhase += fDt2 * (4.0f + fSpeed * 0.012f);
+                            }
+                        }
                         if (s_stepPhase > 62831.85f) {
                             s_stepPhase -= 62831.85f; // 10k cycles; keeps float precision sane
                         }
@@ -2328,6 +2435,7 @@ void CG_OffsetFirstPersonView(refEntity_t *pREnt, qboolean bUseWorldPosition)
                     static int     s_inspNext  = 0;     // when the next inspect may fire
                     static float   s_inspEnv   = 0.0f;  // 0..1 eased
                     static int     s_inspEnd   = 0;     // when the current inspect stops holding
+                    static int     s_inspStart = 0;     // when it began - phase source for the sweep
                     static unsigned s_inspSeed = 2463534242u;
                     static int     s_lastWpn2  = -2;
                     static float   s_spEnvPrev = 0.0f;
@@ -2404,7 +2512,14 @@ void CG_OffsetFirstPersonView(refEntity_t *pREnt, qboolean bUseWorldPosition)
                         }
                         if (s_inspEnd == 0 && cg.time > s_inspNext
                             && CoopWFeelStress() < 0.25f) { // only when genuinely calm
-                            s_inspEnd = cg.time + 2200;
+                            {
+                            // [user 2026-08-27] longer by default now that the gesture shows BOTH
+                            // flanks with a pause on each - 2200ms was sized for a single look.
+                            static cvar_t *pInspTime = NULL;
+                            if (!pInspTime) { pInspTime = cgi.Cvar_Get("coop_inspectTime", "3600", CVAR_ARCHIVE); }
+                            s_inspEnd   = cg.time + (int)pInspTime->value;
+                            s_inspStart = cg.time;
+                        }
                             CoopGunFoley("magck", 500); // turning it over in the hands
                         }
                     }
@@ -2483,6 +2598,30 @@ void CG_OffsetFirstPersonView(refEntity_t *pREnt, qboolean bUseWorldPosition)
                             // mild reduction for clip safety on long guns, not a big one.
                             fPull *= (1.05f - 0.10f * fClassKick);
                             if (fPull < 0.0f) { fPull = 0.0f; }
+
+                            // [user 2026-08-28] NEAR-PLANE GUARD. "the hand gets too close to the
+                            // screen which causes it to clip with the camera". The pull was 5.5 units
+                            // toward the eye while r_znear is 4, so the model was allowed to cross the
+                            // near plane by construction - and the HANDS lead the weapon, so they cross
+                            // first and clip before the gun visibly does.
+                            //
+                            // Measure where the pull actually leaves the model along the view axis and
+                            // give up whatever part of it would breach a margin in front of the near
+                            // plane. Clamping the RESULT rather than lowering the cvar means the
+                            // inspect keeps its full travel wherever there is room for it, and only
+                            // gives ground on the long guns that genuinely run out.
+                            {
+                                static cvar_t *pMin = NULL;
+                                float fFwd, fLimit, fAllow;
+
+                                if (!pMin) { pMin = cgi.Cvar_Get("coop_inspectMinDist", "7", CVAR_ARCHIVE); }
+
+                                fFwd   = DotProduct(pREnt->origin, mat[0]) - DotProduct(cg.refdef.vieworg, mat[0]);
+                                fLimit = pMin->value;
+                                fAllow = fFwd - fLimit;            // how much pull there is room for
+                                if (fAllow < 0.0f) { fAllow = 0.0f; }
+                                if (e * fPull > fAllow) { fPull = fAllow / ((e > 0.001f) ? e : 1.0f); }
+                            }
 
                             VectorMA(pREnt->origin, e * fUp,    mat[2], pREnt->origin); // raise toward the eyes
                             VectorMA(pREnt->origin, e * -fPull, mat[0], pREnt->origin); // and IN toward the player
@@ -2567,8 +2706,55 @@ void CG_OffsetFirstPersonView(refEntity_t *pREnt, qboolean bUseWorldPosition)
                             // coop_inspectTurn rolls the other way if the flank tips away instead of
                             // toward you - the sign depends on the rig's handedness, which is not
                             // something to guess at.
-                            fRoll = e * 42.0f * pInspRot->value;
-                            fYaw  = e * 8.0f  * pInspRot->value;
+                            // [user 2026-08-27] BOTH SIDES. The roll only ever went one way, so you
+                            // only ever saw the left flank - the right side of the weapon is modelled
+                            // and textured (the reload animations already swing these models through
+                            // every angle) and was simply never presented.
+                            //
+                            // The sign is now swept across the inspect window with a DWELL at each
+                            // extreme rather than a plain sine, which would race through both sides
+                            // without ever resting on either: hold left, roll through centre, hold
+                            // right, return. coop_inspectBothSides 0 restores the single-sided look.
+                            {
+                                static cvar_t *pBoth = NULL;
+                                float          p, sgn;
+
+                                if (!pBoth) { pBoth = cgi.Cvar_Get("coop_inspectBothSides", "1", CVAR_ARCHIVE); }
+                                sgn = 0.0f;
+                                if (pBoth->integer && s_inspEnd > s_inspStart) {
+                                    // [user 2026-08-27] "isn't very fluid between flipping sides...
+                                    // and it's really abrupt when it goes back to its base position".
+                                    //
+                                    // Both came from the same thing: the roll was still at FULL
+                                    // deflection when the window expired, so the envelope's fast
+                                    // release (6/s, correct for a cancel) yanked ~50 degrees of roll
+                                    // home in a sixth of a second. The gesture now returns itself to
+                                    // neutral before the window ends, so the release has nothing left
+                                    // to undo, and the side-to-side cross is given twice the time it
+                                    // had. Five phases: ease out to the left flank, hold, cross,
+                                    // hold, ease home - all smoothstepped, none of them linear.
+                                    p = (float)(cg.time - s_inspStart) / (float)(s_inspEnd - s_inspStart);
+                                    if (p < 0.0f) { p = 0.0f; } else if (p > 1.0f) { p = 1.0f; }
+                                    if (p < 0.12f) {
+                                        float t = p / 0.12f;
+                                        sgn = t * t * (3.0f - 2.0f * t);          // out to the left
+                                    } else if (p < 0.34f) {
+                                        sgn = 1.0f;                               // hold, left flank
+                                    } else if (p < 0.58f) {
+                                        float t = (p - 0.34f) / 0.24f;            // cross over
+                                        sgn = 1.0f - 2.0f * (t * t * (3.0f - 2.0f * t));
+                                    } else if (p < 0.80f) {
+                                        sgn = -1.0f;                              // hold, right flank
+                                    } else {
+                                        float t = (p - 0.80f) / 0.20f;            // ease home to level
+                                        sgn = -1.0f + (t * t * (3.0f - 2.0f * t));
+                                    }
+                                } else {
+                                    sgn = 1.0f;
+                                }
+                                fRoll = e * 42.0f * pInspRot->value * sgn;
+                                fYaw  = e * 8.0f  * pInspRot->value * sgn;
+                            }
 
                             // [user 2026-08-21] "when the idle side gun view comes up its practically
                             // off screen... all the way to the right. which is a problem with most of
@@ -2783,10 +2969,14 @@ void CG_OffsetFirstPersonView(refEntity_t *pREnt, qboolean bUseWorldPosition)
                 // and is suppressed while holding breath. Small enough to be felt rather than seen.
                 if (!bScoped) {
                     static cvar_t *pBr      = NULL;
+                    static cvar_t *pBrAds   = NULL; // HZM coop PART F - how much ADS damping releases under stress
                     static float   s_brPhase = 0.0f;
-                    float          hp, amp2, t2;
+                    float          hp, amp2, t2, fRattle;
                     if (!pBr) {
                         pBr = cgi.Cvar_Get("cg_weaponBreath", "1", CVAR_ARCHIVE);
+                    }
+                    if (!pBrAds) {
+                        pBrAds = cgi.Cvar_Get("coop_stressBreathAds", "0.85", CVAR_ARCHIVE);
                     }
                     hp = (cg.snap && cg.snap->ps.stats[STAT_MAXHEALTH] > 0)
                              ? (float)cg.snap->ps.stats[STAT_HEALTH] / (float)cg.snap->ps.stats[STAT_MAXHEALTH]
@@ -2796,20 +2986,159 @@ void CG_OffsetFirstPersonView(refEntity_t *pREnt, qboolean bUseWorldPosition)
                     } else if (hp > 1.0f) {
                         hp = 1.0f;
                     }
-                    amp2 = 0.30f * pBr->value * (1.0f + (1.0f - hp) * 1.6f) * (bAds ? 0.35f : 1.0f);
+                    // HZM coop [user 2026-08-24] PART F - STRESS PERTURBATION.
+                    //
+                    // Breathing was keyed on HEALTH ALONE, so an unhurt player being shot at,
+                    // sprinting and out of breath had exactly the same steady hands as one
+                    // standing alone in an empty room. CoopWFeelStress() is the project's single
+                    // rattled scalar (suppression, health, stamina, speed) - read it rather than
+                    // invent a second input.
+                    //
+                    // Deliberately DIFFERENT from the injury shake a few lines above, which does
+                    // `sev = (1 - hp) * (0.65 + 0.35 * stress)` so stress can amplify shaky hands
+                    // but never create them on an unhurt man. That gate is right for HANDS and
+                    // wrong for BREATHING: exertion and fear move your chest whether or not you
+                    // have been hit. So this one takes the MAX instead of the product.
+                    //
+                    // MAX, not sum: health is already a stress input (weight 0.25), so adding the
+                    // two would double-count it and compound into an amplitude neither was tuned
+                    // for. Whichever is worse wins, which keeps the old health-only curve intact
+                    // as a floor.
+                    fRattle = 1.0f - hp;
+                    {
+                        float fStr = CoopWFeelStress();
+                        if (fStr > fRattle) {
+                            fRattle = fStr;
+                        }
+                    }
+
+                    // ADS damping is no longer a flat 0.35. [user addendum 2026-08-20] "when you
+                    // are injured I think gun shaking should be more prevelant when ads and also
+                    // when not". Everything else in this file damps hard under sights because
+                    // sight-picture disturbance is normally unwanted; for stress it IS the point,
+                    // so the damping RELEASES as the player gets more rattled. Calm and aiming
+                    // stays exactly as steady as it is today - at fRattle 0 this is still 0.35.
+                    //
+                    // COSMETIC ONLY, and it must stay that way: this moves the view weapon, never
+                    // the aim vector, so rounds still go where the reticle points. Making it
+                    // functional is a combat-balance change and a separate decision.
+                    {
+                        float fAdsMul = 0.35f + 0.65f * fRattle * (pBrAds ? pBrAds->value : 0.85f);
+                        if (fAdsMul > 1.0f) {
+                            fAdsMul = 1.0f;
+                        }
+                        amp2 = 0.30f * pBr->value * (1.0f + fRattle * 1.6f) * (bAds ? fAdsMul : 1.0f);
+                    }
                     if (s_breathSteady) {
                         amp2 *= 0.15f;
                     }
                     // accumulated, not time x frequency - see the footfall note above. Health
                     // changes less often than speed, but a phase jump on every hit is a visible
                     // snap at exactly the moment the player is being shot at.
-                    s_brPhase += fDt2 * (1.15f + (1.0f - hp) * 0.9f); // hurt = faster breathing
+                    s_brPhase += fDt2 * (1.15f + fRattle * 0.9f); // hurt OR rattled = faster breathing
                     if (s_brPhase > 62831.85f) {
                         s_brPhase -= 62831.85f;
                     }
                     t2 = s_brPhase;
                     VectorMA(pREnt->origin, amp2 * (float)sin(t2), mat[2], pREnt->origin);
                     VectorMA(pREnt->origin, amp2 * 0.4f * (float)sin(t2 * 0.7f), mat[1], pREnt->origin);
+                    // PART F - THE HANDS NEVER SETTLE TWICE IN THE SAME PLACE.
+                    //
+                    // The two terms above sit at a 1 : 0.7 frequency ratio, which is RATIONAL
+                    // (10:7), so the figure-8 closes on itself every 10 cycles and the rest point
+                    // repeats exactly. A third term at ~1/pi of the base is irrational against
+                    // both, so the composite path never closes and the hands never return to
+                    // precisely the same point.
+                    //
+                    // MODULATE, DO NOT REPLACE: this rides the SAME accumulator and the same
+                    // amplitude. No new phase, no new state, no second oscillator - two wobbles
+                    // at two frequencies in the one state that needs precision is the exact
+                    // failure mode the plan called out. It also costs nothing when calm, because
+                    // it is scaled by fRattle and skipped outright below the threshold.
+                    if (fRattle > 0.002f) {
+                        VectorMA(pREnt->origin,
+                                 amp2 * 0.22f * fRattle * (float)sin(t2 * 0.31831f),
+                                 mat[1], pREnt->origin);
+                    }
+
+                    // HZM coop [user 2026-08-24] HIT FLINCH - the weapon jolts when YOU are hit.
+                    //
+                    // The AI has had a hit reaction since coop_aiHitReact; the player had a viewkick and
+                    // nothing else, so rounds landing on you disturbed the camera but never the hands.
+                    //
+                    // TRANSLATION ONLY, and that is a constraint rather than a shortcut: the FPS arms and
+                    // the gun are separate render entities, and the per-gun ADS tune is the only rotation
+                    // in this system - capped near 12 degrees precisely because more visibly detaches the
+                    // gun from the hands (bug-105). A flinch-scale rotation would pull the weapon out of
+                    // the player's grip.
+                    //
+                    // Direction is real, not decorative. STAT_DAMAGEDIR is damage_yaw in TENTHS OF A
+                    // DEGREE, 0..3600 (player.cpp:8830), a bearing relative to facing - so a hit from the
+                    // left shoves the muzzle right and one from behind shoves it forward, which reads as
+                    // being pushed BY the round rather than as a generic shake.
+                    //
+                    // Cosmetic: view weapon only, never the aim vector. Being shot must not silently
+                    // become an accuracy penalty - that is a combat-balance change and a separate call.
+                    {
+                        static cvar_t *pFl    = NULL;
+                        static float   s_flAmp = 0.0f;   // envelope, units
+                        static float   s_flFwd = 0.0f, s_flSide = 0.0f; // unit direction of the last hit
+                        static int     s_flLastDir = -99999;
+                        static int     s_flLastHp  = -1;
+                        int            iDir, iHp;
+
+                        if (!pFl) { pFl = cgi.Cvar_Get("coop_hitFlinch", "1.0", CVAR_ARCHIVE); }
+
+                        iDir = cg.snap ? cg.snap->ps.stats[STAT_DAMAGEDIR] : 0;
+                        iHp  = cg.snap ? cg.snap->ps.stats[STAT_HEALTH] : 0;
+
+                        // Re-seed rather than fire when the gate is shut, so re-entering play does not
+                        // flinch on a delta that accumulated while dead or spectating (bug-2003's fix 4).
+                        if (iHp <= 0
+                            || (cg.snap->ps.pm_flags & (PMF_SPECTATING | PMF_INTERMISSION | PMF_CAMERA_VIEW))) {
+                            s_flLastDir = iDir;
+                            s_flLastHp  = iHp;
+                            s_flAmp     = 0.0f;
+                        } else {
+                            // TWO edges, deliberately. The bearing alone misses a second hit from the same
+                            // direction (identical value, no change); the health drop alone misses a hit
+                            // that does no damage. Either one is a hit.
+                            qboolean bHit = qfalse;
+                            float    fMag = 0.35f;
+
+                            if (s_flLastHp >= 0 && iHp < s_flLastHp) {
+                                float lost = (float)(s_flLastHp - iHp);
+                                // STAT_HEALTH is a PERCENTAGE (player.cpp:8402), not raw HP, so this is
+                                // already normalised and does not need dividing by coop_health - the exact
+                                // unit slip that left the suppression severity term ~7.5x too weak.
+                                fMag = 0.30f + lost * 0.055f;
+                                if (fMag > 1.10f) { fMag = 1.10f; }
+                                bHit = qtrue;
+                            } else if (iDir != s_flLastDir) {
+                                bHit = qtrue;
+                            }
+                            s_flLastDir = iDir;
+                            s_flLastHp  = iHp;
+
+                            if (bHit && pFl->value > 0.0f) {
+                                float bearing = ((float)iDir / 10.0f) * (float)M_PI / 180.0f;
+                                // away from the shot: the round pushes you off it
+                                s_flFwd  = -(float)cos(bearing);
+                                s_flSide = -(float)sin(bearing);
+                                fMag *= pFl->value * (1.0f + 0.5f * CoopWFeelStress());
+                                if (fMag > s_flAmp) { s_flAmp = fMag; } // a bigger hit wins, no stacking
+                            }
+                        }
+
+                        if (s_flAmp > 0.0005f) {
+                            VectorMA(pREnt->origin, s_flAmp * s_flFwd * 0.9f,  mat[0], pREnt->origin);
+                            VectorMA(pREnt->origin, s_flAmp * s_flSide * 1.1f, mat[1], pREnt->origin);
+                            VectorMA(pREnt->origin, s_flAmp * -0.45f,          mat[2], pREnt->origin);
+                            // fast one-sided decay with a floor - a flinch is a snap, not a wobble.
+                            s_flAmp -= s_flAmp * fDt2 * 7.5f;
+                            if (s_flAmp < 0.002f) { s_flAmp = 0.0f; }
+                        }
+                    }
                 }
             }
 
@@ -2822,6 +3151,11 @@ void CG_OffsetFirstPersonView(refEntity_t *pREnt, qboolean bUseWorldPosition)
                 static qboolean s_lagInit   = qfalse;
                 static float    s_prevPitch = 0.0f, s_prevYaw = 0.0f;
                 static float    s_lagX = 0.0f, s_lagY = 0.0f; // current trail offset (units): X=L/R, Y=U/D
+                static float    s_lagVX = 0.0f, s_lagVY = 0.0f; // [weight 4] the velocity state that
+                                                               // makes it a real second-order spring
+                cvar_t *pLagDamp = cgi.Cvar_Get("cg_weaponLagDamping", "0.62", CVAR_ARCHIVE);
+                cvar_t *pLagRef  = cgi.Cvar_Get("cg_weaponLagRefFps", "60", CVAR_ARCHIVE);
+                cvar_t *pLagHeft = cgi.Cvar_Get("cg_weaponLagHeft", "0.55", CVAR_ARCHIVE);
                 cvar_t *pLag    = cgi.Cvar_Get("cg_weaponLag", "0.7", CVAR_ARCHIVE);        // units of trail / deg
                 cvar_t *pLagMax = cgi.Cvar_Get("cg_weaponLagMax", "3.5", CVAR_ARCHIVE);     // clamp (units)
                 cvar_t *pLagStf = cgi.Cvar_Get("cg_weaponLagStiffness", "7", CVAR_ARCHIVE); // spring rate (1/s)
@@ -2830,6 +3164,16 @@ void CG_OffsetFirstPersonView(refEntity_t *pREnt, qboolean bUseWorldPosition)
                 float   fMaxLag = pLagMax ? pLagMax->value : 3.5f;
                 float   fStiff  = pLagStf ? pLagStf->value : 7.0f;
                 float   fWeight = 1.0f;
+                // [user 2026-08-27] BRACED damps the lag spring - DAMPED, never frozen. A gun pinned
+                // rigid to the crosshair reads as a turret, which is the complaint every game that
+                // over-tuned this got; leaving some trail is what keeps it feeling like a weapon.
+                {
+                    float fBr = CG_CoopBrace();
+                    if (fBr > 0.0f) {
+                        cvar_t *pBrLag = cgi.Cvar_Get("coop_braceLag", "0.18", CVAR_ARCHIVE);
+                        fGain *= 1.0f - fBr * (1.0f - (pBrLag ? pBrLag->value : 0.18f));
+                    }
+                }
                 float   dt      = (cg.frametime > 0) ? (cg.frametime / 1000.0f) : 0.0f;
                 float   dPitch, dYaw, k, tX, tY;
 
@@ -2857,16 +3201,79 @@ void CG_OffsetFirstPersonView(refEntity_t *pREnt, qboolean bUseWorldPosition)
                     // first frame / teleport / map change: snap to rest, don't lurch
                     s_lagInit = qtrue;
                     s_lagX = s_lagY = 0.0f;
+                    s_lagVX = s_lagVY = 0.0f;
                 } else if (fGain > 0.0f && !bScoped) {
-                    tX = -dYaw   * fGain * fWeight; // gun trails opposite the turn
-                    tY =  dPitch * fGain * fWeight;
-                    if (tX >  fMaxLag) { tX =  fMaxLag; } else if (tX < -fMaxLag) { tX = -fMaxLag; }
-                    if (tY >  fMaxLag) { tY =  fMaxLag; } else if (tY < -fMaxLag) { tY = -fMaxLag; }
-                    s_lagX += (tX - s_lagX) * k;
-                    s_lagY += (tY - s_lagY) * k;
+                    // [weight 4] TWO BUGS AND A LIMIT, all in these four lines.
+                    //
+                    // FRAMERATE: the target was built from a per-FRAME angle delta, so the same mouse
+                    // movement produced a trail four times longer at 60fps than at 250 - every tuning
+                    // number in this block was silently calibrated to one machine. The target is now
+                    // built from angular VELOCITY and re-scaled to a reference rate, so it means the
+                    // same thing on every machine.
+                    //
+                    // FIRST ORDER: `pos += (target - pos) * k` can only ever approach. A real mass
+                    // overshoots and comes back, and that overshoot-and-catch is precisely the motion
+                    // the eye reads as inertia - a first-order spring cannot express it at any gain.
+                    // Second order now: a velocity state, a spring constant and a damping ratio.
+                    //
+                    // [weight 5] ASYMMETRIC. Heavy things displace easily and realign reluctantly, so
+                    // the spring is stiffer while the gun is being pushed away from rest than while it
+                    // is returning. Symmetric springs read as rubber; this reads as weight.
+                    float fRefFps = (pLagRef && pLagRef->value > 10.0f) ? pLagRef->value : 60.0f;
+                    float fRateX  = -dYaw / dt;
+                    float fRateY  =  dPitch / dt;
+                    float fHeft   = CoopGunHeft();
+                    float fZeta   = (pLagDamp ? pLagDamp->value : 0.62f);
+                    float fOmega, fAccel;
+
+                    // [vet, bug-2141] CLAMP THE RATE, NOT THE WEIGHTED TARGET. Clamping after the
+                    // weight multiply meant that on any brisk turn - and a mouse turn is routinely
+                    // 300-1500 deg/s - every weapon saturated at the same 3.5 and the weight term was
+                    // discarded entirely. All that survived was omega, which heft LOWERS, so a lower
+                    // omega covered less of an identical target and the heavy guns trailed LESS than
+                    // the pistol. The cue was inverted at exactly the speeds people actually turn at.
+                    // Clamping the input rate instead keeps the ceiling proportional to weight, so
+                    // heft raises the amplitude AND slows the settle, which is what mass does.
+                    {
+                        float fRateMax = (fGain > 0.0001f) ? (fMaxLag * fRefFps / fGain) : 1e9f;
+                        if (fRateX >  fRateMax) { fRateX =  fRateMax; }
+                        else if (fRateX < -fRateMax) { fRateX = -fRateMax; }
+                        if (fRateY >  fRateMax) { fRateY =  fRateMax; }
+                        else if (fRateY < -fRateMax) { fRateY = -fRateMax; }
+                    }
+                    tX = fRateX * fGain * fWeight / fRefFps;
+                    tY = fRateY * fGain * fWeight / fRefFps;
+
+                    // heavier = a lower natural frequency: slower to move, slower to settle
+                    fOmega = fStiff / (1.0f + fHeft * (pLagHeft ? pLagHeft->value : 0.55f));
+
+                    // X
+                    fAccel = (tX - s_lagX) * fOmega * fOmega - s_lagVX * 2.0f * fZeta * fOmega;
+                    if ((tX - s_lagX) * s_lagVX < 0.0f) { fAccel *= 1.35f; } // displacing: stiffer
+                    s_lagVX += fAccel * dt;
+                    s_lagX  += s_lagVX * dt;
+                    // Y
+                    fAccel = (tY - s_lagY) * fOmega * fOmega - s_lagVY * 2.0f * fZeta * fOmega;
+                    if ((tY - s_lagY) * s_lagVY < 0.0f) { fAccel *= 1.35f; }
+                    s_lagVY += fAccel * dt;
+                    s_lagY  += s_lagVY * dt;
+
+                    // the clamp bounds the POSITION too - an underdamped spring can otherwise ring
+                    // out past the authored maximum on a fast flick
+                    // the rail scales with weight too - a shared ceiling would re-flatten everything
+                    // the rate clamp above just preserved, plus a little headroom for the overshoot
+                    // that makes it read as inertia in the first place
+                    {
+                        float fRail = fMaxLag * fWeight * 1.15f;
+                        if (s_lagX >  fRail) { s_lagX =  fRail; s_lagVX = 0.0f; }
+                        else if (s_lagX < -fRail) { s_lagX = -fRail; s_lagVX = 0.0f; }
+                        if (s_lagY >  fRail) { s_lagY =  fRail; s_lagVY = 0.0f; }
+                        else if (s_lagY < -fRail) { s_lagY = -fRail; s_lagVY = 0.0f; }
+                    }
                 } else {
                     s_lagX += (0.0f - s_lagX) * k; // scoped/disabled: ease out
                     s_lagY += (0.0f - s_lagY) * k;
+                    s_lagVX = s_lagVY = 0.0f;
                 }
 
                 VectorMA(pREnt->origin, s_lagX, mat[1], pREnt->origin); // left/right trail
@@ -2909,6 +3316,23 @@ void CG_OffsetFirstPersonView(refEntity_t *pREnt, qboolean bUseWorldPosition)
                 qboolean bAiming  = (bAds || bScoped) ? qtrue : qfalse;
                 qboolean bAlive   = (cg.snap && cg.snap->ps.stats[STAT_HEALTH] > 0) ? qtrue : qfalse;
                 qboolean bWantSprint = qfalse;
+                // HZM coop [user 2026-08-26] CRAWL gun-lower rides the SAME envelope as sprint: while
+                // prone and actually moving, the server strips the fire buttons (player.cpp,
+                // coop_proneMoveNoFire) - this dip is the visual telling you WHY the trigger is dead.
+                // Same 30/15 u/s hysteresis as the server so the two agree.
+                qboolean bWantCrawl = qfalse;
+                {
+                    static qboolean s_crawlLatch = qfalse;
+                    if (cg.predicted_player_state.pm_flags & PMF_VIEW_PRONE) {
+                        vec_t *cv = cg.predicted_player_state.velocity;
+                        float  c2 = cv[0] * cv[0] + cv[1] * cv[1];
+                        if (c2 > 30.0f * 30.0f)      { s_crawlLatch = qtrue; }
+                        else if (c2 < 15.0f * 15.0f) { s_crawlLatch = qfalse; }
+                    } else {
+                        s_crawlLatch = qfalse;
+                    }
+                    bWantCrawl = s_crawlLatch;
+                }
                 usercmd_t scmd;
                 float    fEnvTarget, k;
 
@@ -2950,7 +3374,7 @@ void CG_OffsetFirstPersonView(refEntity_t *pREnt, qboolean bUseWorldPosition)
                     }
                 }
 
-                fEnvTarget = (bWantSprint && s_spStam > 0.0f) ? 1.0f : 0.0f;
+                fEnvTarget = ((bWantSprint && s_spStam > 0.0f) || bWantCrawl) ? 1.0f : 0.0f;
                 if (!s_spInit || dt <= 0.0f || dt >= 0.5f) {
                     s_spInit = qtrue;
                     s_spEnv  = fEnvTarget;
@@ -3663,6 +4087,66 @@ secondary-attack button (RMB), alive, NOT in a native scope/zoom (snipers/binocu
 and not in a camera view. Used by the ADS zoom (CG_CalcFov) and the third->first person ADS switch.
 ====================
 */
+// [vet, bug-2141] ONE definition of the hold budget. The weight penalty was written into
+// CG_GetBreathState, which has no callers anywhere in the tree, while the mechanic that actually
+// runs kept its own unmodified copy - so a Panzerschreck held its breath exactly as long as a Luger
+// and the feature was entirely inert. Both sites now call this.
+static int CG_BreathHoldMs(void)
+{
+    static cvar_t *pH = NULL;
+    int            ms;
+
+    if (!pH) { pH = cgi.Cvar_Get("cg_breathHoldTime", "7", CVAR_ARCHIVE); }
+    ms = (int)(pH->value * 1000.0f * (1.0f - CoopGunHeft() * 0.35f));
+    return (ms < 100) ? 100 : ms;
+}
+
+// [weight 6, vet bug-2142] MUZZLE DROOP - the ANGLE lives here, the rotation is applied to the
+// WEAPON entity in cg_modelanim.c.
+//
+// The first cut rotated pREnt->axis in CG_OffsetFirstPersonView, which looked right and was wrong:
+// that entity is the first-person PLAYER model and its origin is at the FEET, so rotating its axis
+// swung the whole rig - arms, weapon and every tag-attached prop - through an arc on a ~60 unit
+// lever. The dominant result was a parasitic forward shove roughly twice the size of the drop it was
+// trying to produce, and because it never touched pREnt->origin the feel budget could not see it.
+// This function's own history records the identical failure for the idle inspect thirty lines away.
+//
+// Rotation about the GRIP is what a drooping muzzle is, and the weapon entity's origin already sits
+// at tag_weapon_right - so the fix is to rotate there, beside the per-gun ADS tune, where the pivot
+// is correct by construction and costs no compensation at all.
+float CG_CoopDroopAngle(void)
+{
+    static cvar_t *pDroop = NULL, *pDroopMove = NULL;
+    static float   s_droop = 0.0f;
+    static int     s_last  = -1;
+    float          fTgt, fSpd, fDt;
+
+    if (!pDroop) {
+        pDroop     = cgi.Cvar_Get("coop_droop", "2.6", CVAR_ARCHIVE);     // degrees at full weight
+        pDroopMove = cgi.Cvar_Get("coop_droopMove", "1.8", CVAR_ARCHIVE); // extra while moving
+    }
+    if (s_last == cg.time) {
+        return s_droop;   // once per frame, not once per caller
+    }
+    s_last = cg.time;
+
+    fSpd = 0.0f;
+    if (cg.snap) {
+        fSpd = (float)sqrt((double)(cg.snap->ps.velocity[0] * cg.snap->ps.velocity[0]
+                                  + cg.snap->ps.velocity[1] * cg.snap->ps.velocity[1]));
+    }
+    fTgt = CoopGunHeft() * (pDroop->value + pDroopMove->value * (fSpd > 200.0f ? 1.0f : fSpd / 200.0f));
+    // ADS cancels it outright: the sights are up because the player is deliberately holding them
+    // there, and fighting their aim would be the one unforgivable version of this.
+    fTgt *= (1.0f - CG_AdsPoseFactor());
+
+    fDt = (cg.frametime > 0) ? ((float)cg.frametime / 1000.0f) : 0.0f;
+    fDt *= 4.0f;
+    if (fDt > 1.0f) { fDt = 1.0f; }
+    s_droop += (fTgt - s_droop) * fDt;
+    return s_droop;
+}
+
 qboolean CG_AimingDownSights(void)
 {
     usercmd_t cmd;
@@ -3677,6 +4161,30 @@ qboolean CG_AimingDownSights(void)
         return qfalse;
     }
 
+    // [user 2026-08-27] MOUNTING FORCES ADS - "we hit Use to mount when we see the icon, that forces
+    // you in very smooth ads". Returning true here routes the mount through the WHOLE existing ADS
+    // pipeline rather than a parallel one, so the pose, FOV and framing all ease in on the envelope
+    // that is already tuned: the smoothness is inherited, not re-implemented.
+    // [user 2026-08-27] MOUNTING IS AIMING. The user's framing: "have the mounting system just force
+    // ADS on the weapon using what is tuned" - so the mount routes through the EXISTING per-gun ADS
+    // pipeline rather than a parallel pose, and inherits the sight picture, FOV and easing already
+    // dialled in for every weapon. Nothing new to tune, and the transition is smooth for free.
+    //
+    // This is not the earlier dead-button problem: back then the mount held ADS true forever with no
+    // way out. Now Use unmounts, so coming out of the aim is one keypress and the button is live
+    // again the moment you do.
+    // [bug 2026-08-28] Key on the BINARY mount flag, not on the eased envelope crossing 0.5. Testing
+    // the envelope meant the ADS pose only started once the brace was half-risen and then eased again
+    // on its own curve - three serial eases, so the FOV arrived long before the sight picture and the
+    // mount read as a zoom rather than an aim. The flag flips the instant you mount; the existing
+    // per-gun ADS envelope supplies all the smoothing, which is the whole point of routing through it.
+    {
+        static cvar_t *pMnt = NULL;
+        if (!pMnt) { pMnt = cgi.Cvar_Get("coop_braceMounted", "0", 0); }
+        if (pMnt->integer) {
+            return qtrue;
+        }
+    }
     cgi.GetUserCmd(cgi.GetCurrentCmdNumber(), &cmd);
     return (cmd.buttons & BUTTON_COOPADS) ? qtrue : qfalse; // ADS on its own button, decoupled from secondary-fire/bash
 }
@@ -5315,6 +5823,89 @@ qboolean CG_GetStamina(float *outFrac)
     return qtrue;
 }
 
+// HZM coop [user 2026-08-27] GUN BRACING - client mirror of the server envelope.
+//
+// The server owns the truth (geometry traces, hysteresis) and publishes it as coop_braceView 0-100
+// on the same change-only stufftext channel cover uses - every pm_flags bit is already allocated, so
+// there is no room for a real flag. Change-only means the value arrives in steps, so we ease a LOCAL
+// copy toward it: the feel scaling below reads a smooth curve rather than a staircase.
+//
+// The thunk fires on the RISING edge only, and only once the server has committed (its enter dwell
+// already ran), so brushing past a wall cannot machine-gun the sound. Local sound = you hear your own
+// gun settle and nobody else's, which is the user's call.
+// Is a mount OFFERED right now? Drives the prompt only - never the effects, which follow the
+// committed mount below.
+qboolean CG_CoopBraceAvail(void)
+{
+    static cvar_t *pAvail = NULL;
+    if (!pAvail) { pAvail = cgi.Cvar_Get("coop_braceAvail", "0", 0); }
+    return pAvail->integer ? qtrue : qfalse;
+}
+
+float s_braceKickEnv = 0.0f;   // mount-settle impulse, 1 -> 0 over ~0.35s
+
+float CG_CoopBraceKick(void)
+{
+    return s_braceKickEnv;
+}
+
+float CG_CoopBrace(void)
+{
+    static cvar_t *pView = NULL;
+    static float   s_env  = 0.0f;
+    static qboolean s_was = qfalse;
+    static int     s_last = -1;
+    float          fTgt, dt, step;
+
+    if (!pView) { pView = cgi.Cvar_Get("coop_braceView", "0", 0); }
+
+    // a fresh map/respawn leaves the cvar behind; the server re-publishes on any change, and the
+    // ease below cannot strand because the target is read every frame.
+    // [bug-2133] EASE ONCE PER FRAME. This advanced on every CALL, and it is called well over a
+    // dozen times a frame (CG_AimingDownSights alone has ~25 call sites), so the 6/s rise ran at
+    // roughly fifteen times its intended rate and the envelope snapped - reproducing the exact
+    // stufftext staircase the ease exists to hide, and desyncing it from the server envelope that
+    // drives the real spread. Everything now reads one value computed once.
+    if (s_last != cg.time) {
+        qboolean bOn;
+        s_last = cg.time;
+
+        fTgt = (float)pView->integer * 0.01f;
+        if (fTgt < 0.0f) { fTgt = 0.0f; } else if (fTgt > 1.0f) { fTgt = 1.0f; }
+
+        dt   = (cg.frametime > 0) ? ((float)cg.frametime / 1000.0f) : 0.0f;
+        step = dt * ((fTgt > s_env) ? 6.0f : 3.0f);
+        if (s_env < fTgt) {
+            s_env += step;
+            if (s_env > fTgt) { s_env = fTgt; }
+        } else if (s_env > fTgt) {
+            s_env -= step;
+            if (s_env < fTgt) { s_env = fTgt; }
+        }
+
+        bOn = (fTgt > 0.0f) ? qtrue : qfalse;
+        // [user 2026-08-27] "it doesn't really feel like theres any weight to bracing the gun and the
+        // camera doesnt really respond". Setting a rifle down on something is a small collision: the
+        // weapon stops against the surface and the shooter's whole upper body settles onto it. One
+        // impulse on the rising edge, decayed fast, drives both the gun and the view below.
+        if (bOn && !s_was) { s_braceKickEnv = 1.0f; }
+        // The cue now marks a deliberate act (Use pressed), not a surface drifting into range, so it
+        // can be a real sound instead of a whisper - "no real noise" was half the reason the whole
+        // thing was unreadable.
+        if (bOn && !s_was) {
+            cgi.S_StartLocalSound("sound/coop_brace/brace_on.wav", qfalse);
+        } else if (!bOn && s_was) {
+            cgi.S_StartLocalSound("sound/coop_brace/brace_off.wav", qfalse);
+        }
+        s_was = bOn;
+        if (s_braceKickEnv > 0.0f) {
+            s_braceKickEnv -= dt * 3.0f;
+            if (s_braceKickEnv < 0.0f) { s_braceKickEnv = 0.0f; }
+        }
+    }
+    return s_env;
+}
+
 void CG_FeelStressAdvance(void)
 {
     static cvar_t *pOn = NULL;
@@ -5374,6 +5965,17 @@ void CG_FeelStressAdvance(void)
         if (CG_IsBreathSteady()) {
             raw *= 0.60f;
         }
+    // [user 2026-08-27] BRACED damper - the TWIN of the server's in TickCoopStress. Identical weight
+    // by contract: if these two drift, the sway you feel stops matching the spread you actually get.
+    {
+    float fBrEnv = CG_CoopBrace();
+    if (fBrEnv > 0.0f) {
+        // [bug-2133] the twins had drifted (server 0.30, client 0.60) - the felt sway was damped
+        // twice as hard as the spread actually was. One shared cvar, so they cannot drift again.
+        cvar_t *pBS = cgi.Cvar_Get("coop_braceStress", "0.50", CVAR_ARCHIVE);
+        raw *= 1.0f - fBrEnv * (pBS ? pBS->value : 0.50f);
+    }
+    }
         if (raw < 0.0f) { raw = 0.0f; } else if (raw > 1.0f) { raw = 1.0f; }
     }
 
@@ -5452,6 +6054,121 @@ void CG_NoteLocalFire(void)
 }
 
 // Called once per frame beside the other feel updates.
+// HZM coop [user 2026-08-28] TIME OF DAY / DAYLIGHT GRADE.
+//
+// MOHAA cannot relight the world. Lightmaps are baked; BSP surfaces carry no per-style lightmap set
+// at all (`styles` appears zero times in either renderer's BSP loader), so lightstyles drive only
+// entity dlights and particle colour - setting style 0 changes nothing. Every worldspawn lighting key
+// (sunlight, suncolor, ambientlight, sundirection) is declared with a NULL handler and discarded. And
+// r_mapOverBrightBits is baked in at lightmap load and is CVAR_LATCH, needing a vid_restart that
+// crashes gl2 (bug-1181).
+//
+// What DOES move every frame is the gl2 grade in RB_ToneMap, which is applied to the world before the
+// HUD is drawn. So time of day is a GRADE, not a relight: exposure down, saturation down, temperature
+// cooled. Combined with $world farplane_color - which on gl2 also tints the SKYBOX itself, since the
+// sky shell is drawn through the forward global fog - that is a convincing dusk with no baked data
+// touched and no reload.
+//
+// One scalar serves two features deliberately: a scripted day->dusk->night cycle, and 'it looks
+// brighter when the weather is clear'. They are the same knob at different values.
+// HZM coop [found 2026-08-28] HEADSHOT CUE, now shooter-only. The server used to play this with
+// attacker->Sound(..., CHAN_LOCAL), which LOOKS local but ends in SV_Sound - a loop over every active
+// client - and CHAN_LOCAL then makes it 2D at full volume with no attenuation. All four players in a
+// coop game heard every headshot as if it were their own. The server now bumps a per-client counter
+// instead; a change means THIS player got the headshot.
+static void CG_CoopHeadshotCueThink(void)
+{
+    static cvar_t *pCue = NULL;
+    static int     s_last = -1;
+
+    if (!pCue) { pCue = cgi.Cvar_Get("coop_hsCue", "0", 0); }
+
+    if (s_last < 0 || pCue->integer < s_last) {
+        s_last = pCue->integer;   // first sight, or the counter reset on a map change - do not fire
+        return;
+    }
+    if (pCue->integer != s_last) {
+        s_last = pCue->integer;
+        cgi.S_StartLocalSound("coop_headshot", qtrue);   // C file - commandManager is C++ only
+    }
+}
+
+
+void CG_CoopDaylightThink(void)
+{
+    static cvar_t *pDay = NULL, *pGrade = NULL, *pTmap = NULL;
+    static float   s_cur   = -1.0f;   // last published, so we write cvars only on change
+    static qboolean s_gradeOn = qfalse;
+    float          d, expo, cont, sat, temp;
+    qboolean       bFirst;
+
+    if (!pDay) {
+        // NOT archived. Time of day is scripted/server-driven runtime state, not a user preference -
+        // archiving it meant a night value written once (by a script, or over rcon) SURVIVED THE
+        // RESTART and the player came back to a permanently dim world with no obvious cause. The
+        // server republishes the real value on every connect, so nothing is lost by not saving it.
+        pDay   = cgi.Cvar_Get("coop_daylight", "1", 0);
+        pGrade = cgi.Cvar_Get("r_ppGrade", "0", CVAR_ARCHIVE);
+        pTmap  = cgi.Cvar_Get("r_ppTonemap", "0", CVAR_ARCHIVE);
+    }
+
+    bFirst = (s_cur < -0.5f) ? qtrue : qfalse;
+    d = pDay->value;
+    if (d > 1.0f) { d = 1.0f; } else if (d < 0.0f) { d = 0.0f; }
+    if (fabs(d - s_cur) < 0.002f) {
+        return;   // nothing changed - do not touch cvars every frame
+    }
+    s_cur = d;
+
+    // At full daylight, restore the engine's own defaults EXACTLY and switch the grade path back off,
+    // so a player who never triggers a night cycle renders bit-identically to before this existed.
+    // NOTE the `|| bFirst`: the r_pp* grade cvars ARE archived (they are legitimate user settings),
+    // so a night grade written in a previous session comes back at full strength on the next launch.
+    // Without this, a stale archived grade could never be cleared - s_gradeOn starts false, so the
+    // restore below was skipped exactly when it was needed most, and the world stayed dim forever.
+    if (d >= 0.999f) {
+        if (s_gradeOn || bFirst) {
+            cgi.Cvar_Set("r_ppExposure",   "0.889971");
+            cgi.Cvar_Set("r_ppContrast",   "0.951289");
+            cgi.Cvar_Set("r_ppSaturation", "1.031519");
+            cgi.Cvar_Set("r_ppTemp",       "0");
+            cgi.Cvar_Set("r_ppTonemap",    "0");
+            s_gradeOn = qfalse;
+        }
+        return;
+    }
+
+    // The grade block in RB_ToneMap is gated on (r_tonemapMode==1 || r_ppTonemap || r_ppGrade) and all
+    // three default to 0, so the path has to be armed or every value below is silently ignored.
+    // [FIX 2026-08-28] ARM WITH r_ppTonemap, NOT r_ppGrade. r_ppGrade is a PRESET SELECTOR, not an
+    // enable flag: RB_ToneMap switches on its integer and cases 1-4 OVERWRITE exposure, contrast,
+    // saturation and temperature with fixed war-film looks. Setting it to 1 to 'arm' the path therefore
+    // selected the Neutral preset (expo 1.0, sat 1.0, temp 0) and threw away every value written just
+    // above - the cvars read back correctly while the renderer used the preset, so it looked like the
+    // grade was not reaching the screen at all. r_ppTonemap enables the same block and leaves the manual
+    // values alone, and r_ppGrade must be held at 0 so `default: break` keeps them.
+    if (!s_gradeOn) {
+        cgi.Cvar_Set("r_ppTonemap", "1");
+        s_gradeOn = qtrue;
+    }
+    if (pGrade->integer) {
+        cgi.Cvar_Set("r_ppGrade", "0");   // a preset would override everything below
+    }
+
+    // night <- d -> day. Contrast RISES slightly into night: dropping exposure alone reads as a grey
+    // wash rather than darkness, because the lightmap's own ambient floor does not scale with it.
+    expo = 0.30f + (0.889971f - 0.30f) * d;
+    cont = 1.05f + (0.951289f - 1.05f) * d;
+    sat  = 0.45f + (1.031519f - 0.45f) * d;
+    temp = -0.18f * (1.0f - d);   // cool the shadows; moonlight is blue, not grey
+
+    cgi.Cvar_Set("r_ppExposure",   va("%g", expo));
+    cgi.Cvar_Set("r_ppContrast",   va("%g", cont));
+    cgi.Cvar_Set("r_ppSaturation", va("%g", sat));
+    cgi.Cvar_Set("r_ppTemp",       va("%g", temp));
+}
+
+
 static void CG_ActionFoleyThink(void)
 {
     int iClass;
@@ -5588,6 +6305,16 @@ void CG_AdsFactorAdvance(void)
         tgt = 1.0f;
     }
     rate = (tgt > s_adsFactorCur) ? 15.0f : 8.5f;
+    // [user 2026-08-27] and a heavy weapon takes longer to get there. Only the RAISE is slowed -
+    // dropping out of the sights is the shooter letting go, which weight does not much affect.
+    {
+        static cvar_t *pHeft = NULL;
+        if (!pHeft) { pHeft = cgi.Cvar_Get("coop_adsHeft", "0.45", CVAR_ARCHIVE); }
+        if (tgt > s_adsFactorCur && pHeft->value > 0.0f) {
+            rate *= 1.0f - CoopGunHeft() * pHeft->value;
+            if (rate < 3.0f) { rate = 3.0f; }
+        }
+    }
     st   = dt * rate;
     if (st > 1.0f) {
         st = 1.0f; // MANDATORY: the frame clamp is 5s for a client of a remote server
@@ -5611,6 +6338,32 @@ void CG_AdsFactorAdvance(void)
     }
 }
 
+// HZM coop [user 2026-08-27] PER-GUN HANDLING, WITHOUT INVENTING A SINGLE NUMBER.
+//
+// Sixty-nine weapons shared one aim-in speed and one recoil weight per class, so a Luger came up
+// exactly as fast as a Panzerschreck. The obvious fix is a hand-tuned handling column per gun - 69
+// judgement calls, every one of them mine and none of them authoritative.
+//
+// There is better data already in the box. The recoil table extracted from the retail TIKs is the
+// original developers' own statement of how violent each weapon is, and heft and recoil are the same
+// physical fact: the shotgun they gave 20 degrees of climb is the gun that should be slowest to the
+// shoulder, and the Sten they gave 0.9 is the fastest. So handling is DERIVED from their numbers
+// rather than guessed at from mine - one table, two systems, and nothing to keep in sync by hand.
+float CoopGunHeft(void)
+{
+    // The SERVER owns the lookup and publishes the result, because only it has the weapon's model
+    // name - the client sees the display name ("Mauser KAR 98K") while the table is keyed by the
+    // file name ("kar98"), and normalising between the two would be a guess that silently fails on
+    // whichever guns do not follow the pattern. Same change-only channel the cover and brace state
+    // already use, so it costs one stufftext per weapon change.
+    static cvar_t *pHeft = NULL;
+    float          v;
+
+    if (!pHeft) { pHeft = cgi.Cvar_Get("coop_gunHeft", "0", 0); }
+    v = (float)pHeft->integer * 0.01f;
+    if (v < 0.0f) { v = 0.0f; } else if (v > 1.0f) { v = 1.0f; }
+    return v;
+}
 float CG_AdsPoseFactor(void)
 {
     return s_adsFactorCur;
@@ -5633,6 +6386,8 @@ void CG_DrawActiveFrame(int serverTime, int frameTime, stereoFrame_t stereoView,
     CG_GunBloodDecay();     // blood on the weapon fades, and much faster in the rain
     CG_ActionFoleyThink();  // the mechanical layer, a few tens of ms behind the shot
     CoopGunFoleyThink();    // handling foley: sprint, crouch, ADS, switch, dry fire
+    CG_CoopDaylightThink(); // time-of-day grade (see banner) - cheap, early-outs when unchanged
+    CG_CoopHeadshotCueThink(); // shooter-only headshot cue (see banner)
     CG_UpdateScriptedAudioDucks();
     // HZM coop bug-1508 - throttled internally, safe to call every frame (see function banner).
     CG_SyncWussPk3Count();

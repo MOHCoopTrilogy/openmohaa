@@ -650,6 +650,11 @@ const adsGunTune_t *CG_FindAdsTune(const char *wpn);
     void  CG_FeelStressAdvance(void); // HZM coop - advance the shared feel-context scalar; once per frame, before consumers
     float CoopWFeelStress(void);      // HZM coop - 0 = calm, 1 = maximally rattled. THE stress input; do not add a second one
     float CG_GetSuppression(void);    // HZM coop - under-fire intensity 0..1 (one frame stale before CG_CalcFov)
+    float CG_CoopBrace(void);         // HZM coop - 0..1 gun-brace envelope (mirrored from the server)
+    qboolean CG_CoopBraceAvail(void); // HZM coop - a mount is offered (prompt only, never effects)
+    float CG_CoopBraceKick(void);     // HZM coop - mount-settle impulse 1..0
+    float CoopGunHeft(void);          // HZM coop - 0..1 per-gun weight from the weapon class
+    float CG_CoopDroopAngle(void);    // HZM coop - eased muzzle-droop degrees (applied at the grip)
     void  CG_NoteLocalFire(void);           // HZM coop - the local player pulled the trigger this frame
     void  CG_NoteFleshImpact(const vec3_t pos); // HZM coop - a bullet hit a body here (any shooter)
     float CG_GunBlood(void);                // HZM coop - 0..1 blood on the view weapon; rain washes it off

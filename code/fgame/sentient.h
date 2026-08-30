@@ -261,6 +261,7 @@ public:
                                                // must never walk it back down
     bool              m_bForceDropHealth;
     bool              m_bForceDropWeapon;
+    bool m_bCoopSidearmSwap;   // HZM coop - already swapped to a sidearm once (hand shot)
 
     bool m_bFootOnGround_Right;
     bool m_bFootOnGround_Left;

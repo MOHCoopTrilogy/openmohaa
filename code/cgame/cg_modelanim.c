@@ -66,7 +66,20 @@ static void CoopGunVisNote(int *pState, int bHidden, const char *why, int bUnarm
        spent the investigation guessing between four paths - which is the exact failure this
        probe was written to prevent. A diagnostic that has to be switched on in advance only ever
        catches bugs you already knew about. */
-    if (!s_pGunVis) { s_pGunVis = cgi.Cvar_Get("coop_gunVisTrace", "1", CVAR_ARCHIVE); }
+    // HZM coop [bug-2090] DEFAULTED OFF 2026-08-24. bug-2049 defaulted this probe ON so a session
+    // could capture HIDE-WEAPON / HIDE-ARMS edges; bug-2066 CLOSED that hunt (the flicker is
+    // EF_UNARMED during the weapon give) and nothing turned it back off, so it shipped armed to
+    // players in v1.4.4 - the same class the v1.4.0 audit caught for coop_goreDebug/coop_profProbe.
+    //
+    // The default change alone reaches NOBODY. It is CVAR_ARCHIVE and shipped as 1, so every player
+    // who has already launched carries `seta coop_gunVisTrace "1"` and Cvar_Get keeps an existing
+    // value while updating only the reset string. Clear a stale 1 ONCE per session - the same fossil
+    // fix used for coop_lowAmmoTell and coop_idleBolt (TRAPS T7). The static means a deliberate
+    // `coop_gunVisTrace 1` typed at the console afterwards still holds for the rest of the session.
+    if (!s_pGunVis) {
+        s_pGunVis = cgi.Cvar_Get("coop_gunVisTrace", "0", CVAR_ARCHIVE);
+        if (s_pGunVis->integer) { cgi.Cvar_Set("coop_gunVisTrace", "0"); }
+    }
     if (!s_pGunVis->integer) { *pState = bHidden; return; }
     if (*pState == bHidden)  { return; }
     *pState = bHidden;
@@ -1760,7 +1773,7 @@ void CG_ModelAnim(centity_t *cent, qboolean bDoShaderTime)
             int iSnapCover = (cg.snap->ps.pm_flags & PMF_COOP_COVER) ? 1 : 0;
             int iPredCover = (cg.predicted_player_state.pm_flags & PMF_COOP_COVER) ? 1 : 0;
 
-            if (!s_pTrace) { s_pTrace = cgi.Cvar_Get("coop_gunVisTrace", "1", CVAR_ARCHIVE); }
+            if (!s_pTrace) { s_pTrace = cgi.Cvar_Get("coop_gunVisTrace", "0", CVAR_ARCHIVE); }
             if (s_pTrace->integer
                 && (s_iLastTP != (int)bThirdPerson || s_iLastSnap != iSnapCover
                     || s_iLastPred != iPredCover)) {
@@ -2058,6 +2071,18 @@ void CG_ModelAnim(centity_t *cent, qboolean bDoShaderTime)
                     fAdsYaw   *= s_fAdsPose;
                     fAdsRoll  *= s_fAdsPose;
 
+                    // [weight 6] MUZZLE DROOP rides in on the same pitch term. This is the one place
+                    // in the pipeline where the rotation pivot is the GRIP rather than the player's
+                    // feet - model.origin was set from tag_weapon_right by CG_AttachEntity - so a
+                    // heavy barrel can drop while the hands stay put, which is exactly what the cue
+                    // is, and it needs no positional compensation at all. Added rather than replacing
+                    // so the per-gun ADS tune is untouched; the droop is already zero under ADS.
+                    // [vet] NOT folded into fAdsPitch: this whole block is gated on the ADS pose
+                    // being non-zero, while the droop is defined as (1 - ads) - the two conditions
+                    // are exact complements, so the droop could only ever apply in the state it was
+                    // written to stay out of, and never in the hip-fire state it was written for.
+                    // Applied separately below, outside that gate.
+
                     // pitch: rotate forward + up about the left axis (tilt muzzle up/down)
                     if (fAdsPitch != 0.0f) {
                         RotatePointAroundVector(vAdsA, model.axis[1], model.axis[0], fAdsPitch);
@@ -2078,6 +2103,21 @@ void CG_ModelAnim(centity_t *cent, qboolean bDoShaderTime)
                         RotatePointAroundVector(vAdsB, model.axis[0], model.axis[2], fAdsRoll);
                         VectorCopy(vAdsA, model.axis[1]);
                         VectorCopy(vAdsB, model.axis[2]);
+                    }
+
+                    // [weight 6] MUZZLE DROOP - its own rotation, outside the ADS gate, about the
+                    // same left axis. The pivot here is the GRIP (model.origin was set from
+                    // tag_weapon_right), which is the whole reason it belongs at this site rather
+                    // than on the player entity, where it swung the entire rig on a 60-unit lever.
+                    {
+                        float fDroop = CG_CoopDroopAngle();
+                        if (fDroop > 0.01f) {
+                            vec3_t vDrA, vDrB;
+                            RotatePointAroundVector(vDrA, model.axis[1], model.axis[0], -fDroop);
+                            RotatePointAroundVector(vDrB, model.axis[1], model.axis[2], -fDroop);
+                            VectorCopy(vDrA, model.axis[0]);
+                            VectorCopy(vDrB, model.axis[2]);
+                        }
                     }
 
                     // CROUCH-only EXTRA correction (added on top of the standing rotation): the crouch pose
@@ -2651,7 +2691,7 @@ void CG_ModelAnim(centity_t *cent, qboolean bDoShaderTime)
         int bSkipped = ((s1->renderfx & RF_DONTDRAW) || bCoopHideDraw) ? 1 : 0;
 
         if (s_coopDrawVis != bSkipped) {
-            if (!s_pGunVis) { s_pGunVis = cgi.Cvar_Get("coop_gunVisTrace", "1", CVAR_ARCHIVE); }
+            if (!s_pGunVis) { s_pGunVis = cgi.Cvar_Get("coop_gunVisTrace", "0", CVAR_ARCHIVE); }
             if (s_pGunVis->integer) {
                 cgi.Printf("^~^~^ GUNVIS t=%d %s renderfx=0x%x dontdraw=%d hidedraw=%d "
                            "inzoom=%d unarmed=%d health=%d pmflags=0x%x\n",

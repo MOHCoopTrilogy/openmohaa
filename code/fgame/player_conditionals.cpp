@@ -1038,6 +1038,68 @@ qboolean Player::CondCoopSprinting(Conditional& condition)
     return m_bCoopSprinting;
 }
 
+// HZM coop [user 2026-08-24] PRONE. The engine decides and guards (Player::TickCoopProne); the
+// STATEMAP owns height, pose and moveposflags, because `height prone` and `moveposflags prone` are
+// statemap commands. This condition is the single bridge between the two halves.
+qboolean Player::CondCoopProne(Conditional& condition)
+{
+    return m_bCoopProne;
+}
+
+// HZM coop [user 2026-08-26] SUPINE (lying on back) - EYEBALL PROTOTYPE. True while prone AND
+// coop_supineTest is nonzero. The real trigger (ADS aimed far behind the body) gets built only if
+// the pose survives the user's eyeball; the conditional must exist NOW because the legs statemap
+// already routes on it, and an unregistered conditional ERR_DROPs the server at map load.
+// HZM coop [user 2026-08-27] weapon MOUNTED on a surface. Third-person only cares about the
+// committed state - the availability prompt is a first-person HUD affair and never reaches here.
+qboolean Player::CondCoopBraced(Conditional& condition)
+{
+    return (qboolean)m_bCoopBraceMounted;
+}
+
+qboolean Player::CondCoopSupine(Conditional& condition)
+{
+    static cvar_t *pSup = NULL;
+    if (!pSup) { pSup = gi.Cvar_Get("coop_supineTest", "0", 0); }
+    // real state (P2 aim trigger) OR the eyeball-test override
+    return (qboolean)(m_bCoopProne && (m_bCoopSupine || pSup->integer));
+}
+
+qboolean Player::CondCoopSupineFlipL(Conditional& condition)
+{
+    return (qboolean)(m_bCoopProne && m_iCoopSupineFlipDir > 0 && level.time < m_fCoopSupineFlip);
+}
+
+qboolean Player::CondCoopSupineFlipR(Conditional& condition)
+{
+    return (qboolean)(m_bCoopProne && m_iCoopSupineFlipDir < 0 && level.time < m_fCoopSupineFlip);
+}
+
+qboolean Player::CondCoopDiedSupine(Conditional& condition)
+{
+    return (qboolean)m_bCoopDiedSupine;
+}
+
+qboolean Player::CondCoopProneTurnL(Conditional& condition)
+{
+    return (qboolean)(m_bCoopProne && m_iCoopProneTurnDir > 0);
+}
+
+qboolean Player::CondCoopProneTurnR(Conditional& condition)
+{
+    return (qboolean)(m_bCoopProne && m_iCoopProneTurnDir < 0);
+}
+
+qboolean Player::CondCoopProneRollL(Conditional& condition)
+{
+    return (qboolean)(m_bCoopProne && m_iCoopProneRollDir > 0 && level.time < m_fCoopProneRollEnd);
+}
+
+qboolean Player::CondCoopProneRollR(Conditional& condition)
+{
+    return (qboolean)(m_bCoopProne && m_iCoopProneRollDir < 0 && level.time < m_fCoopProneRollEnd);
+}
+
 // HZM coop [user 2026-08-02] bug-1291 - low-health limp state for the legs statemap
 // (m_bCoopLimping, computed in TickLimp: health/max_health below coop_limpStart, on the ground,
 // not downed//vehicle/turret). Drives the LIMP_* legs states in coop_mod/player_legs.st.
@@ -2216,6 +2278,16 @@ Condition<Player> Player::m_conditions[] = {
     {"ATTACK_SECONDARY_BUTTON",         &Player::CondAttackButtonSecondary   },
     {"COOP_ADS",                        &Player::CondCoopAds                 }, // HZM coop - aim down sights (dedicated bind), see CondCoopAds
     {"COOP_SPRINTING",                  &Player::CondCoopSprinting           }, // HZM coop - sprint state for the legs statemap
+    {"COOP_PRONE",                      &Player::CondCoopProne               }, // HZM coop - hold-crouch prone [user 2026-08-24]
+    {"COOP_SUPINE",                     &Player::CondCoopSupine              }, // HZM coop - lying on back (eyeball prototype, coop_supineTest)
+    {"COOP_BRACED",                     &Player::CondCoopBraced              }, // HZM coop - weapon mounted on a surface
+    {"COOP_PRONE_TURNL",                &Player::CondCoopProneTurnL          }, // HZM coop - P1 fluidity
+    {"COOP_PRONE_TURNR",                &Player::CondCoopProneTurnR          }, // HZM coop - P1 fluidity
+    {"COOP_PRONE_ROLLL",                &Player::CondCoopProneRollL          }, // HZM coop - evasive roll
+    {"COOP_PRONE_ROLLR",                &Player::CondCoopProneRollR          }, // HZM coop - evasive roll
+    {"COOP_SUPINE_FLIPL",               &Player::CondCoopSupineFlipL         }, // HZM coop - P2 flip
+    {"COOP_SUPINE_FLIPR",               &Player::CondCoopSupineFlipR         }, // HZM coop - P2 flip
+    {"COOP_DIED_SUPINE",                &Player::CondCoopDiedSupine          }, // died on the back (spec A8)
     {"COOP_LIMPING",                    &Player::CondCoopLimping             }, // HZM coop - low-health limp gait for the legs statemap
     {"COOP_COVER",                      &Player::CondCoopCover               }, // HZM coop - take cover: standing back-to-wall pose valid [214]
     {"COOP_COVER_LOW",                  &Player::CondCoopCoverLow            }, // HZM coop - take cover: crouched low-cover pose valid [214]

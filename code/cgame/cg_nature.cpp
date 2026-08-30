@@ -281,10 +281,27 @@ void CG_RainGlobal(void)
         vpStart[2] = cg.predicted_player_state.origin[2] + 40.0f; // ~chest height, off the floor
         vpEnd[0]   = vpStart[0];
         vpEnd[1]   = vpStart[1];
-        vpEnd[2]   = vpStart[2] + 4096.0f;
+        // HZM coop [user 2026-08-24] RAIN INDOORS. The old test read
+        //     if (fraction < 0.999 && !SURF_SKY) -> dry
+        // i.e. "if we hit something and it is not sky, you are dry" - so when the trace hit NOTHING it
+        // fell through and drew rain. "Hit nothing" was being treated as "open sky", which is why any
+        // interior taller than the 4096u trace, or with a gap the trace escaped through, rained inside.
+        //
+        // Inverted: wet only if the trace ACTUALLY LANDS ON SKY. Lengthened to 16384 so a genuinely
+        // tall outdoor map still finds its sky brush instead of going falsely dry.
+        // coop_rainSkyStrict 0 restores the old behaviour if a map turns out to need it.
+        vpEnd[2]   = vpStart[2] + 16384.0f;
         CG_Trace(&roofTr, vpStart, vZero, vZero, vpEnd, cg.snap->ps.clientNum, MASK_SOLID, qfalse, qtrue, "CG_RainRoof");
-        if (roofTr.fraction < 0.999f && !(roofTr.surfaceFlags & SURF_SKY)) {
-            return; // roof or vehicle above the player -> dry
+        {
+            static cvar_t *pStrict = NULL;
+            if (!pStrict) { pStrict = cgi.Cvar_Get("coop_rainSkyStrict", "1", CVAR_ARCHIVE); }
+            if (pStrict->integer) {
+                if (!(roofTr.surfaceFlags & SURF_SKY)) {
+                    return; // no sky overhead -> dry, INCLUDING "hit nothing at all"
+                }
+            } else if (roofTr.fraction < 0.999f && !(roofTr.surfaceFlags & SURF_SKY)) {
+                return;
+            }
         }
     }
 
@@ -343,10 +360,20 @@ void CG_RainGlobal(void)
         vSkyStart[2] = vStart[2];
         vSkyEnd[0]   = vStart[0];
         vSkyEnd[1]   = vStart[1];
-        vSkyEnd[2]   = vStart[2] + 4096.0f;
+        // same inversion as the per-player roof gate: a drop is drawn only if the column above it
+        // actually reaches SKY. Previously a trace that hit nothing still drew the drop.
+        vSkyEnd[2]   = vStart[2] + 16384.0f;
         cgi.CM_BoxTrace(&skyTr, vSkyStart, vSkyEnd, vZero, vZero, 0, MASK_SOLID, qfalse);
-        if (!(skyTr.surfaceFlags & SURF_SKY) && skyTr.fraction < 0.999f) {
-            continue; // solid ceiling above -> dry
+        {
+            static cvar_t *pStrict2 = NULL;
+            if (!pStrict2) { pStrict2 = cgi.Cvar_Get("coop_rainSkyStrict", "1", CVAR_ARCHIVE); }
+            if (pStrict2->integer) {
+                if (!(skyTr.surfaceFlags & SURF_SKY)) {
+                    continue; // no sky in this column -> no drop
+                }
+            } else if (!(skyTr.surfaceFlags & SURF_SKY) && skyTr.fraction < 0.999f) {
+                continue;
+            }
         }
 
         iRandom = ((214013 * iRandom + 2531011) >> 16) & 0x7FFF;

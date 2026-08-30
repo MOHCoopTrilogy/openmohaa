@@ -706,7 +706,7 @@ void CG_AddPacketEntities(void)
         static int     s_iLastOK = -1;
         int            iSeen = 0, iType = -1, i;
 
-        if (!s_pGV) { s_pGV = cgi.Cvar_Get("coop_gunVisTrace", "1", CVAR_ARCHIVE); }
+        if (!s_pGV) { s_pGV = cgi.Cvar_Get("coop_gunVisTrace", "0", CVAR_ARCHIVE); }
         if (s_pGV->integer && cg.snap) {
             for (i = 0; i < cg.snap->numEntities; i++) {
                 if (cg.snap->entities[i].number == cg.snap->ps.clientNum) {

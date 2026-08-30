@@ -654,9 +654,24 @@ public:
     int m_iCoopCoverClaimTime;
     /* [HZM coop 2026-08-15, bug-1815] level.inttime until which this actor may relocate between
        cover. Granted by aisquad.scr via `coop_relocateok <seconds>` so a squad, not an unphased
-       per-actor timer, decides who moves and who keeps firing. Only consulted when coop_aiBound
-       is on; a window (not a flag) so a missed script tick lapses safely. */
+       per-actor timer, decides who moves and who keeps firing. Consulted ONLY while a squad brain
+       owns this actor (m_iCoopBoundOwnedUntil); a window (not a flag) so a missed script tick
+       lapses safely. */
     int m_iCoopReloAllow;
+    /* [HZM coop 2026-08-30] level.inttime until which a SQUAD BRAIN is driving this actor's
+       relocation. Stamped by EVERY coop_relocateok - a 2.5s grant and a 0s deny alike - so "the
+       brain walked me this tick" is a fact the engine can read. State_Cover_Shoot consults
+       m_iCoopReloAllow only inside this window, so an actor no brain is walking (every american,
+       every actor on a map with coop_aiSquad off, every german not in an ENGAGED cluster, and
+       everyone at all if the brain thread dies) keeps the unbounded bug-1813 relocation. Fail-open
+       by construction: bounding can only reach an actor something is actively bounding. */
+    int m_iCoopBoundOwnedUntil;
+    /* [HZM coop 2026-08-30, correction B] rate-limit stamp for the coop_aiBehav 2 BOUNDGATE
+       deny print. A denied actor is never restamped (m_iCoopCoverClaimTime updates only on a
+       successful relocation), so a frame-edge trigger fires at most once per cover claim and
+       can miss entirely if the actor is not in Cover_Shoot that frame - which would hide
+       exactly the mis-scoping this print exists to catch. */
+    int m_iCoopBoundDenyLog;
     /* should lock think state ? */
     bool m_bLockThinkState;
     /* think state changed */
@@ -1496,6 +1511,7 @@ public:
     void           EventAttackPlayer(Event *ev);
     void           EventAttackEntity(Event *ev); // HZM coop: attackplayer for arbitrary sentients
     void           EventCoopRelocateOk(Event *ev); // HZM coop: bounding-overwatch permission (bug-1815)
+    void           EventCoopCountAsDead(Event *ev); // HZM coop: release waittill-death waiters without killing (bug-2091)
     void           ForceAttackPlayer(void);
     void           EventSetAlarmNode(Event *ev);
     void           EventGetAlarmNode(Event *ev);
@@ -1569,6 +1585,7 @@ public:
     void             EventResetLeash(Event *ev);
     void             EventTether(Event *ev);
     void             EventGetThinkState(Event *ev);
+    void             EventGetEnableEnemy(Event *ev);
     void             EventGetEnemyShareRange(Event *ev);
     void             EventSetEnemyShareRange(Event *ev);
     void             EventGetKickDir(Event *ev);

@@ -2559,6 +2559,9 @@ extern  cvar_t  *r_hzmGenNormalExclude;		// extra substring deny-list
 extern  cvar_t  *r_hzmGenNormalDebug;
 extern  cvar_t  *r_hzmSpecular;				// F0 applied ONLY to generated-relief stages
 extern  cvar_t  *r_hzmSpecularGloss;
+extern  cvar_t  *r_hzmParallaxDepth;   // LIVE parallax depth (r_baseParallax is CVAR_LATCH)
+extern  cvar_t  *r_hzmParallaxFade;    // world units at which parallax has faded to nothing
+extern  cvar_t  *r_hzmNormalStrength;  // relief multiplier for AUTHORED _n/_nh maps (not synthesised)
 
 extern  cvar_t  *r_forceSun;
 extern  cvar_t  *r_forceSunLightScale;

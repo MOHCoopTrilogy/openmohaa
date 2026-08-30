@@ -2270,6 +2270,287 @@ void CoopHeadshotTestTick(void)
     }
 }
 
+
+
+// ============================================================================================
+// HZM coop [user 2026-08-24] ENGAGEMENT-DISTANCE HISTOGRAM  (coop_shotdist)
+// ============================================================================================
+// The caliber falloff curves were set from judgement, not from this game. Nobody knows the range
+// players actually fight at here, and that decides whether ANY distance system is worth having:
+// at 25 m every WW2 round drops under 5 cm and every falloff curve is still near 1.0, so if these
+// maps are fought inside 30 m the whole direction is an elaborate no-op and the honest move is to
+// revert the aggressive falloff rather than add bullet drop on top of it.
+//
+// So: measure first. This counts every bullet that CONNECTS with a damageable entity, bucketed by
+// range and weapon class, split player-fired vs AI-fired.
+//
+// LIMITATION, stated rather than discovered later: this samples HITS, not shots. Rounds that miss
+// are not counted, so a class that sprays and misses at range is under-represented. That is the
+// right bias for calibrating FALLOFF and DROP (both only ever act on a round that connects), but
+// it is the wrong statistic for 'how far away do players open fire'. Do not reuse it for that.
+//
+// Accumulates in memory and prints only on demand - bug-2012 is the standing warning about a probe
+// whose own logging perturbs the thing it measures.
+#define COOP_SD_CLASSES 6
+#define COOP_SD_BUCKETS 12
+static int   s_coopSdHist[2][COOP_SD_CLASSES][COOP_SD_BUCKETS]; // [isPlayer][class][bucket]
+static int   s_coopSdTotal[2];
+static float s_coopSdSum[2][COOP_SD_CLASSES];   // running sum of metres, for a mean
+static float s_coopSdMax[2][COOP_SD_CLASSES];
+
+// bucket upper bounds in METRES; the last bucket is everything beyond
+static const float s_coopSdEdge[COOP_SD_BUCKETS] = {
+    5.f, 10.f, 15.f, 20.f, 30.f, 40.f, 50.f, 75.f, 100.f, 150.f, 200.f, 1e9f
+};
+static const char *s_coopSdClassName[COOP_SD_CLASSES] = {
+    "pistol", "rifle", "smg", "mg", "heavy", "other"
+};
+
+static int CoopSdClassIndex(Weapon *weap)
+{
+    int c;
+
+    if (!weap) {
+        return 5;
+    }
+    c = weap->GetWeaponClass();
+    if (c & WEAPON_CLASS_PISTOL) { return 0; }
+    if (c & WEAPON_CLASS_RIFLE)  { return 1; }
+    if (c & WEAPON_CLASS_SMG)    { return 2; }
+    if (c & WEAPON_CLASS_MG)     { return 3; }
+    if (c & WEAPON_CLASS_HEAVY)  { return 4; }
+    return 5;
+}
+
+void CoopShotDistRecord(Weapon *weap, Entity *owner, float distUnits, float rangeUnits)
+{
+    static cvar_t *pOn = NULL;
+    int            iPly, iCls, b;
+    float          m;
+
+    if (!pOn) { pOn = gi.Cvar_Get("coop_shotDist", "1", CVAR_ARCHIVE); }
+    if (!pOn->integer) { return; }
+
+    // ANOMALY GUARD. vTraceEnd is always start + dir*range, so a recorded distance CANNOT exceed
+    // range - yet a 232 m hit appeared on m3l1b with a 4000 u (102 m) weapon. Rather than reason
+    // about which of the two BulletAttack callers or the 5-layer penetration continuation did it,
+    // print the actual numbers the one time it happens. An unexplained sample would otherwise
+    // quietly widen the tail that this whole histogram exists to measure.
+    if (rangeUnits > 0.0f && distUnits > rangeUnits * 1.05f) {
+        static int s_nWarn = 0;
+        if (s_nWarn < 8) {
+            s_nWarn++;
+            gi.Printf("^~^~^ SHOTDIST ANOMALY dist=%.0fu (%.1fm) > range=%.0fu  weap=%s owner=%s\n",
+                      distUnits, distUnits / 39.37f, rangeUnits,
+                      (weap && weap->model.length()) ? weap->model.c_str() : "<none>",
+                      owner ? owner->getClassname() : "<none>");
+        }
+    }
+
+    iPly = (owner && owner->IsSubclassOfPlayer()) ? 1 : 0;
+    iCls = CoopSdClassIndex(weap);
+    m    = distUnits / 39.37f; // 1 world unit ~ 1 inch
+
+    for (b = 0; b < COOP_SD_BUCKETS; b++) {
+        if (m <= s_coopSdEdge[b]) { break; }
+    }
+    if (b >= COOP_SD_BUCKETS) { b = COOP_SD_BUCKETS - 1; }
+
+    s_coopSdHist[iPly][iCls][b]++;
+    s_coopSdTotal[iPly]++;
+    s_coopSdSum[iPly][iCls] += m;
+    if (m > s_coopSdMax[iPly][iCls]) { s_coopSdMax[iPly][iCls] = m; }
+}
+
+void CoopShotDistDump(void)
+{
+    int   iPly, c, b, n;
+    char  line[512];
+
+    gi.Printf("^~^~^ SHOTDIST begin (hits on damageable entities, bucketed by metres)\n");
+    for (iPly = 1; iPly >= 0; iPly--) {
+        gi.Printf("^~^~^ SHOTDIST --- %s --- %d hit(s)\n",
+                  iPly ? "PLAYER-FIRED" : "AI-FIRED", s_coopSdTotal[iPly]);
+        if (!s_coopSdTotal[iPly]) { continue; }
+        gi.Printf("^~^~^ SHOTDIST %-7s %5s%5s%5s%5s%5s%5s%5s%5s%5s%5s%5s%5s  mean   max\n",
+                  "class", "<5", "10", "15", "20", "30", "40", "50", "75", "100", "150", "200", "+");
+        for (c = 0; c < COOP_SD_CLASSES; c++) {
+            n = 0;
+            for (b = 0; b < COOP_SD_BUCKETS; b++) { n += s_coopSdHist[iPly][c][b]; }
+            if (!n) { continue; }
+            {
+                int len = 0;
+                len += Com_sprintf(line + len, sizeof(line) - len, "^~^~^ SHOTDIST %-7s", s_coopSdClassName[c]);
+                for (b = 0; b < COOP_SD_BUCKETS; b++) {
+                    len += Com_sprintf(line + len, sizeof(line) - len, "%5d", s_coopSdHist[iPly][c][b]);
+                }
+                Com_sprintf(line + len, sizeof(line) - len, "  %5.1f %5.1f",
+                            s_coopSdSum[iPly][c] / (float)n, s_coopSdMax[iPly][c]);
+                gi.Printf("%s\n", line);
+            }
+        }
+    }
+    gi.Printf("^~^~^ SHOTDIST end\n");
+}
+
+void CoopShotDistReset(void)
+{
+    memset(s_coopSdHist, 0, sizeof(s_coopSdHist));
+    memset(s_coopSdTotal, 0, sizeof(s_coopSdTotal));
+    memset(s_coopSdSum, 0, sizeof(s_coopSdSum));
+    memset(s_coopSdMax, 0, sizeof(s_coopSdMax));
+    gi.Printf("^~^~^ SHOTDIST reset\n");
+}
+// ============================================================================================
+// HZM coop [user 2026-08-24] CALIBERS + RANGE DAMAGE FALLOFF
+// ============================================================================================
+// Two gaps, and they are really one system, so they are built as one.
+//
+// 1. THERE WAS NO DAMAGE FALLOFF AT ALL. `bulletrange` is NOT a damage range - the tik comments
+//    say so plainly ("the range at which bulletspread is applied") and the code agrees: it is the
+//    trace length and the reference distance the spread offsets are measured at
+//    (`vTraceEnd = start + dir*range + right*spread.x ...`). 371 of 551 weapons ship 4000 for it.
+//    So a Thompson hit exactly as hard at 100 m as at 5 m, and nothing except spread distinguished
+//    an SMG from a rifle at distance.
+//
+// 2. THERE WERE NO CALIBERS. Measured across every weapon tik in main/mainta/maintt: of the 245
+//    that declare penetration, 244 use `throughmetal 8` and 236 use `throughwood 24`. A Colt .45
+//    and a BAR punched cover identically. 306 more declare neither, so their penetration was 0.
+//
+// A caliber IS a falloff profile plus a penetration power, so one table carries both. Rows are
+// searched in order: a per-weapon row (substring of the tik path) wins, otherwise the first row
+// matching the weapon CLASS. Untabled and unmatched weapons are left completely alone.
+//
+// Units are world units (~1 inch), so 4000 ~ 100 m. Damage scales linearly from 1.0 at nearR down
+// to farFrac at farR, then holds flat - never to zero, because a round that reaches you should
+// still hurt, and a hard cutoff is the thing that makes ranged combat feel arbitrary.
+typedef struct {
+    const char *tik;     // substring of the weapon model path; NULL = a class-default row
+    int         wclass;  // WEAPON_CLASS_* (only consulted on class-default rows)
+    float       nearR;   // full damage at or inside this
+    float       farR;    // farFrac damage at or beyond this
+    float       farFrac; // damage multiplier once past farR
+    float       penWood; // caliber penetration; 0 = leave the tiki value alone
+    float       penMetal;
+} coopCaliber_t;
+
+// [user 2026-08-24] farR CLAMPED TO <= 4000 UNITS AFTER MEASURING. Direct fire cannot exceed the
+// weapon's own bulletrange - BulletAttack traces `start + dir*range` and NO weapon in the trilogy
+// declares more than 4000 (~102 m; 371 of 551 sit exactly there). Several rows were originally
+// written with farR of 6000-8000, i.e. 152-203 m, which is UNREACHABLE: those weapons could never
+// arrive at their floor and their falloff was quietly doing a fraction of the intended work. The
+// rifle row was the worst - farR 6000 meant it only ever reached ~0.88 instead of its 0.75 floor.
+static const coopCaliber_t s_coopCalibers[] = {
+    // ---- per-weapon rows. Substring match, so skin/finish variants inherit for free ----
+    // (thompsonsmg_camo_woodland.tik still matches "thompson"), which is the same variant
+    // normalisation problem bug-2011 solved client-side with CoopStripSkinSuffix.
+    // VERIFIED 2026-08-24 by matching every row against all 551 weapon tik paths in
+    // main/mainta/maintt, in this same first-match-wins order. Two rows were DEAD on the first
+    // pass and are gone: "bren" (no Bren ships at all) and "stg44" (the StG 44 ships as mp44.tik,
+    // so the mp44 row below already covers it - do NOT re-add stg44 thinking it is uncovered).
+    // "bar" was the collision risk and is clean: it matches 13 BAR files and never barrel/bazooka.
+    {"shotgun",      0,  260, 1100, 0.12f,  6.0f,  1.0f}, // buckshot: lethal close, useless far
+    {"bar",          0, 2400, 3800, 0.78f, 40.0f, 15.0f}, // .30-06 automatic rifle
+    {"johnson_m1941",0, 2400, 3800, 0.78f, 40.0f, 15.0f}, // .30-06 LMG, same role as the BAR
+    {"dp28",         0, 2400, 3800, 0.78f, 40.0f, 15.0f}, // 7.62x54R LMG - full-power round
+    {"springfield",  0, 3000, 4000, 0.90f, 44.0f, 18.0f}, // scoped .30-06
+    {"kar98sniper",  0, 3000, 4000, 0.90f, 42.0f, 17.0f}, // plain kar98 is NOT matched - class rifle
+    {"enfieldsniper",0, 3000, 4000, 0.90f, 42.0f, 17.0f},
+    {"mosin",        0, 2600, 3900, 0.80f, 40.0f, 16.0f}, // long barrel, but a line rifle not a sniper
+    {"mp44",         0, 1600, 3800, 0.60f, 26.0f,  9.0f}, // 7.92 Kurz: between SMG and rifle. ALSO the StG44.
+    {"carbine",      0, 1700, 3600, 0.62f, 26.0f,  9.0f}, // .30 Carbine is NOT a full-power rifle round
+    {"thompson",     0,  800, 2600, 0.36f, 18.0f,  5.0f}, // .45 ACP: heavy, slow, sheds energy fastest
+    {"ppsh",         0, 1100, 3400, 0.50f, 22.0f,  7.0f}, // 7.62x25: the fastest pistol round here
+    {"mauser_c96",   0,  900, 2800, 0.55f, 20.0f,  6.0f}, // 7.63x25 carbine-ish pistol
+    {"30cal",        0, 2200, 3800, 0.74f, 38.0f, 14.0f},
+    {"mg42",         0, 2200, 3800, 0.74f, 38.0f, 14.0f},
+    {"panzerschreck",0, 4000, 9000, 0.95f,  0.0f,  0.0f},
+
+    // ---- class defaults ----
+    {NULL, WEAPON_CLASS_PISTOL,  600, 2400, 0.45f, 16.0f,  5.0f},
+    {NULL, WEAPON_CLASS_SMG,     900, 3000, 0.42f, 20.0f,  6.0f},
+    {NULL, WEAPON_CLASS_RIFLE,  2200, 3800, 0.75f, 34.0f, 12.0f},
+    {NULL, WEAPON_CLASS_MG,     1800, 3600, 0.66f, 30.0f, 10.0f},
+    {NULL, WEAPON_CLASS_HEAVY,  2400, 3900, 0.88f, 48.0f, 20.0f},
+};
+
+// Resolve once per fire event, never per bullet - a shotgun fires 12 pellets through this.
+static const coopCaliber_t *CoopFindCaliber(Weapon *weap)
+{
+    const char *pModel;
+    int         wclass, i;
+    size_t      n = sizeof(s_coopCalibers) / sizeof(s_coopCalibers[0]);
+
+    if (!weap) {
+        return NULL;
+    }
+    pModel = weap->model.c_str();
+    wclass = weap->GetWeaponClass();
+
+    if (pModel && *pModel) {
+        for (i = 0; i < (int)n; i++) {
+            if (s_coopCalibers[i].tik && strstr(pModel, s_coopCalibers[i].tik)) {
+                return &s_coopCalibers[i];
+            }
+        }
+    }
+    for (i = 0; i < (int)n; i++) {
+        if (!s_coopCalibers[i].tik && (wclass & s_coopCalibers[i].wclass)) {
+            return &s_coopCalibers[i];
+        }
+    }
+    return NULL; // untabled: behave exactly as before
+}
+
+// One line per DISTINCT weapon, on coop_caliberDebug 1. This exists because the whole table hangs
+// on weap->model actually being the tik path server-side - playerbot.cpp:1102 feeds it straight to
+// `use "%s"`, so it should be - and "should be" is exactly the assumption that has cost this project
+// its worst days. If the row column reads CLASS for a gun that has its own row, the substring never
+// matched and every per-weapon caliber is silently inert.
+static void CoopCaliberDebug(Weapon *weap, const coopCaliber_t *cal)
+{
+    static cvar_t *pDbg = NULL;
+    static char    s_seen[16][64];
+    static int     s_nSeen = 0;
+    const char    *pModel;
+    int            i;
+
+    if (!pDbg) { pDbg = gi.Cvar_Get("coop_caliberDebug", "0", 0); }
+    if (!pDbg->integer || !weap) { return; }
+    pModel = weap->model.c_str();
+    if (!pModel || !*pModel) { pModel = "<EMPTY MODEL - table cannot match>"; }
+    for (i = 0; i < s_nSeen; i++) {
+        if (!strcmp(s_seen[i], pModel)) { return; }
+    }
+    if (s_nSeen < 16) { Q_strncpyz(s_seen[s_nSeen++], pModel, 64); }
+    if (cal) {
+        gi.Printf("^~^~^ CALIBER %s class=0x%x row=%s near=%.0f far=%.0f farFrac=%.2f wood=%.0f metal=%.0f\n",
+                  pModel, weap->GetWeaponClass(), cal->tik ? cal->tik : "CLASS",
+                  cal->nearR, cal->farR, cal->farFrac, cal->penWood, cal->penMetal);
+    } else {
+        gi.Printf("^~^~^ CALIBER %s class=0x%x row=NONE - untabled, unchanged\n",
+                  pModel, weap->GetWeaponClass());
+    }
+}
+
+// 1.0 inside nearR, easing to farFrac at farR, flat after. Never returns 0.
+static float CoopCaliberFalloff(const coopCaliber_t *cal, float dist)
+{
+    float t, f;
+
+    if (!cal || cal->farR <= cal->nearR) {
+        return 1.0f;
+    }
+    if (dist <= cal->nearR) {
+        return 1.0f;
+    }
+    if (dist >= cal->farR) {
+        return cal->farFrac;
+    }
+    t = (dist - cal->nearR) / (cal->farR - cal->nearR);
+    f = 1.0f - t * (1.0f - cal->farFrac);
+    return f;
+}
 float BulletAttack(
     Vector  start,
     Vector  vBarrel,
@@ -2323,6 +2604,63 @@ float BulletAttack(
     lastSurfaceFlags = 0;
     iNumHit          = 0;
 
+    // HZM coop [user 2026-08-25] PLAYER SUPPRESSION - the inverse of the block below. An ENEMY round
+    // cracking past a player feeds that player's server-side stress, which now widens their weapon
+    // spread (Player::TickCoopStress / coop_stressSpread). Until this, stress moved the view weapon and
+    // nothing else: "the gun obviously shakes a lot, but the actual crosshair is steady which means its
+    // still practically perfect aim".
+    //
+    // CLOSEST APPROACH TO THE PATH, not a radius around the impact. The AI block below uses
+    // findradius(endpos) because "shots landing near me" is the right cue for an actor; the player cue
+    // is the CRACK OF A ROUND GOING PAST, which is what the client already reports (cg_parsemsg.cpp
+    // computes closest approach and spikes the FX by (1 - dist/255) * 0.75). Reusing that exact curve
+    // keeps the screen effect and the accuracy penalty rising together, so the player can SEE the thing
+    // costing them their aim instead of being quietly nerfed.
+    //
+    // BulletAttack only - FakeBulletAttack fires cosmetic rounds that do no damage and must not suppress.
+    if (owner && !owner->IsSubclassOfPlayer()) {
+        static cvar_t *pPsOn = gi.Cvar_Get("coop_stressSuppress", "1", CVAR_ARCHIVE);
+        if (pPsOn->integer) {
+            static cvar_t *pPsR = gi.Cvar_Get("coop_stressSuppressRadius", "255", CVAR_ARCHIVE);
+            float   rad  = (pPsR->value > 1.0f) ? pPsR->value : 255.0f;
+            Vector  vAim = dir;
+            trace_t sTr;
+            int     i;
+
+            vAim.normalize();
+            sTr = G_Trace(start, vec_zero, vec_zero, start + vAim * range, owner, MASK_SHOT_TRIG, false,
+                          "CoopPlayerSuppress", true);
+            {
+                Vector vSeg  = Vector(sTr.endpos) - start;
+                float  fLen2 = vSeg * vSeg;
+
+                for (i = 0; i < game.maxclients; i++) {
+                    gentity_t *pe = &g_entities[i];
+                    Player    *pl;
+                    Vector     vTo;
+                    float      t, d;
+
+                    if (!pe->client || !pe->inuse || !pe->entity) {
+                        continue;
+                    }
+                    pl = (Player *)pe->entity;
+                    if (pl == owner || pl->health <= 0 || pl->deadflag) {
+                        continue;
+                    }
+
+                    // project the player's centre onto the bullet segment, clamped to its ends
+                    vTo = pl->centroid - start;
+                    t   = (fLen2 > 0.001f) ? ((vTo * vSeg) / fLen2) : 0.0f;
+                    if (t < 0.0f) { t = 0.0f; } else if (t > 1.0f) { t = 1.0f; }
+                    d = (vTo - vSeg * t).length();
+
+                    if (d < rad) {
+                        pl->CoopAddSuppression((1.0f - (d / rad)) * 0.75f);
+                    }
+                }
+            }
+        }
+    }
     // HZM coop - REACTIVE SUPPRESSION: when a PLAYER's shot lands near ENEMY AI, briefly degrade their aim
     // (sets m_fSuppressTime; the penalty is applied in actor.cpp's aim code) so they keep their head down /
     // spray and you can push or flank. One trace + one radius scan per fire event (cheap). Friendly AI are
@@ -2334,6 +2672,16 @@ float BulletAttack(
             static cvar_t *pSupT = gi.Cvar_Get("coop_aiSuppressTime", "1.5", CVAR_ARCHIVE);
             int     ownTeam = static_cast<Sentient *>(owner)->m_Team;
             float   rad     = (pSupR->value > 1.0f) ? pSupR->value : 150.0f;
+
+            // [weight 13] a round from something heavy is more frightening to be near, so it keeps
+            // more heads down. This is the PLAYER-fires-at-AI path, which is the one where the
+            // player's own weapon is the right thing to scale by - an earlier attempt patched the
+            // enemy-fire-suppresses-player block by mistake, where it would have meant nothing.
+            {
+                static cvar_t *pHS = NULL;
+                if (!pHS) { pHS = gi.Cvar_Get("coop_heftSuppress", "0.6", CVAR_ARCHIVE); }
+                rad *= 1.0f + static_cast<Player *>(owner)->CoopActiveHeft() * pHS->value;
+            }
             Vector  vAim    = dir;
             trace_t sTr;
             Entity *e;
@@ -2385,6 +2733,25 @@ float BulletAttack(
                 if (bulletthroughany < pw) {
                     bulletthroughany = pw;
                 }
+            }
+        }
+    }
+
+    // HZM coop [user 2026-08-24] CALIBER PENETRATION. Resolve the row once for this whole fire
+    // event (a shotgun sends 12 pellets through the loop below) and let it replace the tiki's
+    // penetration numbers. Overriding authored data is normally wrong, but here the authored data
+    // is two constants repeated across the entire arsenal - 244 of 245 weapons at throughmetal 8 -
+    // so there is nothing to preserve, and 306 tiks declare none at all, which reads as 0 = cannot
+    // penetrate anything. coop_caliber 0 restores the tiki values exactly.
+    {
+        static cvar_t *pCal = NULL;
+        if (!pCal) { pCal = gi.Cvar_Get("coop_caliber", "1", CVAR_ARCHIVE); }
+        if (pCal->integer) {
+            const coopCaliber_t *cal = CoopFindCaliber(weap);
+            CoopCaliberDebug(weap, cal);
+            if (cal) {
+                if (cal->penWood  > 0.0f) { bulletthroughwood  = cal->penWood; }
+                if (cal->penMetal > 0.0f) { bulletthroughmetal = cal->penMetal; }
             }
         }
     }
@@ -2567,6 +2934,34 @@ float BulletAttack(
                         // Get the original value of the victims health or water
 
                         original_value = ent->health;
+
+                        // HZM coop [user 2026-08-24] RANGE FALLOFF, applied here rather than to
+                        // `damage` up front, so it composes with - instead of replacing - the
+                        // penetration loss already baked into newdamage. Distance is measured from
+                        // the SHOT ORIGIN to the impact, so a round that punched two walls to reach
+                        // you is correctly weakened for both the walls and the travel.
+                        //
+                        // Applies to AI fire as well as the player's, deliberately: enemies hosing
+                        // full-damage rounds across a map is the same defect from the other side,
+                        // and it is a large part of why distant fire feels arbitrary. coop_dmgFalloffAI 0
+                        // makes it player-only if that turns out to change difficulty too much.
+                        {
+                            static cvar_t *pFo = NULL, *pFoAI = NULL;
+                            if (!pFo)   { pFo   = gi.Cvar_Get("coop_dmgFalloff", "1", CVAR_ARCHIVE); }
+                            if (!pFoAI) { pFoAI = gi.Cvar_Get("coop_dmgFalloffAI", "1", CVAR_ARCHIVE); }
+                            if (pFo->integer
+                                && (pFoAI->integer || (owner && owner->IsSubclassOfPlayer()))) {
+                                const coopCaliber_t *cal = CoopFindCaliber(weap);
+                                if (cal) {
+                                    float fDist = (Vector(trace.endpos) - start).length();
+                                    newdamage *= CoopCaliberFalloff(cal, fDist);
+                                }
+                            }
+                        }
+
+                        // measurement is INDEPENDENT of the falloff switch: turning falloff off to
+                        // A/B it must not also stop the data collection that decides its numbers.
+                        CoopShotDistRecord(weap, owner, (Vector(trace.endpos) - start).length(), range);
 
                         ent->Damage(
                             world,

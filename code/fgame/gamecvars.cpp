@@ -551,7 +551,13 @@ void CVAR_Init(void)
 
     g_viewkick_pitch  = gi.Cvar_Get("g_viewkick_pitch", "0.3", CVAR_CHEAT);
     g_viewkick_yaw    = gi.Cvar_Get("g_viewkick_yaw", "0.3", CVAR_CHEAT);
-    g_viewkick_roll   = gi.Cvar_Get("g_viewkick_roll", "0.15", CVAR_CHEAT);
+    // HZM coop [bug-2092] 0.15 -> 0.08. The 0.15 above it was never actually applied - Player::DamageFeedback
+    // clamped yaw into roll and discarded the roll term - so 0.15 is the original authors' INTENT, never a
+    // value anyone judged in play. Roll is the most nausea-prone axis and this now fires on every hit taken,
+    // so it starts at about half the untested figure: a lean into the hit rather than a camera roll. Raise
+    // toward 0.15 if it reads as too subtle; the tighter +/-25 clamp (vs 30 for pitch/yaw) is stock and
+    // shows the authors already meant roll to be the smaller component.
+    g_viewkick_roll   = gi.Cvar_Get("g_viewkick_roll", "0.08", CVAR_CHEAT);
     g_viewkick_dmmult = gi.Cvar_Get("g_viewkick_dmmult", "1.0", CVAR_CHEAT);
 
     g_drawattackertime  = gi.Cvar_Get("g_drawattackertime", "5", 0);

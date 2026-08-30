@@ -364,7 +364,98 @@ public:
     // HZM coop - SPRINT stamina (seconds of sprint remaining). Drains while sprinting, regens otherwise.
     // m_bCoopSprinting = the per-frame "is actually sprinting right now" flag (set in ClientMove).
     float m_fCoopStamina;
+    // HZM coop [user 2026-08-25] SERVER-SIDE STRESS. cgame already computes a stress scalar
+    // (CG_FeelStressAdvance) but it is explicitly cosmetic-only and CANNOT be used for gameplay: its
+    // stamina term is a client re-simulation the code itself documents as 'known to diverge', and a
+    // client number must never decide where a bullet goes. This is the authoritative mirror.
+    float m_fCoopStressSupp;  // near-miss suppression 0..1, spiked by BulletAttack, decays
+    float m_fCoopStress;      // eased composite 0..1
+    int   m_iCoopSuppHits;    // near-miss events since the last probe print
     bool  m_bCoopSprinting;
+    // HZM coop [user 2026-08-24] SPRINT-TO-SLIDE. Modelled on the sprint above, which is a pure
+    // ps.speed change - no bbox surgery, so it cannot wedge the player in geometry. The duck is
+    // the ENGINE's own, because holding crouch is what triggers the slide in the first place.
+    // HZM coop [user 2026-08-24] QUICK GRENADE - bind g "+coopnade".
+    // Throw without hand-selecting the grenade; hold to charge (further) and cook (shorter fuse).
+    // Rides the engine's OWN charge mechanic (Sentient::ChargeWeapon / ReleaseFireWeapon ->
+    // Weapon::ReleaseFire -> charge_fraction), so distance, the overcook warning and blowing up in
+    // your hand are all stock behaviour. This adds only the select-throw-restore sequencing.
+    int   m_iCoopNadeState;  // 0 idle, 1 selecting, 2 charging, 3 thrown/restoring
+    bool  m_bCoopNadeHeld;   // is the key still physically down
+    float m_fCoopNadeT0;     // level.time the request began - timeout guard
+    float m_fCoopNadeThrow;  // level.time the throw fired, for the restore delay
+    // HZM coop [user 2026-08-24] HEAD TRACKING + TORSO COUNTER-ROTATION.
+    // Both ride bone controllers the player ALREADY registers but never drives
+    // (player.cpp SetControllerTag HEAD_TAG/TORSO_TAG) - so neither costs a slot, which matters
+    // because NUM_BONE_CONTROLLERS is 5, hardcoded, and four are already claimed (bug-2013).
+    // HZM coop [user 2026-08-24] PRONE. Hold crouch to go prone.
+    // The ENGINE only owns the decision and the guards; the statemap owns height, pose and
+    // moveposflags, because that is the MOHAA architecture - `height prone` and
+    // `moveposflags prone` are statemap COMMANDS, and the .st reaches them via the COOP_PRONE
+    // condition registered below.
+    bool  m_bCoopProne;        // is prone right now
+    bool  m_bCoopCrawlNoFire;  // crawling fast enough that firing is stripped (hysteresis latch)
+    // HZM coop [user 2026-08-26] MP3-style prone fluidity (P1): body yaw EASES toward view yaw
+    // instead of snapping, and the legs play the shipped turn anims while it catches up.
+    float m_fCoopProneBodyYaw; // eased body yaw while prone (synced to angles[YAW] when not prone)
+    int   m_iCoopProneTurnDir; // +1 turning left, -1 turning right, 0 settled (25/5 deg hysteresis)
+    float m_fCoopProneRollEnd; // level.time the evasive roll window closes (0 = not rolling)
+    int   m_iCoopProneRollDir; // +1 rolling left, -1 rolling right
+    int   m_iCoopProneLeanPrev; // last frame's lean-button bits, for edge detection
+    // HZM coop [user 2026-08-26] P2 - ROLL ONTO YOUR BACK. Aiming into the rear hemisphere while
+    // ADS is held flips you supine; aim returning toward your feet flips you back.
+    bool  m_bCoopSupine;       // lying on back (real state; coop_supineTest still forces the pose)
+    float m_fCoopSupineFlip;   // level.time the flip transition window closes
+    int   m_iCoopSupineFlipDir;// +1 flipping over the left shoulder, -1 the right
+    bool  m_bCoopDiedSupine;   // died lying on the back - routes KILLED_SUPINE (spec A8)
+    float m_fCoopProneExitAt;  // crouch-press exit from supine defers the stand until this time (A5)
+    float m_fCoopProneYawTarget;// this frame's eased-yaw target (view, or view+180 supine) - A3
+    // HZM coop [user 2026-08-27] GUN BRACING - the gun is physically supported by geometry
+    // (corner lean, crate/sill/sandbag, cover peek). Envelope, not a bool: the ~0.2s ramp IS
+    // the feel of the weapon settling onto the surface.
+    float m_fCoopBrace;       // 0..1 eased support envelope (server truth; mirrored to cgame)
+    float m_fCoopBraceDwell;  // seconds of continuous eligibility (enter dwell)
+    float m_fCoopBraceHold;   // level.time until which a lost support still counts (exit grace)
+    int   m_iCoopBraceSent;   // last published 0-100, change-only stufftext
+    int    m_iCoopBraceMountedSent;  // change-only publish of the BINARY mount state (bug: ADS lag)
+    int    m_iCoopDaylightSent;      // change-only publish of the time-of-day grade scalar
+    float  m_fCoopHitMarkNext;       // hit-marker throttle: collapses a shotgun's pellets into one
+    int    m_iCoopHsCueSent;         // headshot cue counter, published to THIS client only
+    bool  m_bCoopBraceStill;  // stillness hysteresis latch (20 in / 35 out)
+    bool  m_bCoopBraceAvail;  // a support surface is there RIGHT NOW - drives the mount prompt
+    bool  m_bCoopBraceMounted;// player COMMITTED with Use. Only this drives the effects.
+    int   m_iCoopBraceAvailSent; // last published prompt state, change-only
+    bool  m_bCoopBraceUsePrev;   // Use edge tracker (toggle on press, not on hold)
+    bool  m_bCoopProneKeyBlock;  // crouch must be released before it can arm prone again
+    float  m_fCoopReadyUpAt;     // trigger is dead until this time - the sprint-out ready-up
+    int    m_iCoopGunHeftSent;   // change-only publish of the active weapon's handling weight
+    float  m_fCoopStaminaHold;   // level.time until which stamina will not refill
+    bool   m_bCoopJumpPrev;      // jump edge tracker for the stamina cost
+    Vector m_vCoopRecoilOwed;    // recoil applied and not yet handed back
+    float  m_fCoopRecoilRecenter;// the firing weapon's authored recentre speed
+    float  m_fCoopRecoilLast;    // level.time of the last recovery step (ClientThink is per-usercmd)
+    float  m_fCoopStressLast;    // ditto for the stress envelope
+    float  m_fCoopBraceLast;     // ditto for the brace envelope
+    float  m_fCoopRecoilMinDecay;// the authored decay floor - the cgame defaults it to 12 deg/s
+    float  m_fCoopRecoilMaxDecay;// and its ceiling, 25 deg/s
+    float m_fCoopBraceRest;      // distance to the support surface - where the weapon rests
+    int   m_iCoopBraceRestSent;  // change-only publish of the above
+    float m_fCoopBraceYaw;       // aim yaw latched at mount - the centre of the pivot arc
+    int   m_iCoopBraceYawSent;   // last published arc centre, change-only
+    bool  m_bCoopSupineArmsOn;  // ARMS/PELVIS controllers currently re-pointed at the clavicles
+    float m_fCoopSupineRefYaw; // belly facing latched at flip time - the supine exit reference
+    str   m_sCoopHiddenTorso;  // torso anim currently weight-hidden - covers its crossblend-out tail (pass2)
+    bool  m_bCoopProneWant;    // hold satisfied - the statemap may enter prone
+    float m_fCoopCrouchHeld;   // level.time the crouch key went down (0 = not held)
+    float m_fCoopCrouchUp;     // level.time the key was first seen UP (jitter grace, 0 = down)
+    float m_fCoopProneEnter;   // level.time prone began - blocks an instant re-toggle
+    float m_fCoopHeadYaw;    // current head yaw offset, degrees, eased
+    float m_fCoopHeadPitch;  // current head pitch offset
+    float m_fCoopTorsoLag;   // current torso yaw lag, degrees
+    float m_fCoopPrevViewYaw;
+    float m_fCoopSlideEnd;  // level.time the slide ends (0 = not sliding)
+    float m_fCoopSlideNext; // earliest level.time a new slide may begin (anti-spam cooldown)
+    bool  m_bCoopSliding;   // per-frame 'is sliding right now', read by the ClientMove speed chain
     // HZM coop [user 2026-08-02] - LOW-HEALTH LIMP (bug-1291). m_bCoopLimping is the per-frame "is
     // limping right now" flag, set in TickLimp and read by BOTH the COOP_LIMPING statemap conditional
     // (3P body) and the ClientMove speed clamp. m_iCoopLimpSent is the last coop_limpView value
@@ -603,6 +694,16 @@ public:
     qboolean CondAttackButtonSecondary(Conditional& condition);
     qboolean CondCoopAds(Conditional& condition); // HZM coop - aim down sights (dedicated bind)
     qboolean CondCoopSprinting(Conditional& condition); // HZM coop - sprinting this frame (legs statemap)
+    qboolean CondCoopProne(Conditional& condition);     // HZM coop - prone this frame (legs/torso statemap)
+    qboolean CondCoopSupine(Conditional& condition);
+    qboolean CondCoopBraced(Conditional& condition);    // HZM coop - weapon mounted on a surface    // HZM coop - lying on back (prototype)
+    qboolean CondCoopProneTurnL(Conditional& condition); // HZM coop - prone body catching up leftward
+    qboolean CondCoopProneTurnR(Conditional& condition); // HZM coop - prone body catching up rightward
+    qboolean CondCoopProneRollL(Conditional& condition); // HZM coop - evasive roll window, left
+    qboolean CondCoopProneRollR(Conditional& condition); // HZM coop - evasive roll window, right
+    qboolean CondCoopSupineFlipL(Conditional& condition); // HZM coop - supine flip window, left
+    qboolean CondCoopSupineFlipR(Conditional& condition); // HZM coop - supine flip window, right
+    qboolean CondCoopDiedSupine(Conditional& condition); // died on the back (spec A8)
     qboolean CondCoopLimping(Conditional& condition);   // HZM coop - low-health limp this frame (legs statemap)
     qboolean CondCoopCover(Conditional& condition);     // HZM coop - standing back-to-wall cover pose valid (TickCoopCover)
     qboolean CondCoopCoverLow(Conditional& condition);  // HZM coop - crouched low-cover pose valid (TickCoopCover)
@@ -1034,6 +1135,25 @@ public:
     //====
     // Added in 2.0
     void  TickSprint();
+    void  TickSlide(); // HZM coop - sprint + crouch = a slide (must run AFTER TickSprint)
+    void  TickCoopNade();  // HZM coop - quick-grenade state machine
+    void  CoopDirectThrow(); // HZM coop - throw with NO weapon switch (coop_quickNade 2)
+    void  TickCoopLook();  // HZM coop - head tracking + torso counter-rotation
+    void  TickCoopProne(); // HZM coop - hold-crouch prone state machine
+    void  TickCoopStress(); // HZM coop - server-side stress envelope
+    float  CoopBraceBonus();   // brace envelope as the STABILITY bonus sees it (prone scaled)
+    float CoopActiveHeft();   // HZM coop - the active weapon's 0..1 weight, one shared accessor
+    float CoopStaminaDelay(); // HZM coop - one refill delay shared by every spend
+    void  TickCoopRecoil(); // HZM coop - return the authored recoil over time
+    void  CoopAddRecoil(float fPitch, float fYaw, qboolean bVee, float fPitchClamp, float fYawClamp,
+                        float fRecenter, float fMinDecay, float fMaxDecay);
+    void TickCoopBrace();   // HZM coop - gun bracing against geometry
+    void  CoopAddSuppression(float amount); // HZM coop - a round cracked past this player
+    float CoopStress() const { return m_fCoopStress; }
+    void  ApplyCoopBoneOffsets(); // HZM coop - MUST run after PmoveAdjustAngleSettings (bug-2101)
+    void  CoopProneBodyYaw(vec3_t vAngles); // HZM coop - P1 fluidity: rate-limited prone body yaw
+    void  CoopNadeDown();  // HZM coop - '+coopnade' pressed
+    void  CoopNadeUp();    // HZM coop - '-coopnade' released
     float GetRunSpeed() const;
     // HZM coop - is the player currently sprinting this frame (read by cgame-independent consumers if needed)
     bool  IsCoopSprinting() const { return m_bCoopSprinting; }
@@ -1065,6 +1185,7 @@ public:
     // (raise the fire origin over low cover while blind-firing)
     bool  IsCoopBlindfiring() const { return m_bCoopBlindfire; }
     bool  IsCoopDbno() const { return m_bCoopDbno; }   // HZM coop [user 08-02]
+    float CoopBraceEnv() const { return m_fCoopBrace; } // HZM coop - 0..1 gun-brace envelope
     bool  IsCoopCoverLow() const { return m_bCoopCoverLow; }
     bool  IsCoopCoverPeek() const { return m_bCoopCoverPeek; }   // HZM coop - RMB aimed peek
     // HZM coop - one-shot-per-click gate for semi-auto blind fire. The COVER_*_FIRE animation

@@ -1358,7 +1358,10 @@ void RB_DrawTerrainTris(srfTerrain_t* p) {
 	vec3_t  vUp;
 	vec4_t  vTangent;
 	int     firstVert, v;
+	float   fSignAcc;   // patch-wide tangent handedness vote (see the loop below)
 	static vec3_t s_terraNormAcc[SHADER_MAX_VERTEXES];
+	static vec3_t s_terraTanAcc[SHADER_MAX_VERTEXES];
+	static vec3_t s_terraBitanAcc[SHADER_MAX_VERTEXES];
 
 	RB_CHECKOVERFLOW(p->nVerts, p->nTris * 3);
 
@@ -1368,13 +1371,50 @@ void RB_DrawTerrainTris(srfTerrain_t* p) {
 	// moving white sheen). Pack a proper up-normal + a matching tangent once, copy them per vertex (same as
 	// the mesh/sprite paths do via R_VaoPackNormal / R_VaoPackTangent). Tangent (1,0,0), handedness +1 ->
 	// bitangent (0,1,0): a valid TBN for a flat-up terrain vertex.
+	int16_t iLightDir[4];
+
 	VectorSet(vUp, 0.0f, 0.0f, 1.0f);
 	R_VaoPackNormal(iNormal, vUp);
+	// HZM coop [vet 2026-08-28] THIS CONSTANT IS NOW ONLY A FALLBACK - see the real per-vertex
+	// tangent solve at the bottom of this function. It was previously the tangent every terrain
+	// vertex in the game shipped with, and it is correct for almost none of them: terrain UVs are a
+	// planar XY projection whose t axis runs -Y, so the handedness needs to be -1 on 91% of the
+	// 31,169 retail patches, and (1,0,0) lies off the surface plane by the slope angle on the 90% of
+	// patches that are not flat. Measured across all 160 shipped BSPs, this basis was right for 30
+	// patches. That is why generated normal maps read on walls - which get a real tangent from
+	// R_CalcTangentSpace - and did nothing on the ground.
 	vTangent[0] = 1.0f;
 	vTangent[1] = 0.0f;
 	vTangent[2] = 0.0f;
 	vTangent[3] = 1.0f;
 	R_VaoPackTangent(iTangent, vTangent);
+
+	// HZM coop [vet 2026-08-27] ...and the LIGHT DIRECTION, which this path never wrote at all.
+	//
+	// tess.lightdir is a persistent array: leaving it untouched does not mean 'no light direction',
+	// it means every terrain vertex inherits whatever direction the previously batched surface left
+	// there - a brush face somewhere else in the map. Terrain is the ground of every outdoor level,
+	// so the largest lit surface in the game has been shading against an unrelated wall's light
+	// vector. It went unnoticed because nothing sampled a normal map on it until now; with per-pixel
+	// relief switched on it becomes the difference between ground that reads as ground and ground
+	// that is lit from the wrong side.
+	//
+	// Sampled once per patch rather than per vertex, matching how the normal and tangent above are
+	// done: terrain patches are small and flat, and R_LightDirForPoint is a world query.
+	{
+		vec3_t vLightDir, vNorm;
+		VectorSet(vNorm, 0.0f, 0.0f, 1.0f);
+		VectorSet(vLightDir, 0.0f, 0.0f, 1.0f);
+		if (p->iVertHead && tr.world) {
+			R_LightDirForPoint(g_pVert[p->iVertHead].xyz, vLightDir, vNorm, tr.world);
+			if (VectorLength(vLightDir) < 0.01f) {
+				VectorSet(vLightDir, 0.0f, 0.0f, 1.0f);
+			} else {
+				VectorNormalize(vLightDir);
+			}
+		}
+		R_VaoPackNormal(iLightDir, vLightDir);
+	}
 
 	firstVert = tess.numVertexes; // remember where this patch's verts start (for the normal pass below)
 
@@ -1394,6 +1434,7 @@ void RB_DrawTerrainTris(srfTerrain_t* p) {
             tess.lightCoords[tess.numVertexes][1] = g_pVert[i].xyz[1] * lmScale + p->lmapY;
 			VectorCopy4(iNormal, tess.normal[tess.numVertexes]);
 			VectorCopy4(iTangent, tess.tangent[tess.numVertexes]);
+			VectorCopy4(iLightDir, tess.lightdir[tess.numVertexes]);
 			tess.color[tess.numVertexes][0] = 0xffff;
 			tess.color[tess.numVertexes][1] = 0xffff;
 			tess.color[tess.numVertexes][2] = 0xffff;
@@ -1416,6 +1457,7 @@ void RB_DrawTerrainTris(srfTerrain_t* p) {
 			//tess.vertexDlightBits[tess.numVertexes] = dlightBits;
 			VectorCopy4(iNormal, tess.normal[tess.numVertexes]);
 			VectorCopy4(iTangent, tess.tangent[tess.numVertexes]);
+			VectorCopy4(iLightDir, tess.lightdir[tess.numVertexes]);
             tess.color[tess.numVertexes][0] = 0xffff;
             tess.color[tess.numVertexes][1] = 0xffff;
             tess.color[tess.numVertexes][2] = 0xffff;
@@ -1429,7 +1471,19 @@ void RB_DrawTerrainTris(srfTerrain_t* p) {
 	// HZM coop - zero the per-vertex normal accumulator for this patch's verts.
 	for (v = firstVert; v < tess.numVertexes; v++) {
 		VectorClear(s_terraNormAcc[v]);
+		VectorClear(s_terraTanAcc[v]);
+		VectorClear(s_terraBitanAcc[v]);
 	}
+
+	// [user 2026-08-28] PATCH-WIDE HANDEDNESS. Deciding the tangent sign per VERTEX made it flip as the
+	// terrain LOD morphed: the varnode tessellation changes the triangle set with view distance, so the
+	// accumulated bitangent at a vertex changes too, and near a degenerate sum the sign could land either
+	// way from frame to frame. A flipped sign inverts the normal map's green channel, which inverts the
+	// lighting - seen as whole 512-unit patches flashing as the player moves toward or around them.
+	// A patch's UVs are a single planar XY projection, so ONE sign is correct for all of it by
+	// construction; summing the evidence over the patch also makes the decision robust where any
+	// individual vertex is degenerate.
+	fSignAcc = 0.0f;
 
 	for (i = p->iTriHead; i; i = g_pTris[i].iNext)
 	{
@@ -1454,6 +1508,42 @@ void RB_DrawTerrainTris(srfTerrain_t* p) {
 			VectorAdd(s_terraNormAcc[ib], fn, s_terraNormAcc[ib]);
 			VectorAdd(s_terraNormAcc[ic], fn, s_terraNormAcc[ic]);
 
+			// HZM coop [vet 2026-08-28] ...and the tangent frame, solved from this triangle's own UV
+			// gradient instead of assumed. Left unnormalized so the accumulation is area-weighted, the
+			// same way the face normal above is.
+			{
+				float du1 = tess.texCoords[ib][0] - tess.texCoords[ia][0];
+				float dv1 = tess.texCoords[ib][1] - tess.texCoords[ia][1];
+				float du2 = tess.texCoords[ic][0] - tess.texCoords[ia][0];
+				float dv2 = tess.texCoords[ic][1] - tess.texCoords[ia][1];
+				float det = du1 * dv2 - du2 * dv1;
+
+				if (fabs(det) > 1e-12f) {
+					float  f = 1.0f / det;
+					vec3_t t, b;
+					int    k;
+
+					for (k = 0; k < 3; k++) {
+						t[k] = (e1[k] * dv2 - e2[k] * dv1) * f;
+						b[k] = (e2[k] * du1 - e1[k] * du2) * f;
+					}
+					VectorAdd(s_terraTanAcc[ia], t, s_terraTanAcc[ia]);
+					VectorAdd(s_terraTanAcc[ib], t, s_terraTanAcc[ib]);
+					VectorAdd(s_terraTanAcc[ic], t, s_terraTanAcc[ic]);
+					VectorAdd(s_terraBitanAcc[ia], b, s_terraBitanAcc[ia]);
+					VectorAdd(s_terraBitanAcc[ib], b, s_terraBitanAcc[ib]);
+					VectorAdd(s_terraBitanAcc[ic], b, s_terraBitanAcc[ic]);
+
+					// area-weighted vote: cross(faceNormal, T) . B is positive for one handedness and
+					// negative for the other, and weighting by face area lets the big triangles decide
+					{
+						vec3_t cf;
+						CrossProduct(fn, t, cf);
+						fSignAcc += DotProduct(cf, b);
+					}
+				}
+			}
+
 			tess.indexes[tess.numIndexes] = ia;
 			tess.indexes[tess.numIndexes + 1] = ib;
 			tess.indexes[tess.numIndexes + 2] = ic;
@@ -1473,6 +1563,37 @@ void RB_DrawTerrainTris(srfTerrain_t* p) {
 		}
 		R_VaoPackNormal(pn, n);
 		VectorCopy4(pn, tess.normal[v]);
+
+		// HZM coop [vet 2026-08-28] Gram-Schmidt the accumulated tangent against the SMOOTHED normal -
+		// which is why this lives here rather than up top: the real normal does not exist until this
+		// loop. Handedness comes from the accumulated bitangent, so it is measured per vertex rather
+		// than assumed, and rotated or mirrored UV sets resolve correctly with no special case.
+		{
+			vec3_t t, c;
+			vec4_t t4;
+			int16_t pt[4];
+
+			VectorCopy(s_terraTanAcc[v], t);
+			VectorMA(t, -DotProduct(n, t), n, t);
+			if (VectorNormalize(t) < 0.001f) {
+				// degenerate UVs - fall back to any vector in the surface plane
+				VectorSet(t, 1.0f, 0.0f, 0.0f);
+				VectorMA(t, -DotProduct(n, t), n, t);
+				if (VectorNormalize(t) < 0.001f) {
+					VectorSet(t, 0.0f, 1.0f, 0.0f);
+				}
+			}
+			CrossProduct(n, t, c);
+			VectorCopy(t, t4);
+			// one sign for the whole patch, from the area-weighted vote above. Falls back to the
+			// per-vertex sum only if the vote is a dead tie, which needs genuinely degenerate UVs.
+			if (fSignAcc > 0.0f)      { t4[3] =  1.0f; }
+			else if (fSignAcc < 0.0f) { t4[3] = -1.0f; }
+			else                      { t4[3] = (DotProduct(c, s_terraBitanAcc[v]) < 0.0f) ? -1.0f : 1.0f; }
+			(void)c;
+			R_VaoPackTangent(pt, t4);
+			VectorCopy4(pt, tess.tangent[v]);
+		}
 	}
 }
 

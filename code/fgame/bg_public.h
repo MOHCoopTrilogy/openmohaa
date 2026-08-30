@@ -321,6 +321,12 @@ movement on the server game.
         int touchents[MAXTOUCH];
 
         int      moveresult; // indicates whether 2the player's movement was blocked and how
+        // HZM coop [user 2026-08-25] DIAGNOSTIC ONLY. pmove_t is local to the server and to the client
+        // predictor, so adding a field here is not a protocol change (same reasoning as
+        // coopCoverLeanSide above). Carries the ground plane the move actually resolved against, which
+        // is the one number that decides walk-vs-air acceleration and is otherwise trapped in the
+        // file-static pml.
+        float    coopDbgGroundNormalZ;
         qboolean stepped;
 
         int    pmoveEvent; // events predicted on client side

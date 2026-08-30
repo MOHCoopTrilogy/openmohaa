@@ -2256,6 +2256,131 @@ Player::Player()
     m_iTextChatTime       = 0;
     //====
 
+    // [vet 2026-08-28] SEEDED ABOVE THE LoadingSavegame RETURN. Player memory comes from gi.Malloc
+    // with no memset, and Player::Archive persists NONE of these coop members - so every one of them
+    // held indeterminate heap bytes after a savegame load. All 118 sat below the early return. The
+    // worst of them had no repair path: m_fCoopHitMarkNext is only rewritten on a NON-kill hit, so a
+    // garbage-high value killed hit markers for the rest of the session. weapon.cpp:1027 already
+    // established this exact pattern on 2026-08-21; player.cpp never got the same treatment.
+    m_szCoopFireLast[0]     = 0;
+    m_fCoopStamina    = 9999.0f;
+    m_fCoopStress     = 0.0f;
+    m_iCoopSuppHits   = 0;
+    m_bCoopSprinting  = false;
+    m_fCoopSlideNext  = 0;
+    m_bCoopSliding    = false;
+    m_bCoopNadeHeld   = false;
+    m_fCoopNadeT0     = 0;
+    m_fCoopNadeThrow  = 0;
+    m_fCoopHeadPitch  = 0;
+    m_fCoopTorsoLag   = 0;
+    m_fCoopPrevViewYaw = 0;
+    m_fCoopProneRollEnd = 0;
+    m_iCoopProneRollDir = 0;
+    m_iCoopProneLeanPrev = 0;
+    m_bCoopSupine = false;
+    m_fCoopSupineFlip = 0;
+    m_iCoopSupineFlipDir = 0;
+    m_bCoopDiedSupine = false;
+    m_fCoopProneExitAt = 0;
+    m_fCoopProneYawTarget = 0;
+    m_iCoopProneTurnDir = 0;
+    m_bCoopCrawlNoFire = false;
+    m_bCoopProneWant  = false;
+    m_fCoopCrouchHeld = 0;
+    m_bCoopProneKeyBlock = false;
+    m_fCoopCrouchUp   = 0;
+    m_fCoopProneEnter = 0;
+    m_fCoopReadyUpAt      = 0.0f;
+    m_iCoopGunHeftSent    = -1;
+    m_fCoopRecoilLast     = 0.0f;
+    m_fCoopStressLast     = 0.0f;
+    m_fCoopBraceLast      = 0.0f;
+    m_fCoopRecoilMinDecay = 12.0f;
+    m_fCoopRecoilMaxDecay = 25.0f;
+    m_fCoopStaminaHold    = 0.0f;
+    m_bCoopJumpPrev       = false;
+    m_fCoopRecoilRecenter = 0.0f;
+    m_fCoopBraceRest     = 0.0f;
+    m_iCoopBraceRestSent = -1;
+    m_fCoopSupineRefYaw = 0.0f;
+    m_fCoopBrace          = 0.0f;
+    m_fCoopBraceDwell     = 0.0f;
+    m_fCoopBraceHold      = 0.0f;
+    m_fCoopBraceYaw       = 0.0f;
+    m_bCoopBraceStill     = false;
+    m_bCoopBraceAvail     = false;
+    m_bCoopBraceMounted   = false;
+    m_bCoopBraceUsePrev   = false;
+    m_fCoopHitMarkNext    = 0.0f;
+    m_iCoopHsCueSent      = 0;
+    m_iCoopBraceAvailSent = -1;
+    m_iCoopBraceYawSent   = -9999;
+    m_bCoopBfShotDone = false;
+    m_bCoopNavRec     = false;
+    m_bCoopNavFull    = false;
+    m_iCoopNavCount   = 0;
+    m_fCoopCoverEdge      = 0.0f;
+    m_iCoopCoverSideWant  = 0;
+    m_fCoopCoverSideDwell = 0.0f;
+    m_fCoopCoverLastYaw   = 0.0f;
+    m_iCoopVarCoverLast = -1;
+    m_iCoopLobbyRightPrev = 0;
+    m_bCoopLobbyUsePrev   = false;
+    m_bCoopLobbyCurInit   = false;
+    m_iCoopLobbyYawPrev   = 0;
+    m_iCoopLobbyPitchPrev = 0;
+    m_fCoopLobbyCurX      = 320.0f;
+    m_fCoopLobbyCurY      = 240.0f;
+    m_bCoopLobbyAtkPrev   = false;
+    m_fCoopSprintDur  = 0.0f;
+    m_iCoopBreathRemainMs   = -1;
+    m_iCoopBreathCooldownMs = 0;
+    m_iCoopBreathLastMs     = 0;
+    m_bCoopBreathSteady     = qfalse;
+    m_bCoopCoverRequested = false;
+    m_fCoopCoverAutoRetry = 0.0f;
+    m_bCoopCoverWall      = false;
+    m_bCoopCoverLow       = false;
+    m_bCoopBlindfire      = false;
+    m_fCoopCoverBadTime   = 0.0f;
+
+    m_fCoopStressSupp = 0.0f;   // HZM coop [user 2026-08-25] - server stress
+    m_bCoopLimping    = false;   // HZM coop - low-health limp (bug-1291)
+    m_fCoopSlideEnd   = 0;       // HZM coop [user 2026-08-24] - sprint-to-slide
+    m_iCoopNadeState  = 0;       // HZM coop [user 2026-08-24] - quick grenade
+    m_fCoopHeadYaw    = 0;       // HZM coop [user 2026-08-24] - head look / torso lag
+    m_bCoopProne      = false;   // HZM coop [user 2026-08-24] - prone
+    m_fCoopProneBodyYaw = 0;   // P1 fluidity
+    m_bCoopWounded    = false;   // HZM coop - bug-1324
+    m_iCoopLimpSent   = -1;      // force the first coop_limpView stuff, whatever its value
+    m_iCoopVaultSent  = 0;       // HZM coop - vault pulse counter (see player.h)
+    m_iCoopCoverSent  = -1;      // HZM coop - same for coop_coverView
+    m_bCoopSupineArmsOn = false;      // [v3] never read from uninitialised heap - see bug-2133
+    m_iCoopBraceSent      = -1;    // impossible: forces one send on first evaluation
+    m_iCoopBraceMountedSent = -1;  // same, for the binary mount flag
+    m_iCoopDaylightSent   = -1;    // same, for the time-of-day scalar
+    m_iCoopBfButtons  = 0;       // HZM coop - semi-auto blindfire edge tracking
+    m_bCoopShoulderAim = false; // HZM coop - 3P shoulder-aim stage (userinfo mirror)
+    m_bCoopView3p      = false; // HZM coop - client view mode (u_view3p userinfo mirror)
+    m_vCoopCoverNormal = vec_zero; // HZM coop - anchored cover OUT normal [215]
+    m_iCoopCoverSide   = 0;        // HZM coop - 0 = NONE. Never assume a side (bug-2028)
+    m_iCoopCoverSideSent  = -99;   // impossible value: forces one send on first evaluation
+    m_bCoopCoverPeek   = false;    // HZM coop - RMB peek-aim from cover [215]
+    m_fCoopVehTurretTime = -10.0f; // HZM coop - vehicle-turret manning stamp [219]
+    m_fCoopProbeTime   = -10.0f;   // HZM coop - GUNNERPROBE throttle [221]
+    m_pCoopBotTarget   = NULL;     // HZM coop - bot combat drive (dev/test, coop_botInput) target cache
+    m_iCoopBotRetarget = 0;        // HZM coop - bot combat drive next-rescan stamp
+    m_iCoopCoverTypeLast = -1;   // [bug-2090] force the first coop_coverType push      // HZM coop - force the first coop_incover var push [235]
+    m_bCoopLobbyInputOn   = false; // HZM coop - lobby usercmd input bridge stays off until the lobby enables it
+    m_bCoopLobbyCursorOn  = false; // HZM coop - lobby mouse-cursor bridge (clickable lobby UI) stays off until enabled
+    m_vCoopCoverBaseOrg = vec_zero; // HZM coop - cover pose anchor position [216]
+    m_fCoopPeekFrac    = 0.0f;     // HZM coop - eased peek step-out fraction [216]
+    m_bCoopGearLoop  = false; // HZM coop - gear rattle off
+    m_bCoopDbno           = false;   // HZM coop [user 08-02]
+    m_fCoopCoverAutoDwell = 0.0f; // HZM coop [user 2026-08-09] auto-cover dwell/backoff
+    m_vCoopRecoilOwed     = Vector(0, 0, 0);
+    m_iCoopSpeedBase      = 0;   // [vet] was never assigned anywhere - the SPEEDPROBE read it raw
     if (LoadingSavegame) {
         return;
     }
@@ -2279,7 +2404,6 @@ Player::Player()
     new_buttons        = 0;
     server_new_buttons = 0;
     m_bFireLockUntilRelease = false;
-    m_szCoopFireLast[0]     = 0;
     respawn_time       = -1.0;
 
     //
@@ -2388,62 +2512,16 @@ Player::Player()
 
     m_fLastSprintTime = 0;
     // start with a full stamina pool on (re)spawn; TickSprint clamps this down to the cvar max each frame
-    m_fCoopStamina    = 9999.0f;
-    m_bCoopSprinting  = false;
-    m_bCoopLimping    = false;   // HZM coop - low-health limp (bug-1291)
-    m_bCoopWounded    = false;   // HZM coop - bug-1324
-    m_iCoopLimpSent   = -1;      // force the first coop_limpView stuff, whatever its value
-    m_iCoopVaultSent  = 0;       // HZM coop - vault pulse counter (see player.h)
-    m_iCoopCoverSent  = -1;      // HZM coop - same for coop_coverView
-    m_iCoopBfButtons  = 0;       // HZM coop - semi-auto blindfire edge tracking
-    m_bCoopBfShotDone = false;
-    m_bCoopNavRec     = false;
-    m_bCoopNavFull    = false;
-    m_iCoopNavCount   = 0;
-    m_bCoopShoulderAim = false; // HZM coop - 3P shoulder-aim stage (userinfo mirror)
-    m_bCoopView3p      = false; // HZM coop - client view mode (u_view3p userinfo mirror)
-    m_vCoopCoverNormal = vec_zero; // HZM coop - anchored cover OUT normal [215]
-    m_iCoopCoverSide   = 0;        // HZM coop - 0 = NONE. Never assume a side (bug-2028)
-    m_fCoopCoverEdge      = 0.0f;
-    m_iCoopCoverSideWant  = 0;
-    m_fCoopCoverSideDwell = 0.0f;
-    m_fCoopCoverLastYaw   = 0.0f;
-    m_iCoopCoverSideSent  = -99;   // impossible value: forces one send on first evaluation
-    m_bCoopCoverPeek   = false;    // HZM coop - RMB peek-aim from cover [215]
-    m_fCoopVehTurretTime = -10.0f; // HZM coop - vehicle-turret manning stamp [219]
-    m_fCoopProbeTime   = -10.0f;   // HZM coop - GUNNERPROBE throttle [221]
-    m_pCoopBotTarget   = NULL;     // HZM coop - bot combat drive (dev/test, coop_botInput) target cache
-    m_iCoopBotRetarget = 0;        // HZM coop - bot combat drive next-rescan stamp
-    m_iCoopVarCoverLast = -1;
-    m_iCoopCoverTypeLast = -1;   // [bug-2090] force the first coop_coverType push      // HZM coop - force the first coop_incover var push [235]
-    m_bCoopLobbyInputOn   = false; // HZM coop - lobby usercmd input bridge stays off until the lobby enables it
-    m_iCoopLobbyRightPrev = 0;
-    m_bCoopLobbyUsePrev   = false;
-    m_bCoopLobbyCursorOn  = false; // HZM coop - lobby mouse-cursor bridge (clickable lobby UI) stays off until enabled
-    m_bCoopLobbyCurInit   = false;
-    m_iCoopLobbyYawPrev   = 0;
-    m_iCoopLobbyPitchPrev = 0;
-    m_fCoopLobbyCurX      = 320.0f;
-    m_fCoopLobbyCurY      = 240.0f;
-    m_bCoopLobbyAtkPrev   = false;
-    m_vCoopCoverBaseOrg = vec_zero; // HZM coop - cover pose anchor position [216]
-    m_fCoopPeekFrac    = 0.0f;     // HZM coop - eased peek step-out fraction [216]
-    m_bCoopGearLoop  = false; // HZM coop - gear rattle off
-    m_fCoopSprintDur  = 0.0f;
+    // HZM coop [user 2026-08-27, bug-2133] BRACE STATE - seeded here for two separate reasons.
+    // (1) Player is allocated through gi.Malloc, which does NOT zero: every one of these was read
+    // from indeterminate heap memory, and m_fCoopBrace is consumed by TickCoopStress ~60 lines
+    // BEFORE TickCoopBrace first writes it. (2) The publish is change-only, so without an
+    // impossible sentinel a fresh Player whose counter happened to hold 100 would never send
+    // 'set coop_braceView 0' - and a client that changed map while mounted would keep a clamped
+    // aim cone and forced ADS for the rest of the session with no way out. Same sentinel trick
+    // the limp and cover channels above already use, and for exactly the same reason.
     // HZM coop [user 2026-08-17] - breath budget; -1 means "uninitialised", filled on first tick
-    m_iCoopBreathRemainMs   = -1;
-    m_iCoopBreathCooldownMs = 0;
-    m_iCoopBreathLastMs     = 0;
-    m_bCoopBreathSteady     = qfalse;
     // HZM coop - TAKE COVER [214]: start clear (no request, no valid pose)
-    m_bCoopDbno           = false;   // HZM coop [user 08-02]
-    m_bCoopCoverRequested = false;
-    m_fCoopCoverAutoDwell = 0.0f; // HZM coop [user 2026-08-09] auto-cover dwell/backoff
-    m_fCoopCoverAutoRetry = 0.0f;
-    m_bCoopCoverWall      = false;
-    m_bCoopCoverLow       = false;
-    m_bCoopBlindfire      = false;
-    m_fCoopCoverBadTime   = 0.0f;
     m_bHasJumped      = false;
 
     m_fLastInvulnerableTime      = 0;
@@ -2788,6 +2866,9 @@ void Player::InitModel(void)
     SetControllerTag(TORSO_TAG, gi.Tag_NumForName(edict->tiki, "Bip01 Spine2"));
     SetControllerTag(ARMS_TAG, gi.Tag_NumForName(edict->tiki, "Bip01 Spine1"));
     SetControllerTag(PELVIS_TAG, gi.Tag_NumForName(edict->tiki, "Bip01 Pelvis"));
+    // HZM coop [v3] remember the resting assignments: while supine these two controllers are
+    // TEMPORARILY re-pointed at the clavicles to reverse the arms, and must go back afterwards.
+    m_bCoopSupineArmsOn = false;
 
     if (g_gametype->integer != GT_SINGLE_PLAYER && IsSpectator()) {
         hideModel();
@@ -3408,6 +3489,23 @@ void Player::Killed(Event *ev)
     int     meansofdeath;
     int     location;
     Event  *event;
+
+    // [review F3+F4, bug-2124] died-supine latch, HERE and nowhere else. The first version
+    // latched in TickCoopProne's forced-leave: (a) nothing ever cleared it while alive, so ONE
+    // supine death made every later death that map play the on-back anim; (b) TickCoopProne is
+    // usercmd-driven while the KILLED statemap dispatch is server-frame-driven, so on a dedicated
+    // server a remote victim's latch could lose the race and a real supine death played belly-down
+    // (the standing dedicated/listen parity rule). Killed() runs on EVERY death on the server
+    // frame itself, with the stance flags still live - assigning unconditionally makes the value
+    // correct per-death and self-overwriting: no stale state can survive to the next death.
+    // [vet, bug-2139] recoil debt must not outlive the life that earned it. The constructor runs once
+    // per CONNECTION, not per life, so without this a player who died mid-burst respawned still owing
+    // recoil and the recovery immediately rotated their fresh view.
+    m_vCoopRecoilOwed     = Vector(0, 0, 0);
+    m_fCoopRecoilRecenter = 0.0f;
+    m_fCoopRecoilLast     = level.time;
+
+    m_bCoopDiedSupine = (m_bCoopProne && m_bCoopSupine);
 
     //
     // Added in OPM
@@ -4636,7 +4734,19 @@ void Player::ClientMove(usercmd_t *ucmd)
     }
 
     if (g_protocol >= protocol_e::PROTOCOL_MOHTA_MIN) {
-        if (maxs.z == 54.0f || maxs.z == 60.0f) {
+        // HZM coop [user 2026-08-24] the 2.0+ branch never derived PRONE from the hull - prone was
+        // REMOVED in 2.0 (PM_CheckDuck says so in as many words) and coop runs that protocol. Without
+        // the flag PM_CheckDuck cannot recognise a prone player and resets him to standing height on
+        // the next pmove frame, which is why the camera and gun stayed at eye level.
+        // AND m_bCoopProne, not the hull alone. A 20-unit hull is not unique to prone - DBNO uses one
+        // too - and deriving the flag from height alone handed a DOWNED player PRONE_VIEWHEIGHT (16).
+        // The DBNO camera then applies cg_dbnoCamVert -30 from the view origin, so the camera resolved
+        // to 16 - 30 = -14 and sat UNDER THE MAP (user, 2026-08-26). Before prone existed a downed
+        // player kept a standing viewheight and -30 landed safely above the floor; requiring the coop
+        // prone state restores that exactly while leaving real prone untouched.
+        if (maxs.z == 20.0f && m_bCoopProne) {
+            client->ps.pm_flags |= PMF_VIEW_PRONE;
+        } else if (maxs.z == 54.0f || maxs.z == 60.0f) {
             client->ps.pm_flags |= PMF_DUCKED;
         } else if (viewheight == JUMP_START_VIEWHEIGHT) {
             client->ps.pm_flags |= PMF_VIEW_JUMP_START;
@@ -4749,6 +4859,57 @@ void Player::ClientMove(usercmd_t *ucmd)
             client->ps.speed = (float)client->ps.speed * sv_crouchspeedmult->value;
         }
 
+        // HZM coop [user 2026-08-24] SLIDE SPEED. Placed immediately AFTER the crouch multiplier
+        // deliberately: a slide IS a crouched state, so without this the crouch penalty would be exactly
+        // the thing the slide exists to carry you through. Everything downstream (dmspeedmult, the
+        // weapon-weight mults, the limp floors) still applies normally on top.
+        //
+        // The curve decays to 1.0 across the slide, so it ENDS at a normal crouch-walk rather than
+        // stopping dead - the deceleration is the whole feel of the move.
+        // HZM coop [user 2026-08-24] CRAWL SPEED. Placed with the other stance multipliers so the
+        // later global mults (dmspeedmult, weapon weight, the limp floors) still apply on top.
+        if (m_bCoopProne) {
+            static cvar_t *pPS = NULL;
+            if (!pPS) { pPS = gi.Cvar_Get("coop_proneSpeed", "0.42", CVAR_ARCHIVE); } // [user 2026-08-25] 0.30 -> 0.42. NOTE: the original reason given here ("a slope already costs speed") was WRONG - measurement showed the ground was flat (nrmZ 0.97-1.00). The real cause was the flat pm_stopspeed friction floor, fixed in PM_Friction; this multiplier is now just the feel knob it was meant to be.
+            {
+                float m = pPS->value;
+                if (m < 0.05f) { m = 0.05f; } else if (m > 1.0f) { m = 1.0f; }
+                client->ps.speed = (float)client->ps.speed * m;
+            }
+        }
+
+        // [pass4, bug-2127] the supine/flip movement-freeze must reach the CLIENT PREDICTOR.
+        // The TickCoopProne ucmd zeroing is server-only, so the client replayed raw usercmds
+        // and predicted the ~84 u/s crawl the server discarded - rubber-banding whenever a
+        // move key was held while supine or mid-flip (worse with latency, dedicated parity
+        // rule), plus a FALSE client-side crawl no-fire gun-dip keyed on PREDICTED velocity.
+        // ps.speed is replicated and feeds PM_CmdScale on BOTH sides, so zeroing it here
+        // keeps prediction honest; the ucmd zeroing stays as the authoritative backstop.
+        // Jump exits are unaffected (PM_CheckJump reads upmove directly, not CmdScale).
+        if (m_bCoopProne && (m_bCoopSupine || level.time < m_fCoopSupineFlip)) {
+            static cvar_t *pSupMoveSpd = NULL;
+            if (!pSupMoveSpd) { pSupMoveSpd = gi.Cvar_Get("coop_supineMove", "0", CVAR_ARCHIVE); }
+            if (!pSupMoveSpd->integer) {
+                client->ps.speed = 0;
+            }
+        }
+
+        if (m_bCoopSliding && m_fCoopSlideEnd > level.time) {
+            cvar_t *pSpd = gi.Cvar_Get("coop_slideSpeed", "1.9", CVAR_ARCHIVE);
+            cvar_t *pDur = gi.Cvar_Get("coop_slideTime", "0.75", CVAR_ARCHIVE);
+            float   dur  = (pDur && pDur->value > 0.05f) ? pDur->value : 0.75f;
+            float   frac = (m_fCoopSlideEnd - level.time) / dur; // 1 at entry -> 0 at the end
+            float   top  = (pSpd ? pSpd->value : 1.9f);
+            float   mult;
+
+            if (frac < 0.0f) { frac = 0.0f; } else if (frac > 1.0f) { frac = 1.0f; }
+            if (top < 1.0f) { top = 1.0f; } // a slide is never slower than the crouch it rides
+            // frac*frac, not frac: a linear decay reads as being dragged backwards. Quadratic holds
+            // most of the speed early and sheds it late, which is what a slide actually feels like.
+            mult = 1.0f + (top - 1.0f) * frac * frac;
+            client->ps.speed = (float)client->ps.speed * mult;
+        }
+
         pWeap = GetActiveWeapon(WEAPON_MAIN);
         if (pWeap) {
             //
@@ -4837,6 +4998,15 @@ void Player::ClientMove(usercmd_t *ucmd)
                * gi.Cvar_Get("coop_limpMinFrac", "0.35", CVAR_ARCHIVE)->value;
         if (m_iMovePosFlags & MPF_POSITION_CROUCHING) {
             fFloor *= sv_crouchspeedmult->value;
+        } else if (m_bCoopProne) {
+            // HZM coop [user 2026-08-25] BOTH floors discounted for CROUCH and neither for PRONE, so a
+            // prone player who aimed (or was limping) had their speed RAISED back to ~0.7x run: "when
+            // you hold right mouse down in prone and move around you move at the normal over shoulder
+            // speed as walking". Measured directly - ps.speed read 172 while prone.
+            cvar_t *pPSf = gi.Cvar_Get("coop_proneSpeed", "0.42", CVAR_ARCHIVE);
+            float   mp   = pPSf ? pPSf->value : 0.42f;
+            if (mp < 0.05f) { mp = 0.05f; } else if (mp > 1.0f) { mp = 1.0f; }
+            fFloor *= mp;
         }
         if (fFloor > fPreLimp) {
             fFloor = fPreLimp; // injured is never faster than healthy in the same stance
@@ -4856,15 +5026,74 @@ void Player::ClientMove(usercmd_t *ucmd)
     // HZM coop [2026-08-02] bug-1291 - `&& !m_bCoopLimping`: this FLOOR would otherwise raise a
     // limping player back to full run pace whenever the 3P shoulder stage is up, undoing the limp
     // clamp above and skating the injured clip at run speed.
-    if (m_bCoopShoulderAim && !m_bCoopSprinting) {
+    // [pass5, bug-2130] ...and `&& !(supine || flip window)` for the same reason, found by three of
+    // six auditors independently: this floor runs AFTER the pass-4 supine freeze (ps.speed = 0) and
+    // raised it straight back to ~84 u/s, resurrecting the exact bug-2127 rubber-band it fixed. It
+    // hits the feature's PRIMARY path, not an edge: settled supine REQUIRES ADS held, and staged 3P
+    // ADS stage 0 IS the shoulder, so every third-person supine player was floored. The limp clamp
+    // above survives only because it clamps the floor to a pre-freeze capture; this one did not.
+    if (m_bCoopShoulderAim && !m_bCoopSprinting
+        && !(m_bCoopProne && (m_bCoopSupine || level.time < m_fCoopSupineFlip))) {
         cvar_t *p3pMult = gi.Cvar_Get("coop_adsSpeedMult3p", "0.7", CVAR_ARCHIVE); // [237] -0.10 again per user (was 0.8); live-tunable 0.5-1.6
         float   m3      = p3pMult ? p3pMult->value : 1.0f;
         float   fFloor;
 
         if (m3 < 0.5f) { m3 = 0.5f; } else if (m3 > 1.6f) { m3 = 1.6f; }
-        fFloor = GetRunSpeed() * sv_dmspeedmult->value * m3;
+        // [user 2026-08-28] "when over shoulder ads and moving in third person, you move faster than
+        // you move when you sprint". Correct, and it was arithmetic rather than tuning - two errors
+        // stacking:
+        //
+        // 1. GetRunSpeed() DOES NOT RETURN THE RUN SPEED. Under the engine's legacy sprint rule it
+        //    returns sv_runspeed * sv_sprintmult_dm (1.20), so the floor was really 1.20 * 0.7 =
+        //    0.84 of run. Coop sprint is sv_runspeed * coop_sprintMult (1.05) and then takes the
+        //    weapon-class multiplier - 0.89 rifle, 0.78 MG - landing at 0.93 and 0.82. So with any
+        //    heavy weapon the aimed walk genuinely outran the sprint.
+        //
+        // 2. THE FLOOR IGNORED WEAPON WEIGHT, because it is applied after the class multiplier and
+        //    simply overwrote it - a Panzerschreck aimed-walked exactly as fast as a Luger. The user
+        //    asked whether weight should factor in here; it should, and it did not.
+        //
+        // Base it on the real run speed, carry the same weight multiplier the rest of the chain uses,
+        // and cap it at what this player would actually be doing sprinting - the discipline the limp
+        // floor beside it already follows, so no floor can ever make a stance faster than the stance
+        // that is supposed to be the fast one.
+        fFloor = sv_runspeed->value * sv_dmspeedmult->value * m3;
+        {
+            Weapon *pFW = GetActiveWeapon(WEAPON_MAIN);
+            int     iFC = pFW ? pFW->GetWeaponClass() : 0;
+            float   fWm = 0.92f;
+
+            if (iFC & WEAPON_CLASS_PISTOL)     { fWm = 0.98f; }
+            else if (iFC & WEAPON_CLASS_SMG)   { fWm = 0.94f; }
+            else if (iFC & WEAPON_CLASS_RIFLE) { fWm = 0.89f; }
+            else if (iFC & WEAPON_CLASS_MG)    { fWm = 0.78f; }
+            else if (iFC & WEAPON_CLASS_HEAVY) { fWm = 0.74f; }
+            fFloor *= fWm;
+
+            // never at or above this player's own sprint
+            {
+                static cvar_t *pCap = NULL;
+                cvar_t        *pSM  = gi.Cvar_Get("coop_sprintMult", "1.05", CVAR_ARCHIVE);
+                float          fSprint;
+                if (!pCap) { pCap = gi.Cvar_Get("coop_adsFloorCap", "0.85", CVAR_ARCHIVE); }
+                fSprint = sv_runspeed->value * sv_dmspeedmult->value * fWm
+                        * ((pSM && pSM->value > 1.0f) ? pSM->value : 1.0f);
+                if (fFloor > fSprint * pCap->value) {
+                    fFloor = fSprint * pCap->value;
+                }
+            }
+        }
         if (m_iMovePosFlags & MPF_POSITION_CROUCHING) {
             fFloor *= sv_crouchspeedmult->value;
+        } else if (m_bCoopProne) {
+            // HZM coop [user 2026-08-25] BOTH floors discounted for CROUCH and neither for PRONE, so a
+            // prone player who aimed (or was limping) had their speed RAISED back to ~0.7x run: "when
+            // you hold right mouse down in prone and move around you move at the normal over shoulder
+            // speed as walking". Measured directly - ps.speed read 172 while prone.
+            cvar_t *pPSf = gi.Cvar_Get("coop_proneSpeed", "0.42", CVAR_ARCHIVE);
+            float   mp   = pPSf ? pPSf->value : 0.42f;
+            if (mp < 0.05f) { mp = 0.05f; } else if (mp > 1.0f) { mp = 1.0f; }
+            fFloor *= mp;
         }
         // HZM coop [user 2026-08-02] bug-1292 - SCALE the floor while limping, do not SKIP it.
         // This floor is the only thing that gives the 3P shoulder stage a usable movement speed
@@ -4934,6 +5163,33 @@ void Player::ClientMove(usercmd_t *ucmd)
         // if we're not moving, set the blocked flag in case the user is trying to move
         if ((ucmd->forwardmove || ucmd->rightmove) && ((oldpos - origin).length() < 0.005f)) {
             moveresult = MOVERESULT_BLOCKED;
+        }
+
+        // HZM coop [user 2026-08-25] CRAWL PROBE (coop_crawlDebug 1). Prone crawl is slow and stalls on
+        // slopes. The suspects are separable and this prints all of them together: ps.speed is what the
+        // stance multiplier produced, disp is what the frame ACTUALLY moved, and blocked is
+        // `disp < 0.005` - the single condition that sets MOVERESULT_BLOCKED, which both rewinds the
+        // player to oldpos AND kicks the legs statemap out of PRONE_FORWARD (it requires !BLOCKED), so
+        // one stalled frame costs the crawl animation as well as the distance.
+        {
+            static cvar_t *pCDbg = NULL;
+            static int     s_cLast = 0;
+            static int     s_blocked = 0, s_frames = 0;
+
+            if (!pCDbg) { pCDbg = gi.Cvar_Get("coop_crawlDebug", "0", 0); }
+            if (pCDbg->integer && (client->ps.pm_flags & PMF_VIEW_PRONE) && (ucmd->forwardmove || ucmd->rightmove)) {
+                float disp = (oldpos - origin).length();
+                s_frames++;
+                if (moveresult >= MOVERESULT_BLOCKED) { s_blocked++; }
+                if (level.inttime - s_cLast > 500) {
+                    s_cLast = level.inttime;
+                    gi.Printf("^~^~^ CRAWL speed=%.1f vel=%.1f disp=%.3f blocked=%d/%d gnd=%d velz=%.1f | nrmZ=%.3f walking=%d stepped=%d xy=%.1f\n",
+                              (float)client->ps.speed, velocity.length(), disp,
+                              s_blocked, s_frames, groundentity ? 1 : 0, velocity[2],
+                              pm.coopDbgGroundNormalZ, (int)client->ps.walking, (int)pm.stepped, pm.xyspeed);
+                    s_blocked = 0; s_frames = 0;
+                }
+            }
         }
         if (client->ps.walking && moveresult >= MOVERESULT_BLOCKED) {
             setOrigin(oldpos);
@@ -5300,18 +5556,41 @@ void Player::CoopBotDrive(usercmd_t *ucmd)
         target = NULL;
     }
     if (!target || level.inttime >= m_iCoopBotRetarget) {
+        // HZM coop [user 2026-08-24] TARGET SELECTION IS A MEASUREMENT BIAS, so make it switchable.
+        // The original always took the NEAREST visible German. Combined with the close-the-distance
+        // movement below that made this rig sample close-quarters combat by construction - the
+        // engagement-distance histogram (coop_shotdump) read a 20 m mean on m3l2 purely because the
+        // bot walks to 7-18 m and shoots whatever is closest. Any conclusion about "the range players
+        // fight at" drawn from that would have been an artifact of the test tool.
+        //   coop_botTargetMode 0 = nearest (default, unchanged)
+        //                      1 = FARTHEST visible - samples the long tail
+        //                      2 = RANDOM visible (reservoir) - the unbiased one
+        static cvar_t *pTgtMode = NULL;
+        int            iTgtMode;
+        int            iSeen = 0;
+
+        if (!pTgtMode) { pTgtMode = gi.Cvar_Get("coop_botTargetMode", "0", 0); }
+        iTgtMode = pTgtMode->integer;
+
         m_iCoopBotRetarget = level.inttime + 400;
         Sentient *best     = NULL;
-        float     bestDist = 1.0e18f;
+        float     bestDist = (iTgtMode == 1) ? -1.0f : 1.0e18f;
         for (Sentient *obj = level.m_HeadSentient[TEAM_GERMAN]; obj != NULL; obj = obj->m_NextSentient) {
             if (obj == this || obj->health <= 0 || obj->deadflag) {
                 continue;
             }
             float d = (obj->centroid - origin).lengthSquared();
-            if (d >= bestDist) {
+            // cheap rejects BEFORE the trace, exactly as before - CanSee is the expensive part
+            if (iTgtMode == 0 && d >= bestDist) { continue; }
+            if (iTgtMode == 1 && d <= bestDist) { continue; }
+            if (!CanSee(obj, 360.0f, 8192.0f, false)) {
                 continue;
             }
-            if (!CanSee(obj, 360.0f, 8192.0f, false)) {
+            if (iTgtMode == 2) {
+                // reservoir sample: every visible enemy gets an equal chance, so the distance
+                // distribution of the CHOSEN target matches the distribution of what is visible.
+                iSeen++;
+                if (G_Random() * (float)iSeen < 1.0f) { best = obj; }
                 continue;
             }
             best     = obj;
@@ -5341,13 +5620,26 @@ void Player::CoopBotDrive(usercmd_t *ucmd)
     }
 
     // --- movement: close to mid range, hold there, gentle strafe so the bot isn't a static target ---
+    // HZM coop [user 2026-08-24] THE STAND-OFF RANGE IS THE OTHER HALF OF THE BIAS. Hard-coded 700/300
+    // meant the bot always fought at 7.6-17.8 m whatever the map offered. coop_botRange sets the band
+    // it holds at; coop_botRange 0 makes it STAND ITS GROUND and engage from wherever it already is,
+    // which is what an unbiased distance sample needs (pair with coop_botTargetMode 2).
     float dist = (target->centroid - origin).length();
-    if (dist > 700.0f) {
-        ucmd->forwardmove = 127;
-    } else if (dist < 300.0f) {
-        ucmd->forwardmove = (signed char)-80;
-    } else {
-        ucmd->forwardmove = 0;
+    {
+        static cvar_t *pRange = NULL;
+        float          fHold;
+
+        if (!pRange) { pRange = gi.Cvar_Get("coop_botRange", "700", 0); }
+        fHold = pRange->value;
+        if (fHold <= 0.0f) {
+            ucmd->forwardmove = 0; // stand ground
+        } else if (dist > fHold) {
+            ucmd->forwardmove = 127;
+        } else if (dist < fHold * 0.43f) {
+            ucmd->forwardmove = (signed char)-80;
+        } else {
+            ucmd->forwardmove = 0;
+        }
     }
     ucmd->rightmove = ((level.inttime % 3000) < 1500) ? (signed char)90 : (signed char)-90;
 }
@@ -5396,6 +5688,90 @@ void Player::ClientThink(void)
     // class of bug this codebase has already paid for twice (bugs 319 / 554).
     TickLimp();
     TickSprint();
+    TickSlide(); // HZM coop - MUST follow TickSprint: it reads m_bCoopSprinting for THIS frame
+    TickCoopNade(); // HZM coop - quick grenade (bind g "+coopnade")
+    TickCoopLook(); // HZM coop - head tracking + torso counter-rotation
+    TickCoopProne(); // HZM coop - hold crouch to go prone
+    TickCoopStress(); // HZM coop - server-side stress envelope (drives weapon spread)
+    TickCoopRecoil(); // HZM coop - hand the authored recoil back at the weapon's recentre speed
+    // HZM coop [user 2026-08-27] publish the active weapon's handling weight, change-only. The client
+    // uses it to slow the raise and weight the punch; only the server can resolve it, because the
+    // lookup is keyed by the weapon's model name and the client only ever sees its display name.
+    {
+        Weapon *w = GetActiveWeapon(WEAPON_MAIN);
+        int     iHeft = w ? (int)(w->CoopHeft() * 100.0f + 0.5f) : 0;
+        if (iHeft != m_iCoopGunHeftSent) {
+            m_iCoopGunHeftSent = iHeft;
+            gi.SendServerCommand(edict - g_entities, "stufftext \"set coop_gunHeft %d\"", iHeft);
+        }
+    }
+
+    // HZM coop [user 2026-08-26] NO FIRING WHILE CRAWLING. "you must be stopped to shoot" - prone
+    // fire is the stance's whole payoff, so shooting mid-crawl is stripped AT THE INPUT, the same
+    // level the bot drive injects at: the statemap never sees the attack press, so no shoot
+    // animation starts, and the block is server-authoritative rather than cosmetic (sprint's gun
+    // lower, by contrast, never blocked anything - measured before copying, for once).
+    // Hysteresis: blocks above 30 u/s, releases below 15, so the gun does not flicker at the
+    // crawl's stop-start boundary.
+    // [user 2026-08-26] "I don't think you should be able to shoot while sprinting either" - same
+    // strip, same reasoning: sprint's gun-lower was ONLY ever visual (measured before the crawl gate
+    // was built - it never blocked a shot). Stripping at the input means stopping the sprint is what
+    // brings the trigger back, which is the tradeoff sprint is supposed to carry. m_bCoopSprinting is
+    // this frame's value because TickSprint runs earlier in this same function.
+    if (m_bCoopSprinting && current_ucmd) {
+        static cvar_t *pSNF = NULL;
+        if (!pSNF) { pSNF = gi.Cvar_Get("coop_sprintNoFire", "1", CVAR_ARCHIVE); }
+        if (pSNF->integer) {
+            current_ucmd->buttons &= ~(BUTTON_ATTACKLEFT | BUTTON_ATTACKRIGHT);
+        }
+    }
+
+    // [weight 7] the ready-up window: the trigger is dead until the weapon is back on target. Held
+    // beside the other fire strips so every reason the trigger can be inert lives in one place.
+    if (current_ucmd && m_fCoopReadyUpAt > level.time && !deadflag) {
+        current_ucmd->buttons &= ~(BUTTON_ATTACKLEFT | BUTTON_ATTACKRIGHT);
+    }
+
+    if (m_bCoopProne && (client->ps.pm_flags & PMF_VIEW_PRONE) /*[pass4] gate on BOTH*/ && current_ucmd) {
+        static cvar_t *pPNF = NULL;
+        if (!pPNF) { pPNF = gi.Cvar_Get("coop_proneMoveNoFire", "1", CVAR_ARCHIVE); }
+        if (pPNF->integer) {
+            float v2 = velocity[0] * velocity[0] + velocity[1] * velocity[1];
+            if (v2 > 30.0f * 30.0f) {
+                m_bCoopCrawlNoFire = true;
+            } else if (v2 < 15.0f * 15.0f) {
+                m_bCoopCrawlNoFire = false;
+            }
+            if (m_bCoopCrawlNoFire) {
+                current_ucmd->buttons &= ~(BUTTON_ATTACKLEFT | BUTTON_ATTACKRIGHT);
+            }
+        }
+
+        // HZM coop [user 2026-08-27] DO NOT FIRE WHERE THE GUN IS NOT POINTING.
+        //
+        // "when aiming in free cam your bullets still follow your crosshair even if its aimed behind
+        // you even though your gun is in front of you." Exactly right, and it is structural: the shot
+        // is cast along the VIEW (Weapon::GetMuzzlePosition uses m_vViewAng), while a prone body only
+        // eases toward that view at 25-120 deg/s - so between the aim arriving and the body catching
+        // up there is a window where the crosshair is behind you and the weapon is still pointing
+        // ahead. Firing there sends rounds through your own torso and reads as a cheat.
+        //
+        // The trigger is held until the weapon actually agrees with the crosshair. Settled supine is
+        // exempt: on your back the gun tracks the aim by design, so the offset there is not a lie.
+        // Standing is unaffected - pmove keeps body yaw locked to view, so it can never disagree.
+        {
+            static cvar_t *pAimGate = NULL;
+            if (!pAimGate) { pAimGate = gi.Cvar_Get("coop_proneAimGate", "45", CVAR_ARCHIVE); }
+            if (pAimGate->value > 0.0f && !m_bCoopSupine) {
+                float fOff = AngleSubtract(client->ps.viewangles[YAW], m_fCoopProneBodyYaw);
+                if (fOff > pAimGate->value || fOff < -pAimGate->value) {
+                    current_ucmd->buttons &= ~(BUTTON_ATTACKLEFT | BUTTON_ATTACKRIGHT);
+                }
+            }
+        }
+    } else {
+        m_bCoopCrawlNoFire = false;
+    }
 
     // HZM coop [223] - Shift is the SPRINT key, so BUTTON_RUN arrives CLEAR while it's held (legacy
     // walk semantics). The speed branch already keeps RUN speed in that case, but the LEGS statemap
@@ -5414,6 +5790,17 @@ void Player::ClientThink(void)
     }
 
     TickCoopCover(); // HZM coop - take cover [214]: validate the pose with this frame's traces
+    // HZM coop [user 2026-08-27] BRACING ticks HERE, immediately after cover, because scheme C
+    // consumes THIS frame's m_bCoopCoverPeek - the tick-order trap already documented above.
+    TickCoopBrace();
+    // [vet] and ASSERT the aim state, rather than overriding one client predicate. Mounting forced
+    // ADS by overriding CG_AimingDownSights alone, while every other consumer on both sides still
+    // read the raw button - so the server computed a hip-fire cone while the player was looking down
+    // the sights. Setting the bit here makes one decision drive all of them, the same way the sprint
+    // block already re-asserts BUTTON_RUN.
+    if (m_bCoopBraceMounted && current_ucmd) {
+        current_ucmd->buttons |= BUTTON_COOPADS;
+    }
     // [user 2026-08-07] Nav recorder ticks HERE, not inside TickCoopCover - that function returns
     // early whenever cover is not requested, so hanging the recorder off its tail meant nodes only
     // dropped while hugging a wall. Sixteen minutes of walking produced one node. Same early-return
@@ -7362,7 +7749,17 @@ void Player::CalcBlend(void)
     // Do the cinematic fading
     float alpha = 1;
 
-    level.m_fade_time -= level.frametime;
+    // HZM coop [found 2026-08-28] LEVEL-GLOBAL TIMER, PER-PLAYER FUNCTION. CalcBlend runs once per
+    // player per frame, so with N players this decremented the level's single fade timer N times a
+    // frame and every scripted fadeout/fadein ran N times too fast - four times too fast on a full
+    // coop server. Decrement once per frame, whoever gets here first.
+    {
+        static int s_iFadeFrame = -1;
+        if (s_iFadeFrame != level.framenum) {
+            s_iFadeFrame = level.framenum;
+            level.m_fade_time -= level.frametime;
+        }
+    }
 
     // Return if we are completely faded in
     if ((level.m_fade_time <= 0) && (level.m_fade_type == fadein)) {
@@ -7462,7 +7859,11 @@ void Player::DamageFeedback(void)
 
     damage_angles.z +=
         DotProduct(vDir, orientation[2]) * damage_blood * g_viewkick_roll->value * g_viewkick_dmmult->value;
-    damage_angles.z = Q_clamp_float(damage_angles.y, -25, 25);
+    // HZM coop [bug-2092] .y -> .z. This clamped the YAW member into the ROLL member, throwing away the
+    // roll computed on the line directly above and replacing it with the yaw. Net effect for the life of
+    // the project: incoming fire rolled the view by the yaw kick, and g_viewkick_roll did nothing at all.
+    // Its "0.15" default is therefore an UNTESTED author intent, not a tuned value - see gamecvars.cpp.
+    damage_angles.z = Q_clamp_float(damage_angles.z, -25, 25);
 
     damage_count += damage_blood;
     count     = damage_blood;
@@ -7572,7 +7973,27 @@ void Player::DamageFeedback(void)
             }
 
             // use the animation based on the movement
-            if (m_iMovePosFlags & MPF_POSITION_CROUCHING) {
+            // HZM coop [user 2026-08-26, bug-2119] PRONE pain. There was no prone case, so a prone
+            // player snapped into the STANDING pain animation on every hit ("jolting"). Retail ships
+            // prone pain skcs but aliases them only on the AI tik, and only for rifles - so rather
+            // than 15 weapon-group alias sets, prone REPLACES the weapon prefix with one shared
+            // coop_prone_ set (7 aliases in anims_shared.txt, rifle skcs for every gun - the same
+            // rifle-for-all rule the crawl already uses). Verified notetrack-free before aliasing.
+            if (m_bCoopProne && (client->ps.pm_flags & PMF_VIEW_PRONE)) {
+                // [spec P1] a supine body plays the FLIPPED pain set - the prone hit files are
+                // movement-class (they carry root pos+rot), so unflipped they wrench the whole
+                // body toward its side at pain-blend weight for up to 2.7s per hit.
+                // [pass4, bug-2127] during a flip window the FLAG already reports the
+                // DESTINATION pose (both flip paths toggle it at roll start), but the body
+                // is still mostly in the SOURCE pose - a destination-set pain is exactly the
+                // root-rot wrench P1 removed. XOR with the window routes by the source:
+                // settled supine (1,0)->supine; flip-in (1,1)->prone; flip-out (0,1)->supine.
+                if (m_bCoopSupine != (level.time < m_fCoopSupineFlip)) {
+                    painAnim = "coop_supine_";
+                } else {
+                    painAnim = "coop_prone_";
+                }
+            } else if (m_iMovePosFlags & MPF_POSITION_CROUCHING) {
                 painAnim += "crouch_";
             } else {
                 painAnim += "stand_";
@@ -7581,7 +8002,15 @@ void Player::DamageFeedback(void)
 
         painAnim += "hit_";
 
-        if (pain_dir == PAIN_REAR || pain_location == HITLOC_TORSO_MID || HITLOC_TORSO_LOWER) {
+        // [pass3, bug-2126] upstream bug: the third operand was the bare constant
+        // HITLOC_TORSO_LOWER (always truthy), so the per-location switch below was DEAD and
+        // every pain played *_hit_back. Fixed for the coop prone/supine sets, whose 7 location
+        // aliases all ship (anims_shared 621-635) - supine_hit_helmet/_legs were unreachable
+        // assets. The always-back result is deliberately PRESERVED for stand/crouch: retail
+        // per-weapon hit_<loc> alias coverage is unaudited, and a missing alias there skips
+        // the flinch entirely (worse than a wrong 'back').
+        if (pain_dir == PAIN_REAR || pain_location == HITLOC_TORSO_MID || pain_location == HITLOC_TORSO_LOWER
+            || !(m_bCoopProne && (client->ps.pm_flags & PMF_VIEW_PRONE))) {
             painAnim += "back";
         } else {
             switch (pain_location) {
@@ -8211,6 +8640,16 @@ void Player::PlayerAngles(void)
     }
 
     PmoveAdjustAngleSettings(v_angle, angles, &client->ps, &edict->s);
+
+    // HZM coop - P1 prone fluidity: MUST run before ApplyCoopBoneOffsets so the aim-lead below
+    // reads this frame's eased body yaw.
+    CoopProneBodyYaw(angles);
+
+    // HZM coop [user 2026-08-25] - MUST be immediately after the call above. PmoveAdjustAngleSettings
+    // owns all four player bone controllers and rewrites them with VectorCopy every frame, so any
+    // offset written earlier (e.g. from ClientThink) is erased before it is ever networked - which is
+    // exactly how head tracking and torso lag shipped completely inert (bug-2101, measured).
+    ApplyCoopBoneOffsets();
 
     SetViewAngles(v_angle);
     setAngles(angles);
@@ -13496,6 +13935,1921 @@ void Player::EventCoopLimpTest(Event *ev)
               gi.Cvar_Get("coop_limpStart", "0.30", CVAR_ARCHIVE)->string);
 }
 
+// HZM coop [user 2026-08-24] PRONE - hold the crouch key.
+//
+// DIVISION OF LABOUR, and it is not arbitrary. In MOHAA the STATEMAP owns stance: `height prone`
+// (player_conditionals.cpp:1798 -> maxs.z 20) and `moveposflags prone` are statemap commands, and
+// the legs/torso .st files choose the animation. So the engine's job here is only to DECIDE and to
+// GUARD; it publishes COOP_PRONE and the .st does the rest. Trying to drive height or pose from C++
+// would fight the state system rather than use it.
+//
+// THE STAND-UP GUARD IS THE WHOLE RISK. A prone hull is short and long (maxs.z 20 vs 94), so you can
+// crawl into somewhere you cannot stand - under a truck, a low pipe, a collapsed beam. Every game
+// with prone has shipped this bug at least once. Leaving prone is therefore CONDITIONAL on a real
+// trace for standing clearance, and a blocked player simply stays prone rather than being teleported
+// or wedged inside geometry.
+//
+// The hold is deliberate rather than a tap: tap-crouch is already the crouch toggle and thousands of
+// existing muscle-memory inputs use it. coop_proneHold is the dwell in seconds.
+void Player::TickCoopProne()
+{
+    static cvar_t *pOn = NULL, *pHold = NULL;
+    qboolean       bCrouchKey, bCanEnter, bMustLeave;
+    float          dt = level.frametime;
+
+    if (!pOn)   { pOn   = gi.Cvar_Get("coop_prone", "1", CVAR_ARCHIVE); } // statemap (player_legs.st PRONE_*) and anims (anims_shared.txt coop_prone_*) landed 2026-08-24, all three boot-verified
+    // [user 2026-08-27] 0.35s sat inside the range of an ordinary crouch tap, which is half of why
+    // a gentle press could drop you prone. A deliberate hold should feel deliberate.
+    if (!pHold) { pHold = gi.Cvar_Get("coop_proneHold", "0.5", CVAR_ARCHIVE); }
+
+    // [user 2026-08-24] ENTRY and EXIT conditions are NOT the same set, and conflating them was a bug:
+    // "I drop into prone and then quickly back into crouch automatically".
+    //
+    // groundentity belongs ONLY to entry. Going prone shrinks the hull from 94 to 20, and on the frame
+    // that happens the ground trace can miss, so groundentity is momentarily NULL. Testing it every
+    // frame meant the state cleared itself one tick after it was set - the drop-in was real, and so was
+    // the instant pop back to crouch.
+    //
+    // What genuinely forces a prone player upright is a different, smaller list: dying, boarding a
+    // vehicle or turret, spectating, or being frozen. Losing footing for a frame is not on it.
+    // [spec A1, bug-2123] m_bCoopDbno was MISSING here: going down WHILE prone kept m_bCoopProne,
+    // PMF_VIEW_PRONE re-derived from the 20u hull, viewheight fell to 16, and the DBNO camera's
+    // -30 vertical offset went under the map again - bug-2112's exact failure, returned by a new
+    // path. Supine made it worse: the yaw ease kept driving a downed player's crawl backwards.
+    // [pass4, bug-2127] COVER was missing: holding crouch 0.35s while in wall/low cover
+    // latched m_bCoopProne on a STANDING body (the cover legs states have no COOP_PRONE
+    // route) - dead trigger above 30 u/s, frozen WASD once supine latched, flipped anims
+    // on an upright body. Cover can no longer engage while prone either (TickCoopCover),
+    // so these terms are the belt-and-braces direction. Ladder and swim close the spec's
+    // two known bMustLeave gaps while we are here.
+    bMustLeave = (qboolean)(deadflag || m_bCoopDbno || m_pVehicle || m_pTurret
+                            || m_bCoopCoverRequested || m_bCoopCoverWall || m_bCoopCoverLow
+                            || m_pLadder || waterlevel > 1
+                            || (client->ps.pm_flags & (PMF_SPECTATING | PMF_INTERMISSION
+                                                       | PMF_FROZEN | PMF_NO_MOVE)));
+    bCanEnter  = (qboolean)(!bMustLeave && groundentity && !m_bCoopSliding);
+
+    if (!pOn->integer || bMustLeave) {
+        // gated - this used to print unconditionally, i.e. on every death and every vehicle mount, for
+        // every player, on a shipped build. The user's standing rule is no dev prints to players.
+        if (m_bCoopProne && gi.Cvar_Get("coop_proneDebug", "0", 0)->integer) {
+            gi.Printf("^~^~^ PRONE-EXIT engine: on=%d dead=%d veh=%d tur=%d pmflags=0x%x\n",
+                      pOn->integer, (int)(deadflag != 0), m_pVehicle ? 1 : 0, m_pTurret ? 1 : 0,
+                      client->ps.pm_flags);
+        }
+        // never strand the flag - a player who dies or boards a vehicle prone must not stay prone
+        // ([review F3+F4] the died-supine latch that lived here moved to Player::Killed - this
+        // block is usercmd-driven and nothing here could ever clear the latch while alive.)
+        m_bCoopSupine     = false;
+        m_fCoopSupineFlip = 0;
+        m_fCoopProneExitAt = 0; // [review F2] a death/DBNO/vehicle inside the deferred-exit
+                                // window must not force-stand the NEXT prone session
+        m_bCoopProne      = false;
+        m_bCoopProneWant  = false;
+        m_fCoopCrouchHeld = 0;
+        m_fCoopCrouchUp   = 0; // never let the arming latch survive a death or a vehicle
+        return;
+    }
+
+    bCrouchKey = (last_ucmd.upmove < 0) ? qtrue : qfalse;
+
+    // [user 2026-08-26] EVASIVE ROLLS - lean keys while prone. Edge-triggered on the lean BUTTONS
+    // (bits ship in every usercmd; leaning itself is meaningless while prone, so the keys are free).
+    // The statemap plays the 0.9s roll anim via COOP_PRONE_ROLLL/R while this window is open, and
+    // the impulse below actually displaces the body - without it the roll animates in place, because
+    // player legs anims never drive origin (pmove owns it).
+    // [spec A6, closes H10/Q5] while ON YOUR BACK: no move input (the supine pose has no locomotion
+    // - WASD slid a frozen statue at ~84 u/s and tripped the fire strip), and no lean-rolls (they
+    // fired the 170 u/s impulse with no animation routed). Rolling back to your front IS the
+    // mobility. coop_supineMove 1 restores the slide for A/B.
+    // [pass2] ...and during the flip WINDOWS: supine clears at the start of a flip-out, which
+    // un-froze WASD for the entire roll back onto the front (the ~84 u/s statue-slide again).
+    if ((m_bCoopSupine || level.time < m_fCoopSupineFlip) && current_ucmd) {
+        static cvar_t *pSupMove = NULL;
+        if (!pSupMove) { pSupMove = gi.Cvar_Get("coop_supineMove", "0", CVAR_ARCHIVE); }
+        if (!pSupMove->integer) {
+            current_ucmd->forwardmove = 0;
+            current_ucmd->rightmove   = 0;
+        }
+    }
+
+    if (m_bCoopProne && !m_bCoopSupine) {
+        int iLean = last_ucmd.buttons & (BUTTON_LEAN_LEFT | BUTTON_LEAN_RIGHT);
+        int iEdge = iLean & ~m_iCoopProneLeanPrev;
+        m_iCoopProneLeanPrev = iLean;
+        // [pass2, bug-2125] same yield set the supine enter-latch got: no evasive rolls during a
+        // flip window or an armed exit - supine clears at the START of a flip-out, so a lean press
+        // mid-roll fired the 170 u/s impulse and armed a COMPETING legs condition against the
+        // still-running flip (winner = statemap row order, the bug-1291 class).
+        if (iEdge && level.time >= m_fCoopProneRollEnd
+            && level.time >= m_fCoopSupineFlip && m_fCoopProneExitAt <= 0.0f) {
+            static cvar_t *pRollOn = NULL, *pRollImp = NULL;
+            if (!pRollOn)  { pRollOn  = gi.Cvar_Get("coop_proneRoll", "1", CVAR_ARCHIVE); }
+            if (!pRollImp) { pRollImp = gi.Cvar_Get("coop_proneRollImpulse", "170", CVAR_ARCHIVE); }
+            if (pRollOn->integer) {
+                vec3_t vF, vR;
+                m_iCoopProneRollDir = (iEdge & BUTTON_LEAN_LEFT) ? 1 : -1;
+                m_fCoopProneRollEnd = level.time + 0.9f; // = the roll animation's real length (9f)
+                AngleVectors(client->ps.viewangles, vF, vR, NULL);
+                velocity[0] += vR[0] * pRollImp->value * (float)-m_iCoopProneRollDir;
+                velocity[1] += vR[1] * pRollImp->value * (float)-m_iCoopProneRollDir;
+            }
+        }
+        if (level.time >= m_fCoopProneRollEnd) { m_iCoopProneRollDir = 0; }
+    } else {
+        m_fCoopProneRollEnd = 0; m_iCoopProneRollDir = 0; m_iCoopProneLeanPrev = 0;
+    }
+
+    // PROBE PLACEMENT: this MUST sit above the m_bCoopProne early-return below. It used to sit at
+    // the bottom of the function, which meant the prone branch returned before ever reaching it and
+    // the probe could only ever print prone=0 - blind to the exact state it was meant to measure
+    // (TRAPS T14, and the second time this shape has cost a round trip).
+
+    // PROBE (coop_proneDebug 1). Prone did not engage on the first live test and the input source is
+    // provably right - CondCrouch, the engine's own crouch condition, reads the identical
+    // `last_ucmd.upmove < 0`. So print the deciding inputs rather than reason about them again.
+    {
+        static cvar_t *pDbg = NULL;
+        static int     s_last = 0;
+        if (!pDbg) { pDbg = gi.Cvar_Get("coop_proneDebug", "0", 0); } // ships OFF - set 1 to diagnose
+        if (pDbg->integer && level.inttime - s_last > 250) {
+            s_last = level.inttime;
+            gi.Printf("^~^~^ PRONE up=%d held=%.2f canbe=%d prone=%d ground=%d slide=%d posflags=%d\n",
+                      (int)last_ucmd.upmove,
+                      m_fCoopCrouchHeld,
+                      (int)bCanEnter, (int)m_bCoopProne,
+                      groundentity ? 1 : 0, (int)m_bCoopSliding, m_iMovePosFlags);
+        }
+    }
+
+
+    if (m_bCoopProne) {
+        // EXIT IS EDGE-TRIGGERED, and this is the third shape this has taken - the reasoning matters.
+        //
+        // It used to leave prone whenever the crouch key was simply NOT held. That silently demanded the
+        // player hold crouch forever to stay down, which is not how anyone plays: you press to go prone
+        // and let go. The bug was hidden for a while because the standup clearance trace was refusing
+        // every frame (785 probe samples of up=0 with prone=1 - the player could not get up at all).
+        // Adding an escape valve for that then exposed the real design: "NOW IT SEEMS LIKE EVERYTIME I
+        // TRY TO PRONE ANYWHERE I GET PUT BACK INTO CROUCH" - the valve was force-standing them one
+        // second after they released the key they had just used to go down.
+        //
+        // So: releasing crouch ARMS the exit, it does not perform it. Getting up needs a deliberate new
+        // input - another crouch press, or jump. m_fCoopCrouchUp holds the arming state, which is exactly
+        // what its declaration always said it was for.
+        qboolean bJump   = (last_ucmd.upmove > 0) ? qtrue : qfalse;
+        qboolean bWantUp;
+
+        if (!bCrouchKey) {
+            if (!m_fCoopCrouchUp) {
+                m_fCoopCrouchUp = level.time; // released - a later press now means 'get up'
+            }
+        }
+        bWantUp = (qboolean)((m_fCoopCrouchUp && bCrouchKey) || bJump);
+
+        // [spec A5, closes H6] leaving prone from ON YOUR BACK used to clear m_bCoopProne at once;
+        // CoopProneBodyYaw's reset branch then snapped the eased body yaw to the view - a 180-degree
+        // teleport into the crouch rise. A crouch-press now rolls you onto your front FIRST (the
+        // same flip-out arming the aim exit uses) and the stand is deferred until the roll ends.
+        // Jump exits stay immediate per the spec - a panic exit may cut the roll.
+        if (bWantUp && !bJump && m_bCoopSupine) {
+            m_bCoopSupine        = false;
+            m_fCoopSupineFlip    = level.time + ((m_iCoopSupineFlipDir >= 0) ? 0.9f : 1.0f);
+            m_iCoopSupineFlipDir = (m_iCoopSupineFlipDir >= 0) ? 1 : -1;
+            m_fCoopProneExitAt   = m_fCoopSupineFlip;
+        } else if (bWantUp && !bJump && level.time < m_fCoopSupineFlip && m_fCoopProneExitAt <= 0.0f) {
+            // [pass2, bug-2125] release-ADS first, press crouch a beat later - the natural way to
+            // get up - had already cleared m_bCoopSupine, so the press bypassed the defer and
+            // teleported the body up to ~180 degrees mid-roll. Reuse the RUNNING flip-out window
+            // (never re-arm a fresh one); belly-prone sessions have flip==0, so their immediate
+            // exit is untouched.
+            m_fCoopProneExitAt = m_fCoopSupineFlip;
+        }
+        // [pass3, bug-2126] 'Jump exits stay immediate' held only until a crouch-press armed
+        // the defer - after that the early-return below swallowed the panic jump for up to
+        // 1.0s. A jump cancels the defer and falls through to the immediate standup trace.
+        if (bJump && m_fCoopProneExitAt > 0.0f) {
+            m_fCoopProneExitAt = 0;
+        }
+        if (m_fCoopProneExitAt > 0.0f) {
+            if (level.time < m_fCoopProneExitAt) {
+                return; // rolling onto the front; the stand comes when the roll ends
+            }
+            m_fCoopProneExitAt = 0;
+            bWantUp = qtrue; // the deferred press is honoured even if the key came up meanwhile
+            m_bCoopProneKeyBlock = true;
+        }
+
+        if (!bWantUp) {
+            return; // lying down, no request to rise
+        }
+
+        {
+            trace_t tr;
+            Vector  vUpMaxs = maxs;
+
+            vUpMaxs[2] = 60.0f; // crouch height - the cheapest stance that is not prone
+            tr = G_Trace(origin, mins, vUpMaxs, origin, this, MASK_PLAYERSOLID, false,
+                         "Player::TickCoopProne standup");
+            {
+                static cvar_t *pSDbg = NULL;
+                static int     s_sLast = 0;
+                if (!pSDbg) { pSDbg = gi.Cvar_Get("coop_proneDebug", "0", 0); }
+                if (pSDbg->integer && level.inttime - s_sLast > 400) {
+                    s_sLast = level.inttime;
+                    gi.Printf("^~^~^ STANDUP start=%d all=%d frac=%.2f | mins=%.0f/%.0f/%.0f maxs=%.0f/%.0f/%.0f org=%.0f/%.0f/%.0f\n",
+                              (int)tr.startsolid, (int)tr.allsolid, tr.fraction,
+                              mins[0], mins[1], mins[2], vUpMaxs[0], vUpMaxs[1], vUpMaxs[2],
+                              origin[0], origin[1], origin[2]);
+                }
+            }
+
+            // Blocked means genuinely no headroom. The player ASKED to get up, so refusing is correct -
+            // but it must never be permanent, and it is no longer time-based: they can simply press
+            // again, and each press re-runs the honest trace.
+            if (tr.startsolid || tr.allsolid) {
+                return;
+            }
+        }
+
+        // [vet] drop to the CROUCH hull on the same statement as the state clear. The flag
+        // derivation needs both maxs.z == 20 and m_bCoopProne, so clearing one without the other
+        // matched neither case and every stand-up ran a full server frame at standing height - a
+        // 94u hull appearing for one frame wherever the player was lying.
+        maxs.z            = 54.0f;
+        m_bCoopProne      = false;
+        m_bCoopProneWant  = false;
+        m_fCoopCrouchUp   = 0;
+        m_fCoopCrouchHeld = 0; // do not let the entry accumulator re-trigger prone on this same press
+        m_bCoopProneKeyBlock = true; // and not on this held key either
+        return;
+    }
+
+    // [user 2026-08-27] "sometimes if I gently touch control to crouch ill go into prone instead".
+    //
+    // The accumulator DECAYED on release instead of resetting, so a run of short taps banked partial
+    // credit - 0.2s down, a quick release giving back only 0.1, 0.2s down again - and crossed the
+    // threshold without any press ever being a deliberate hold. A completed short press means CROUCH.
+    // It is a discrete decision, so it resets the dwell rather than half-remembering it.
+    //
+    // The block latch is the other half: standing up from prone left the key still down, the
+    // accumulator started building again immediately, and you dropped straight back onto your face -
+    // the "and then get stuck" half of the report. After any deliberate exit the key must be
+    // released before it can arm prone again.
+    // [vet] ELAPSED TIME, not accumulated frametime. ClientThink runs once per USERCMD, not once per
+    // server frame, so this added a whole server frametime several times per frame: with the shipped
+    // com_maxfps 180 against sv_fps 40 that is ~4.5 additions per frame, and the advertised 0.5s hold
+    // actually fired after ~0.11s - inside the duration of an ordinary crouch tap. Which is to say
+    // the 'gentle touch puts me prone' report was only half fixed: resetting the accumulator stopped
+    // taps ACCUMULATING, but each individual tap was still being credited four times over.
+    if (bCrouchKey) {
+        if (!m_bCoopProneKeyBlock && m_fCoopCrouchHeld == 0.0f) {
+            m_fCoopCrouchHeld = level.time;   // the moment the press began
+        }
+    } else {
+        m_fCoopCrouchHeld    = 0.0f;
+        m_bCoopProneWant     = false;
+        m_bCoopProneKeyBlock = false; // key is up: prone may arm again
+        return;
+    }
+    // [spec A9] a leftover from the first elapsed-time design assigned level.time into what is
+    // now a SECONDS accumulator - on a zero-length frame that poisoned the hold with a huge
+    // timestamp and entered prone instantly. The accumulator needs no seeding; deleted.
+    if (bCanEnter && m_fCoopCrouchHeld != 0.0f && (level.time - m_fCoopCrouchHeld) >= pHold->value) {
+        // MUST clear the arming latch. Entry happens with crouch still DOWN, so a latch left set by a
+        // previous prone session would satisfy (m_fCoopCrouchUp && bCrouchKey) on the very next frame
+        // and stand the player straight back up - the same symptom that brought this rewrite about.
+        m_fCoopCrouchUp   = 0;
+        m_fCoopProneExitAt = 0; // [review F2] belt-and-braces: entry never inherits a stale defer
+        m_bCoopProne      = true;
+        m_bCoopProneWant  = true;
+        m_fCoopProneEnter = level.time;
+    }
+}
+
+// HZM coop [user 2026-08-25] SERVER-SIDE STRESS.
+//
+// WHY THIS EXISTS RATHER THAN REUSING THE CLIENT ONE. cg_view.c already computes exactly this scalar,
+// and its own comment forbids this use: 'STAMINA is a client-side re-simulation of the server's pool
+// and is known to diverge ... do not reuse the stamina term for anything a 3P player sees.' The whole
+// point of the change is that stress now decides where rounds go, so it must be computed from state
+// the SERVER owns. Every term below is authoritative here.
+//
+// The weights, the ducked discount and the ease rates are copied from CG_FeelStressAdvance deliberately
+// - two stress numbers that disagree would be worse than one that is slightly wrong, and the user tunes
+// the FEEL through coop_stressSpread rather than by drifting the two formulas apart.
+//
+// SUPPRESSION is the headline term (weight 0.45) and the only one the client had that the server did
+// not. It is fed by BulletAttack the same way player fire already suppresses AI (coop_aiSuppress,
+// weaputils.cpp) - one trace, one radius scan, per fire event.
+void Player::TickCoopStress()
+{
+    // [vet] same per-usercmd trap as the recoil recovery and the prone dwell: this runs once per
+    // COMMAND, so a 125fps client advanced the envelope roughly six times faster than a 20fps one
+    // on the same server - and stress multiplies bullet spread directly, so framerate was quietly
+    // buying accuracy. dt is elapsed level time, clamped so a hitch cannot dump the whole envelope.
+    float dtReal = level.time - m_fCoopStressLast;
+    m_fCoopStressLast = level.time;
+    if (dtReal <= 0.0f) { return; }
+    if (dtReal > 0.25f) { dtReal = 0.25f; }
+    static cvar_t *pOn = NULL, *pSuppFade = NULL, *pStamina = NULL, *pRun = NULL, *pDbg = NULL;
+    static int     s_last = 0;
+    float          raw = 0.0f, hp = 1.0f, stam = 1.0f, spd = 0.0f, dt = dtReal, rate;
+
+    if (!pOn)       { pOn       = gi.Cvar_Get("coop_stress", "1", CVAR_ARCHIVE); }
+    if (!pSuppFade) { pSuppFade = gi.Cvar_Get("coop_stressSuppFade", "2.5", CVAR_ARCHIVE); }
+    if (!pStamina)  { pStamina  = gi.Cvar_Get("coop_sprintStamina", "5", CVAR_ARCHIVE); }
+    if (!pRun)      { pRun      = gi.Cvar_Get("sv_runspeed", "287", 0); }
+    if (!pDbg)      { pDbg      = gi.Cvar_Get("coop_stressDebug", "0", 0); }
+
+    if (dt <= 0.0f) { return; }
+    if (dt > 0.1f)  { dt = 0.1f; } // a hitch must not teleport the envelope
+
+    // coop_stressDebug 2 injects suppression on a standing player, so the envelope -> stress -> spread
+    // chain can be exercised without needing an enemy to actually shoot at you. Separates "the maths is
+    // wrong" from "nothing ever called CoopAddSuppression" - two failures that look identical in play.
+    if (pDbg->integer >= 2) { CoopAddSuppression(dt * 1.5f); }
+
+    // suppression decays on its own clock, exactly like the client FX it mirrors
+    if (m_fCoopStressSupp > 0.0f) {
+        float fade = (pSuppFade->value > 0.1f) ? pSuppFade->value : 2.5f;
+        m_fCoopStressSupp -= dt / fade;
+        if (m_fCoopStressSupp < 0.0f) { m_fCoopStressSupp = 0.0f; }
+    }
+
+    if (pOn->integer && !deadflag && !m_pVehicle && !m_pTurret
+        && !(client->ps.pm_flags & (PMF_SPECTATING | PMF_INTERMISSION | PMF_FROZEN))) {
+        // HEALTH: real hit points, not STAT_HEALTH - that is a 0..100 percentage and a vehicle hijacks
+        // it (the client hit exactly this trap and routed around it via r_ppHealthFrac). A DOWNED
+        // player reads as maximally stressed rather than as healthy, because dbno.scr restores health.
+        if (IsCoopDbno()) {
+            hp = 0.02f;
+        } else if (max_health > 0.0f) {
+            hp = health / max_health;
+        }
+        hp = Q_clamp_float(hp, 0.0f, 1.0f);
+
+        {
+            float maxStam = (pStamina->value > 0.1f) ? pStamina->value : 5.0f;
+            stam = Q_clamp_float(m_fCoopStamina / maxStam, 0.0f, 1.0f);
+        }
+        {
+            float runRef = (pRun->value > 1.0f) ? pRun->value : 287.0f;
+            spd = Q_clamp_float(velocity.length() / runRef, 0.0f, 1.0f);
+        }
+
+        raw = 0.45f * m_fCoopStressSupp + 0.25f * (1.0f - hp) + 0.18f * (1.0f - stam) + 0.12f * spd;
+        // same overloaded-flag trap as ApplyCoopBoneOffsets - MOVECONTROL_CROUCH raises PMF_VIEW_PRONE
+        if (m_bCoopProne && (client->ps.pm_flags & PMF_VIEW_PRONE)) {
+            raw *= 0.70f; // steadier than crouching - the whole body is supported
+        } else if (client->ps.pm_flags & PMF_DUCKED) {
+            raw *= 0.85f;
+        }
+        // [user 2026-08-27] BRACED calms the stress spread too - a supported gun does not shake.
+        // Applied AFTER the stance chain so it composes with it rather than replacing it. This
+        // damper has an identical TWIN in the cgame (CG_FeelStressAdvance) and the two must carry
+        // the same weights, or the sway you feel and the spread you actually get drift apart.
+        if (m_fCoopBrace > 0.0f) {
+            static cvar_t *pBS = NULL;
+            if (!pBS) { pBS = gi.Cvar_Get("coop_braceStress", "0.50", CVAR_ARCHIVE); }
+            raw *= 1.0f - CoopBraceBonus() * (pBS ? pBS->value : 0.50f);
+        }
+    }
+
+    rate = (raw > m_fCoopStress) ? 9.0f : 0.8f; // spike fast, bleed off slowly - adrenaline, not a meter
+    {
+        float k = dt * rate;
+        if (k > 1.0f) { k = 1.0f; } // MANDATORY: two-sided ease with no floor to rescue an overshoot
+        m_fCoopStress += (raw - m_fCoopStress) * k;
+    }
+    if (m_fCoopStress < 0.0005f && raw == 0.0f) { m_fCoopStress = 0.0f; }
+
+    if (pDbg->integer && level.inttime - s_last > 500) {
+        s_last = level.inttime;
+        gi.Printf("^~^~^ STRESS cur=%.2f raw=%.2f | supp=%.2f hp=%.2f stam=%.2f spd=%.2f hits=%d\n",
+                  m_fCoopStress, raw, m_fCoopStressSupp, hp, stam, spd, m_iCoopSuppHits);
+        m_iCoopSuppHits = 0; // per-window count of rounds that cracked past - 0 here means the
+                             // BulletAttack hook never fired, which is a different bug to a bad curve
+    }
+}
+
+// Called from BulletAttack when a round not fired by this player cracks past them. Mirrors the client
+// FX curve (cg_parsemsg.cpp: (1 - dist/255) * 0.75) so the screen effect and the aim penalty rise
+// together - the player SEES the thing that is costing them accuracy.
+// How long the pool waits before refilling after ANY spend. One place, so sprint, jump and vault
+// cannot drift apart into three different economies.
+// The active weapon's 0..1 weight. One accessor, because weight only reads as CONTRAST and six
+// systems already degrade the player - scattering separate derivations would stack into sludge.
+// HZM coop [user 2026-08-28] The brace envelope AS THE GAMEPLAY BONUS SEES IT. Prone gets a fraction,
+// because prone is already the steadiest stance and a full brace on top would flatten the stance
+// ladder. Every stability consumer reads this rather than m_fCoopBrace directly, so the two cannot
+// drift apart - the raw envelope still drives the visuals and the HUD pip at full value.
+float Player::CoopBraceBonus()
+{
+    static cvar_t *pPS = NULL;
+
+    if (!pPS) { pPS = gi.Cvar_Get("coop_braceProneScale", "0.35", CVAR_ARCHIVE); }
+    if (m_bCoopProne) {
+        float f = pPS->value;
+        if (f < 0.0f) { f = 0.0f; } else if (f > 1.0f) { f = 1.0f; }
+        return m_fCoopBrace * f;
+    }
+    return m_fCoopBrace;
+}
+
+
+float Player::CoopActiveHeft()
+{
+    Weapon *w = GetActiveWeapon(WEAPON_MAIN);
+    return w ? w->CoopHeft() : 0.0f;
+}
+
+float Player::CoopStaminaDelay()
+{
+    static cvar_t *pDelay = NULL;
+    if (!pDelay) { pDelay = gi.Cvar_Get("coop_staminaRegenDelay", "1.2", CVAR_ARCHIVE); }
+    return (pDelay->value > 0.0f) ? pDelay->value : 0.0f;
+}
+
+// HZM coop [user 2026-08-27] RECOIL THAT RECOVERS.
+//
+// The old model was one flat pitch nudge per shot with no recovery at all - the aim simply inched
+// upward and stayed there. Every modern shooter kicks hard and then RETURNS most of it, and the
+// authored TIKI data has always carried a per-weapon recentre speed for exactly that. The kick lands
+// immediately, so the shot goes where the climbing gun points; the tick below hands it back at the
+// weapon's own rate. coop_recoilRecover is the fraction that returns on its own - the remainder is
+// permanent walk-up you compensate by hand, which is what stops sustained fire being free.
+void Player::CoopAddRecoil(float fPitch, float fYaw, qboolean bVee, float fPitchClamp,
+                           float fYawClamp, float fRecenter, float fMinDecay, float fMaxDecay)
+{
+    Vector vAng = GetViewAngles();
+
+    // The authored clamps bound the ACCUMULATED climb, not the single shot.
+    //
+    // [vet, bug-2139] The pitch test was written in the wrong sign and never bounded anything. A
+    // climb is NEGATIVE pitch here and the whole table is negative, so both owed and fPitch are
+    // negative and 'owed - fPitch' moves TOWARD zero - it could only exceed +clamp if the
+    // accumulator were large and POSITIVE, which never happens. On the rare shot where it did fire
+    // it set fPitch = owed - clamp, whose magnitude is |owed| + clamp: it roughly DOUBLED the debt.
+    // Simulated over ten seconds of fire, an M1 Garand settled near -66 degrees against its authored
+    // ceiling of 8 - which pins the view at the engine's pitch stop and then leaves the player facing
+    // the floor when the recovery hands back a figure the view no longer holds. Symmetric now.
+    if (fPitchClamp > 0.0f) {
+        float fNext = m_vCoopRecoilOwed[0] + fPitch;
+        if (fNext < -fPitchClamp)     { fPitch = -fPitchClamp - m_vCoopRecoilOwed[0]; }
+        else if (fNext > fPitchClamp) { fPitch =  fPitchClamp - m_vCoopRecoilOwed[0]; }
+    }
+    m_vCoopRecoilOwed[0] += fPitch;
+
+    // [vet] V resolves against the accumulator, matching the cgame - the step that makes the muzzle
+    // walk in a V instead of a straight line.
+    if (bVee) {
+        fYaw = m_vCoopRecoilOwed[0] * fYaw;
+    }
+    if (fYawClamp > 0.0f) {
+        float fNext = m_vCoopRecoilOwed[1] + fYaw;
+        if (fNext > fYawClamp)       { fYaw = fYawClamp - m_vCoopRecoilOwed[1]; }
+        else if (fNext < -fYawClamp) { fYaw = -fYawClamp - m_vCoopRecoilOwed[1]; }
+    }
+    m_vCoopRecoilOwed[1] += fYaw;
+
+    vAng[0] += fPitch;
+    vAng[1] += fYaw;
+    SetViewAngles(vAng);
+
+    // [vet] do NOT adopt a new weapon's recentre on top of an old accumulator - a fast weapon would
+    // dump a slow weapon's accumulated climb in a single frame, which reads as a view teleport rather
+    // than a recovery. Blend by how much of the debt each weapon actually contributed.
+    {
+        float fOwed = (float)fabs(m_vCoopRecoilOwed[0]);
+        float fNew  = (float)fabs(fPitch);
+        if (m_fCoopRecoilRecenter <= 0.0f || (fOwed + fNew) <= 0.0001f) {
+            m_fCoopRecoilRecenter = (fRecenter > 0.01f) ? fRecenter : 2.0f;
+        } else {
+            m_fCoopRecoilRecenter =
+                (m_fCoopRecoilRecenter * fOwed + fRecenter * fNew) / (fOwed + fNew);
+        }
+    }
+    m_fCoopRecoilMinDecay = (fMinDecay > 0.0f) ? fMinDecay : 12.0f;
+    m_fCoopRecoilMaxDecay = (fMaxDecay > 0.0f) ? fMaxDecay : 25.0f;
+}
+
+void Player::TickCoopRecoil()
+{
+    static cvar_t *pRecover = NULL;
+    float          dt;
+    int            ax;
+    Vector         vAng;
+
+    if (m_fCoopRecoilRecenter <= 0.0f
+        || (m_vCoopRecoilOwed[0] == 0.0f && m_vCoopRecoilOwed[1] == 0.0f)) {
+        m_fCoopRecoilLast = level.time;
+        return;
+    }
+    if (!pRecover) { pRecover = gi.Cvar_Get("coop_recoilRecover", "0.85", CVAR_ARCHIVE); }
+
+    // [vet] ELAPSED TIME, not level.frametime. ClientThink runs once per usercmd, not once per server
+    // frame, so integrating a fixed frame delta made the recovery scale with the client's framerate -
+    // a 125 fps player recovered roughly six times faster than a 20 fps one on the same server.
+    // Clamped so a hitch cannot dump the whole accumulator in one step.
+    dt = level.time - m_fCoopRecoilLast;
+    m_fCoopRecoilLast = level.time;
+    if (dt <= 0.0f) { return; }
+    if (dt > 0.1f)  { dt = 0.1f; }
+
+    vAng = GetViewAngles();
+    for (ax = 0; ax < 2; ax++) {
+        float owed = m_vCoopRecoilOwed[ax];
+        float rate, back;
+
+        if (owed == 0.0f) { continue; }
+
+        // [vet] the cgame bounds its decay to [minDecay, maxDecay] degrees per second and every row
+        // carries those bounds. Without the floor a weapon with a low recentre - the Garand's 0.15 -
+        // took the better part of a minute to hand the climb back. Proportional decay alone is not
+        // the model EA shipped.
+        rate = (float)fabs(owed) * m_fCoopRecoilRecenter;
+        if (rate < m_fCoopRecoilMinDecay) { rate = m_fCoopRecoilMinDecay; }
+        if (rate > m_fCoopRecoilMaxDecay) { rate = m_fCoopRecoilMaxDecay; }
+
+        back = rate * dt;
+        if (back > (float)fabs(owed)) { back = (float)fabs(owed); }
+        if (owed < 0.0f) { back = -back; }
+
+        vAng[ax] -= back * pRecover->value;
+        m_vCoopRecoilOwed[ax] -= back;
+        if (m_vCoopRecoilOwed[ax] < 0.01f && m_vCoopRecoilOwed[ax] > -0.01f) {
+            m_vCoopRecoilOwed[ax] = 0.0f;
+        }
+    }
+    SetViewAngles(vAng);
+}
+void Player::CoopAddSuppression(float amount)
+{
+    if (amount <= 0.0f || deadflag) {
+        return;
+    }
+    // HZM coop [user 2026-08-27] MOUNTED SOLDIERS DO NOT FLINCH. Rounds cracking past normally load
+    // the stress scalar, which shakes the hands and opens the cone - the single most felt thing in a
+    // firefight. A weapon resting on a surface is not being held up by a startled man, and every
+    // milsim that ships mounting cuts incoming flinch for exactly that reason. Damped at the SOURCE
+    // so one change reaches every consumer downstream (spread, sway, breathing) instead of three
+    // separate ones that could drift apart.
+    if (m_fCoopBrace > 0.0f) {
+        static cvar_t *pBF = NULL;
+        if (!pBF) { pBF = gi.Cvar_Get("coop_braceFlinch", "0.80", CVAR_ARCHIVE); }
+        amount *= 1.0f - CoopBraceBonus() * ((pBF ? pBF->value : 0.80f));
+        if (amount <= 0.0f) {
+            return;
+        }
+    }
+    m_fCoopStressSupp += amount;
+    m_iCoopSuppHits++;
+    if (m_fCoopStressSupp > 1.0f) { m_fCoopStressSupp = 1.0f; }
+}
+
+// HZM coop [user 2026-08-26] MP3 PRONE FLUIDITY P1 - RATE-LIMITED BODY YAW.
+//
+// PmoveAdjustAngleSettings sets body yaw = view yaw EVERY FRAME, so a prone body pivoted instantly
+// on its belly - it read as sliding, the exact opposite of the fluid ground movement asked for
+// ("similar to max payne 3"). While prone, the body now EASES toward the view at coop_proneTurnRate
+// deg/s and the legs statemap plays the shipped rifle_prone_turn_left/right anims while it catches
+// up (COOP_PRONE_TURNL/R, 25-degree engage / 5-degree settle hysteresis).
+//
+// SERVER-ONLY is safe for the same reason the bone offsets are: first person never draws your own
+// body, and PmoveAdjustAngleSettings_Client only runs in first person - so the eased yaw reaches
+// every observer through the networked entity angles with no client change.
+//
+// KNOWN LIMIT, stated now: crawl direction stays VIEW-relative (pmove moves along viewangles), so
+// during a large catch-up the feet can slide slightly against the crawl direction. Acceptable at
+// 120 deg/s; steering by eased body yaw instead would change how crawling handles - a separate call.
+//
+// NOT gated on the hull (bug-2112 lesson): m_bCoopProne is the coop decision, and DBNO shares the
+// 20u hull but must keep vanilla snap behaviour.
+void Player::CoopProneBodyYaw(vec3_t vAngles)
+{
+    static cvar_t *pRate = NULL;
+    float          fDelta, fStep, fAbs, fStepRate;
+
+    if (!pRate) { pRate = gi.Cvar_Get("coop_proneTurnRate", "120", CVAR_ARCHIVE); }
+    fStepRate = pRate->value;
+
+    if (!m_bCoopProne || pRate->value <= 0.0f) {
+        // keep the ease state synced to the true body yaw so prone ENTRY starts from reality
+        m_fCoopProneBodyYaw = vAngles[1];
+        m_iCoopProneTurnDir = 0;
+        m_bCoopSupine = false;
+        m_fCoopSupineFlip = 0;
+        return;
+    }
+
+    // ---- P2: ROLL ONTO YOUR BACK -------------------------------------------------------------
+    // The ask, verbatim: aim behind you in freecam, hold ADS, and 'your body flipped so you are
+    // now laying on your back facing that direction. The trigger is therefore the AIM, not a key:
+    // while ADS is held and the view is more than coop_supineEnter degrees off the body facing,
+    // latch supine. On your back the ease drives the body toward view+180 (feet away from the aim,
+    // firing over your head), so continuing to sweep keeps pivoting you smoothly ON your back.
+    // Aim returning to within coop_supineExit of the body facing rolls you back onto your front -
+    // wide hysteresis (110 in / 60 out) so the boundary cannot flap. The lateral roll anims play
+    // as the flip via COOP_SUPINE_FLIPL/R; coop_supine 0 disables the trigger (coop_supineTest
+    // still forces the pose for eyeballing).
+    {
+        static cvar_t *pSupOn = NULL, *pSupIn = NULL, *pSupOut = NULL;
+        float          fOff;
+
+        // [user 2026-08-27] DEFAULT OFF. The screenshot settles it: the rigid-transform supine pose puts
+// the legs in the air, and not by a tuning margin. The flip mirrors every point about a plane
+// through the body centreline at z=19, so a boot resting flat ~15 units BELOW that plane lands ~15
+// units above it - thirty units off the deck. A person rolling over re-plants their legs; a mirror
+// cannot, because it does not know the floor exists. No value of untwist, lift, arms angle or cone
+// fixes that: it is the transform, not the parameters. Belly prone is unaffected and stays on.
+// coop_supine 1 re-enables the experiment for anyone iterating on it.
+if (!pSupOn)  { pSupOn  = gi.Cvar_Get("coop_supine", "0", CVAR_ARCHIVE); }
+        if (!pSupIn)  { pSupIn  = gi.Cvar_Get("coop_supineEnter", "110", CVAR_ARCHIVE); }
+        if (!pSupOut) { pSupOut = gi.Cvar_Get("coop_supineExit", "60", CVAR_ARCHIVE); }
+
+        fOff = AngleSubtract(vAngles[1], m_fCoopProneBodyYaw); // aim vs the body's BELLY facing
+        if (!pSupOn->integer) {
+            m_bCoopSupine = false;
+        } else if (!m_bCoopSupine) {
+            // [review F1, bug-2124] the enter trigger MUST yield to an armed crouch-press exit and
+            // to a running flip window. Without this, a crouch-exit while ADS was held re-latched
+            // supine on the SAME frame (TickCoopProne clears in ClientThink; this runs later in
+            // PlayerAngles, and with the aim still ~180 off the belly the enter condition is
+            // trivially true) - the exit block then re-armed every frame: a soft-strand while
+            // crouch+ADS were held, ending in exactly the 180-degree stand-up snap the deferred
+            // exit exists to prevent.
+            if ((last_ucmd.buttons & BUTTON_COOPADS) && m_fCoopProneExitAt <= 0.0f
+                && (client->ps.pm_flags & PMF_VIEW_PRONE) // [pass4] never latch supine on a non-prone hull
+                && level.time >= m_fCoopSupineFlip
+                // [pass3, bug-2126] and to a RUNNING evasive roll - the roll gate yields to
+                // flips (13836) but not vice versa, so a latch on the roll's first frame cut
+                // the anim yet kept its 170 u/s side impulse: the body slid through the flip.
+                && level.time >= m_fCoopProneRollEnd
+                && (fOff > pSupIn->value || fOff < -pSupIn->value)) {
+                m_bCoopSupine        = true;
+                // [supine-yaw] latch the belly facing we are turning away FROM: once on your
+                // back the body tracks the view, so the view-vs-body offset is ~0 and can no
+                // longer say whether the aim has come back forward. This reference can.
+                m_fCoopSupineRefYaw  = m_fCoopProneBodyYaw;
+                m_iCoopSupineFlipDir = (fOff > 0.0f) ? 1 : -1;
+                // [spec A4] per-direction: rolll is 9 frames (0.9s), rollr is 10 (1.0s)
+                m_fCoopSupineFlip    = level.time + ((m_iCoopSupineFlipDir > 0) ? 0.9f : 1.0f);
+            }
+        } else {
+            // [user 2026-08-26] RELEASING ADS ALSO ROLLS YOU BACK. The first cut only exited when
+            // the aim returned toward the feet, so letting go of ADS left you lying on your back
+            // ('I get stuck in the ground when I let go of it'). ADS is the hold: release it, or
+            // bring the aim forward, and you roll onto your front either way.
+            // [v3] THE SUPINE CONE. On your back you can traverse a limited arc over your own feet;
+            // past it a real person rolls back onto their front and turns, which retail already
+            // animates. So leaving the cone in EITHER direction rolls out - it never spins you round
+            // on your back, which is the failure mode both earlier versions had.
+            static cvar_t *pCone = NULL;
+            float          fCone;
+
+            if (!pCone) { pCone = gi.Cvar_Get("coop_supineCone", "60", CVAR_ARCHIVE); }
+            fCone = AngleSubtract(vAngles[1], AngleMod(m_fCoopSupineRefYaw + 180.0f));
+            if (fCone > pCone->value || fCone < -pCone->value
+                || !(last_ucmd.buttons & BUTTON_COOPADS)) {
+                m_bCoopSupine        = false;
+                // [pass2] settled supine sits at the +/-180 wrap, where fOff's sign is numerical
+                // noise - the roll-out shoulder was a coin toss. Reverse the shoulder you rolled
+                // IN on instead (the crouch-press exit already does).
+                m_iCoopSupineFlipDir = (m_iCoopSupineFlipDir >= 0) ? 1 : -1;
+                m_fCoopSupineFlip    = level.time + ((m_iCoopSupineFlipDir > 0) ? 0.9f : 1.0f);
+            }
+        }
+    }
+
+    {
+        // [spec A4] during the flip window the ease runs at coop_supineFlipRate (200 deg/s =
+        // 180/0.9) so the yaw finishes WITH the roll animation - at the old 120 the anim ended
+        // 0.6s early and the settled pose pivoted flat like a record player for the remainder.
+        static cvar_t *pFlipRate = NULL;
+        // [supine-yaw, user 2026-08-27, bug-2129] THE TARGET IS THE VIEW, NOT VIEW+180.
+        //
+        // "even though im on my back, my torso and gun dont turn and face the correct way, so
+        // essentially my head and gun are just upside down." The +180 rested on a false premise:
+        // that rolling onto your back reverses which way the body faces. It does not - skc_flip
+        // rolls 180 about the model's own X, the head-to-toe long axis, so the head stays at the
+        // head end and everything that pointed forward still points forward. The animation's gun
+        // direction IS the body yaw; only the belly now faces the sky.
+        //
+        // With the +180 the arithmetic cancelled exactly: flipping while aiming 180 off meant a
+        // target of (view+180) == the belly facing the body ALREADY held, so the body never
+        // rotated at all and the gun kept pointing where you used to be aiming. The 200 deg/s
+        // flip rate exists to sweep 180 degrees across the roll (spec A4) and had nothing to
+        // sweep - the tell that the target, not the rate, was wrong.
+        // HZM coop [user 2026-08-27, v3] TWO SUPINE MODES, because two guesses were already wrong.
+        //
+        // The research settled the mechanic: TLOU2's rule, shared by R6 Siege and MGSV, is that you
+        // aim toward your HEAD end belly-down and toward your FEET end belly-up. The threat is past
+        // your feet; your head stays exactly where it was, your body never rotates, and you shoot out
+        // over your own abdomen. That is coop_supineMode 1 - the body PLANTS, target view+180.
+        //
+        // The catch, and the reason two attempts failed: in every prone source the head axis and the
+        // gun both point along model +X, and a rigid rotation moves both identically. So no transform
+        // of a prone clip can aim the gun backward while leaving the head put. v1 had this yaw policy
+        // with a pose whose gun pointed the old way; v2 fixed the gun by spinning the whole body,
+        // which is the record-player artifact the user rejected. The missing piece is not the yaw at
+        // all - it is reversing the ARMS at the shoulders, below.
+        //
+        // Mode 0 keeps the v2 somersault so the two can be compared in play rather than argued about.
+        static cvar_t *pMode = NULL;
+        float          fTarget;
+
+        if (!pMode) { pMode = gi.Cvar_Get("coop_supineMode", "1", CVAR_ARCHIVE); }
+        fTarget = (m_bCoopSupine && pMode->integer) ? AngleMod(vAngles[1] + 180.0f) : vAngles[1];
+
+        if (!pFlipRate) { pFlipRate = gi.Cvar_Get("coop_supineFlipRate", "200", CVAR_ARCHIVE); }
+        fDelta = AngleSubtract(fTarget, m_fCoopProneBodyYaw);
+        m_fCoopProneYawTarget = fTarget; // [spec A3] hysteresis + aim-lead re-base on the TARGET
+        // [v3] the sweep only exists in mode 0. In mode 1 there is nothing to sweep - and the sweep
+        // IS the artifact the user objected to, so it must not be merely retuned.
+        if (!pMode->integer && level.time < m_fCoopSupineFlip && pFlipRate->value > pRate->value) {
+            fStepRate = pFlipRate->value;
+        }
+    }
+    // HZM coop [user 2026-08-27] PLANT THE BODY WHILE AIMING - the Max Payne 3 rule.
+    //
+    // The supine trigger measures the aim against the body facing, but the body CHASED the
+    // view at coop_proneTurnRate (120 deg/s) unconditionally, so the offset could never
+    // accumulate: "the camera just follows the crosshair as it moves around and my players
+    // body also moves accordingly. But in no instance are we laying on our back." You cannot
+    // out-sweep a body that is glued to your reticle - the 110-degree threshold was
+    // unreachable by construction, not by tuning.
+    //
+    // While ADS is HELD and belly-down, the body now creeps at coop_proneAdsTurnRate (25 deg/s)
+    // instead: it still settles toward where you are looking, but the aim outruns it easily,
+    // the offset builds, and sweeping past the threshold rolls you onto your back. Aiming is
+    // the plant; letting go of ADS resumes the normal 120 chase.
+    //
+    // NOT applied while supine or mid-flip: on your back the ease must keep driving toward
+    // view+180 so continuing to sweep pivots you smoothly ON your back (that part already
+    // worked - "most of it works"), and the flip windows own the rate outright (spec A4).
+    // [user 2026-08-27] A STILL PRONE BODY DOES NOT FOLLOW YOUR EYES.
+    //
+    // The plant used to require ADS to be HELD, but the user's actual sequence - and the one that
+    // matches how people describe this - is "move your camera to look behind you and THEN hold your
+    // ads button". During that look the body was still chasing at the full 120 deg/s, so by the time
+    // the button went down the aim and the body agreed again, there was no offset left, and the flip
+    // could never trigger. What the user saw instead was the body pivoting round to face the new
+    // direction: not a bug in the flip, a bug in what happened BEFORE it.
+    //
+    // A prone soldier turns his head freely and his whole body only deliberately. So while lying
+    // still the body barely tracks at all (coop_proneStillTurnRate), and holding ADS plants it harder
+    // still. CRAWLING keeps the full rate - if you are moving, you go where you look.
+    // [vet] ...but never so slowly that the trigger stays dead. The aim gate strips fire while the
+    // gun disagrees with the crosshair by more than coop_proneAimGate, and the plant was allowed to
+    // close that gap at 25 deg/s - so an ordinary 90 degree turn to a new target cost nearly two
+    // seconds of dead trigger. Outside the gate the body turns at the full rate; the plant only
+    // holds it still INSIDE the arc the player can already shoot into.
+    {
+        static cvar_t *pGate = NULL;
+        float          fAim;
+        if (!pGate) { pGate = gi.Cvar_Get("coop_proneAimGate", "45", CVAR_ARCHIVE); }
+        fAim = AngleSubtract(vAngles[1], m_fCoopProneBodyYaw);
+        if (pGate->value > 0.0f && (fAim > pGate->value || fAim < -pGate->value)) {
+            fStep = fStepRate * level.frametime;
+            fDelta = Q_clamp_float(fDelta, -fStep, fStep);
+            m_fCoopProneBodyYaw = AngleMod(m_fCoopProneBodyYaw + fDelta);
+            fAbs = AngleSubtract(m_fCoopProneYawTarget, m_fCoopProneBodyYaw);
+            if (fAbs > 25.0f)       { m_iCoopProneTurnDir = 1; }
+            else if (fAbs < -25.0f) { m_iCoopProneTurnDir = -1; }
+            else if (fAbs < 5.0f && fAbs > -5.0f) { m_iCoopProneTurnDir = 0; }
+            vAngles[1] = m_fCoopProneBodyYaw;
+            return;
+        }
+    }
+
+    if (!m_bCoopSupine && level.time >= m_fCoopSupineFlip
+        && !last_ucmd.forwardmove && !last_ucmd.rightmove) {
+        static cvar_t *pStillRate = NULL, *pAdsRate = NULL;
+        float          fWant;
+
+        if (!pStillRate) {
+            pStillRate = gi.Cvar_Get("coop_proneStillTurnRate", "55", CVAR_ARCHIVE);
+            pAdsRate   = gi.Cvar_Get("coop_proneAdsTurnRate", "25", CVAR_ARCHIVE);
+        }
+        fWant = (last_ucmd.buttons & BUTTON_COOPADS) ? pAdsRate->value : pStillRate->value;
+        if (fWant >= 0.0f && fWant < fStepRate) {
+            fStepRate = fWant;
+        }
+    }
+
+    // HZM coop [user 2026-08-27, v3] REVERSE THE ARMS AT THE SHOULDERS.
+    //
+    // This is the piece that makes the whole thing possible, and it exists only because a standing
+    // assumption was wrong. These four controllers are NOT small clamped additive nudges on the spine
+    // - they are full-range, networked, RE-POINTABLE model-space subtree rotations, and the deadband
+    // clamps we believed in live in Actor code, not on the player path. So the arms can simply be
+    // turned around at the clavicles: measured on this rig, a 180 on both clavicle subtrees over the
+    // existing flip leaves the head and pelvis untouched and puts the muzzle over the feet, sights up.
+    //
+    // It also cures a defect nobody had noticed: the pure long-axis flip was holding the rifle UPSIDE
+    // DOWN, because that roll maps the weapon's up vector to down.
+    //
+    // Bone angles are already networked entityState fields, so this reaches every observer with no
+    // protocol change and no exe.
+    {
+        static cvar_t *pArms = NULL;
+        qboolean       bWant;
+
+        if (!pArms) { pArms = gi.Cvar_Get("coop_supineArms", "1", CVAR_ARCHIVE); }
+        bWant = (qboolean)(m_bCoopSupine && pArms->integer);
+        if (bWant && !m_bCoopSupineArmsOn) {
+            SetControllerTag(ARMS_TAG, gi.Tag_NumForName(edict->tiki, "Bip01 L Clavicle"));
+            SetControllerTag(PELVIS_TAG, gi.Tag_NumForName(edict->tiki, "Bip01 R Clavicle"));
+            m_bCoopSupineArmsOn = true;
+        } else if (!bWant && m_bCoopSupineArmsOn) {
+            SetControllerTag(ARMS_TAG, gi.Tag_NumForName(edict->tiki, "Bip01 Spine1"));
+            SetControllerTag(PELVIS_TAG, gi.Tag_NumForName(edict->tiki, "Bip01 Pelvis"));
+            m_bCoopSupineArmsOn = false;
+        }
+    }
+
+    fStep  = fStepRate * level.frametime;
+    fDelta = Q_clamp_float(fDelta, -fStep, fStep);
+    m_fCoopProneBodyYaw = AngleMod(m_fCoopProneBodyYaw + fDelta);
+
+    // hysteresis so the turn anim does not flicker at the boundary; sign convention: positive
+    // delta = view is to the LEFT (MOHAA yaw increases CCW), body turns left. If play shows the
+    // anims mirrored, swap the two conditionals - one line each.
+    // [spec A3] against the TARGET (view+180 while supine) - measuring against the raw view left
+    // m_iCoopProneTurnDir pinned at +/-1 for the entire time on the back.
+    fAbs = AngleSubtract(m_fCoopProneYawTarget, m_fCoopProneBodyYaw);
+    if (fAbs > 25.0f)       { m_iCoopProneTurnDir = 1; }
+    else if (fAbs < -25.0f) { m_iCoopProneTurnDir = -1; }
+    else if (fAbs < 5.0f && fAbs > -5.0f) { m_iCoopProneTurnDir = 0; }
+
+    vAngles[1] = m_fCoopProneBodyYaw;
+}
+
+
+// HZM coop [user 2026-08-25] COOP BONE OFFSETS - prone spine bias, head tracking, torso lag.
+//
+// WHY IT LIVES HERE AND NOWHERE ELSE. PmoveAdjustAngleSettings (bg_pmove.cpp:1622) is the SOLE
+// writer of the player's four bone controllers - a sweep of every bone_angles writer in the tree
+// found no other. It runs from Player::EndFrame -> FinishMove -> PlayerAngles, i.e. AFTER
+// ClientThink, and it assigns with VectorCopy rather than accumulating. Anything written before it
+// is gone. That was measured, not reasoned: writing an impossible sentinel (head 11/22, torso 33/44)
+// from TickCoopLook read back as 0.00/0.00 on every one of 328 samples (bug-2101).
+//
+// So these offsets are applied HERE, and ADDITIVELY, so the vanilla behaviour survives underneath.
+// That matters: pmove distributes your view pitch down the spine chain (pelvis/Spine1/Spine2/head
+// shares that sum to exactly 1.0), and that distribution IS the look-down body bend. Replacing it
+// would flatten the player every time they looked at their feet.
+//
+// PRONE. The same arithmetic explains the prone complaint. Lying down and aiming level means a view
+// pitch near zero, so every share is near zero, so the spine is STRAIGHT - and a straight spine on
+// top of the flat pelvis the prone legs animation produces is a chest standing vertically. Hence
+// 'my torso pops up as though I am crouched'. The fix is to feed the chain a pitch it cannot get
+// from the view: a constant bias while prone.
+//
+// The head is counter-rotated by the FULL bias because it is a descendant of both spine bones and
+// therefore inherits Spine1 + Spine2 in full - without it the player would be face-down in the dirt
+// while the camera looked at the horizon.
+// HZM coop [user 2026-08-27] GUN BRACING - "if you are in first person and leaning by a wall, or
+// crouched up against an object (like one that does not get considered cover) the feeling of the
+// gun should feel supported with stronger accuracy and weight adjustments".
+//
+// AUTOMATIC, never a bind (the Rising Storm 2 model, and the user's call): the surveyed games that
+// ask for a button do it because their buff is enormous (CoD mounts ~90% of recoil away); ours is
+// deliberately mid-pack, so it can simply be granted. It is a BUFF and never blocks the gun - the
+// games that BLOCK firing near geometry are the ones players resent.
+//
+// Three ways to be supported, cheapest first:
+//   C  cover peek       - zero new traces; the anchored cover sustain already revalidated geometry
+//                         this frame. Aimed cover fire is otherwise UNREWARDED today (blindfire is
+//                         penalised 3x, peek gets plain standing spread).
+//   B' lean at a corner - lean PLUS a confirming trace. Never lean alone: vanilla lean performs no
+//                         geometry test at all, so raw lean would hand out free accuracy in an open
+//                         field.
+//   A  muzzle support   - the sills, crates, sandbags and fences the cover system never claims. The
+//                         support trace must HIT below the gun line while the eye line stays CLEAR,
+//                         the same inverse pair the vault code uses: you brace on what you can
+//                         shoot OVER, not on what you are facing.
+//
+// Generosity is deliberate. The most-praised part of RS2's resting is that it is pure geometry with
+// no eligibility list; the most-complained-about part of Sandstorm's and Hell Let Loose's is that
+// theirs is strict. The anti-camping price here is the stillness gate, not a stingy trigger.
+void Player::TickCoopBrace()
+{
+    // [vet] elapsed time, for the same reason as the stress envelope above.
+    float dtBrace = level.time - m_fCoopBraceLast;
+    m_fCoopBraceLast = level.time;
+    if (dtBrace < 0.0f)      { dtBrace = 0.0f; }
+    else if (dtBrace > 0.25f){ dtBrace = 0.25f; }
+    static cvar_t *pOn = NULL, *pDist = NULL, *pDelay = NULL, *pGrace = NULL, *pDbg = NULL;
+    qboolean bGeom = qfalse;
+    float    fSpeed2, fTarget, fStep;
+
+    if (!pOn) {
+        pOn    = gi.Cvar_Get("coop_brace", "1", CVAR_ARCHIVE);
+        pDist  = gi.Cvar_Get("coop_braceDist", "36", CVAR_ARCHIVE);
+        pDelay = gi.Cvar_Get("coop_braceDelay", "0.12", CVAR_ARCHIVE);
+        pGrace = gi.Cvar_Get("coop_braceGrace", "0.35", CVAR_ARCHIVE);
+        pDbg   = gi.Cvar_Get("coop_braceDebug", "0", 0);
+    }
+
+    // --- gates: integer compares only, before any trace ---------------------------------------
+    // [user 2026-08-28] PRONE CAN NOW BRACE. It was excluded because it 'already owns the tightest
+    // spread lane in the game, and stacking brace on top would collapse the stance ladder it earns' -
+    // a real balance point, not an oversight, so it is answered rather than deleted: prone still
+    // mounts, but the stability it gains is scaled by coop_braceProneScale (0.35) instead of the full
+    // bonus. Prone+braced therefore sits just above prone rather than lapping it, and the ladder
+    // stand -> crouch -> prone -> prone-braced still climbs. Resting a rifle on a wall while prone is
+    // also simply what a soldier does, and the pose already reads as braced.
+    if (!pOn->integer || deadflag || IsSpectator() || m_pVehicle || m_pTurret
+        || m_pLadder || level.playerfrozen || m_bFrozen || (flags & FL_IMMOBILE) || !groundentity
+        || m_bCoopBlindfire
+        // [bug-2133] DBNO was missing: going down clears m_bCoopProne and keeps deadflag false, so a
+        // downed player could mount and crawl around with forced ADS and the full buff.
+        || m_bCoopDbno
+        || (client->ps.pm_flags & (PMF_SPECTATING | PMF_INTERMISSION | PMF_FROZEN | PMF_NO_MOVE))
+        // [user 2026-08-27] FIRST PERSON ONLY. Mounting forces ADS, clamps the aim to a cone and
+        // plants the viewmodel on the surface - three things that only mean anything down the sights.
+        // In third person it would be a silent stat buff with a camera that ignores all of it.
+        // m_bCoopView3p is the cgame's own final view mode, mirrored through the u_view3p userinfo.
+        || m_bCoopView3p /*[user 08-27] brace is a first-person mechanic*/) {
+        m_fCoopBraceDwell = 0.0f;
+        m_fCoopBraceHold  = 0.0f;
+        m_bCoopBraceStill = false;
+        bGeom             = qfalse;
+        m_bCoopBraceMounted = false; // switching to 3P (or any gate) stands the mount down
+    } else {
+        // stillness, with the same shape of hysteresis the crawl no-fire strip uses: a braced gun
+        // is a planted gun. This is what stops the mounted-and-strafing look that every surveyed
+        // game's players complain about.
+        fSpeed2 = velocity[0] * velocity[0] + velocity[1] * velocity[1];
+        if (fSpeed2 > 35.0f * 35.0f)      { m_bCoopBraceStill = false; }
+        else if (fSpeed2 < 20.0f * 20.0f) { m_bCoopBraceStill = true; }
+
+        if (m_bCoopBraceStill) {
+            Vector vFwd, vRight, vAng, vStart;
+            float  fDist = (pDist->value > 8.0f) ? pDist->value : 8.0f;
+            float  fSup, fEye;
+            trace_t tr;
+
+            // FLAT yaw forward, not the 3D aim: aiming down over a sill must still qualify.
+            vAng = Vector(0.0f, client->ps.viewangles[YAW], 0.0f);
+            AngleVectors(vAng, vFwd, vRight, NULL);
+
+            // [user 2026-08-27] mount and cover are ALTERNATIVES, not partners. Cover-peek used to
+            // grant a brace outright, which meant the two systems raced for the same moment and got
+            // in each other's way. Availability is now PURELY geometric - "as long as it's the proper
+            // crouch height" - so from cover you get a real choice: keep blindfiring or peeking, or
+            // press Use and mount. Whichever you pick, the other steps out of the way.
+
+            // B' - leaning past halfway, confirmed by one shoulder trace toward the lean side
+            if (!bGeom && (client->ps.fLeanAngle > 12.0f || client->ps.fLeanAngle < -12.0f)) {
+                Vector vSide = (client->ps.fLeanAngle > 0.0f) ? vRight : (vRight * -1.0f);
+                vStart = origin + Vector(0.0f, 0.0f, (float)viewheight);
+                tr = G_Trace(vStart, vec_zero, vec_zero, vStart + vSide * 48.0f, this, MASK_SOLID,
+                             false, "Player::TickCoopBrace lean-confirm");
+                if (!tr.startsolid && tr.fraction < 1.0f && tr.plane.normal[2] < 0.7f
+                    && tr.plane.normal[2] > -0.7f
+                    && !(tr.ent && tr.ent->entity && tr.ent->entity->IsSubclassOfSentient())) {
+                    bGeom = qtrue;
+                }
+            }
+
+            // A - support under the gun line, sightline clear above it.
+            //
+            // [user 2026-08-27] brace v2 - SCAN A BAND OF HEIGHTS, not one. The first cut probed a
+            // single height (70 standing) and so only ever found CHEST-high surfaces; almost all
+            // usable cover in this game is waist-high, which sits below that probe and was missed
+            // entirely - "I couldnt get it to work in a doorway or using q and e on a wall". The
+            // band runs from just under the gun line down to waist height, which is exactly the
+            // range a soldier can actually rest a weapon on.
+            if (!bGeom) {
+                static const float kStand[3] = {70.0f, 60.0f, 50.0f};
+                static const float kCrouch[3] = {46.0f, 38.0f, 30.0f};
+                const float *pBand = (m_iMovePosFlags & MPF_POSITION_CROUCHING) ? kCrouch : kStand;
+                float fEye = (m_iMovePosFlags & MPF_POSITION_CROUCHING) ? 52.0f : 82.0f;
+                float fSupFrac = 1.0f;
+                int   k;
+
+                for (k = 0; k < 3 && !bGeom; k++) {
+                    vStart = origin + Vector(0.0f, 0.0f, pBand[k]);
+                    tr = G_Trace(vStart, vec_zero, vec_zero, vStart + vFwd * fDist, this, MASK_SOLID,
+                                 false, "Player::TickCoopBrace support");
+                    if (tr.startsolid || tr.fraction >= 1.0f || tr.plane.normal[2] >= 0.7f
+                        || tr.plane.normal[2] <= -0.7f || DotProduct(tr.plane.normal, vFwd) >= -0.5f
+                        || (tr.ent && tr.ent->entity && tr.ent->entity->IsSubclassOfSentient())) {
+                        continue;
+                    }
+                    fSupFrac = tr.fraction; // keep it: the eye-clear trace below reuses tr
+                    // the surface must be something we can shoot OVER, not something we face
+                    vStart = origin + Vector(0.0f, 0.0f, fEye);
+                    tr = G_Trace(vStart, vec_zero, vec_zero, vStart + vFwd * (fDist + 8.0f), this,
+                                 MASK_SOLID, false, "Player::TickCoopBrace eye-clear");
+                    if (tr.fraction >= 1.0f) {
+                        bGeom = qtrue;
+                        // [user 2026-08-27] remember HOW FAR the support actually is, so the weapon
+                        // can be rested against the real surface instead of a guessed offset.
+                        m_fCoopBraceRest = fDist * fSupFrac;
+                    }
+                }
+            }
+
+            // D - SHOULDER/SIDE CONTACT: a doorway jamb, the corner of a building, the wall you are
+            // stood flat against. [user 2026-08-27] These are the cases the user actually reached for
+            // and none of them put geometry in FRONT of the gun, so no forward probe could ever have
+            // found them. Bracing a weapon against the side of an opening is one of the most common
+            // real supported positions there is; it needs no lean and no cover state.
+            if (!bGeom) {
+                // [user 2026-08-27] "doesnt seem to catch leaning into doorways well". 26u was the
+                // problem: a MOHAA doorway is ~64-72 units wide, so standing anywhere near its middle
+                // puts each jamb 32-36u away and the probe simply fell short. Reach is now a cvar and
+                // defaults past the half-width of a standard opening, and it samples three heights so
+                // a low sill or a waist-high frame counts too.
+                static cvar_t *pSide = NULL;
+                float          fSideLen;
+                int            iSide, iSh;
+                float          kSideZ[3];
+
+                if (!pSide) { pSide = gi.Cvar_Get("coop_braceSideDist", "44", CVAR_ARCHIVE); }
+                fSideLen = (pSide->value > 8.0f) ? pSide->value : 8.0f;
+                if (m_iMovePosFlags & MPF_POSITION_CROUCHING) {
+                    kSideZ[0] = 44.0f; kSideZ[1] = 36.0f; kSideZ[2] = 26.0f;
+                } else {
+                    kSideZ[0] = 62.0f; kSideZ[1] = 52.0f; kSideZ[2] = 42.0f;
+                }
+                for (iSide = 0; iSide < 2 && !bGeom; iSide++) {
+                  Vector vS = (iSide == 0) ? vRight : (vRight * -1.0f);
+                  for (iSh = 0; iSh < 3 && !bGeom; iSh++) {
+                    vStart = origin + Vector(0.0f, 0.0f, kSideZ[iSh]);
+                    tr = G_Trace(vStart, vec_zero, vec_zero, vStart + vS * fSideLen, this, MASK_SOLID,
+                                 false, "Player::TickCoopBrace side");
+                    if (!tr.startsolid && tr.fraction < 1.0f && tr.plane.normal[2] < 0.7f
+                        && tr.plane.normal[2] > -0.7f
+                        && !(tr.ent && tr.ent->entity && tr.ent->entity->IsSubclassOfSentient())) {
+                        bGeom = qtrue;
+                        m_fCoopBraceRest = fSideLen * tr.fraction;
+                    }
+                  }
+                }
+            }
+        }
+    }
+
+    // --- hysteresis: small ENTER threshold, generous EXIT ---------------------------------------
+    // Sticky mounts are the CoD complaint; a brace that drops the instant a trace flickers is the
+    // Squad one. Dwell in, grace out.
+    // [user 2026-08-27] MOUNTING, not auto-bracing. The automatic version worked but was invisible:
+    // "It might be working but there's nothing that really suggests it... its hard to really tell
+    // youre actually braced". Without a moment of commitment there is no before and after to notice.
+    // So geometry now only OFFERS the mount (prompt icon); pressing Use takes it. That single change
+    // also earns a far stronger effect set, because the player asked for it deliberately - the same
+    // reason CoD can afford to mount ~90% of recoil away while an automatic system cannot.
+    if (bGeom) {
+        m_fCoopBraceDwell += dtBrace;
+        m_fCoopBraceHold   = level.time + ((pGrace->value > 0.0f) ? pGrace->value : 0.35f);
+    } else {
+        m_fCoopBraceDwell = 0.0f;
+    }
+    m_bCoopBraceAvail = (m_fCoopBraceDwell >= pDelay->value || level.time < m_fCoopBraceHold);
+
+    // Use TOGGLES the mount, and moving breaks it - the user's own exit rule. The stillness latch
+    // above already went false the moment they moved, which drops availability and unmounts here.
+    {
+        // [vet] read the LIVE command, not last frame's copy, and CONSUME the press when the mount
+        // takes it. This tick runs before last_ucmd is refreshed and before DoUse is dispatched, so
+        // clearing the bit here means one press does one thing. Without it, standing near any wall -
+        // and the side probe offers a mount off a wall 44u away with no facing requirement - made
+        // every Use press both mount the weapon and work whatever was behind it.
+        // [user 2026-08-28] MOVING BREAKS THE MOUNT - "moving in any direction while braced should exit
+        // brace (W,S,A,D)". Tested on the INPUT, not on the stillness/velocity latch that already feeds
+        // availability: that one runs through a grace window and a dwell timer, so it let a mount survive
+        // a step. Reading the movement axes makes the rule exactly what the player pressed, and it means
+        // walking away always releases even if the surface probe still reports a wall.
+        if (m_bCoopBraceMounted && current_ucmd
+            && (current_ucmd->forwardmove || current_ucmd->rightmove)) {
+            m_bCoopBraceMounted   = false;
+            m_fCoopCoverAutoDwell = 0.0f;
+            m_fCoopCoverAutoRetry = level.time + 0.6f;
+        }
+
+        // [user 2026-08-28] AND THE MOUNT OWNS THE BODY FOR AS LONG AS IT IS HELD. Taking the mount
+        // cleared these once, but auto-cover re-requests on the very next frame, and the torso statemap
+        // evaluates COOP_COVER_LOW above the ADS row - so crouched at a wall the cover pose kept stealing
+        // the torso and a braced player never reached the sights (standing looked fine only because low
+        // cover was not triggering there). Re-asserting every frame is the server half; the !COOP_BRACED
+        // guard on those two statemap rows is the client half. Both, because either alone leaves a frame
+        // where the two systems disagree about who owns the pose.
+        if (m_bCoopBraceMounted) {
+            m_bCoopCoverRequested = false;
+            m_bCoopCoverWall      = false;
+            m_bCoopCoverLow       = false;
+            m_bCoopBlindfire      = false;
+        }
+
+        qboolean bUseNow = (current_ucmd && (current_ucmd->buttons & BUTTON_USE)) ? qtrue : qfalse;
+        if (bUseNow && !m_bCoopBraceUsePrev) {
+            if (m_bCoopBraceMounted) {
+                m_bCoopBraceMounted = false;
+                // give cover a beat before its auto-dwell can grab you again, so unmounting does not
+                // instantly snap you into the pose you just chose to leave
+                m_fCoopCoverAutoDwell = 0.0f;
+                m_fCoopCoverAutoRetry = level.time + 0.6f;
+                if (current_ucmd) { current_ucmd->buttons &= ~BUTTON_USE; }
+            } else if (m_bCoopBraceAvail && !m_pLadder && !m_pTurret && !m_pVehicle) {
+                m_bCoopBraceMounted = true;
+                if (current_ucmd) { current_ucmd->buttons &= ~BUTTON_USE; }
+                // [user 2026-08-27] latch the direction the weapon was set down facing. The client
+                // clamps the aim to a cone around it - you pivot ON the rest instead of turning
+                // freely, which is what makes mounting a decision rather than a free buff: you trade
+                // your field of view for the stability, and being flanked while mounted costs you.
+                // [bug-2133] publish the arc centre in the USERCMD frame, which is the frame the
+                // client clamps in. ps.viewangles carries delta_angles (spawn facing, script view
+                // nudges, recoil) on top of the command angles, so centring on it yanked the aim by
+                // that offset the instant you mounted and locked the cone somewhere you never aimed.
+                m_fCoopBraceYaw = client->cmd_angles[YAW];
+                // stand cover down the moment the mount is taken - one pose owns the body at a time
+                m_bCoopCoverRequested = false;
+                m_bCoopCoverWall      = false;
+                m_bCoopCoverLow       = false;
+                m_bCoopBlindfire      = false;
+                m_bCoopCoverPeek      = false;
+                SendCoopCoverView();
+            }
+        }
+        m_bCoopBraceUsePrev = bUseNow;
+    }
+    if (!m_bCoopBraceAvail) {
+        m_bCoopBraceMounted = false; // walked away, or the surface moved
+    }
+    fTarget = m_bCoopBraceMounted ? 1.0f : 0.0f;
+
+    // rise faster than it falls - the gun settles onto the surface and leaves it reluctantly
+    fStep = dtBrace * ((fTarget > m_fCoopBrace) ? 6.0f : 3.0f);
+    if (m_fCoopBrace < fTarget) {
+        m_fCoopBrace += fStep;
+        if (m_fCoopBrace > fTarget) { m_fCoopBrace = fTarget; }
+    } else if (m_fCoopBrace > fTarget) {
+        m_fCoopBrace -= fStep;
+        if (m_fCoopBrace < fTarget) { m_fCoopBrace = fTarget; }
+    }
+    // [bug-2133] hard bound: the ease alone cannot rescue an out-of-range value, and everything
+    // downstream multiplies by this.
+    if (m_fCoopBrace < 0.0f)      { m_fCoopBrace = 0.0f; }
+    else if (m_fCoopBrace > 1.0f) { m_fCoopBrace = 1.0f; }
+
+    // --- publish to our own client, change-only ------------------------------------------------
+    // Every pm_flags bit is allocated, so the envelope rides the same change-only stufftext channel
+    // cover uses; `set coop_*` is auto-allowed by the servercmd filter, so nothing else changes.
+    {
+        // [user 2026-08-28, bug] "using the brace feature doesnt actually put you down ads, just sorta
+        // zooms into the gun". Two defects met here.
+        //
+        // (1) THE MOUNT STATE IS BINARY; ONLY THE VISUAL IS AN ENVELOPE. The client decided "am I
+        // aiming?" by testing this eased envelope against 0.5, so the ADS pose did not even BEGIN
+        // until the brace was half risen - and then eased again on its own curve. Three serial eases
+        // (server envelope -> client envelope -> ADS factor) put the sight picture far behind the FOV,
+        // which is what reads as a zoom rather than an aim. Publish the mount as a flag, let the ONE
+        // tuned ADS envelope do the smoothing, exactly as this system's own comment intended.
+        //
+        // (2) THE ENVELOPE PUBLISH WAS A MESSAGE STORM. At 1/100 granularity the value changed on
+        // essentially every frame of the rise, so "change-only" sent ~100 server commands per mount.
+        // 5% steps carry the pip and the recoil portrayal just as well for a twentieth of the traffic.
+        int iSend  = ((int)(m_fCoopBrace * 100.0f + 0.5f) / 5) * 5;
+        int iAvail = (m_bCoopBraceAvail && !m_bCoopBraceMounted) ? 1 : 0;
+        int iMnt   = m_bCoopBraceMounted ? 1 : 0;
+
+        // [user 2026-08-28] TIME OF DAY REPLICATES. coop_daylight is consumed by the CLIENT grade, so
+        // a script setcvar reaches nobody on a dedicated server - listen-only is a defect by standing
+        // rule. Published change-only here; `set coop_*` is auto-allowed by the servercmd filter, so
+        // this needs no whitelist change. Quantised to 1% because the value is a slow scripted ramp
+        // and a raw float would send a command every frame of it.
+        {
+            static cvar_t *pDay = NULL;
+            int            iDay;
+            if (!pDay) { pDay = gi.Cvar_Get("coop_daylight", "1", 0); }
+            iDay = (int)(pDay->value * 100.0f + 0.5f);
+            if (iDay < 0)        { iDay = 0; }
+            else if (iDay > 100) { iDay = 100; }
+            if (iDay != m_iCoopDaylightSent) {
+                m_iCoopDaylightSent = iDay;
+                gi.SendServerCommand(edict - g_entities,
+                                     "stufftext \"set coop_daylight %g\"", iDay / 100.0f);
+            }
+        }
+
+        if (iMnt != m_iCoopBraceMountedSent) {
+            m_iCoopBraceMountedSent = iMnt;
+            gi.SendServerCommand(edict - g_entities, "stufftext \"set coop_braceMounted %d\"", iMnt);
+        }
+        if (iSend != m_iCoopBraceSent) {
+            m_iCoopBraceSent = iSend;
+            gi.SendServerCommand(edict - g_entities, "stufftext \"set coop_braceView %d\"", iSend);
+        }
+        if (iAvail != m_iCoopBraceAvailSent) {
+            m_iCoopBraceAvailSent = iAvail;
+            gi.SendServerCommand(edict - g_entities, "stufftext \"set coop_braceAvail %d\"",
+                                 iAvail);
+        }
+        {
+            int iRest = (int)m_fCoopBraceRest;
+            if (m_bCoopBraceMounted && iRest != m_iCoopBraceRestSent) {
+                m_iCoopBraceRestSent = iRest;
+                gi.SendServerCommand(edict - g_entities, "stufftext \"set coop_braceRest %d\"", iRest);
+            }
+        }
+        {
+            int iYaw = (int)AngleMod(m_fCoopBraceYaw);
+            if (m_bCoopBraceMounted && iYaw != m_iCoopBraceYawSent) {
+                m_iCoopBraceYawSent = iYaw;
+                gi.SendServerCommand(edict - g_entities, "stufftext \"set coop_braceYaw %d\"",
+                                     iYaw);
+            }
+        }
+    }
+
+    if (pDbg->integer) {
+        gi.DPrintf("^~^~^ BRACE env=%.2f geom=%d avail=%d mounted=%d still=%d lean=%.1f\n",
+                   m_fCoopBrace, (int)bGeom, (int)m_bCoopBraceAvail,
+                   (int)m_bCoopBraceMounted, (int)m_bCoopBraceStill,
+                   client->ps.fLeanAngle);
+    }
+}
+
+void Player::ApplyCoopBoneOffsets()
+{
+    static cvar_t *pProneSpine = NULL, *pSplit = NULL, *pDbg = NULL, *pAct = NULL;
+    static int     s_last      = 0;
+    qboolean       bProne;
+
+    if (!pProneSpine) { pProneSpine = gi.Cvar_Get("coop_proneSpine", "-5", CVAR_ARCHIVE); } // user-tuned 2026-08-25
+    if (!pSplit)      { pSplit      = gi.Cvar_Get("coop_proneSpineSplit", "0.6", CVAR_ARCHIVE); }
+    if (!pDbg)        { pDbg        = gi.Cvar_Get("coop_boneDebug", "0", 0); }
+    if (!pAct)        { pAct        = gi.Cvar_Get("coop_proneSpineAction", "35", CVAR_ARCHIVE); } // user-tuned 2026-08-25
+
+    // GATE ON BOTH, and PMF_VIEW_PRONE alone is NOT enough. That flag is OVERLOADED: MOVECONTROL_CROUCH
+    // - the scripted-crouch state used by set pieces like the m3l1a landing craft - also raises it
+    // (player.cpp:4690), so gating on it alone bent the spine during scripted crouch scenes. Caught by
+    // measurement, not by reading: a forced-stress run on m3l1a printed raw exactly 0.70x its expected
+    // value (the prone discount) while the prone probe reported prone=0 on every line.
+    // m_bCoopProne is the coop decision; PMF_VIEW_PRONE confirms the hull actually got there.
+    bProne = (qboolean)(m_bCoopProne && (client->ps.pm_flags & PMF_VIEW_PRONE));
+
+    // coop_boneDebug 2 FORCES the prone branch on a standing player. This exists to separate two
+    // failures that look identical from the outside: 'the prone spine bias is wrong' and 'prone
+    // never engaged'. Testing them together is how this feature already burned a session.
+    if (pDbg->integer >= 2) { bProne = qtrue; }
+
+    {
+        Vector vHead  = Vector(edict->s.bone_angles[HEAD_TAG]);
+        Vector vTorso = Vector(edict->s.bone_angles[TORSO_TAG]);
+        Vector vArms  = Vector(edict->s.bone_angles[ARMS_TAG]);
+
+        // SECOND TIER, scaled by the torso action blend. The constant tier alone cannot be right in both
+        // states: at rest the LEGS animation drives the spine and it is already lying down, so only a few
+        // degrees of trim are wanted - but the moment a torso ACTION plays (reload, aim), that action
+        // poses the spine from a STANDING animation and the correction needed jumps to tens of degrees.
+        // edict->s.actionWeight is the engine's own 0..1 blend for exactly that slot (animate.cpp:762),
+        // so it is 0 while the legs drive and ramps to 1 as the action takes the torso over.
+        if (bProne && (pProneSpine->value != 0.0f || pAct->value != 0.0f)) {
+            // THIRD TIER, RELOAD ONLY.
+            //
+            // One coefficient cannot serve every torso action. At coop_proneSpineAction 35 the user
+            // reported shooting fixed and reloading still wrong: 'this only impacts shooting (half of
+            // the problem) reloading is still messed up and his torso comes up to reload'. That is what
+            // you would expect - a reload animation lifts the chest to work the bolt and seat a clip,
+            // a far larger deviation from the prone pose than a firing animation, so it needs a bigger
+            // correction.
+            //
+            // actionWeight CANNOT separate them: it is one blend for the whole torso slot, and on the
+            // PLAYER it never even gates, because ANIM_NOACTION is set only on actors (actor.cpp,
+            // simpleactor.cpp) and never here - so hasAction is true whenever any slot has weight.
+            //
+            // weaponstate is the honest discriminator. WEAPON_RELOADING covers exactly the window the
+            // reload animation owns the torso, so the extra bend begins and ends with the animation
+            // instead of being timed by hand.
+            // RELOAD REPLACES THE ACTION TIER RATHER THAN STACKING ON IT. Since 2026-08-25 a prone
+            // reload plays a real body-space animation (coop_prone_reload -> pistol_prone_reload), so the
+            // chest is ALREADY down and the +35 correction meant for a standing firing pose would bend it
+            // through the floor. coop_proneSpineReload therefore defaults to 0: trim only if the borrowed
+            // pistol animation sits slightly wrong for a longer weapon.
+            // [user 2026-08-26] The reload branch is GONE. It was written for the swapped-animation
+            // world that has since been reverted, and it left a prone reload with LESS spine correction
+            // than a prone shot (coop_proneSpineReload defaults 0, replacing the 35 action tier) - which
+            // was actively making the observed rise worse. The torso now carries zero render weight
+            // through a prone reload (player_animation.cpp), so there is nothing there to correct.
+            float fBias = pProneSpine->value;
+            if (!m_bCoopSupine) { // [spec A2a] the action tier un-stands STANDING anims; flipped
+                                  // supine anims are already correct and it acts inverted there
+                fBias += pAct->value * Q_clamp_float(edict->s.actionWeight, 0.0f, 1.0f);
+            }
+            float fLower = Q_clamp_float(pSplit->value, 0.0f, 1.0f);
+
+            vArms[0]  += fBias * fLower;          // Bip01 Spine1 - lower spine carries most of the bend
+            vTorso[0] += fBias * (1.0f - fLower); // Bip01 Spine2
+            vHead[0]  -= fBias;                   // cancel the inherited bend so the head stays level
+        }
+
+        // [user 2026-08-26] P1 AIM-LEAD: while the prone body yaw is still catching up, the head and
+        // upper spine lean toward the aim - the body follows the eyes, which is most of what reads
+        // as MP3's fluidity. Additive on the eased base, inside the AI head caps.
+        // [spec A2] SUPINE BONE FRAME. The 180 model-X roll reverses every bone's local Y and Z,
+        // so pmove's view-pitch spine distribution and our additive tiers all act INVERTED on a
+        // flipped body - aiming at your feet arched the chest INTO the ground, and the +35 action
+        // tier (tuned to un-stand a standing fire anim) bent the already-correct flipped fire pose
+        // the wrong way. While supine: negate the inherited pitch on all three spine bones, drop
+        // the action tier entirely, and re-base the aim-lead on view+180 (the raw delta is +/-180
+        // when settled - it clamped to +/-50 and FLAPPED sign as the aim wobbled across the
+        // boundary: the head snapped +/-27 degrees).
+        if (bProne && m_bCoopSupine) {
+            static cvar_t *pSupSpine = NULL;
+            if (!pSupSpine) { pSupSpine = gi.Cvar_Get("coop_supineSpine", "0", CVAR_ARCHIVE); }
+            vHead[0]  = -vHead[0]  + pSupSpine->value;
+            vTorso[0] = -vTorso[0];
+            vArms[0]  = -vArms[0];
+        }
+        if (bProne) {
+            static cvar_t *pLead = NULL;
+            if (!pLead) { pLead = gi.Cvar_Get("coop_proneAimLead", "1", CVAR_ARCHIVE); }
+            if (pLead->integer) {
+                // [supine-yaw] the +180 re-base went with the old view+180 target - the body
+                // tracks the view in both stances now, so the lead is measured the same way.
+                float fBase = client->ps.viewangles[YAW];
+                float fLag  = AngleSubtract(fBase, m_fCoopProneBodyYaw);
+                fLag = Q_clamp_float(fLag, -50.0f, 50.0f);
+                if (m_bCoopSupine) { fLag = -fLag; } // inverted local frame on the flipped body
+                vHead[1]  += fLag * 0.55f;
+                vTorso[1] += fLag * 0.35f;
+            }
+        }
+        // [review F5] the flipped body's local yaw axis is reversed (the A2 rule), so every yaw
+        // term needs the mirror, not just the aim-lead - the torso-lag (up to +/-18 deg on fast
+        // sweeps, and sweeping while ADS-ing is precisely the supine activity) was counter-rotating
+        // the wrong way and fighting the correctly-mirrored aim-lead on the same bone.
+        // HZM coop [user 2026-08-27] THE SHAKE OTHER PLAYERS SEE. First person has a rich weapon-feel
+        // layer - stress sway, breathing, the settle after a shot - and none of it existed in third
+        // person, so a rattled soldier looked identical to a calm one to everybody else. Same stress
+        // scalar, expressed through the two bone controllers that carry the weapon (TORSO and ARMS)
+        // so it reaches every observer through the networked bone angles with no client change.
+        //
+        // Deliberately SMALL and slow: this is a body under strain, not a vibrating prop. Bracing
+        // calms it by the same factor it calms the first-person sway, so a mounted gun visibly steadies
+        // to your teammates too - which is the whole point of showing it at all.
+        {
+            static cvar_t *pShake = NULL;
+            float          fAmp;
+
+            if (!pShake) { pShake = gi.Cvar_Get("coop_shake3p", "1.7", CVAR_ARCHIVE); }
+            fAmp = m_fCoopStress * pShake->value;
+            if (m_fCoopBrace > 0.0f) {
+                static cvar_t *pBS2 = NULL;
+                if (!pBS2) { pBS2 = gi.Cvar_Get("coop_braceStress", "0.50", CVAR_ARCHIVE); }
+                fAmp *= 1.0f - CoopBraceBonus() * (pBS2 ? pBS2->value : 0.50f);
+            }
+            if (fAmp > 0.02f) {
+                float t = level.time;
+                vTorso[1] += (float)sin(t * 7.3f) * fAmp * 0.6f;
+                vTorso[0] += (float)sin(t * 5.1f + 1.1f) * fAmp * 0.4f;
+                vArms[1]  += (float)sin(t * 9.7f + 0.4f) * fAmp;
+                vArms[0]  += (float)sin(t * 6.3f + 2.2f) * fAmp * 0.7f;
+            }
+        }
+
+        {
+            float fMir = m_bCoopSupine ? -1.0f : 1.0f;
+            vHead[0]  += m_fCoopHeadPitch;
+            vHead[1]  += m_fCoopHeadYaw * fMir;
+            vTorso[1] += m_fCoopTorsoLag * fMir;
+        }
+
+        // SetControllerAngles re-derives bone_quat, which the SERVER skeleton uses for tag positions
+        // (g_main.cpp:915). bone_quat is not networked - msg.cpp:3115 rebuilds it from bone_angles.
+        // [pass3, bug-2126] pmove distributes a view-pitch share into PELVIS too (bg_pmove
+        // PmoveAdjustAngleSettings: 0.3*pitch when looking down, ~11 deg at 60) - the same
+        // inverted-local-frame rule as the three bones above, so while supine it arched the
+        // hips INTO the floor. Mirror the pitch only; roll is about the flip axis and stays.
+        // Written every frame this block runs - the same lifecycle as the other three tags.
+        // [v3] while the arms are reversed these two controllers are pointing at the CLAVICLES, not
+        // the spine and pelvis, so the spine-mirror maths below does not apply to them - they carry
+        // one job, the 180 that turns the arms around.
+        if (m_bCoopSupineArmsOn) {
+            static cvar_t *pArmAng = NULL;
+            Vector         vClav;
+
+            if (!pArmAng) { pArmAng = gi.Cvar_Get("coop_supineArmsAng", "180", CVAR_ARCHIVE); }
+            vClav = Vector(pArmAng->value, 0.0f, 0.0f);
+            SetControllerAngles(ARMS_TAG, vClav);
+            SetControllerAngles(PELVIS_TAG, vClav);
+        } else {
+            Vector vPelvis = Vector(edict->s.bone_angles[PELVIS_TAG]);
+            if (bProne && m_bCoopSupine) {
+                vPelvis[0] = -vPelvis[0];
+            }
+            SetControllerAngles(PELVIS_TAG, vPelvis);
+        }
+        SetControllerAngles(HEAD_TAG, vHead);
+        SetControllerAngles(TORSO_TAG, vTorso);
+        if (!m_bCoopSupineArmsOn) {
+            SetControllerAngles(ARMS_TAG, vArms);
+        }
+
+        if (pDbg->integer && level.inttime - s_last > 500) {
+            s_last = level.inttime;
+            gi.Printf("^~^~^ BONEOFF prone=%d bias=%.0f aw=%.2f rld=%d | head=%.1f/%.1f torso=%.1f/%.1f arms=%.1f\n",
+                      (int)bProne, pProneSpine->value, edict->s.actionWeight,
+                      (GetActiveWeapon(WEAPON_MAIN)
+                       && GetActiveWeapon(WEAPON_MAIN)->GetState() == WEAPON_RELOADING) ? 1 : 0,
+                      edict->s.bone_angles[HEAD_TAG][0], edict->s.bone_angles[HEAD_TAG][1],
+                      edict->s.bone_angles[TORSO_TAG][0], edict->s.bone_angles[TORSO_TAG][1],
+                      edict->s.bone_angles[ARMS_TAG][0]);
+        }
+    }
+}
+
+// HZM coop [user 2026-08-24] HEAD TRACKING + TORSO COUNTER-ROTATION.
+//
+// Both write bone controllers the player ALREADY registers and then never uses. player.cpp claims
+// HEAD_TAG, TORSO_TAG, ARMS_TAG and PELVIS_TAG at spawn, but the only SetControllerAngles call
+// anywhere in Player is MOUTH_TAG for lipsync - so HEAD and TORSO are registered, wired through to
+// the renderer, and sitting at zero. That is the whole reason this is cheap: NUM_BONE_CONTROLLERS is
+// 5, hardcoded, raising it means editing the exe and breaking the protocol, and four slots are
+// already claimed (bug-2013 - the finger system got exactly one and the left hand silently got none).
+// Driving an idle slot costs nothing.
+//
+// Controller angles are OFFSETS added on top of the animated pose, and they live in
+// edict->s.bone_angles[] which is entityState - so this networks, and other players see it.
+//
+// Conventions copied from the AI head-aim (actor.cpp:3806-3846) rather than invented: [0]=pitch,
+// [1]=yaw, [2]=roll and always zero, yaw clamped +/-60, pitch +/-35, and the change per frame
+// rate-limited so the head turns rather than snapping.
+void Player::TickCoopLook()
+{
+    static cvar_t *pHead = NULL, *pHeadRange = NULL, *pTorso = NULL, *pTorsoAmt = NULL;
+    Vector         vBodyFwd, vToTarget;
+    float          fWantYaw = 0.0f, fWantPitch = 0.0f;
+    float          dt       = level.frametime;
+    qboolean       bAlive;
+
+    if (!pHead)      { pHead      = gi.Cvar_Get("coop_headLook", "0", CVAR_ARCHIVE); } // [user 2026-08-25] off - the head following the view reads better than glancing at contacts
+    if (!pHeadRange) { pHeadRange = gi.Cvar_Get("coop_headLookRange", "1400", CVAR_ARCHIVE); }
+    if (!pTorso)     { pTorso     = gi.Cvar_Get("coop_torsoLag", "1", CVAR_ARCHIVE); }
+    if (!pTorsoAmt)  { pTorsoAmt  = gi.Cvar_Get("coop_torsoLagAmount", "0.35", CVAR_ARCHIVE); }
+
+    if (dt <= 0.0f) {
+        return; // a zero-length frame must not be integrated - it would divide by nothing below
+    }
+
+    bAlive = (qboolean)(!deadflag && !m_pVehicle && !m_pTurret
+                        && !(client->ps.pm_flags & (PMF_SPECTATING | PMF_INTERMISSION | PMF_FROZEN)));
+
+    // ---- HEAD: glance toward the nearest visible German -----------------------------------
+    // Suppressed while aiming: down the sights you look exactly where you aim, and a head that
+    // wanders there reads as a bug rather than as life.
+    if (bAlive && pHead->integer && !(last_ucmd.buttons & BUTTON_COOPADS)) {
+        Sentient *best     = NULL;
+        float     bestDist = pHeadRange->value * pHeadRange->value;
+
+        for (Sentient *obj = level.m_HeadSentient[TEAM_GERMAN]; obj != NULL; obj = obj->m_NextSentient) {
+            float d;
+
+            if (obj == this || obj->health <= 0 || obj->deadflag) {
+                continue;
+            }
+            d = (obj->centroid - origin).lengthSquared();
+            if (d >= bestDist) {
+                continue;
+            }
+            if (!CanSee(obj, 200.0f, pHeadRange->value, false)) {
+                continue; // 200 deg cone: you can glance at something well off to the side
+            }
+            best     = obj;
+            bestDist = d;
+        }
+
+        // [user 2026-08-24] "i dont notice my head moving with free cam". The mechanism was fine - the
+        // TRIGGER was too narrow. Nearest-visible-GERMAN-within-35m means the head does nothing at all
+        // in the situation you are most likely to be looking at yourself in freecam: standing around
+        // with no enemy in view. Fall back to a visible TEAMMATE, which is also just better behaviour -
+        // soldiers look at each other.
+        if (!best) {
+            float bestMate = 900.0f * 900.0f;
+            for (Sentient *obj = level.m_HeadSentient[TEAM_AMERICAN]; obj != NULL; obj = obj->m_NextSentient) {
+                float d;
+
+                if (obj == this || obj->health <= 0 || obj->deadflag) {
+                    continue;
+                }
+                d = (obj->centroid - origin).lengthSquared();
+                if (d >= bestMate) {
+                    continue;
+                }
+                if (!CanSee(obj, 200.0f, 900.0f, false)) {
+                    continue;
+                }
+                best     = obj;
+                bestMate = d;
+            }
+        }
+
+        if (best) {
+            Vector vDelta = best->centroid - (origin + Vector(0, 0, viewheight));
+            Vector vWant  = vDelta.toAngles();
+
+            // relative to where the BODY faces, not the world
+            fWantYaw   = AngleSubtract(vWant[YAW], angles[YAW]);
+            fWantPitch = AngleSubtract(vWant[PITCH], 0.0f);
+            if (fWantPitch > 180.0f) { fWantPitch -= 360.0f; }
+        }
+    }
+
+    // clamps identical to the AI head so a player head can never out-turn a German one
+    fWantYaw   = Q_clamp_float(fWantYaw, -60.0f, 60.0f);
+    fWantPitch = Q_clamp_float(fWantPitch, -35.0f, 35.0f);
+
+    {
+        float fMaxStep = 220.0f * dt; // degrees/sec - a look, not a snap
+        float dY       = Q_clamp_float(fWantYaw - m_fCoopHeadYaw, -fMaxStep, fMaxStep);
+        float dP       = Q_clamp_float(fWantPitch - m_fCoopHeadPitch, -fMaxStep, fMaxStep);
+
+        m_fCoopHeadYaw += dY;
+        m_fCoopHeadPitch += dP;
+    }
+
+    {
+        static cvar_t *pHDbg = NULL;
+        static int     s_hLast = 0;
+        if (!pHDbg) { pHDbg = gi.Cvar_Get("coop_headLookDebug", "0", 0); } // verified live 2026-08-25 (bug-2101)
+        if (pHDbg->integer && level.inttime - s_hLast > 500) {
+            s_hLast = level.inttime;
+            // READBACK: what is in the slot BEFORE we write it - i.e. whoever wrote it LAST frame.
+            // PmoveAdjustAngleSettings (bg_pmove.cpp:1698) writes HEAD_TAG with VectorCopy from
+            // Player::EndFrame, which runs AFTER ClientThink - so if it is reclaiming the slot, the
+            // readback yaw will be pinned at 0.00 (pmove's head write has [1]=0 in normal play)
+            // no matter what we put there. Non-zero readback yaw = our write survived.
+            gi.Printf("^~^~^ HEADLOOK want=%.0f/%.0f cur=%.0f/%.0f ads=%d | readback head=%.2f/%.2f torso=%.2f/%.2f\n",
+                      fWantYaw, fWantPitch, m_fCoopHeadYaw, m_fCoopHeadPitch,
+                      (int)((last_ucmd.buttons & BUTTON_COOPADS) ? 1 : 0),
+                      edict->s.bone_angles[HEAD_TAG][0], edict->s.bone_angles[HEAD_TAG][1],
+                      edict->s.bone_angles[TORSO_TAG][0], edict->s.bone_angles[TORSO_TAG][1]);
+        }
+        Vector vHead(m_fCoopHeadPitch, m_fCoopHeadYaw, 0.0f);
+        SetControllerAngles(HEAD_TAG, vHead);
+    }
+
+    // ---- TORSO: lag behind a fast turn, then catch up --------------------------------------
+    // The body currently pivots rigidly with the camera. Counter-rotating Spine2 against the turn
+    // rate makes the hips lead and the chest follow, which is what reads as weight. Spine2 sits
+    // directly above ARMS_TAG (Spine1), which already carries view pitch - so the two compose
+    // instead of fighting: pitch on the lower spine, yaw lag on the upper.
+    {
+        float fYawRate = AngleSubtract(client->ps.viewangles[YAW], m_fCoopPrevViewYaw) / dt;
+        float fTarget  = 0.0f;
+
+        m_fCoopPrevViewYaw = client->ps.viewangles[YAW];
+
+        if (bAlive && pTorso->integer) {
+            fTarget = Q_clamp_float(-fYawRate * pTorsoAmt->value * 0.02f, -18.0f, 18.0f);
+        }
+        // one-pole toward the target: builds while turning, bleeds off when you stop
+        {
+            float k = dt * 9.0f;
+            if (k > 1.0f) { k = 1.0f; }
+            // [weight 3] a man carrying a Panzerschreck should turn like one. This lag is written to
+            // a networked bone channel, so unlike every other weight cue it is visible to TEAMMATES -
+            // the cheapest way to put mass on screen for somebody other than the person holding it.
+            {
+                static cvar_t *pTL = NULL;
+                if (!pTL) { pTL = gi.Cvar_Get("coop_heftTorsoLag", "0.9", CVAR_ARCHIVE); }
+                fTarget *= 1.0f + CoopActiveHeft() * pTL->value;
+            }
+            m_fCoopTorsoLag += (fTarget - m_fCoopTorsoLag) * k;
+            if (m_fCoopTorsoLag < 0.02f && m_fCoopTorsoLag > -0.02f) { m_fCoopTorsoLag = 0.0f; }
+        }
+        {
+            Vector vTorso(0.0f, m_fCoopTorsoLag, 0.0f); // pitch/roll cleared, as the AI torso does
+            SetControllerAngles(TORSO_TAG, vTorso);
+        }
+    }
+
+}
+
+// HZM coop [user 2026-08-26] DIRECT GRENADE THROW - no weapon switch.
+//
+// The old quick-grenade was a scripted WEAPON SWAP: UseWeaponClass grenade, wait for the takeout
+// animation to finish (ReadyToFire/MuzzleClear both gate on it), charge, throw, UseLastWeapon 0.9 s
+// later. Four weapon-system operations where a modern shooter has none, and the wait is what the user
+// saw: 'it actually equips the grenade first and then throws versus just throwing'.
+//
+// THE RECIPE IS NOT INVENTED. Every AI grenade in the game already throws this way - actor.cpp:10877
+// computes a throw point and velocity, calls ProjectileAttack with a projectile tik, and decrements
+// ammo. No weapon is ever made active. That is exactly what is wanted here, so it is copied rather than
+// designed: same call, same ammo name, same per-team projectile choice.
+//
+// SCOPE, stated honestly: this is the WORLD half. The projectile, the ammo and the arc are correct and
+// authoritative. The first-person viewmodel is driven by cg.snap->ps.activeItems[1] - the ACTIVE weapon
+// - so with no swap the viewmodel keeps showing the current gun. The throw animations exist
+// (viewmodel/vm_grenadeload.skc, vm_grenaderelease.skc) but hooking them without an active grenade is a
+// separate client-side job. Third person is correct now; first person shows the grenade leave without a
+// hand animation until that lands.
+void Player::CoopDirectThrow()
+{
+    static cvar_t *pSpeed = NULL, *pMin = NULL, *pUp = NULL;
+    Vector         vPos, vDir, vAng;
+    float          fCharge, fSpeed;
+    str            sGrenade;
+
+    if (!pSpeed) { pSpeed = gi.Cvar_Get("coop_nadeThrowSpeed", "900", CVAR_ARCHIVE); }
+    if (!pMin)   { pMin   = gi.Cvar_Get("coop_nadeThrowMin", "420", CVAR_ARCHIVE); }
+    if (!pUp)    { pUp    = gi.Cvar_Get("coop_nadeThrowUp", "9", CVAR_ARCHIVE); }
+
+    if (AmmoCount("grenade") < 1) {
+        return;
+    }
+
+    // charge -> distance, the same hold-to-throw-further the weapon path gave for free
+    fCharge = level.time - m_fCoopNadeT0;
+    if (fCharge < 0.0f) { fCharge = 0.0f; } else if (fCharge > 1.5f) { fCharge = 1.5f; }
+    fSpeed = pMin->value + (pSpeed->value - pMin->value) * (fCharge / 1.5f);
+
+    // throw from the eye, along the view, pitched up a little so a level throw still arcs
+    vAng    = client->ps.viewangles;
+    vAng[0] -= pUp->value;
+    vAng.AngleVectors(&vDir);
+    vDir.normalize();
+    vPos = origin + Vector(0, 0, (float)viewheight) + vDir * 16.0f;
+
+    // same per-team choice the actor code makes, so the model matches the thrower
+    sGrenade = (m_Team == TEAM_GERMAN) ? "models/projectiles/steilhandgranate.tik"
+                                       : "models/projectiles/M2FGrenade.tik";
+
+    ProjectileAttack(vPos, vDir, this, sGrenade, 0, fSpeed);
+    UseAmmo("grenade", 1);
+}
+
+// HZM coop [user 2026-08-24] QUICK GRENADE. bind g "+coopnade"
+//
+// Press: select a grenade and start charging it. Hold: charge further and cook. Release: throw,
+// then go back to the gun you were holding.
+//
+// EVERYTHING THE FEATURE DOES IS ALREADY IN THE ENGINE and this deliberately adds no new physics:
+//   * distance   - Sentient::ReleaseFireWeapon computes charge_time and Weapon::ReleaseFire turns
+//                  it into charge_fraction (weapon.cpp:2948), clamped by the tik's own
+//                  min/max_charge_time. Per-weapon tuning therefore already exists, in the data.
+//   * cooking    - Weapon::Charge arms EV_OverCooked / EV_OverCooked_Warning, and ReleaseFire
+//                  cancels them. Hold too long and it goes off in your hand, which is stock.
+//   * restoring  - EV_Sentient_UseLastWeapon + the engine's own lastActiveWeapon.
+// So this is a SEQUENCER, not a new mechanic - the project's rule is to find the working recipe
+// and copy it rather than invent, and here the recipe was already complete.
+//
+// WHY A CONSOLE COMMAND rather than a usercmd button bit: there are none left. Bits 0-6 are stock,
+// 7-11 are the weapon-command field (GetWeaponCommandMask), 12 is COOPWALK, 13 was taken by
+// COOPADS as 'the last free one', 14-15 are ANY/MOUSE. The +/- bind convention is intact in
+// cl_keys.cpp (press builds '+cmd key time' at :1266, release builds '-cmd key time' at :1078) and
+// unmatched commands forward to the server, so a console command gives a genuine held state with
+// no protocol change at all. G_ConsoleCmds dispatch ignores the trailing key/time args.
+void Player::TickCoopNade()
+{
+    static cvar_t *pOn = NULL;
+    Weapon        *pW;
+
+    if (!pOn) { pOn = gi.Cvar_Get("coop_quickNade", "1", CVAR_ARCHIVE); }
+
+    if (!m_iCoopNadeState) {
+        return;
+    }
+
+    // Abort on anything that makes throwing meaningless. Deliberately generous: leaving this state
+    // stuck would leave the player holding a charging grenade with no key to release it.
+    if (!pOn->integer || deadflag || m_pVehicle || m_pTurret
+        || (client->ps.pm_flags & (PMF_SPECTATING | PMF_INTERMISSION | PMF_FROZEN))) {
+        if (charge_start_time) {
+            ReleaseFireWeapon(WEAPON_MAIN, FIRE_PRIMARY); // never leave one cooking in the hand
+        }
+        m_iCoopNadeState = 0;
+        m_bCoopNadeHeld  = false;
+        return;
+    }
+
+    pW = GetActiveWeapon(WEAPON_MAIN);
+
+    // ---- 1: waiting for the grenade to come up -------------------------------------------
+    if (m_iCoopNadeState == 1) {
+        // Timeout. A player with no grenades, or mid-reload, would otherwise sit here forever.
+        if (level.time - m_fCoopNadeT0 > 2.5f) {
+            m_iCoopNadeState = 0;
+            m_bCoopNadeHeld  = false;
+            return;
+        }
+        if (pW && (pW->GetWeaponClass() & WEAPON_CLASS_GRENADE)) {
+            // HZM coop [user 2026-08-26] INSTANT PRESENT. The whole 'it equips first and then throws'
+            // delay lives in ReadyToFire, which stays false until weaponstate reaches WEAPON_READY -
+            // i.e. until the TAKEOUT ANIMATION finishes. ForceState just assigns weaponstate
+            // (weapon.cpp:5176) and MuzzleClear is a hard `return qtrue` (:5185), so skipping the wait
+            // costs nothing except the pullout animation, which is precisely what we do not want to
+            // watch. The grenade IS still genuinely equipped, which is why first person stays correct:
+            // the weapon model is a server-side attachment to tag_weapon_right (weapon.cpp:3236), and
+            // no client-only trick can put a grenade in your hand without one.
+            static cvar_t *pInst = NULL;
+            if (!pInst) { pInst = gi.Cvar_Get("coop_quickNadeInstant", "1", CVAR_ARCHIVE); }
+            if (pInst->integer && pW->GetState() != WEAPON_READY) {
+                pW->ForceState(WEAPON_READY);
+            }
+            if (pW->ReadyToFire(FIRE_PRIMARY) && pW->MuzzleClear()) {
+                ChargeWeapon(WEAPON_MAIN, FIRE_PRIMARY);
+                m_iCoopNadeState = 2;
+
+                // [user 2026-08-26] THROW ON PRESS. "hitting G equips the grenade, I was hoping it
+                // would prime the grenade to be thrown ... basically skipping the step of just holding
+                // it in our hand." Waiting for the key to come up is what produced that dwell: the
+                // grenade is genuinely equipped for as long as you hold, and it has to be, because the
+                // model in your hand is a server-side attachment (weapon.cpp:3236). Clearing the held
+                // flag here releases it on the SAME tick it charges, so pullout and throw run as one
+                // motion and the gun comes straight back.
+                //
+                // coop_quickNadeCook 1 restores hold-to-cook for anyone who wants to bake one.
+                {
+                    static cvar_t *pCook = NULL;
+                    if (!pCook) { pCook = gi.Cvar_Get("coop_quickNadeCook", "0", CVAR_ARCHIVE); }
+                    if (!pCook->integer) {
+                        m_bCoopNadeHeld = false;
+                    }
+                }
+            }
+        }
+        return;
+    }
+
+    // ---- 2: charging ----------------------------------------------------------------------
+    if (m_iCoopNadeState == 2) {
+        // The weapon can be taken out from under us - overcook detonates it, or a script strips it.
+        if (!pW || !(pW->GetWeaponClass() & WEAPON_CLASS_GRENADE)) {
+            m_iCoopNadeState = 3;
+            m_fCoopNadeThrow = level.time;
+            return;
+        }
+        if (!m_bCoopNadeHeld) {
+            ReleaseFireWeapon(WEAPON_MAIN, FIRE_PRIMARY);
+            m_iCoopNadeState = 3;
+            m_fCoopNadeThrow = level.time;
+        }
+        return;
+    }
+
+    // ---- 3: restore the previous weapon ---------------------------------------------------
+    // Delayed, not immediate: switching on the same frame as the throw cuts the throw animation
+    // and (worse) can pull the weapon before the projectile is actually released.
+    if (m_iCoopNadeState == 4) {
+        // direct-throw hold. Release throws; a hard cap stops a forgotten key cooking forever.
+        if (!m_bCoopNadeHeld || level.time - m_fCoopNadeT0 > 1.5f) {
+            CoopDirectThrow();
+            m_iCoopNadeState = 0;
+            m_bCoopNadeHeld  = false;
+        }
+        return;
+    }
+
+    if (m_iCoopNadeState == 3) {
+        static cvar_t *pBack = NULL;
+        if (!pBack) { pBack = gi.Cvar_Get("coop_quickNadeReturn", "0.9", CVAR_ARCHIVE); }
+
+        if (level.time - m_fCoopNadeThrow >= (pBack->value > 0.0f ? pBack->value : 0.9f)) {
+            m_iCoopNadeState = 0;
+            // Only go back if we are still holding a grenade. If the player has already switched
+            // by hand, or is out of grenades and the engine moved him on, respect that.
+            pW = GetActiveWeapon(WEAPON_MAIN);
+            if (pW && (pW->GetWeaponClass() & WEAPON_CLASS_GRENADE)) {
+                ProcessEvent(EV_Sentient_UseLastWeapon);
+            }
+        }
+        return;
+    }
+}
+
+void Player::CoopNadeDown()
+{
+    static cvar_t *pOn = NULL;
+    Weapon        *pW;
+
+    if (!pOn) { pOn = gi.Cvar_Get("coop_quickNade", "1", CVAR_ARCHIVE); }
+    if (!pOn->integer || deadflag || m_pVehicle || m_pTurret
+        || (client->ps.pm_flags & (PMF_SPECTATING | PMF_INTERMISSION | PMF_FROZEN))) {
+        return;
+    }
+    if (m_iCoopNadeState) {
+        return; // already mid-throw; a second press must not restart the sequence
+    }
+
+    m_bCoopNadeHeld = true;
+    m_fCoopNadeT0   = level.time;
+
+    // coop_quickNade 2 = DIRECT THROW. No UseWeaponClass, so no putaway, no takeout, no wait, and
+    // nothing to switch back from. State 4 just holds the charge until release.
+    if (pOn->integer >= 2) {
+        m_iCoopNadeState = 4;
+        return;
+    }
+
+    pW = GetActiveWeapon(WEAPON_MAIN);
+    if (pW && (pW->GetWeaponClass() & WEAPON_CLASS_GRENADE)) {
+        // already holding one - charge immediately, no switch and no restore surprise
+        m_iCoopNadeState = 1; // the tick charges it once ReadyToFire/MuzzleClear agree
+        return;
+    }
+
+    // Same event the stock WEAPON_COMMAND_USE_GRENADE path posts (player.cpp:5954), so grenade
+    // SELECTION is not reimplemented here - inventory order, dual-wield rules and the
+    // no-grenades case all behave exactly as they do for the normal weapon key.
+    {
+        Event *ev = new Event(EV_Sentient_UseWeaponClass);
+        ev->AddString("grenade");
+        ProcessEvent(ev);
+    }
+    m_iCoopNadeState = 1;
+}
+
+void Player::CoopNadeUp()
+{
+    // Only records the key state. The throw itself happens in TickCoopNade, so a TAP that is
+    // released before the grenade has even finished coming up still throws (at minimum charge)
+    // instead of being swallowed - which is what 'quick throw' has to mean.
+    m_bCoopNadeHeld = false;
+}
+
+// HZM coop [user 2026-08-24] SPRINT-TO-SLIDE.
+//
+// Sprint, then hold crouch: you keep (and briefly exceed) your speed for coop_slideTime while
+// crouched, decaying back to a crouch-walk. Every piece it needs already existed - sprint state,
+// stamina, and the crouch the engine already owns.
+//
+// DELIBERATELY A SPEED CHANGE ONLY, copying the sprint recipe rather than inventing one. No bbox
+// surgery, no origin pushes, no forced PMF_DUCKED: the player is genuinely crouched because HOLDING
+// CROUCH IS THE TRIGGER, so PM_CheckDuck owns the hull exactly as it does for any other crouch. That
+// is what stops this wedging anyone inside geometry - the failure every hand-rolled slide finds.
+//
+// Costs stamina, so it cannot be chained to cross a map faster than sprinting, and carries its own
+// cooldown on top so it cannot be spammed on the spot.
+void Player::TickSlide()
+{
+    static cvar_t *pOn   = NULL;
+    static cvar_t *pDur  = NULL;
+    static cvar_t *pCool = NULL;
+    static cvar_t *pCost = NULL;
+    qboolean       bCrouch;
+
+    if (!pOn)   { pOn   = gi.Cvar_Get("coop_slide", "1", CVAR_ARCHIVE); }
+    if (!pDur)  { pDur  = gi.Cvar_Get("coop_slideTime", "0.75", CVAR_ARCHIVE); }
+    if (!pCool) { pCool = gi.Cvar_Get("coop_slideCooldown", "1.2", CVAR_ARCHIVE); }
+    if (!pCost) { pCost = gi.Cvar_Get("coop_slideStamina", "0.55", CVAR_ARCHIVE); }
+
+    // Exit is tested BEFORE entry, so a slide ending this frame cannot also re-enter on the same tick.
+    if (m_bCoopSliding) {
+        if (m_fCoopSlideEnd <= level.time || deadflag || !groundentity || m_pVehicle || m_pTurret
+            || last_ucmd.upmove > 0) { // jump cancels it
+            // HZM coop [user 2026-08-26] P3 SLIDE-INTO-PRONE (the shootdodge substitute). If crouch is
+            // STILL held as the slide runs out naturally, seed the prone hold accumulator full so
+            // TickCoopProne (which runs later this same frame - order is TickSlide then TickCoopProne)
+            // enters prone immediately: sprint -> slide -> prone in one continuous hold, no new
+            // assets. Natural expiry only - a jump-cancel or death must not put you on the ground.
+            if (m_fCoopSlideEnd <= level.time && !deadflag && groundentity && !m_pVehicle && !m_pTurret
+                && last_ucmd.upmove < 0) {
+                static cvar_t *pS2P = NULL, *pHoldS = NULL;
+                if (!pS2P)   { pS2P   = gi.Cvar_Get("coop_slideToProne", "1", CVAR_ARCHIVE); }
+                if (!pHoldS) { pHoldS = gi.Cvar_Get("coop_proneHold", "0.35", CVAR_ARCHIVE); }
+                if (pS2P->integer) {
+                    m_fCoopCrouchHeld = level.time - pHoldS->value; // timestamp model: already satisfied
+                }
+            }
+            m_bCoopSliding  = false;
+            m_fCoopSlideEnd = 0;
+        }
+        return;
+    }
+
+    // [pass2, bug-2125] mirror of bCanEnter's !m_bCoopSliding: a crouch press during a shift-held
+    // crawl entered a SLIDE on the same frame the prone exit processed the press.
+    if (m_bCoopProne) { return; }
+    if (!pOn->integer) {
+        m_bCoopSliding = false;
+        return;
+    }
+
+    bCrouch = (last_ucmd.upmove < 0) ? qtrue : qfalse;
+
+    // m_bCoopSprinting is THIS frame's value because TickSlide runs after TickSprint. If that order is
+    // ever reversed this silently reads a stale frame and the slide fires a tick late.
+    // Wounded is excluded for the same reason sprint excludes it (bugs 1291/1324): a limping player who
+    // could still slide would be faster hurt than healthy.
+    if (m_bCoopSprinting && bCrouch && groundentity && !deadflag && !m_pVehicle && !m_pTurret
+        && !m_bCoopWounded && level.time >= m_fCoopSlideNext && m_fCoopStamina >= pCost->value) {
+        float dur = (pDur->value > 0.05f) ? pDur->value : 0.75f;
+
+        m_bCoopSliding   = true;
+        m_fCoopSlideEnd  = level.time + dur;
+        m_fCoopSlideNext = level.time + dur + (pCool->value > 0.0f ? pCool->value : 0.0f);
+        m_fCoopStamina -= pCost->value;
+        if (m_fCoopStamina < 0.0f) { m_fCoopStamina = 0.0f; }
+    }
+}
+
 void Player::TickSprint()
 {
     float timeHeld;
@@ -13544,6 +15898,20 @@ void Player::TickSprint()
         // clamp the (possibly spawn-seeded huge) pool to the current max
         if (m_fCoopStamina > maxStam) { m_fCoopStamina = maxStam; }
 
+        // [user 2026-08-27] a JUMP costs stamina - it is the cheapest movement in the game and was
+        // free, so it undercut every other option. Edge-triggered: holding jump is not a tax.
+        {
+            static cvar_t *pJC = NULL;
+            qboolean       bJumpNow = (last_ucmd.upmove > 0) ? qtrue : qfalse;
+            if (!pJC) { pJC = gi.Cvar_Get("coop_staminaJump", "1.4", CVAR_ARCHIVE); }
+            if (bJumpNow && !m_bCoopJumpPrev && groundentity && !deadflag && pJC->value > 0.0f) {
+                m_fCoopStamina -= pJC->value;
+                if (m_fCoopStamina < 0.0f) { m_fCoopStamina = 0.0f; }
+                m_fCoopStaminaHold = level.time + CoopStaminaDelay();
+            }
+            m_bCoopJumpPrev = bJumpNow;
+        }
+
         aiming  = (IsZoomed() || (last_ucmd.buttons & BUTTON_COOPADS)) ? qtrue : qfalse; // ADS now on its own button
         walkKey = (last_ucmd.buttons & BUTTON_RUN) ? qfalse : qtrue;       // Shift held = walk-key state
         altWalk = (last_ucmd.buttons & BUTTON_COOPWALK) ? qtrue : qfalse;  // Alt held = forced slow walk
@@ -13559,14 +15927,44 @@ void Player::TickSprint()
             wantSprint = qtrue;
         }
 
+        // [pass2, bug-2125] a belly-crawl with Shift held latched SPRINT: fire stripped while
+        // effectively stationary, gear-rattle loop, stamina drain, and the sprint speed re-base
+        // fighting the crawl multiplier. Prone crawling is never a sprint.
+        if (m_bCoopProne) { wantSprint = qfalse; }
         if (wantSprint && m_fCoopStamina > 0.0f) {
             m_bCoopSprinting = true;
-            m_fCoopStamina -= dt; // drains 1 stamina-sec per real-sec while sprinting
+            // [weight 9] the only weight cue that changes what you DO rather than what you feel:
+            // a heavy loadout plans shorter sprints.
+            {
+                static cvar_t *pSD = NULL;
+                float          fDrain;
+                if (!pSD) { pSD = gi.Cvar_Get("coop_heftStamina", "0.6", CVAR_ARCHIVE); }
+                fDrain = dt * (1.0f + CoopActiveHeft() * pSD->value);
+                m_fCoopStamina -= fDrain;
+            }
             if (m_fCoopStamina < 0.0f) { m_fCoopStamina = 0.0f; }
+            m_fCoopStaminaHold = level.time + CoopStaminaDelay();
         } else {
+            // [weight 7] READY-UP. The animation of bringing the weapon back down out of a sprint
+            // already plays; the server never honoured it, so you could fire on the exact frame you
+            // stopped running and the sprint carried no cost at all. The delay scales with the
+            // weapon's weight, which is the whole point: a Panzerschreck takes real time to come
+            // back on target, a Luger almost none.
+            if (m_bCoopSprinting) {
+                static cvar_t *pRU = NULL;
+                if (!pRU) { pRU = gi.Cvar_Get("coop_readyUp", "0.35", CVAR_ARCHIVE); }
+                m_fCoopReadyUpAt = level.time + pRU->value * (0.45f + CoopActiveHeft());
+            }
             m_bCoopSprinting = false;
             // regen only when NOT actively trying to sprint, so you can't "pump" it
-            if (!wantSprint) {
+            // HZM coop [user 2026-08-27] ONE ECONOMY, NOT FOUR TOYS.
+            //
+            // Sprint, slide, vault and jump each existed on their own terms, and stamina refilled the
+            // instant you stopped sprinting - so the pool never actually constrained anything: you
+            // could sprint, vault, jump and sprint again with no accounting. A regen DELAY is what
+            // turns a meter into a resource; every spend now pushes the refill back, so bursts of
+            // movement have to be paid for and the pause afterwards is the price.
+            if (!wantSprint && level.time >= m_fCoopStaminaHold) {
                 m_fCoopStamina += dt * regen;
                 if (m_fCoopStamina > maxStam) { m_fCoopStamina = maxStam; }
             }
@@ -13904,7 +16302,8 @@ void Player::TickCoopCover()
             s_coopCoverAuto      = gi.Cvar_Get("coop_coverAuto", "1", 0);
             s_coopCoverAutoDelay = gi.Cvar_Get("coop_coverAutoDelay", "0.9", 0);
         }
-        if (s_coopCoverAuto->integer && !deadflag && !IsSpectator() && !m_pVehicle && !m_pTurret
+        if (s_coopCoverAuto->integer && !deadflag && !IsSpectator() && !m_pVehicle && !m_pTurret && !m_bCoopProne // [pass4] a lying player is not a wall-cover candidate
+            && !m_bCoopBraceMounted // [user 2026-08-27] mounted first = mounted wins; cover stays out
             && !m_pLadder && !level.playerfrozen && !m_bFrozen && !(flags & FL_IMMOBILE)
             && (client->ps.pm_flags & PMF_DUCKED) && !last_ucmd.forwardmove && !last_ucmd.rightmove
             && last_ucmd.upmove <= 0) {
@@ -13928,7 +16327,7 @@ void Player::TickCoopCover()
     }
 
     // hard cancels - things that end cover instantly (the statemap "!" exits fire this frame)
-    if (deadflag || IsSpectator() || m_pVehicle || m_pTurret || m_pLadder || level.playerfrozen || m_bFrozen
+    if (deadflag || IsSpectator() || m_bCoopProne /*[pass4]*/ || m_bCoopBraceMounted /*[user 08-27]*/ || m_pVehicle || m_pTurret || m_pLadder || level.playerfrozen || m_bFrozen
         || (flags & FL_IMMOBILE) || last_ucmd.forwardmove || last_ucmd.rightmove || last_ucmd.upmove > 0) {
         m_bCoopCoverRequested = false;
         // HZM coop [user 2026-08-09] auto-cover backoff: a deliberate exit must not re-grab
@@ -14428,11 +16827,24 @@ void Player::TickCoopCover()
                     static cvar_t *pFace = NULL;
                     Vector         vAim = vOut;
 
-                    // [bug-2089] DEFAULT 0 - this entry turn is superseded. It set the body angle
-                    // ONCE, and the view-follows-body coupling overwrote it on the next mouse
-                    // input, which is why tuning it never held. The per-frame wall pin below
-                    // replaces it. Kept rather than deleted so it is one cvar away if needed.
-                    if (!pFace) { pFace = gi.Cvar_Get("coop_coverFaceOpen", "0.65", CVAR_ARCHIVE); }
+                    // [user 2026-08-24] DEFAULT 0.65 -> 0. THIS WAS THE REPORTED DEFECT.
+                    // User: "Anytime I hit the key my camera is looking at the direction of the
+                    // opening and my character faces the door. The whole point is for the character
+                    // to stay back against the wall."
+                    //
+                    // At 0.65 the entry yaw was blended 65% toward vAlong - along the wall, at the
+                    // opening - which IS "face the door". vOut points out of the wall toward the
+                    // player, so 0 means face straight out = back flat against the wall, which is
+                    // what was asked for and what a modern cover system does.
+                    //
+                    // NOTE: the comment previously here claimed the default was already 0 and that
+                    // "the per-frame wall pin below replaces it". Both were false - the registered
+                    // default was 0.65 and NO wall pin exists anywhere in this file (grep it). A
+                    // comment asserting a default it does not set is the cg_adsLeanRoll fossil
+                    // again: the reader checks, believes it, and rules out the real cause.
+                    // (Its "[bug-2089]" anchor is also a collision - 2089 is the stale-plan-header
+                    // entry filed 2026-08-24.)
+                    if (!pFace) { pFace = gi.Cvar_Get("coop_coverFaceOpen", "0", CVAR_ARCHIVE); }
 
                     // m_iCoopCoverSide: +1 = opening LEFT, -1 = opening RIGHT (0 = none yet)
                     if (m_iCoopCoverSide != 0 && pFace->value > 0.0f) {
@@ -15222,8 +17634,15 @@ void Player::Postthink(void)
                     continue;
                 }
                 const char *pszM = pP->model.c_str();
+                // [user 2026-08-26] "granate" IS THE WHOLE POINT. The German stick grenade is
+                // steilhandgranate.tik - GRANATE, the German spelling - so a filter testing only for
+                // "grenade" matched every Allied, British, Italian and Russian projectile and MISSED
+                // the one the player is actually being shelled with. Five models were invisible here:
+                // steilhandgranate{,_ai,_primary}.tik and nebelhandgranate{,_primary}.tik. The kick
+                // prompt therefore never appeared for enemy grenades in the entire trilogy.
                 if (!pszM
-                    || (!Q_stristr(pszM, "grenade") && !Q_stristr(pszM, "masher") && !Q_stristr(pszM, "mills")
+                    || (!Q_stristr(pszM, "grenade") && !Q_stristr(pszM, "granate")
+                        && !Q_stristr(pszM, "masher") && !Q_stristr(pszM, "mills")
                         && !Q_stristr(pszM, "bomba"))) {
                     continue;
                 }
@@ -15279,8 +17698,11 @@ void Player::Postthink(void)
                     continue;
                 }
                 const char *pszModel = pProj->model.c_str();
+                // same "granate" fix as the detection pass above - these two filters MUST agree, or the
+                // prompt appears and the kick then refuses the very grenade it offered to kick
                 if (!pszModel
-                    || (!Q_stristr(pszModel, "grenade") && !Q_stristr(pszModel, "masher")
+                    || (!Q_stristr(pszModel, "grenade") && !Q_stristr(pszModel, "granate")
+                        && !Q_stristr(pszModel, "masher")
                         && !Q_stristr(pszModel, "mills") && !Q_stristr(pszModel, "bomba"))) {
                     continue;
                 }
@@ -15337,6 +17759,15 @@ void Player::Postthink(void)
                         origin + Vector(0, 0, 56), vec_zero, vec_zero, origin + Vector(0, 0, 56) + vFwd * 52.0f,
                         this, MASK_PLAYERSOLID, qfalse, "coop_vault_chest");
                     if (trChest.fraction >= 1.0f) {
+                        // [user 2026-08-27] a vault is the most athletic thing in the movement set
+                        // and cost nothing at all; it is now the most expensive.
+                        {
+                            static cvar_t *pVC = NULL;
+                            if (!pVC) { pVC = gi.Cvar_Get("coop_staminaVault", "2.5", CVAR_ARCHIVE); }
+                            m_fCoopStamina -= pVC->value;
+                            if (m_fCoopStamina < 0.0f) { m_fCoopStamina = 0.0f; }
+                            m_fCoopStaminaHold = level.time + CoopStaminaDelay();
+                        }
                         s_fVaultOk[client->ps.clientNum] = level.time + 0.8f;
                         velocity                         = vFwd * 150.0f + Vector(0, 0, 310.0f);
 

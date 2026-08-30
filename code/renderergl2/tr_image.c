@@ -2738,6 +2738,25 @@ qboolean R_HZM_GenNormalsWanted( const char *name )
 	if ( !r_hzmGenNormals || r_hzmGenNormals->integer <= 0 || !name || !name[0] )
 		return qfalse;
 
+	// HZM gl2 [measured 2026-08-28] MOHAA KEEPS CHARACTER SKINS FLAT IN textures/, NOT IN models/.
+	//
+	// The comment above says the include list keeps models/ out. It does not, because that is not
+	// where the skins are: recon_jacket, medic_coat, infantry_tunic and friends sit directly in
+	// textures/ with no subfolder, while world art is always textures/<set>/<name>. Measured on a
+	// live m3l3 load, 95 of 187 generated maps - over half the time and the VRAM - went to skins
+	// that can never render correctly, because a TIKI skeletal vertex carries no tangent and the
+	// normal would be rotated by a garbage basis.
+	//
+	// The structural rule is cheap and exact where a substring list cannot be: world art has a
+	// second slash, skins do not. Enforced here rather than by asking the user to maintain a
+	// ~2KB include string of 99 folder names, which would also collide with the console tokenizer.
+	{
+		const char *p = name;
+		if ( !Q_stricmpn( p, "textures/", 9 ) && !strchr( p + 9, '/' ) ) {
+			return qfalse;   // textures/<name> with no set folder = a character skin
+		}
+	}
+
 	// Never build relief out of something that already IS a normal or glow map. "_n" and "_nh"
 	// are rend2's own unambiguous conventions, so a file with those names is data, not art.
 	//
@@ -3022,7 +3041,14 @@ static void R_HZM_GenerateNormalMap( const char *normalName, byte *pic, int widt
 		ri.Free( fullNormal );
 	}
 
-	img = R_CreateImage( normalName, normalPic, genW, genH, IMGTYPE_NORMAL, normalFlags, 0 );
+	// HZM gl2 [2026-08-28] IMGTYPE_NORMALHEIGHT, not IMGTYPE_NORMAL. R_HZM_HeightToNormal already writes
+	// the height into alpha (see its banner), but RawImage_GetFormat preserves alpha ONLY for
+	// NORMALHEIGHT - IMGTYPE_NORMAL falls through to GL_RGB and the driver discards it at upload. The
+	// height was being computed and thrown away on every generated map in the game. Registering the true
+	// type is also what lets CollapseStagesToLightall's '_nh' probe claim it and set
+	// LIGHTDEF_USE_PARALLAXMAP. With r_parallaxMapping 0 this is still free: that same RawImage_GetFormat
+	// test requires the cvar, so the alpha is dropped and the format is byte-identical to before.
+	img = R_CreateImage( normalName, normalPic, genW, genH, IMGTYPE_NORMALHEIGHT, normalFlags, 0 );
 
 	ri.Free( normalPic );
 	ri.Free( heightBuf );
@@ -3161,11 +3187,20 @@ image_t	*R_FindImageFile( const char *name, imgType_t type, imgFlags_t flags )
 
 		normalFlags = (flags & ~IMGFLAG_GENNORMALMAP) | IMGFLAG_NOLIGHTSCALE;
 
-		COM_StripExtension(name, normalName, MAX_QPATH);
-		Q_strcat(normalName, MAX_QPATH, "_n");
+		// HZM gl2 [2026-08-28] This block is SHARED with upstream's r_genNormalMaps, whose behaviour must
+		// stay byte-identical (see the else-if below). So the suffix and type branch on which generator
+		// will actually own the image: ours carries height in alpha and is a true '_nh' normal-height map,
+		// upstream's is a plain '_n' normal. Getting this wrong would silently rename upstream's output.
+		{
+			qboolean bHzmOwns = R_HZM_GenNormalsWanted(name);
 
-		// find normalmap in case it's there
-		normalImage = R_FindImageFile(normalName, IMGTYPE_NORMAL, normalFlags);
+			COM_StripExtension(name, normalName, MAX_QPATH);
+			Q_strcat(normalName, MAX_QPATH, bHzmOwns ? "_nh" : "_n");
+
+			// find normalmap in case it's there
+			normalImage = R_FindImageFile(normalName,
+										  bHzmOwns ? IMGTYPE_NORMALHEIGHT : IMGTYPE_NORMAL, normalFlags);
+		}
 
 		// if not, generate it
 		// HZM gl2: r_hzmGenNormals owns this image if its path filter claims it. Upstream's
@@ -3273,10 +3308,11 @@ image_t	*R_FindImageFile( const char *name, imgType_t type, imgFlags_t flags )
 		char normalName[MAX_QPATH];
 		imgFlags_t normalFlags = (flags & ~IMGFLAG_GENNORMALMAP) | IMGFLAG_NOLIGHTSCALE;
 
+		// HZM-only branch (gated on R_HZM_GenNormalsWanted above), so it is unconditionally '_nh'.
 		COM_StripExtension(name, normalName, MAX_QPATH);
-		Q_strcat(normalName, MAX_QPATH, "_n");
+		Q_strcat(normalName, MAX_QPATH, "_nh");
 
-		if (R_FindImageFile(normalName, IMGTYPE_NORMAL, normalFlags) == NULL)
+		if (R_FindImageFile(normalName, IMGTYPE_NORMALHEIGHT, normalFlags) == NULL)
 		{
 			R_HZM_GenerateNormalMapFromSource(name, normalName, normalFlags,
 											  (qboolean)((flags & IMGFLAG_CLAMPTOEDGE) != 0));

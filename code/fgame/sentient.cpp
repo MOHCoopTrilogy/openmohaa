@@ -930,6 +930,7 @@ Sentient::Sentient()
     m_PrevSentient = m_NextSentient = NULL;
     m_bForceDropHealth              = false;
     m_bForceDropWeapon              = false;
+    m_bCoopSidearmSwap              = false;   // memory is not zeroed - seed every member
 
     Link();
 }
@@ -1742,6 +1743,100 @@ void Sentient::ArmorDamage(Event *ev)
         }
     }
 
+    // HZM coop [user 2026-08-28] HIT CONFIRMATION. Retail's CGM_NOTIFY_HIT fires from Player::Pain only,
+    // so it is player-on-player and does nothing in PvE - which is the entire coop case. Sent from here
+    // instead, for the same reason the headshot cue below lives here: rank-and-file AI carry the
+    // aihandler health buffer, so a player's bullet only WOUNDS them engine-side and the real killing
+    // blow arrives through this same event.
+    //
+    // MSG_SetClient zeroes the receive mask and sets one bit, so this reaches the shooter and nobody
+    // else - the only genuinely single-recipient channel the engine has. The payload is a 6-bit type,
+    // which is why a per-hit message is affordable at MG fire rates.
+    //
+    // THROTTLED, and not for bandwidth: a shotgun resolves as ~12 separate pellet hits, and without this
+    // one trigger pull would fire twelve markers and twelve ticks. A kill is never throttled - missing a
+    // kill confirm is far worse than an extra one.
+    // HZM coop [user 2026-08-30] SHOOT THE RIFLE OUT OF HIS HANDS -> HE DRAWS A SIDEARM.
+    //
+    // The engine reports hand hits (HITLOC_R_HAND / HITLOC_L_HAND, q_shared.h:1444), so the trigger is
+    // real marksmanship rather than a dice roll on any hit.
+    //
+    // WHY A SWAP AND NOT A DROP: the AI has NO think state for retrieving anything - the full set is
+    // ATTACK/BADPLACE/CURIOUS/DISGUISE/GRENADE/IDLE/KILLED/NOCLIP/PAIN/VOID - so a disarmed actor can
+    // never pick his weapon back up, and bug-1959b recorded what a weaponless actor actually does: his
+    // re-draw loop retries every think tick (30 ms spam) while his anims keep posing armed. That is the
+    // trap this design avoids entirely. EventGiveWeaponInternal does Holster -> RemoveWeapons ->
+    // giveItem -> Unholster in ONE call, so there is never a weaponless frame to go wrong.
+    //
+    // Once per actor: losing the rifle should be a memorable moment, not a mechanic to farm. And only
+    // if he is actually holding a long gun - a man already on a pistol has nothing to lose.
+    if (!m_bCoopSidearmSwap && health > 0 && attacker && attacker->IsSubclassOfPlayer()
+        && !IsSubclassOfPlayer() && IsSubclassOfActor()
+        && (location == HITLOC_R_HAND || location == HITLOC_L_HAND)) {
+        static cvar_t *pSA = NULL, *pSAC = NULL;
+        if (!pSA)  { pSA  = gi.Cvar_Get("coop_sidearmSwap", "1", CVAR_ARCHIVE); }
+        if (!pSAC) { pSAC = gi.Cvar_Get("coop_sidearmSwapChance", "0.6", CVAR_ARCHIVE); }
+
+        if (pSA->integer && random() < pSAC->value) {
+            Weapon *pCur = GetActiveWeapon(WEAPON_MAIN);
+            int     cls  = pCur ? pCur->GetWeaponClass() : 0;
+
+            if (pCur && !(cls & WEAPON_CLASS_PISTOL)) {
+                // weapon_internal takes a TIK PATH, not the display name - retail's own global/weapon.scr
+                // maps `case "colt 45":` to models/weapons/colt45.tik before calling it. Passing a name
+                // here would FAIL the give, and a failed give is bug-1959b exactly: Holster and
+                // RemoveWeapons have already run, so the actor is left weaponless, posing armed, with his
+                // re-draw loop retrying every think tick.
+                Actor      *pAct  = static_cast<Actor *>(this);
+                                // P38, not the Luger: lugerp08.tik ships only in the extra-weapons pack, so on a stock
+                // install the give would FAIL - and a failed give is bug-1959b (Holster and RemoveWeapons
+                // have already run). p38.tik is in Pak0, and the Walther P38 was the standard German
+                // sidearm by 1944 anyway, with the Luger being phased out. Correct and always present.
+                const char *pSide = "models/weapons/p38.tik";   // TIK PATH, not the display name
+
+                switch (pAct->m_iNationality) {
+                case ACTOR_NATIONALITY_AMERICAN:
+                case ACTOR_NATIONALITY_BRITISH:
+                    pSide = "models/weapons/colt45.tik";
+                    break;
+                case ACTOR_NATIONALITY_ITALIAN:
+                case ACTOR_NATIONALITY_RUSSIAN:
+                case ACTOR_NATIONALITY_GERMAN:
+                default:
+                    pSide = "models/weapons/p38.tik";
+                    break;
+                }
+
+                m_bCoopSidearmSwap = true;   // latch BEFORE the give, so a failed give cannot loop
+                {
+                    // EV_Actor_WeaponInternal lives in actor.cpp and is not declared in any header, so
+                    // it is reached by its registered command name rather than by including actor.cpp's
+                    // internals here. Listener resolves the name through the same table the script
+                    // parser uses (listener.h:321).
+                    Event *pEv = new Event("weapon_internal");
+                    pEv->AddString(pSide);
+                    pAct->ProcessEvent(pEv);
+                }
+            }
+        }
+    }
+
+    if (attacker && attacker->IsSubclassOfPlayer() && !IsSubclassOfPlayer()
+        && attacker->IsSubclassOfSentient() && attacker->m_Team != m_Team) {
+        Player  *pAtk   = static_cast<Player *>(attacker);
+        qboolean bKill  = (fCoopPrevHealth > 0 && health <= 0) ? qtrue : qfalse;
+
+        if (bKill || level.time >= pAtk->m_fCoopHitMarkNext) {
+            if (!bKill) {
+                pAtk->m_fCoopHitMarkNext = level.time + 0.05f;
+            }
+            gi.MSG_SetClient(pAtk->edict - g_entities);
+            gi.MSG_StartCGM(BG_MapCGMToProtocol(g_protocol,
+                                                bKill ? CGM_NOTIFY_KILL : CGM_NOTIFY_HIT));
+            gi.MSG_EndCGM();
+        }
+    }
+
     // HZM coop - CONFIRMED HEADSHOT KILL (cue + guaranteed visible feedback). Lives HERE, not in
     // BulletAttack, because rank-and-file AI carry the aihandler 5000-health buffer: the player's
     // bullet only WOUNDS them engine-side and the real killing blow is the pain handler's scripted
@@ -1754,7 +1849,18 @@ void Sentient::ArmorDamage(Event *ev)
         && !IsSubclassOfPlayer()
         && (meansofdeath == MOD_BULLET || meansofdeath == MOD_FAST_BULLET || meansofdeath == MOD_SHOTGUN)
         && (location == HITLOC_HEAD || location == HITLOC_HELMET || location == HITLOC_NECK)) {
-        attacker->Sound("coop_headshot", CHAN_LOCAL);
+        // [found 2026-08-28] THIS WAS NOT SHOOTER-ONLY. Entity::Sound ends in gi.Sound -> SV_Sound,
+        // which loops EVERY active client, and CHAN_LOCAL then makes it a 2D listener-positioned sound
+        // at full volume with no attenuation - so in 4-player coop all four players heard every headshot
+        // cue as if it were their own. It reads as correct because CHAN_LOCAL sounds local. Published as
+        // a per-client counter instead: `set coop_*` is auto-allowed by the servercmd filter and reaches
+        // exactly one client. Headshot kills are rare, so one server command each is cheap.
+        {
+            Player *pAtkHs = static_cast<Player *>(attacker);
+            pAtkHs->m_iCoopHsCueSent++;
+            gi.SendServerCommand(pAtkHs->edict - g_entities,
+                                 "stufftext \"set coop_hsCue %d\"", pAtkHs->m_iCoopHsCueSent);
+        }
         CoopHeadshotKillFx(position, direction);
         CoopGoreDisfigureHead(); // HZM coop [user 2026-08-17] - and leave the face unrecognisable
         CoopGoreHeadshotExtras(position, direction); // HZM coop [user 2026-08-19] - brain chunks + eyeball

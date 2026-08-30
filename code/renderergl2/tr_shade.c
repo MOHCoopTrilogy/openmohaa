@@ -924,8 +924,32 @@ static void RB_HZMStageMaterial( const shaderStage_t *pStage, vec4_t normalScale
 	Vector4Copy( pStage->normalScale, normalScaleOut );
 	Vector4Copy( pStage->specularScale, specularScaleOut );
 
+	// [user 2026-08-28] PARALLAX APPLIES TO EVERY NORMAL-MAPPED STAGE, NOT JUST SYNTHESISED ONES - so
+	// this sits ABOVE the generated-only early-return below. The CC0 terrain pack ships AUTHORED
+	// <name>_nh maps, which are not marked hzmGenNormal; they were therefore falling through with
+	// .a = the latched r_baseParallax and .z = the constant 1.0 that means NO DISTANCE FADE. Two
+	// symptoms followed: authored ground bulged up close (measured displacement has far more range than
+	// the luminance guess 0.04 was tuned against) and it kept the distance shimmer the fade exists to fix.
+	//
+	// .a is the depth; r_baseParallax feeds it at collapse time but is CVAR_LATCH, so overriding here is
+	// what makes depth tunable in play at all. .z carries the fade distance - it was written as a
+	// constant 1.0 and read by no shader, so the channel was free; lightall_fp treats <= 1.0 as 'no fade'.
+	if ( r_hzmParallaxDepth->value >= 0.0f )
+	{
+		normalScaleOut[3] = CLAMP( r_hzmParallaxDepth->value, 0.0f, 0.5f );
+	}
+	normalScaleOut[2] = ( r_hzmParallaxFade->value > 1.0f ) ? r_hzmParallaxFade->value : 1.0f;
+
+	// [user 2026-08-28] AUTHORED normal maps get their own strength. The synthesised ones below are
+	// multiplied by r_hzmGenNormalStrength (1.5 in the shipped cfg), so when the CC0 pack replaced them
+	// with real measured normals at a raw 1.0 the ground read FLATTER - not because the data is worse,
+	// but because it is honest where the old one was exaggerated. Same knob, separate value, so tuning
+	// real art cannot drag the synthesised fallback with it.
 	if ( !pStage->hzmGenNormal )
 	{
+		float fAuth = CLAMP( r_hzmNormalStrength->value, 0.0f, 4.0f );
+		normalScaleOut[0] = pStage->normalScale[0] * fAuth;
+		normalScaleOut[1] = pStage->normalScale[1] * fAuth;
 		return;
 	}
 
@@ -937,6 +961,7 @@ static void RB_HZMStageMaterial( const shaderStage_t *pStage, vec4_t normalScale
 		normalScaleOut[0] = pStage->normalScale[0] * strength;
 		normalScaleOut[1] = pStage->normalScale[1] * strength;
 	}
+
 
 	// Specular reflectance, confined to exactly these stages. Deliberately NOT r_baseSpecular:
 	// that one is global and latched, and was defaulted to 0 in this fork because it puts a

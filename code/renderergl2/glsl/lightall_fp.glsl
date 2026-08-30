@@ -336,11 +336,31 @@ void main()
 	vec2 texCoords = var_TexCoords.xy;
 
 #if defined(USE_PARALLAXMAP)
-	vec3 offsetDir = E * tangentToWorld;
+	// HZM [user 2026-08-28] DISTANCE FALLOFF. Stock rend2 raymarches at full strength to the horizon,
+	// and because the 16 taps land on different texels for neighbouring pixels, distant ground turns to
+	// static. u_NormalScale.z is the range at which the effect reaches zero; <= 1.0 means 'no fade',
+	// which is what every stage the HZM material hook does not touch still carries.
+	{
+		float pxFade = 1.0;
 
-	offsetDir.xy *= -u_NormalScale.a / offsetDir.z;
+		if (u_NormalScale.z > 1.0)
+		{
+			// hold full strength over the near half, then ease out - a linear ramp from the eye is
+			// visible as a gradient on a flat floor, which is worse than the artefact it fixes
+			float d = length(viewDir);
+			pxFade = clamp(1.0 - (d - u_NormalScale.z * 0.5) / (u_NormalScale.z * 0.5), 0.0, 1.0);
+			pxFade *= pxFade;   // squared, so it is already small well before it is gone
+		}
 
-	texCoords += offsetDir.xy * RayIntersectDisplaceMap(texCoords, offsetDir.xy, u_NormalMap);
+		if (pxFade > 0.004)
+		{
+			vec3 offsetDir = E * tangentToWorld;
+
+			offsetDir.xy *= -u_NormalScale.a * pxFade / offsetDir.z;
+
+			texCoords += offsetDir.xy * RayIntersectDisplaceMap(texCoords, offsetDir.xy, u_NormalMap);
+		}
+	}
 #endif
 
 	vec4 diffuse = texture2D(u_DiffuseMap, texCoords);

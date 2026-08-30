@@ -896,8 +896,22 @@ void SV_PackNonPVSClient(radarUnpacked_t* unpacked, int* packed) {
 	length = sqrt(x * x + y * y);
 	if (length > 0) {
 		valid = 1;
-		x *= 1.f / length;
-		y *= 1.f / length;
+		// HZM coop [user 2026-08-30]: CLAMP to the rim, do not normalise unconditionally.
+		// x,y are already (delta / com_radar_range), so |(x,y)| <= 1 means 'inside the radar'.
+		// The stock code divided by length for EVERY length > 0, so every out-of-PVS teammate
+		// went on the wire as a pure unit direction vector - all distance destroyed, every
+		// icon welded to the rim. That is precisely the case the radar exists to cover (a
+		// teammate in another room), so the feature was direction-only in practice.
+		// The client does `x * range / (MAX_CLIENTS-1)` (cl_parse.cpp:226-227), which only
+		// reconstructs the real delta if the packer stored (delta/range)*63 UN-normalised -
+		// so the unpack side was always correct and this was the broken half.
+		// Bit layout is unchanged (msg.cpp:3380), so any client of THIS build decodes it
+		// correctly; the retail 2.x decoder cannot be inspected from here, but the mod ships
+		// the exe so every coop client runs this build.
+		if (length > 1) {
+			x *= 1.f / length;
+			y *= 1.f / length;
+		}
 	} else {
 		valid = 0;
 	}

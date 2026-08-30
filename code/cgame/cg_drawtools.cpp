@@ -1400,6 +1400,13 @@ void CG_DrawSpectatorView()
     }
 }
 
+// [2026-08-28] Hit-marker state. Declared HERE rather than beside CG_DrawHitMarker because
+// CG_DrawCrosshair - which is defined above it - writes the aim point every frame.
+static float s_coopAimX = -1.0f, s_coopAimY = -1.0f;
+static int   s_coopAimSet = 0;
+static int   s_coopHitTime = 0;
+static qboolean s_coopHitKill = qfalse;
+
 void CG_DrawCrosshair()
 {
     centity_t *friendEnt;
@@ -1584,6 +1591,14 @@ void CG_DrawCrosshair()
                 y += (cgs.glconfig.vidHeight * 0.5f) * (tan(DEG2RAD(faPitch)) / tan(DEG2RAD(fovy * 0.5f)));
             }
         }
+
+        // [2026-08-28] Remember where the crosshair ACTUALLY ended up, after the 3P true-aim
+        // re-projection and the free-aim offset above. The hit marker anchors to this instead of
+        // screen centre - in third person and free-aim the two are different places, and a marker
+        // pinned to the middle of the screen would float away from the shot it is confirming.
+        s_coopAimX = x + width * 0.5f;
+        s_coopAimY = y + height * 0.5f;
+        s_coopAimSet = cg.time;
 
         cgi.R_SetColor(NULL);
         cgi.R_DrawStretchPic(x, y, width * cgs.uiHiResScale[0], height * cgs.uiHiResScale[1], 0, 0, 1, 1, shader);
@@ -2487,6 +2502,157 @@ static void CG_DrawDamageIndicator(void)
     cgi.R_SetColor(NULL);
 }
 
+// HZM coop [user 2026-08-27] BRACE PIP - the discoverability story. Without an indicator a real
+// share of players never work out the system exists and just think the gun feels inconsistent.
+//
+// DRAWN PROCEDURALLY, NOT FROM A TEXTURE, and that is the whole "ultra high def" answer: a texture
+// has one native size and is resampled at every other resolution, so it is soft at 1440p and mush on
+// a 4K ultrawide. Filled rects have no native size at all - every edge lands on a real pixel boundary
+// at any resolution, so the mark is exactly as sharp at 3440x1440 as at 640x480. Geometry scales off
+// screen HEIGHT (never a fixed pixel count) so it holds the same visual weight on any monitor, and
+// the thickness is rounded to whole pixels so no edge ever half-covers one and greys itself.
+//
+// Four short ticks bracketing the crosshair, opening outward as the brace engages: it reads as the
+// weapon settling into a rest, and it cannot be mistaken for the crosshair itself.
+// HZM coop [user 2026-08-28] HIT MARKERS.
+//
+// Retail ships NO hit-marker art - a sweep of all 17 retail paks found only a 16x16 crosshair. So this
+// is procedural, like the brace pip beside it: four diagonal arms stepped out of small filled boxes,
+// which needs no texture, no shader registration and no asset that could go missing from a pak.
+//
+// Neutral for a hit, RED for a kill - the convention players already read fluently. The kill also holds
+// longer, so the two differ in duration as well as colour and stay distinguishable for a colour-blind
+// player. Radius is deliberately INSIDE the brace pip's 0.020-0.028 band so the two never collide.
+void CG_CoopHitMark(qboolean bKill)
+{
+    // a kill outranks a hit landing in the same instant - never let the plain tick mask a confirmed kill
+    if (bKill || !s_coopHitKill || cg.time - s_coopHitTime > 60) {
+        s_coopHitKill = bKill;
+    }
+    s_coopHitTime = cg.time;
+}
+
+static void CG_DrawHitMarker(void)
+{
+    static cvar_t *pOn = NULL;
+    float          cx, cy, gap, len, th, a, frac;
+    int            life, age, i, steps;
+    vec4_t         col;
+
+    if (!pOn) { pOn = cgi.Cvar_Get("coop_hitMarker", "1", CVAR_ARCHIVE); }
+    if (!pOn->integer || !s_coopHitTime) { return; }
+
+    life = s_coopHitKill ? 420 : 260;
+    age  = cg.time - s_coopHitTime;
+    if (age < 0 || age > life) { return; }
+
+    frac = 1.0f - (float)age / (float)life;
+    a    = frac * frac;   // hold bright, then leave quickly - a linear fade reads as a smear
+
+    // anchor to the real aim point; fall back to centre only if the crosshair is not being drawn
+    if (s_coopAimSet && cg.time - s_coopAimSet < 500) {
+        cx = s_coopAimX; cy = s_coopAimY;
+    } else {
+        cx = cgs.glconfig.vidWidth * 0.5f; cy = cgs.glconfig.vidHeight * 0.5f;
+    }
+
+    th  = cgs.glconfig.vidHeight * 0.0028f;
+    if (th < 1.0f) { th = 1.0f; }
+    th  = (float)(int)(th + 0.5f);          // whole pixels - a half-covered edge reads grey, not thin
+    gap = cgs.glconfig.vidHeight * 0.008f;
+    len = cgs.glconfig.vidHeight * 0.012f;
+    gap += len * (1.0f - frac) * 0.35f;     // the arms drift outward as it fades, so it reads as a pop
+
+    if (s_coopHitKill) { col[0] = 1.0f;  col[1] = 0.22f; col[2] = 0.17f; }
+    else               { col[0] = 1.0f;  col[1] = 1.0f;  col[2] = 1.0f;  }
+    col[3] = a;
+    cgi.R_SetColor(col);
+
+    // R_DrawBox is axis-aligned, so the diagonals are stepped. At this size the steps are sub-pixel
+    // dense and read as clean strokes; a rotated texture would need an asset this game does not have.
+    steps = (int)(len / (th * 0.7f));
+    if (steps < 3)  { steps = 3; }
+    if (steps > 24) { steps = 24; }
+    for (i = 0; i <= steps; i++) {
+        float d  = gap + (len * (float)i / (float)steps);
+        float dx = d * 0.7071f;
+        cgi.R_DrawBox(cx - dx - th * 0.5f, cy - dx - th * 0.5f, th, th);
+        cgi.R_DrawBox(cx + dx - th * 0.5f, cy - dx - th * 0.5f, th, th);
+        cgi.R_DrawBox(cx - dx - th * 0.5f, cy + dx - th * 0.5f, th, th);
+        cgi.R_DrawBox(cx + dx - th * 0.5f, cy + dx - th * 0.5f, th, th);
+    }
+    cgi.R_SetColor(NULL);
+}
+
+
+static void CG_DrawBracePip(void)
+{
+    extern float CG_CoopBrace(void);
+    float  env = CG_CoopBrace();
+    float  cx, cy, len, thick, gap, a;
+    vec4_t col;
+
+    qboolean avail = CG_CoopBraceAvail();
+
+    if (env <= 0.004f && !avail) {
+        return;
+    }
+
+    // [user 2026-08-27] THE MOUNT PROMPT - a warm bracket that pulses while a surface is on offer,
+    // replaced by the cool solid mark once Use commits. This is the half that was missing: with
+    // nothing on screen there was no way to know a mount was even available, which is most of why
+    // the automatic version read as invisible - "its hard to really tell youre actually braced".
+    if (avail && env <= 0.5f) {
+        float pcx   = cgs.glconfig.vidWidth * 0.5f;
+        float pcy   = cgs.glconfig.vidHeight * 0.5f;
+        float plen  = cgs.glconfig.vidHeight * 0.020f;
+        float pth   = cgs.glconfig.vidHeight * 0.0026f;
+        float pgap  = cgs.glconfig.vidHeight * 0.034f;
+        float pulse = 0.45f + 0.28f * (float)sin((double)cg.time * 0.006);
+        vec4_t pc;
+        if (pth < 1.0f) { pth = 1.0f; }
+        pth = (float)(int)(pth + 0.5f);
+        pc[0] = 1.0f; pc[1] = 0.90f; pc[2] = 0.55f; pc[3] = pulse;
+        cgi.R_SetColor(pc);
+        cgi.R_DrawBox(pcx - pgap,        pcy - pgap,        plen, pth);
+        cgi.R_DrawBox(pcx - pgap,        pcy - pgap,        pth,  plen);
+        cgi.R_DrawBox(pcx + pgap - plen, pcy - pgap,        plen, pth);
+        cgi.R_DrawBox(pcx + pgap - pth,  pcy - pgap,        pth,  plen);
+        cgi.R_DrawBox(pcx - pgap,        pcy + pgap - pth,  plen, pth);
+        cgi.R_DrawBox(pcx - pgap,        pcy + pgap - plen, pth,  plen);
+        cgi.R_DrawBox(pcx + pgap - plen, pcy + pgap - pth,  plen, pth);
+        cgi.R_DrawBox(pcx + pgap - pth,  pcy + pgap - plen, pth,  plen);
+        cgi.R_SetColor(NULL);
+    }
+
+    if (env <= 0.004f) {
+        return;
+    }
+
+    cx    = cgs.glconfig.vidWidth  * 0.5f;
+    cy    = cgs.glconfig.vidHeight * 0.5f;
+    len   = cgs.glconfig.vidHeight * 0.020f;   // ~23px at 1440p, scales with the display
+    thick = cgs.glconfig.vidHeight * 0.0030f;  // ~3px at 1440p
+    if (thick < 1.0f) { thick = 1.0f; }
+    thick = (float)(int)(thick + 0.5f);        // whole pixels only - a half-covered edge reads grey
+    if (len < 4.0f) { len = 4.0f; }
+
+    // the ticks slide outward as the brace takes hold, so the motion itself carries the state
+    gap = cgs.glconfig.vidHeight * (0.020f + 0.008f * env);
+    a   = 0.45f + 0.50f * env;
+
+    // cool + solid, so MOUNTED can never be mistaken for the warm pulsing offer
+    col[0] = 0.72f; col[1] = 0.94f; col[2] = 1.0f; col[3] = a;
+    cgi.R_SetColor(col);
+    // left / right verticals
+    cgi.R_DrawBox(cx - gap - thick, cy - len * 0.5f, thick, len);
+    cgi.R_DrawBox(cx + gap,         cy - len * 0.5f, thick, len);
+    // top / bottom horizontals
+    cgi.R_DrawBox(cx - len * 0.5f, cy - gap - thick, len, thick);
+    cgi.R_DrawBox(cx - len * 0.5f, cy + gap,         len, thick);
+    cgi.R_SetColor(NULL);
+}
+
 void CG_Draw2D(void)
 {
     CG_UpdateHudFade();
@@ -2506,6 +2672,8 @@ void CG_Draw2D(void)
     CG_DrawVote();
     CG_DrawInstantMessageMenu();
     CG_DrawCrosshair();
+    CG_DrawBracePip();          // HZM coop - gun-brace indicator, drawn over the crosshair
+    CG_DrawHitMarker();         // HZM coop - hit/kill confirmation at the true aim point
     CG_DrawDamageIndicator();
     CG_DrawCoopIcons();
     CG_DrawMGHeat();

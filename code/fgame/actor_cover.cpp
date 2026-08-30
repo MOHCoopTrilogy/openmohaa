@@ -499,17 +499,47 @@ void Actor::State_Cover_Shoot(void)
        0 disables. */
     static cvar_t *pCoverRelo = NULL;
     if (!pCoverRelo) { pCoverRelo = gi.Cvar_Get("coop_aiCoverRelocateMs", "12000", CVAR_ARCHIVE); }
-    /* [HZM coop 2026-08-15, bug-1815] BOUNDING OVERWATCH GATE. With coop_aiBound on, the timer
-       above only says an actor is DUE to move; the squad still has to say it MAY. aisquad.scr
-       grants a short window to a rotating half of each engaged cluster, so somebody is always
-       firing while the others reposition. Without this the phases are unsynchronised - stamped
-       whenever each actor happened to claim cover - which can empty a whole squad out of cover at
-       once, or send a man across the player's line while everyone else is also moving.
-       Off (default) keeps the pure-timer behaviour, so this cannot regress a map nobody has
-       tuned. */
-    static cvar_t *pBound = NULL;
-    if (!pBound) { pBound = gi.Cvar_Get("coop_aiBound", "0", CVAR_ARCHIVE); }
-    bool bMayRelocate = (!pBound->integer) || (level.inttime < m_iCoopReloAllow);
+    /* [HZM coop 2026-08-15, bug-1815] BOUNDING OVERWATCH GATE. The timer above only says an actor
+       is DUE to move; a squad brain driving him still has to say he MAY. aisquad.scr walks each
+       ENGAGED cluster every 1.7 s and hands the window to a rotating half, so somebody is always
+       firing while the others reposition.
+
+       [HZM coop 2026-08-30] SCOPED TO ACTORS A SQUAD BRAIN ACTUALLY OWNS - the cvar test was
+       wrong and silently so. This function is shared by SP, Spearhead and Breakthrough and by
+       EVERY cover-thinking actor, americans included (gags/t2l3_medic.scr:548 spawns a friendly
+       with type_attack cover, maps/e1l4/PostShip.scr:60 the spy, global/mg42_active.scr:494 the
+       spotter), plus anyone the engine itself pushes into cover think under fire (actor.cpp:11307,
+       coop_aiSuppressCover default 1, team-agnostic). But windows are granted only by aisquad.scr
+       and only to level.coop_actorArray["german"]. m_iCoopReloAllow starts at 0 and level.inttime
+       only grows, so `(level.inttime < m_iCoopReloAllow)` was false FOREVER for every one of those
+       actors: flipping the cvar on reverted them all to the pre-bug-1813 root-to-one-cover
+       behaviour, with nothing logged. Only this block was gated (the m_bNeedReload branch below is
+       untouched), so it degraded to vanilla - which is precisely why nobody would have noticed.
+
+       So gate on OWNERSHIP: an actor the brain walked in the last 5 s obeys his window, and
+       everyone else relocates exactly as bug-1813 left them. The engine no longer reads
+       coop_aiBound at all - the switch lives at its single reader, aisquad.scr:112 - so there is
+       no engine default left that can silently disagree with a cfg seed (g_main.cpp:293-299). */
+    bool bBoundOwned  = (level.inttime < m_iCoopBoundOwnedUntil);
+    bool bMayRelocate = (!bBoundOwned) || (level.inttime < m_iCoopReloAllow);
+
+    /* [HZM coop 2026-08-30] PROOF LINE. The failure this change exists to prevent is silent:
+       an actor PINNED by a gate that should never have owned him. Rate-limited rather than
+       frame-edge triggered, because denial never restamps m_iCoopCoverClaimTime (that happens
+       only on a successful relocation), so an edge test fires at most once per cover claim and
+       misses entirely if the actor is not in Cover_Shoot on that one frame. team=1 here means
+       an ALLY was owned by the german squad brain, which is the regression to watch for. */
+    {
+        static cvar_t *pBehav = NULL;
+        if (!pBehav) { pBehav = gi.Cvar_Get("coop_aiBehav", "0", 0); }
+        if (pBehav->integer >= 2 && !bMayRelocate && m_pCoverNode && m_Enemy
+            && level.inttime > m_iCoopCoverClaimTime + pCoverRelo->integer
+            && level.inttime >= m_iCoopBoundDenyLog) {
+            m_iCoopBoundDenyLog = level.inttime + 3000;
+            gi.Printf("^~^~^ BOUNDGATE deny ent=%i team=%i ownedMsLeft=%i\n",
+                      entnum, m_Team, m_iCoopBoundOwnedUntil - level.inttime);
+        }
+    }
 
     if (pCoverRelo->integer > 0 && bMayRelocate && m_pCoverNode && m_Enemy
         && level.inttime > m_iCoopCoverClaimTime + pCoverRelo->integer) {

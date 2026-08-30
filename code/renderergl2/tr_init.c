@@ -171,6 +171,9 @@ cvar_t  *r_hzmGenNormalExclude;
 cvar_t  *r_hzmGenNormalDebug;
 cvar_t  *r_hzmSpecular;
 cvar_t  *r_hzmSpecularGloss;
+cvar_t  *r_hzmParallaxDepth;
+cvar_t  *r_hzmParallaxFade;
+cvar_t  *r_hzmNormalStrength;
 cvar_t  *r_forceSun;
 cvar_t  *r_forceSunLightScale;
 cvar_t  *r_forceSunAmbientScale;
@@ -1640,6 +1643,23 @@ void R_Register( void )
 	// Live. Meaning depends on r_glossType (default 1 = smoothness, so roughness = 1 - gloss).
 	// Low = broad dull sheen, high = tight glint.
 	r_hzmSpecularGloss = ri.Cvar_Get( "r_hzmSpecularGloss", "0.3", CVAR_ARCHIVE );
+
+	// [user 2026-08-28] "looks kinda like static as you walk around and look at further distance".
+	// Stock rend2 parallax has NO distance or mip falloff at all: RayIntersectDisplaceMap runs a fixed
+	// 16-step raymarch at full strength however far away the surface is, so at distance adjacent pixels
+	// land on wildly different offsets and the ground boils. Fade it out with range instead.
+	//
+	// Both live, and both deliberately NOT latched: r_baseParallax is CVAR_LATCH, which is why an A/B of
+	// it appeared to do nothing. These ride u_NormalScale, which RB_HZMStageMaterial already rewrites per
+	// draw - .a is the depth and .z was set to a constant 1.0 and never read by any shader.
+	// 0.04 was tuned against a height GUESSED from diffuse luminance, which is shallow and smooth.
+	// The CC0 pack ships MEASURED displacement using the full range, so the same number bulges.
+	r_hzmParallaxDepth = ri.Cvar_Get( "r_hzmParallaxDepth", "0.015", CVAR_ARCHIVE );
+	r_hzmParallaxFade  = ri.Cvar_Get( "r_hzmParallaxFade",  "800", CVAR_ARCHIVE );
+
+	// Authored relief multiplier. Defaults slightly above 1 because the synthesised maps this replaces
+	// were being run at 1.5, so honest normals at 1.0 read as a regression even though they are better data.
+	r_hzmNormalStrength = ri.Cvar_Get( "r_hzmNormalStrength", "1.25", CVAR_ARCHIVE );
 
 	// HZM (bug-1222): these three were CVAR_CHEAT, inherited from upstream rend2. A listen server
 	// clamps cheat cvars (bug-1156), so the host could not set them - which left NO lever for

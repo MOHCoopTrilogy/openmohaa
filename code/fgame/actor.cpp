@@ -1347,6 +1347,34 @@ Event EV_Actor_CoopRelocateOk
     "HZM coop: permit cover relocation for the next N seconds (bounding overwatch)",
     EV_NORMAL
 );
+
+// HZM coop [user 2026-08-24, bug-2091] COUNT A CONVERTED MAN AS DEAD, WITHOUT KILLING HIM.
+//
+// Maps gate objectives on a PER-ACTOR `local.self waittill death` (m3l1b.scr:1671-1697 threads one
+// per bunker defender, each incrementing level.clear_bunker / level.clear_farbunker_gunner).
+// Recruiting such an actor removed a body the map was still waiting to see die, and the softlock
+// was ABSOLUTE: Sentient::TakeDamage filters same-team damage in every gametype (sentient.cpp:1705),
+// so once he is american the player cannot kill him by any means to release the waiter.
+//
+// bug-2088 could not fix this - it repaired the ARRAY-counting objectives
+// (level.coop_actorArray["german"]), which is a different mechanism. Both now work.
+//
+// `Unregister` is exactly what wakes a `waittill`, and it is what the real death path already uses
+// (Actor::Killed :5505, Actor::Remove :12229). Calling it alone releases every waiter without
+// touching health, deadflag, think state, the corpse, gore or score - he keeps fighting for you.
+//
+// Idempotent by construction: each map watcher does `waittill death` -> `++` -> `end`, so it is
+// gone after the first release and a genuine death later finds no waiter to double-count.
+Event EV_Actor_CoopCountAsDead
+(
+    "coop_countasdead",
+    EV_DEFAULT,
+    NULL,
+    NULL,
+    "HZM coop: release every `waittill death` waiter on this actor WITHOUT killing him, so an "
+    "objective that counts per-actor deaths still completes after he is recruited (bug-2091)",
+    EV_NORMAL
+);
 Event EV_Actor_SetSoundAwareness
 (
     "sound_awareness",
@@ -1842,6 +1870,21 @@ Event EV_Actor_Tether
     "entity",
     "the entity to which the AI's leash should be tethered",
     EV_NORMAL
+);
+// HZM coop [user 2026-08-26] GETTER for enableEnemy (bug-2117 hunt). Actors were RUNNING TO players
+// and standing there: probe read near=3 nearSee=2 nearEnemy=0 - they see the player and never acquire.
+// Three coop systems set enableEnemy 0 temporarily (aimaneuver runto, aisquad bounding, aihandler heal
+// retreat) and each promises to restore it; a missed restore leaves exactly this symptom. The flag had
+// NO getter, and the standing rule from the notarget saga (bug-2064, TRAPS T3) is: a flag with no
+// getter cannot be debugged - add the getter FIRST, then measure. EV_GETTER lives in its own command
+// list (scriptmaster.cpp:616), so sharing the EV_NORMAL setter's name cannot collide.
+Event EV_Actor_GetEnableEnemy(
+    "enableEnemy",
+    EV_DEFAULT,
+    NULL,
+    NULL,
+    "Returns 1 when this actor may acquire enemies (m_bEnableEnemy), else 0.",
+    EV_GETTER
 );
 Event EV_Actor_GetThinkState(
     "thinkstate",
@@ -2653,6 +2696,7 @@ CLASS_DECLARATION(SimpleActor, Actor, "Actor") {
     {&EV_Actor_AttackPlayer,                  &Actor::EventAttackPlayer                 },
     {&EV_Actor_AttackEntity,                  &Actor::EventAttackEntity                 },
     {&EV_Actor_CoopRelocateOk,                &Actor::EventCoopRelocateOk                },
+    {&EV_Actor_CoopCountAsDead,               &Actor::EventCoopCountAsDead               },
     {&EV_Actor_SetAlarmNode,                  &Actor::EventSetAlarmNode                 },
     {&EV_Actor_SetAlarmNode2,                 &Actor::EventSetAlarmNode                 },
     {&EV_Actor_GetAlarmNode,                  &Actor::EventGetAlarmNode                 },
@@ -2731,6 +2775,7 @@ CLASS_DECLARATION(SimpleActor, Actor, "Actor") {
     {&EV_Actor_ResetLeash,                    &Actor::EventResetLeash                   },
     {&EV_Actor_Tether,                        &Actor::EventTether                       },
     {&EV_Actor_GetThinkState,                 &Actor::EventGetThinkState                },
+    {&EV_Actor_GetEnableEnemy,                &Actor::EventGetEnableEnemy               }, // HZM coop bug-2117
     {&EV_Actor_GetEnemyShareRange,            &Actor::EventGetEnemyShareRange           },
     {&EV_Actor_SetEnemyShareRange,            &Actor::EventSetEnemyShareRange           },
     {&EV_Actor_SetEnemyShareRange2,           &Actor::EventSetEnemyShareRange           },
@@ -3032,6 +3077,8 @@ Actor::Actor()
     m_pCoverNode           = NULL;
     m_iCoopCoverClaimTime  = 0;   // [HZM coop bug-1813] cover-relocation stamp
     m_iCoopReloAllow       = 0;   // [HZM coop bug-1815] bounding-overwatch permission expiry
+    m_iCoopBoundOwnedUntil = 0;   // [HZM coop 2026-08-30] squad-brain ownership expiry (0 = nobody owns me)
+    m_iCoopBoundDenyLog    = 0;   // [HZM coop 2026-08-30] BOUNDGATE deny print rate limit
 
     m_csSpecialAttack       = STRING_NULL;
     m_bNeedReload           = false;
@@ -5262,6 +5309,14 @@ Actor::EventGiveWeapon
 Give weapon to actor.
 ===============
 */
+// HZM coop [user 2026-08-24, bug-2091] see EV_Actor_CoopCountAsDead for the full reasoning.
+void Actor::EventCoopCountAsDead(Event *ev)
+{
+    // Deliberately ONLY the notification. No health/deadflag/think-state change, so he stays alive
+    // and fighting; the map's per-actor death watcher wakes, increments its counter and ends.
+    Unregister(STRING_DEATH);
+}
+
 void Actor::EventGiveWeapon(Event *ev)
 {
     Event event(EV_Listener_ExecuteScript);
@@ -8394,9 +8449,14 @@ Actor::EventSetTypeAttack
 Actor::EventCoopRelocateOk   [HZM coop 2026-08-15, bug-1815]
 
 Grant this actor permission to relocate between cover for the next N seconds. Consumed by the
-relocation gate in State_Cover_Shoot when coop_aiBound is on. A window rather than a boolean so a
-dropped or delayed script tick simply lets the permission lapse, instead of leaving an actor
-permanently allowed (or permanently pinned) if the granting loop dies.
+relocation gate in State_Cover_Shoot. A window rather than a boolean so a dropped or delayed script
+tick simply lets the permission lapse, instead of leaving an actor permanently allowed (or
+permanently pinned) if the granting loop dies.
+
+[HZM coop 2026-08-30] N == 0 is a DENY, not a no-op: it ends any window still running from a
+previous tick. Either way the call stamps ownership, because a squad brain that says "hold" is
+driving this actor just as much as one that says "move", and the engine has to be able to tell both
+from "nobody is bounding this actor at all".
 ===============
 */
 void Actor::EventCoopRelocateOk(Event *ev)
@@ -8404,6 +8464,9 @@ void Actor::EventCoopRelocateOk(Event *ev)
     float secs = ev->GetFloat(1);
     if (secs < 0.0f) { secs = 0.0f; }
     m_iCoopReloAllow = level.inttime + (int)(secs * 1000.0f);
+    /* 5000 ms is ~3 aisquad ticks (it runs `wait 1.7`), so a hitched or skipped tick does not unpin
+       anybody, but a brain that stops walking this actor - or dies - releases him within 5 s. */
+    m_iCoopBoundOwnedUntil = level.inttime + 5000;
 }
 
 void Actor::EventSetTypeAttack(Event *ev)
@@ -10399,15 +10462,37 @@ Returns required velocity to throw grenade from vFrom to vTo.
 Or vec_zero if it's not possible.
 ===============
 */
+// HZM coop [2026-08-28] GRENADE TRACE LOG. ai_debug_grenades only ever fed G_DebugLine, and
+// R_DrawDebugLines is #if 0 in renderergl2 (tr_main.c:2120) - the renderer this project ships - so the
+// only tool for this bug drew into nothing. It is also CVAR_CHEAT, which a listen server clamps
+// (bug-1156). This prints instead, on a plain archive cvar, with the ^~^~^ prefix the project's log
+// parsers already key on. Eight hypotheses for 'AI grenades land at their own feet' were refuted by
+// inspection, so the next step is observing a real bad throw rather than guessing a ninth.
+bool CoopGrenLog(void)
+{
+    static cvar_t *pGD = NULL;
+    if (!pGD) { pGD = gi.Cvar_Get("coop_grenDebug", "0", CVAR_ARCHIVE); }
+    return pGD->integer != 0;
+}
+
 Vector Actor::CanThrowGrenade(const Vector& vFrom, const Vector& vTo)
 {
     Vector vVel;
 
     vVel = CalcThrowVelocity(vFrom, vTo);
-
     if (vVel != vec_zero && ValidGrenadePath(vFrom, vTo, vVel)) {
+        if (CoopGrenLog()) {
+            gi.Printf("^~^~^ GREN OK   from(%.0f %.0f %.0f) to(%.0f %.0f %.0f) dist=%.0f vel=%.0f\n",
+                      vFrom.x, vFrom.y, vFrom.z, vTo.x, vTo.y, vTo.z,
+                      (vTo - vFrom).length(), vVel.length());
+        }
         return vVel;
     } else {
+        if (CoopGrenLog()) {
+            gi.Printf("^~^~^ GREN VETO from(%.0f %.0f %.0f) to(%.0f %.0f %.0f) dist=%.0f reason=%s\n",
+                      vFrom.x, vFrom.y, vFrom.z, vTo.x, vTo.y, vTo.z, (vTo - vFrom).length(),
+                      (vVel == vec_zero) ? "no-arc" : "path-blocked");
+        }
         return vec_zero;
     }
 }
@@ -10839,6 +10924,16 @@ void Actor::Grenade_EventFire(Event *ev)
 
     pos   = GrenadeThrowPoint(origin, orientation[0], csAnim);
     dir   = m_vGrenadeVel;
+
+    // The one measurement that separates the surviving theories: where the grenade ACTUALLY leaves
+    // versus the point its path was validated from. A large offset means the launch point moved
+    // between decision and throw; a near-zero velocity means the decision never produced an arc.
+    if (CoopGrenLog()) {
+        gi.Printf("^~^~^ GREN FIRE origin(%.0f %.0f %.0f) spawn(%.0f %.0f %.0f) offset=%.0f vel=%.0f enemyDist=%.0f\n",
+                  origin.x, origin.y, origin.z, pos.x, pos.y, pos.z,
+                  (pos - origin).length(), dir.length(),
+                  m_Enemy ? (m_Enemy->origin - origin).length() : -1.0f);
+    }
     speed = dir.normalize();
 
     if (g_protocol >= PROTOCOL_MOHTA_MIN) {
@@ -11365,6 +11460,85 @@ qboolean Actor::setModel(void)
     // carried stale bits. That was WRONG and inert - Level::FreeEdict already memsets the entire
     // gentity_t on every free, so a recycled slot is always clean. The index space moving under
     // live bits is the mechanism, not entity reuse.
+    //
+    // HZM coop [user 2026-08-24, bug-2075] ...BUT CLEARING THEM ALL LOSES THE LEGITIMATE ONES.
+    //
+    // Measured on m3l1b with coop_surfscan: `coop_ally6 dday_ranger_private.tik nsurf=23
+    // hidden[7]=us_helmet` - one bit, and no bang* among them. The ranger tik carries a bangalore
+    // model on purpose and hides it with `surface bang* +nodraw` in its init/server block; the map
+    // spawns him with a `gun` keyvalue, which dispatches EV_Actor_SetGun -> EventGiveWeapon -> HERE,
+    // and the memset below wiped that hide. Result: bangalore tubes stuck through every ally for the
+    // rest of the map. us_helmet survived only because our helmet code sets it AFTER this runs.
+    //
+    // The 2026-08-21 reasoning above is still correct - index N genuinely is a different surface
+    // before and after a composite rebuild - so the answer is not to stop clearing. It is to carry
+    // the bits across BY SURFACE NAME, which is the thing that actually survives an index-space
+    // change. Capture name+bits now, clear, rebuild, then re-resolve each name to its NEW index.
+    // Entity::SurfaceCommand (entity.cpp:4399) already resolves surfaces by name this way, so the
+    // primitives are proven; this is not a new mechanism.
+    //
+    // Cost is bounded and off the hot path: setModel runs on spawn and on weapon/head changes, not
+    // per frame, and the loops are <= MAX_MODEL_SURFACES.
+    // [user 2026-08-24] DEFAULTED OFF AFTER A LIVE REGRESSION. User, mid-session: "tons of skins
+    // that are invisible for enemies minus their hands and head" - which is precisely the failure
+    // this carry-by-name can produce, and precisely what I warned to watch for when shipping it.
+    //
+    // MECHANISM (identified, not yet proven): SURFACE NAMES ARE NOT UNIQUE. A coop_surfscan dump
+    // shows single actors with TWO surfaces both called "head" (ent=23 hidden[3] and hidden[4];
+    // ent=37 hidden[0] and hidden[1]). Carrying bits by NAME therefore collapses duplicates: one
+    // surface carrying NODRAW re-applies that NODRAW to EVERY surface sharing its name. Body
+    // surfaces that share a name with a legitimately-hidden one vanish, while uniquely-named heads
+    // and hands keep rendering - exactly the reported shape.
+    //
+    // coop_surfCarry 1 re-enables it. The bangalore fix (bug-2075) rides on this, so with it off
+    // the tubes come back - a cosmetic defect, which is strictly better than invisible enemies.
+    // The real fix is to carry bits by INDEX-AND-NAME pairs and only re-apply where the name is
+    // unambiguous, falling back to clearing when it is not.
+    static cvar_t *pSurfCarry = NULL;
+    if (!pSurfCarry) { pSurfCarry = gi.Cvar_Get("coop_surfCarry", "1", CVAR_ARCHIVE); }
+
+    char savedName[MAX_MODEL_SURFACES][64];
+    int  savedOrd[MAX_MODEL_SURFACES];
+    byte savedBits[MAX_MODEL_SURFACES];
+    int  nSaved = 0;
+
+    if (edict->tiki && pSurfCarry->integer) {
+        int nOld = gi.TIKI_NumSurfaces(edict->tiki);
+        int i;
+
+        if (nOld > MAX_MODEL_SURFACES) {
+            nOld = MAX_MODEL_SURFACES;
+        }
+        for (i = 0; i < nOld; i++) {
+            const char *pName;
+
+            if (!edict->s.surfaces[i]) {
+                continue; // nothing set, nothing to carry
+            }
+            pName = gi.Surface_NumToName(edict->tiki, i);
+            if (!pName || !*pName) {
+                continue; // unnameable surface cannot be re-resolved; dropping it is the old behaviour
+            }
+            // ORDINAL, not just the name. Surface names are NOT unique - a coop_surfscan dump shows
+            // single actors with two surfaces both called "head". Matching on the name alone made one
+            // hidden surface re-apply its NODRAW to EVERY surface sharing that name, which is what
+            // turned enemy bodies invisible while uniquely-named heads and hands kept drawing.
+            // Recording "the Nth surface called X" and re-applying to "the Nth surface called X" is
+            // exact for duplicates and identical to the old behaviour when names are unique.
+            {
+                int k, ord = 0;
+                for (k = 0; k < i; k++) {
+                    const char *pPrev = gi.Surface_NumToName(edict->tiki, k);
+                    if (pPrev && !Q_stricmp(pPrev, pName)) { ord++; }
+                }
+                savedOrd[nSaved] = ord;
+            }
+            Q_strncpyz(savedName[nSaved], pName, sizeof(savedName[nSaved]));
+            savedBits[nSaved] = edict->s.surfaces[i];
+            nSaved++;
+        }
+    }
+
     memset(edict->s.surfaces, 0, sizeof(edict->s.surfaces));
 
     str      name;
@@ -11397,6 +11571,40 @@ qboolean Actor::setModel(void)
     level.skel_index[edict->s.number] = -1;
 
     success = gi.setmodel(edict, name);
+
+    // Re-apply against the NEW index space. Deliberately keyed on the new tiki's surface list rather
+    // than on the saved indices - that is the whole point, and it is why a rebuild that reorders,
+    // adds or drops surfaces can no longer land a NODRAW on the wrong body part.
+    if (nSaved && edict->tiki && pSurfCarry->integer) {
+        int nNew = gi.TIKI_NumSurfaces(edict->tiki);
+        int i, k;
+
+        if (nNew > MAX_MODEL_SURFACES) {
+            nNew = MAX_MODEL_SURFACES;
+        }
+        for (i = 0; i < nNew; i++) {
+            const char *pName = gi.Surface_NumToName(edict->tiki, i);
+
+            if (!pName || !*pName) {
+                continue;
+            }
+            // which occurrence of this name is surface i in the NEW list?
+            {
+                int j, ord = 0;
+                for (j = 0; j < i; j++) {
+                    const char *pPrev = gi.Surface_NumToName(edict->tiki, j);
+                    if (pPrev && !Q_stricmp(pPrev, pName)) { ord++; }
+                }
+                for (k = 0; k < nSaved; k++) {
+                    if (savedOrd[k] == ord && !Q_stricmp(pName, savedName[k])) {
+                        edict->s.surfaces[i] = savedBits[k];
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
     return success;
 }
 
@@ -12126,6 +12334,11 @@ void Actor::StrafeToAttack(float fDist, vec3_t vDir)
 Actor::EventGetThinkState
 ===============
 */
+void Actor::EventGetEnableEnemy(Event *ev)
+{
+    ev->AddInteger(m_bEnableEnemy ? 1 : 0);
+}
+
 void Actor::EventGetThinkState(Event *ev)
 {
     ev->AddConstString(m_csThinkStateNames[m_ThinkState]);

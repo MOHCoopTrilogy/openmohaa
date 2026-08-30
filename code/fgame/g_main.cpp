@@ -325,11 +325,19 @@ void G_InitGame(int levelTime, int randomSeed)
        (type_attack cover) instead of script-issued runto orders, 85% of which stalled because
        their destinations were validated for line of sight rather than for reachability. */
     gi.Cvar_Get("coop_aiCoverThink", "1", CVAR_ARCHIVE);
-    /* [user 2026-08-15, bug-1815] Bounding overwatch. Registered here as well as at its lazy use
-       site in State_Cover_Shoot, because aisquad.scr reads it by string and the cover-shoot state
-       may not have been entered yet when it does - which is exactly how bug-1669/1811 turned a
-       script getcvar into an empty cvar that permanently defeated the engine default. */
-    gi.Cvar_Get("coop_aiBound", "0", CVAR_ARCHIVE);
+    /* [user 2026-08-15, bug-1815] Bounding overwatch. [2026-08-30] The ENGINE no longer reads this
+       cvar - State_Cover_Shoot now gates on squad-brain ownership - so the sole reader is
+       aisquad.scr:112, which tests != "0" and is therefore ON when the cvar does not exist at all
+       (safe mode skips autoexec at common.c:1471; a dedicated server on a bare homepath has none).
+       The registration stays so the name is real for rcon/console, and the default MUST now be "1"
+       to agree with that script default: registered "0" it would make a clean install read "0" and
+       switch the feature off - the bug-1669 shape in reverse.
+       This is NOT the value home. Every machine that has run the 2026-08-15 build carries a stale
+       archived seta coop_aiBound "0" (verified: G:/mohaa-gl2/home/maintt/configs/omconfig.cfg:3618;
+       the 08-21 backup carries "1"), and configs/<name>.cfg execs at common.c:1848, AFTER this
+       default and AFTER coop_defaults.cfg (1841), but BEFORE autoexec.cfg (1862). autoexec is the
+       only file that can win, so the seed lives there. All three sources must read "on". */
+    gi.Cvar_Get("coop_aiBound", "1", CVAR_ARCHIVE);
 
     g_protocol    = gi.Cvar_Get("com_protocol", "", 0)->integer;
     g_target_game = (target_game_e)gi.Cvar_Get("com_target_game", "0", 0)->integer;

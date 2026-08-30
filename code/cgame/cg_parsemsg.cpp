@@ -2038,6 +2038,11 @@ void CG_ParseCGMessage_ver_15()
                 iOldEnt = current_entity_number;
 
                 current_entity_number = cg.snap->ps.clientNum;
+                // HZM coop [2026-08-28] the marker rides the SAME message as the cue, so the pip and
+                // the tick can never disagree about whether a hit landed.
+                extern void CG_CoopHitMark(qboolean bKill);
+                CG_CoopHitMark((iType == CGM_NOTIFY_KILL) ? qtrue : qfalse);
+
                 if (iType == CGM_NOTIFY_KILL) {
                     commandManager.PlaySound("dm_kill_notify", NULL, CHAN_LOCAL, 2.0, -1, -1, 1);
                 } else {
@@ -2434,6 +2439,11 @@ void CG_ParseCGMessage_ver_6()
                 iOldEnt = current_entity_number;
 
                 current_entity_number = cg.snap->ps.clientNum;
+                // HZM coop [2026-08-28] the marker rides the SAME message as the cue, so the pip and
+                // the tick can never disagree about whether a hit landed.
+                extern void CG_CoopHitMark(qboolean bKill);
+                CG_CoopHitMark((iType == CGM6_NOTIFY_KILL) ? qtrue : qfalse);
+
                 if (iType == CGM6_NOTIFY_KILL) {
                     commandManager.PlaySound("dm_kill_notify", NULL, CHAN_LOCAL, 2.0, -1, -1, 1);
                 } else {

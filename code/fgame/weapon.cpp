@@ -1027,6 +1027,7 @@ Weapon::Weapon()
     // [2026-08-21] BEFORE the LoadingSavegame return, and these two are not archived - left
     // after it they would be indeterminate on a savegame load, and an uninitialised time makes
     // the term latch at maximum spread permanently.
+    m_fCoopSubNext        = 0.0f;   // player memory is not zeroed - seed every member
     m_fCoopMoveSpread     = 0.0f;
     m_fCoopMoveSpreadTime = 0.0f;
 
@@ -1842,6 +1843,48 @@ void Weapon::Shoot(Event *ev)
         return;
     }
 
+    // HZM coop [user 2026-08-28] GUN SUB LAYER. Retail gunfire carries no low end at all: the aliases
+    // are a crack and a tail, and the shot has no body. This adds the missing half a shot ABOVE the
+    // existing alias rather than replacing it - the sub is felt, not heard, so it must layer under the
+    // sound the player already recognises.
+    //
+    // Server-side and per-weapon, because this is the only place the exact weapon is known. The cgame
+    // bullet hook that carries the distance tail sees only iLarge (a 2-bit bullet size), which cannot
+    // tell a Luger from a Panzerschreck - and weight is the entire point of the feature.
+    //
+    // RATE LIMITED, and that is not just budget: an MG at 600 RPM would fire ten of these a second and
+    // the low end would turn to mud. A periodic thump under sustained fire reads as a heavy weapon far
+    // better than one thump per round does, and it keeps the sound-channel cost near a pistol's.
+    {
+        static cvar_t *pSub = NULL, *pSubGap = NULL, *pSubVol = NULL;
+        if (!pSub) {
+            pSub    = gi.Cvar_Get("coop_gunSub", "1", CVAR_ARCHIVE);
+            pSubGap = gi.Cvar_Get("coop_gunSubGap", "0.11", CVAR_ARCHIVE);   // seconds between thumps
+            pSubVol = gi.Cvar_Get("coop_gunSubVol", "1.0", CVAR_ARCHIVE);
+        }
+        if (pSub->integer && level.time >= m_fCoopSubNext) {
+            int         cls = GetWeaponClass();
+            const char *pAl = NULL;
+
+            if (cls & WEAPON_CLASS_HEAVY)                             { pAl = "snd_gun_sub_massive"; }
+            // WEAPON_CLASS_ITEM is deliberately absent: thrown items route through Shoot too, and a
+            // chest-thump on a grenade toss would be plainly wrong. No alias = no layer, which is right.
+            else if (cls & WEAPON_CLASS_MG)                           { pAl = "snd_gun_sub_heavy"; }
+            else if (cls & WEAPON_CLASS_RIFLE)                        { pAl = "snd_gun_sub_mid"; }
+            else if (cls & (WEAPON_CLASS_PISTOL | WEAPON_CLASS_SMG))  { pAl = "snd_gun_sub_light"; }
+
+            if (pAl) {
+                // heft already encodes this weapon's weight for recoil, droop and movement - reuse it
+                // so the sub cannot drift out of agreement with the rest of the feel.
+                float fVol = pSubVol->value * (0.55f + 0.75f * CoopHeft());
+                float fGap = (pSubGap->value > 0.01f) ? pSubGap->value : 0.11f;
+
+                m_fCoopSubNext = level.time + fGap;
+                Sound(pAl, CHAN_AUTO, fVol);
+            }
+        }
+    }
+
     mc = MuzzleClear();
 
     // If we are in loopfire, we need to keep checking ammo and using it up
@@ -1931,7 +1974,77 @@ void Weapon::Shoot(Event *ev)
                         vSpread       = bulletspreadmax[mode] * fSpreadFactor;
                         fSpreadFactor = 1.0f - fSpreadFactor;
                         vSpread += bulletspread[mode] * fSpreadFactor;
-                        vSpread *= m_fFireSpreadMult[mode] + 1.0f;
+                        // HZM coop [user 2026-08-27] MOUNTED KILLS THE SUSTAINED-FIRE BLOOM.
+                        // m_fFireSpreadMult is the cone opening up as you hold the trigger, and it is
+                        // the single reason a machine gun is useless in long bursts here. Every game
+                        // that ships weapon mounting lets a rested MG hold a burst without the cone
+                        // blowing out - that IS the reason to mount one. The BASE spread is untouched;
+                        // only the growth term is suppressed, so a mounted gun is not more accurate on
+                        // the first round, it just stops getting worse on the twentieth.
+                        {
+                            static cvar_t *pBB = NULL;
+                            float          fBr = player->CoopBraceEnv();
+                            float          fBloom = m_fFireSpreadMult[mode];
+                            if (!pBB) { pBB = gi.Cvar_Get("coop_braceBloom", "0.85", CVAR_ARCHIVE); }
+                            if (fBr > 0.0f) {
+                                fBloom *= 1.0f - fBr * ((pBB ? pBB->value : 0.85f));
+                            }
+                            vSpread *= fBloom + 1.0f;
+                        }
+
+                        // HZM coop [user 2026-08-24] STANCE ACCURACY. This chain had NO stance term at
+                        // all - it lerped on VELOCITY alone, so crouched-still and standing-still shot
+                        // identically and going prone bought nothing. Braced on the ground is the
+                        // biggest real accuracy gain there is, so it should feel decisive.
+                        // Applied AFTER the sustained-fire bloom so it scales the whole spread instead
+                        // of being erased by the next multiplier. Both fire paths get it - there are
+                        // two copies of this block and patching one would work in SP and not MP.
+                        {
+                            static cvar_t *pPr = NULL, *pCr = NULL;
+                            if (!pPr) { pPr = gi.Cvar_Get("coop_proneSpread", "0.35", CVAR_ARCHIVE); }
+                            if (!pCr) { pCr = gi.Cvar_Get("coop_crouchSpread", "0.80", CVAR_ARCHIVE); }
+                            if (player->m_bCoopProne) {
+                                vSpread *= (pPr->value > 0.02f) ? pPr->value : 0.02f;
+                            } else if (player->client->ps.pm_flags & PMF_DUCKED) {
+                                vSpread *= (pCr->value > 0.02f) ? pCr->value : 0.02f;
+                            }
+                        }
+
+                        // HZM coop [user 2026-08-27] BRACED - the gun is resting on something.
+                        // Stacks with the stance term above rather than replacing it, so braced
+                        // crouch beats plain crouch but still loses to prone: the stance ladder
+                        // keeps its order. Prone never braces (gated server-side), so the two
+                        // cannot compound into a free sniper rifle. Same both-copies rule as the
+                        // block above - patching one works in SP and not MP.
+                        {
+                            static cvar_t *pBs = NULL;
+                            float          fBr = player->CoopBraceEnv();
+                            if (!pBs) { pBs = gi.Cvar_Get("coop_braceSpread", "0.35", CVAR_ARCHIVE); }
+                            if (fBr > 0.0f) {
+                                float m = (pBs->value > 0.02f) ? pBs->value : 0.02f;
+                                vSpread *= 1.0f - fBr * (1.0f - m);
+                            }
+                        }
+
+                        // HZM coop [user 2026-08-27] AIMING DOWN THE SIGHTS MAKES YOU ACCURATE.
+                        //
+                        // It did not. This chain had terms for sustained fire, stance, bracing,
+                        // movement, breath, stress, zoom and blindfire - and nothing at all for the
+                        // ADS button, so hip-firing an MG42 standing still was exactly as accurate as
+                        // aiming it. That inverts the reward for the mod's flagship system: every
+                        // other feature assumes sights are worth using.
+                        //
+                        // Multiplicative like every other term, so it composes with stance and brace
+                        // rather than overriding them. Both fire-path copies, per the warning above.
+                        {
+                            static cvar_t *pAds = NULL;
+                            int            btn  = player->GetLastButtons();
+                            if (!pAds) { pAds = gi.Cvar_Get("coop_adsSpread", "0.55", CVAR_ARCHIVE); }
+                            if ((player->IsZoomed() || (btn & BUTTON_COOPADS)) && pAds->value > 0.02f
+                                && pAds->value < 1.0f) {
+                                vSpread *= pAds->value;
+                            }
+                        }
 
                         // HZM coop [user 2026-08-21] MOVEMENT PUNISHMENT. "If you move, the gun
                         // bounces out of true alignment... to hit a target you must fully stop, wait
@@ -2022,6 +2135,32 @@ void Weapon::Shoot(Event *ev)
                                 if (player->IsCoopBreathSteady()) {
                                     vSpread *= pBreathAcc->value;
                                 }
+                            }
+                        }
+
+                        // HZM coop [user 2026-08-25] STRESS WIDENS THE CONE.
+                        //
+                        // The stress system moved the view weapon and nothing else, which the user
+                        // called correctly: "the gun obviously shakes a lot, but the actual crosshair
+                        // is steady which means its still practically perfect aim". The cgame comment
+                        // had flagged exactly this as deliberate - "COSMETIC ONLY ... making it
+                        // functional is a combat-balance change and a separate decision" - and this is
+                        // that decision, taken by the user on 2026-08-25.
+                        //
+                        // SERVER stress, never the client's: cg_view.c's scalar is built partly from a
+                        // client re-simulation of stamina that its own comment calls 'known to diverge'.
+                        // Player::TickCoopStress recomputes the same weights from authoritative state.
+                        //
+                        // Multiplied like every other term in this chain (prone/crouch, movement,
+                        // breath, zoom) so it composes instead of overriding: a calm player is exactly
+                        // as accurate as before, which keeps this from being a stealth nerf.
+                        {
+                            static cvar_t *pStrSp = NULL;
+                            if (!pStrSp) {
+                                pStrSp = gi.Cvar_Get("coop_stressSpread", "1.0", CVAR_ARCHIVE);
+                            }
+                            if (pStrSp->value > 0.0f) {
+                                vSpread *= 1.0f + player->CoopStress() * pStrSp->value;
                             }
                         }
 
@@ -2233,7 +2372,77 @@ void Weapon::Shoot(Event *ev)
                         vSpread       = bulletspreadmax[mode] * fSpreadFactor;
                         fSpreadFactor = 1.0f - fSpreadFactor;
                         vSpread += bulletspread[mode] * fSpreadFactor;
-                        vSpread *= m_fFireSpreadMult[mode] + 1.0f;
+                        // HZM coop [user 2026-08-27] MOUNTED KILLS THE SUSTAINED-FIRE BLOOM.
+                        // m_fFireSpreadMult is the cone opening up as you hold the trigger, and it is
+                        // the single reason a machine gun is useless in long bursts here. Every game
+                        // that ships weapon mounting lets a rested MG hold a burst without the cone
+                        // blowing out - that IS the reason to mount one. The BASE spread is untouched;
+                        // only the growth term is suppressed, so a mounted gun is not more accurate on
+                        // the first round, it just stops getting worse on the twentieth.
+                        {
+                            static cvar_t *pBB = NULL;
+                            float          fBr = player->CoopBraceEnv();
+                            float          fBloom = m_fFireSpreadMult[mode];
+                            if (!pBB) { pBB = gi.Cvar_Get("coop_braceBloom", "0.85", CVAR_ARCHIVE); }
+                            if (fBr > 0.0f) {
+                                fBloom *= 1.0f - fBr * ((pBB ? pBB->value : 0.85f));
+                            }
+                            vSpread *= fBloom + 1.0f;
+                        }
+
+                        // HZM coop [user 2026-08-24] STANCE ACCURACY. This chain had NO stance term at
+                        // all - it lerped on VELOCITY alone, so crouched-still and standing-still shot
+                        // identically and going prone bought nothing. Braced on the ground is the
+                        // biggest real accuracy gain there is, so it should feel decisive.
+                        // Applied AFTER the sustained-fire bloom so it scales the whole spread instead
+                        // of being erased by the next multiplier. Both fire paths get it - there are
+                        // two copies of this block and patching one would work in SP and not MP.
+                        {
+                            static cvar_t *pPr = NULL, *pCr = NULL;
+                            if (!pPr) { pPr = gi.Cvar_Get("coop_proneSpread", "0.35", CVAR_ARCHIVE); }
+                            if (!pCr) { pCr = gi.Cvar_Get("coop_crouchSpread", "0.80", CVAR_ARCHIVE); }
+                            if (player->m_bCoopProne) {
+                                vSpread *= (pPr->value > 0.02f) ? pPr->value : 0.02f;
+                            } else if (player->client->ps.pm_flags & PMF_DUCKED) {
+                                vSpread *= (pCr->value > 0.02f) ? pCr->value : 0.02f;
+                            }
+                        }
+
+                        // HZM coop [user 2026-08-27] BRACED - the gun is resting on something.
+                        // Stacks with the stance term above rather than replacing it, so braced
+                        // crouch beats plain crouch but still loses to prone: the stance ladder
+                        // keeps its order. Prone never braces (gated server-side), so the two
+                        // cannot compound into a free sniper rifle. Same both-copies rule as the
+                        // block above - patching one works in SP and not MP.
+                        {
+                            static cvar_t *pBs = NULL;
+                            float          fBr = player->CoopBraceEnv();
+                            if (!pBs) { pBs = gi.Cvar_Get("coop_braceSpread", "0.35", CVAR_ARCHIVE); }
+                            if (fBr > 0.0f) {
+                                float m = (pBs->value > 0.02f) ? pBs->value : 0.02f;
+                                vSpread *= 1.0f - fBr * (1.0f - m);
+                            }
+                        }
+
+                        // HZM coop [user 2026-08-27] AIMING DOWN THE SIGHTS MAKES YOU ACCURATE.
+                        //
+                        // It did not. This chain had terms for sustained fire, stance, bracing,
+                        // movement, breath, stress, zoom and blindfire - and nothing at all for the
+                        // ADS button, so hip-firing an MG42 standing still was exactly as accurate as
+                        // aiming it. That inverts the reward for the mod's flagship system: every
+                        // other feature assumes sights are worth using.
+                        //
+                        // Multiplicative like every other term, so it composes with stance and brace
+                        // rather than overriding them. Both fire-path copies, per the warning above.
+                        {
+                            static cvar_t *pAds = NULL;
+                            int            btn  = player->GetLastButtons();
+                            if (!pAds) { pAds = gi.Cvar_Get("coop_adsSpread", "0.55", CVAR_ARCHIVE); }
+                            if ((player->IsZoomed() || (btn & BUTTON_COOPADS)) && pAds->value > 0.02f
+                                && pAds->value < 1.0f) {
+                                vSpread *= pAds->value;
+                            }
+                        }
 
                         // HZM coop [user 2026-08-17] HOLD-BREATH ACCURACY. The breath-hold already
                         // existed but was PURELY COSMETIC: cg_view.c steadies the ADS sway on the
@@ -2269,6 +2478,32 @@ void Weapon::Shoot(Event *ev)
                                 if (player->IsCoopBreathSteady()) {
                                     vSpread *= pBreathAcc->value;
                                 }
+                            }
+                        }
+
+                        // HZM coop [user 2026-08-25] STRESS WIDENS THE CONE.
+                        //
+                        // The stress system moved the view weapon and nothing else, which the user
+                        // called correctly: "the gun obviously shakes a lot, but the actual crosshair
+                        // is steady which means its still practically perfect aim". The cgame comment
+                        // had flagged exactly this as deliberate - "COSMETIC ONLY ... making it
+                        // functional is a combat-balance change and a separate decision" - and this is
+                        // that decision, taken by the user on 2026-08-25.
+                        //
+                        // SERVER stress, never the client's: cg_view.c's scalar is built partly from a
+                        // client re-simulation of stamina that its own comment calls 'known to diverge'.
+                        // Player::TickCoopStress recomputes the same weights from authoritative state.
+                        //
+                        // Multiplied like every other term in this chain (prone/crouch, movement,
+                        // breath, zoom) so it composes instead of overriding: a calm player is exactly
+                        // as accurate as before, which keeps this from being a stealth nerf.
+                        {
+                            static cvar_t *pStrSp = NULL;
+                            if (!pStrSp) {
+                                pStrSp = gi.Cvar_Get("coop_stressSpread", "1.0", CVAR_ARCHIVE);
+                            }
+                            if (pStrSp->value > 0.0f) {
+                                vSpread *= 1.0f + player->CoopStress() * pStrSp->value;
                             }
                         }
 
@@ -2380,7 +2615,17 @@ void Weapon::Shoot(Event *ev)
                 // Added in OPM
                 //  Weapon firing sounds can be heard up to 8000 units away
                 //  (from ubersound.scr)
-                BroadcastAIEvent(AI_EVENT_WEAPON_FIRE, Q_clamp_float(world->GetRadius() * 0.5, 1500, 8000));
+                // [weight 10] the AI was calibre-blind: a silenced Welrod and an MG42 alerted exactly
+                // the same distance. Scaling the radius by the weapon's weight makes the choice of gun
+                // a stealth decision as well as a damage one - and it is the only weight cue the ENEMY
+                // responds to, which is what the user asked for when they said 'how the world responds'.
+                {
+                    static cvar_t *pHH = NULL;
+                    float          fRad = Q_clamp_float(world->GetRadius() * 0.5, 1500, 8000);
+                    if (!pHH) { pHH = gi.Cvar_Get("coop_heftHearing", "0.8", CVAR_ARCHIVE); }
+                    fRad *= 1.0f + CoopHeft() * pHH->value;
+                    BroadcastAIEvent(AI_EVENT_WEAPON_FIRE, fRad);
+                }
             }
             next_noise_time = level.time + 1;
         }
@@ -2392,7 +2637,13 @@ void Weapon::Shoot(Event *ev)
                 vAngles[0] += random() * (viewkickmax[mode][0] - viewkickmin[mode][0]) + viewkickmin[mode][0];
             }
 
-            if (viewkickmin[1][0] != 0.0f || viewkickmax[1][0] != 0.0f) {
+            // HZM coop [2026-08-27, bug-2138] upstream index bug: the YAW guard tested firemode 1's
+            // PITCH ([1][0]) while the body applies this mode's YAW ([mode][1]). So a weapon with a
+            // yaw kick and no pitch kick on firemode 1 was silently skipped, and a weapon with
+            // firemode 1 pitch data got a yaw kick applied on EVERY firemode. Inert today because
+            // nothing declares the server-side viewkick, but load-bearing the moment per-gun recoil
+            // is wired to the authored TIKI data - fixed now, while it costs nothing.
+            if (viewkickmin[mode][1] != 0.0f || viewkickmax[mode][1] != 0.0f) {
                 vAngles[1] += random() * (viewkickmax[mode][1] - viewkickmin[mode][1]) + viewkickmin[mode][1];
             }
 
@@ -2432,6 +2683,220 @@ void Weapon::Shoot(Event *ev)
 //======================
 //Weapon::ApplyFireKickback
 //======================
+// HZM coop [user 2026-08-27] the authored per-weapon recoil table, loaded once.
+typedef struct coopRecoil_s {
+    char  name[64];
+    float pitchMin, pitchMax, yawMin, yawMax, recenter;
+    char  pattern;                 // 'T' = independent yaw, 'V' = yaw proportional to the climb
+    float pitchClamp, yawClamp, scatterPitch;
+    float minDecay, maxDecay;      // [vet] the cgame's own rate bounds - 12/25 when unstated
+} coopRecoil_t;
+
+// [vet] 473 rows now that the extractor reads the TIK the engine really loads and includes the
+// mod's own weapons - the old 128 cap would have silently dropped three quarters of them, which
+// is the same class of failure as the variant-suffix miss: a feature that works on whatever you
+// happen to test with and is absent everywhere else.
+#define COOP_RECOIL_MAX 512
+static coopRecoil_t s_coopRecoil[COOP_RECOIL_MAX];
+static int          s_coopRecoilCount = -1;
+
+static void CoopLoadRecoilTable(void)
+{
+    char *buf = NULL;
+    int   len;
+
+    s_coopRecoilCount = 0;
+    len = gi.FS_ReadFile("coop_mod/recoil_table.txt", (void **)&buf, qtrue);
+    if (len <= 0 || !buf) {
+        return;
+    }
+    {
+        char *p = buf;
+        while (*p && s_coopRecoilCount < COOP_RECOIL_MAX) {
+            char  line[256];
+            int   i = 0;
+            while (*p && *p != '\n' && i < 255) { line[i++] = *p++; }
+            if (*p == '\n') { p++; }
+            line[i] = 0;
+            if (line[0] && line[0] != '/' && line[0] != '\r') {
+                coopRecoil_t *r = &s_coopRecoil[s_coopRecoilCount];
+                char          pat[8] = {0};
+                if (sscanf(line, "%63s %f %f %f %f %f %7s %f %f %f %f %f", r->name,
+                           &r->pitchMin, &r->pitchMax, &r->yawMin, &r->yawMax, &r->recenter,
+                           pat, &r->pitchClamp, &r->yawClamp, &r->scatterPitch,
+                           &r->minDecay, &r->maxDecay) == 12) {
+                    r->pattern = (pat[0] == 'V' || pat[0] == 'v') ? 'V' : 'T';
+                    s_coopRecoilCount++;
+                }
+            }
+        }
+    }
+    gi.FS_FreeFile(buf);
+    gi.Printf("coop: loaded %d authored weapon recoil entries\n", s_coopRecoilCount);
+    if (s_coopRecoilCount >= COOP_RECOIL_MAX) {
+        gi.Printf("coop: WARNING recoil table hit the %d row cap - some weapons will fall back to the flat kick\n", COOP_RECOIL_MAX);
+    }
+}
+
+// Apply this weapon's authored kick. Returns false when the weapon has no entry, so the caller
+// falls through to the legacy flat kick and nothing regresses.
+const coopRecoil_t *Weapon::CoopFindRecoil()
+{
+    str key;
+    int i, slash;
+
+    if (s_coopRecoilCount < 0) {
+        CoopLoadRecoilTable();
+    }
+    if (s_coopRecoilCount <= 0) {
+        return NULL;
+    }
+    // model is 'models/weapons/<name>.tik' - match on the bare name the table is keyed by
+    key   = model;
+    slash = key.length();
+    while (slash > 0 && key[slash - 1] != '/' && key[slash - 1] != 92) { slash--; } // 92 = backslash
+    key = key.c_str() + slash;
+    if (key.length() > 4 && !Q_stricmp(key.c_str() + key.length() - 4, ".tik")) {
+        key = str(key.c_str(), 0, key.length() - 4);
+    }
+    // [vet, bug-2140] THE VARIANT SUFFIX, for the fifth time in this project's history (TRAPS.md).
+    // The mod ships 481 weapon TIKs, but only ~41 are base guns - the rest are finish variants named
+    // <base>_<finish>, like G43_dhg43fleck. An exact match on the model name therefore found nothing
+    // for 428 of them, and today's per-gun recoil was inert on almost every weapon a player can
+    // actually unlock. Cutting at the first underscore would be wrong the other way: real names like
+    // m1_garand and svt_rifle contain one. So try the whole name, then drop trailing _segments one at
+    // a time - which resolves a variant to its base and never truncates a base gun, because the base
+    // matched before any stripping could happen.
+    for (;;) {
+        int cut;
+        for (i = 0; i < s_coopRecoilCount; i++) {
+            if (!Q_stricmp(s_coopRecoil[i].name, key.c_str())) {
+                return &s_coopRecoil[i];
+            }
+        }
+        cut = key.length();
+        while (cut > 0 && key[cut - 1] != '_') { cut--; }
+        if (cut <= 1) {
+            break;   // no underscore left to drop
+        }
+        key = str(key.c_str(), 0, cut - 1);
+    }
+    return NULL;
+}
+// 0 = a pistol, 1 = a launcher. The one scalar every weight cue multiplies.
+//
+// [vet, bug-2141] THIRD DERIVATION, AND THE FIRST TWO WERE BOTH INVERTED - worth recording why.
+//
+// Attempt 1 read weight out of the authored recoil climb. Wrong because climb carries mass in the
+// DENOMINATOR: a heavier weapon absorbs more of the same impulse and climbs LESS, so the launchers
+// scored zero.
+//
+// Attempt 2 read `movementspeed`, on the reasoning that how much a gun slows you IS its mass. Right
+// in principle and wrong in this project, for two reasons found by measurement rather than argument:
+// this mod also uses that field as a SCRIPTED movement penalty, so dbno_pistol - the down-but-not-out
+// sidearm - was the heaviest object in the game at a perfect 1.00; and the M1 Garand and Kar98, the
+// two most-carried weapons here, are authored at 1.05, which was the zero anchor, so every weight cue
+// was silently inert on the standard rifle while a Colt .45 outweighed it.
+//
+// So: the CLASS is the spine. It cannot be poisoned by a per-weapon script tuning and it orders
+// correctly by construction. Movement speed is kept only as a one-way HEAVY detector - a genuinely
+// low value does mean real encumbrance, and only the launchers and the BAR reach down there - and
+// pistols are capped outright, because nothing in a holster should ever read as heavy no matter what
+// a script does to its speed.
+float Weapon::CoopHeft()
+{
+    int   cls = GetWeaponClass();
+    float ms  = GetMovementSpeed();
+    float h;
+
+    if (cls & WEAPON_CLASS_PISTOL)      { h = 0.10f; }
+    else if (cls & WEAPON_CLASS_SMG)    { h = 0.28f; }
+    else if (cls & WEAPON_CLASS_RIFLE)  { h = 0.45f; }
+    else if (cls & WEAPON_CLASS_MG)     { h = 0.82f; }
+    else if (cls & WEAPON_CLASS_HEAVY)  { h = 0.70f; }
+    else                                { h = 0.35f; }
+
+    // one-way: a low movement speed can only ever make something read HEAVIER, never lighter
+    if (ms > 0.05f && ms < 0.90f) {
+        float bump = (0.90f - ms) / 0.15f;
+        if (bump > 1.0f) { bump = 1.0f; }
+        h += (1.0f - h) * bump * 0.9f;
+    }
+
+    if ((cls & WEAPON_CLASS_PISTOL) && h > 0.20f) {
+        h = 0.20f;   // dbno_pistol's scripted crawl speed must not make it a Panzerschreck
+    }
+    if (h < 0.0f) { h = 0.0f; } else if (h > 1.0f) { h = 1.0f; }
+    return h;
+}
+qboolean Weapon::CoopApplyAuthoredKick(Player *player)
+{
+    static cvar_t *pOn = NULL, *pScale = NULL;
+    const coopRecoil_t *r;
+    float               fPitch, fYaw, fMult;
+
+    if (!pOn) {
+        pOn    = gi.Cvar_Get("coop_recoilPerGun", "1", CVAR_ARCHIVE);
+        pScale = gi.Cvar_Get("coop_recoilScale", "1.0", CVAR_ARCHIVE);
+    }
+    if (!pOn->integer) {
+        return qfalse;
+    }
+    r = CoopFindRecoil();
+    if (!r) {
+        return qfalse;
+    }
+
+    // the same maths the cgame has always used for the camera (cg_commands.cpp EventViewKick)
+    // [vet, bug-2139] the V pattern multiplies by the ACCUMULATED climb, not this one shot - that
+    // growth IS what bends the walk into a V. Computed here from a single shot, every V weapon (the
+    // MP40, Thompson, Sten, every pistol - most of the table) drifted in a straight line instead.
+    // The factor is handed down and resolved where the accumulator lives.
+    fPitch = r->pitchMin + random() * (r->pitchMax - r->pitchMin);
+    fYaw   = r->yawMin + random() * (r->yawMax - r->yawMin);
+
+    // the existing steadiness multipliers still apply - they are about the shooter, not the weapon
+    fMult = (pScale ? pScale->value : 1.0f);
+    {
+        // [vet] the AUTHORITATIVE breath flag, not the raw button pair. TickCoopBreath owns a real
+        // budget with a cooldown; testing ADS-plus-walk directly kept paying the recoil discount for
+        // as long as the keys were held, long after the hold had actually run out.
+        if (player->IsCoopBreathSteady()) {
+            cvar_t *pBR = gi.Cvar_Get("g_breathRecoilMult", "0.4", CVAR_ARCHIVE);
+            fMult *= (pBR ? pBR->value : 0.4f);
+        }
+    }
+    {
+        float fBr = player->CoopBraceEnv();
+        if (fBr > 0.0f) {
+            cvar_t *pBK = gi.Cvar_Get("coop_braceKick", "0.75", CVAR_ARCHIVE);
+            fMult *= 1.0f - fBr * ((pBK ? pBK->value : 0.75f));
+        }
+    }
+    fPitch *= fMult;
+    fYaw   *= fMult;
+
+    // [vet] A SINGLE SHOT MAY NOT EXCEED ITS OWN AUTHORED CEILING. The accumulator clamp in
+    // CoopAddRecoil bounds the running total, which is not the same guarantee: with the debt sitting
+    // at +8 and a rolled yaw of -16, the sum lands at -8 and passes unclamped, so one round throws
+    // the view the full 16 degrees. That is exactly how the bad Spearhead rows got past every check
+    // and reached the aim. Bound the shot as well as the sum, so a mis-authored row degrades into a
+    // hard kick instead of a teleport.
+    if (r->pitchClamp > 0.0f) {
+        if (fPitch >  r->pitchClamp) { fPitch =  r->pitchClamp; }
+        else if (fPitch < -r->pitchClamp) { fPitch = -r->pitchClamp; }
+    }
+    if (r->yawClamp > 0.0f) {
+        if (fYaw >  r->yawClamp) { fYaw =  r->yawClamp; }
+        else if (fYaw < -r->yawClamp) { fYaw = -r->yawClamp; }
+    }
+
+    // authored pitch is NEGATIVE for a climb (the view pitches up); clamp to the authored ceiling
+    player->CoopAddRecoil(fPitch, fYaw, (qboolean)(r->pattern == 'V'), r->pitchClamp,
+                          r->yawClamp, r->recenter, r->minDecay, r->maxDecay);
+    return qtrue;
+}
+
 void Weapon::ApplyFireKickback(const Vector& org, float kickback)
 {
     // HZM coop - REAL recoil: push the firing player's VIEW up a little on each shot so the aim physically
@@ -2449,6 +2914,22 @@ void Weapon::ApplyFireKickback(const Vector& org, float kickback)
     }
     player = (Player *)owner.Pointer();
 
+    // HZM coop [user 2026-08-27] PER-GUN RECOIL FROM THE AUTHORED DATA.
+    //
+    // EA hand-tuned a nine-parameter recoil model for every weapon - pitch and yaw ranges, a recentre
+    // speed, a 'T' or 'V' climb pattern and absolute clamps - and then only ever RENDERED it: the
+    // cgame accumulates and recentres those numbers for the camera while the shots ignore them
+    // completely. What actually moved your aim was the flat pitch-only constant below, identical for
+    // a Colt .45 and a BAR. So the camera kicked per gun and the bullets did not care - the same
+    // see-one-thing-get-another inversion the stress system was already corrected for.
+    //
+    // The table is extracted from those TIKs (coop_mod/recoil_table.txt, 70 weapons) and applied here
+    // with the client's own maths, so the recoil you see is the recoil you get. Anything not in the
+    // table falls through to the flat constant, so nothing regresses.
+    if (CoopApplyAuthoredKick(player)) {
+        return;
+    }
+
     pKick = gi.Cvar_Get("g_adsRecoilKick", "0.5", CVAR_ARCHIVE);
     amt   = pKick ? pKick->value : 0.0f;
     if (amt <= 0.0f) {
@@ -2459,12 +2940,31 @@ void Weapon::ApplyFireKickback(const Vector& org, float kickback)
     // scoped sniper) AND holding the walk key (BUTTON_RUN clear = the breath-hold input, matching the cgame
     // breath logic), scale the kick down by g_breathRecoilMult so steadying your aim also tames muzzle climb.
     {
-        int      btn    = player->GetLastButtons();
-        qboolean aiming = (player->IsZoomed() || (btn & BUTTON_COOPADS)) ? qtrue : qfalse;
-        qboolean walk   = (btn & BUTTON_RUN) ? qfalse : qtrue;
-        if (aiming && walk) {
+        // [vet] the AUTHORITATIVE breath flag, not the raw button pair. TickCoopBreath owns a real
+        // budget with a cooldown; testing ADS-plus-walk directly kept paying the recoil discount for
+        // as long as the keys were held, long after the hold had actually run out.
+        if (player->IsCoopBreathSteady()) {
             cvar_t *pBR = gi.Cvar_Get("g_breathRecoilMult", "0.4", CVAR_ARCHIVE);
             amt *= (pBR ? pBR->value : 0.4f);
+        }
+    }
+
+    // HZM coop [user 2026-08-27] BRACED tames muzzle climb, exactly like the breath hold above and
+    // for the same physical reason: the recoil is going into the surface instead of your shoulder.
+    // Deliberately mid-pack (-40% at full brace) where the genre ships -50 to -90 - ours is granted
+    // automatically rather than committed to with a button, so it is priced lower.
+    // [user 2026-08-27] "when you brace the gun recoil still exists we just need to portray it like
+    // it's recoil on a braced gun". Exactly right, and the split is which recoil. THIS is the server
+    // kick, and it is a PERMANENT change to where you are pointing - the climb you have to drag back
+    // down by hand. A rested weapon does not do that: the support eats the impulse and the sights
+    // come back to the same place. So the permanent part is cut hard here, while the cgame keeps (and
+    // slightly sharpens) the VISIBLE punch and snaps it back fast. You still see and feel every shot;
+    // you just do not have to fight the gun afterwards.
+    {
+        float fBr = player->CoopBraceEnv();
+        if (fBr > 0.0f) {
+            cvar_t *pBK = gi.Cvar_Get("coop_braceKick", "0.75", CVAR_ARCHIVE);
+            amt *= 1.0f - fBr * ((pBK ? pBK->value : 0.75f));
         }
     }
 

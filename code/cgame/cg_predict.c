@@ -648,7 +648,13 @@ void CG_PredictPlayerState(void)
         {
             static cvar_t *pLean = NULL, *pLeanMax = NULL, *pSide = NULL;
 
-            if (!pLean)    { pLean    = cgi.Cvar_Get("coop_coverLean",    "0",  CVAR_ARCHIVE); }
+            // [user 2026-08-30] MUST match player.cpp's default, which is "1" (it was flipped on
+            // 2026-08-23 - "I am good with coop lean cover on"). This half was left at "0". Both
+            // halves call the SAME engine Cvar_Get, so on a listen host it was first-caller-wins,
+            // and on a dedicated server the remote client got 0 while the server ran 1 - the
+            // predictor then computed no lean against a server that did, which is the judder the
+            // block comment above warns about. Not seeded in any cfg, so the default IS the value.
+            if (!pLean)    { pLean    = cgi.Cvar_Get("coop_coverLean",    "1",  CVAR_ARCHIVE); }
             if (!pLeanMax) { pLeanMax = cgi.Cvar_Get("coop_coverLeanMax", "28", CVAR_ARCHIVE); }
             if (!pSide)    { pSide    = cgi.Cvar_Get("coop_coverSide",    "0",  0); }
 

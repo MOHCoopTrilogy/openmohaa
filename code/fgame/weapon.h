@@ -198,6 +198,7 @@ protected:
     float m_fMaxFireMovement;
     // HZM coop [user 2026-08-21] movement-spread penalty state. Sampled at each shot; rises
     // instantly with speed and SETTLES over time, so stopping is not instantly accurate.
+    float m_fCoopSubNext;   // HZM coop - gun sub layer: next time this weapon may thump
     float m_fCoopMoveSpread;
     float m_fCoopMoveSpreadTime;
     float m_fZoomMovement;
@@ -259,6 +260,9 @@ protected:
     void         EmptyAmmoClip(Event *ev);
     void         AddToAmmoClip(Event *ev);
     void         DoneReloading(Event *ev);
+    const struct coopRecoil_s *CoopFindRecoil();     // HZM coop - this weapon's authored recoil row
+    float    CoopHeft();                             // HZM coop - 0..1 handling weight from that row
+    qboolean CoopApplyAuthoredKick(Player *player); // HZM coop - per-gun recoil from the TIKI data
     virtual void ApplyFireKickback(const Vector& org, float kickback);
     void         SetAimAnim(Event *ev);
     virtual void Shoot(Event *ev);

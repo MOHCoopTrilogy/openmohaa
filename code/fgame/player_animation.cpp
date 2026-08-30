@@ -422,6 +422,106 @@ void Player::AdjustAnimBlends(void)
         }
     }
 
+    // HZM coop [user 2026-08-26] PRONE RELOAD - keep the body flat by zeroing the torso action's
+    // RENDER weight, while letting the real per-weapon reload animation run untouched.
+    //
+    // A RELOAD IS DRIVEN BY THE ANIMATION, NOT BY THE STATEMAP. The player's reload alias carries the
+    // server notetracks that do the work: `first reloadweapon` -> Sentient::ReloadWeapon ->
+    // Weapon::StartReloading, and `N weaponcommand mainhand clip_fill` -> Weapon::FillAmmoClip, which
+    // refills ammo_in_clip and clears ShouldReload. Substituting a different animation drops both.
+    // That is what broke the two previous attempts: coop_prone_reload was a bare alias with no
+    // notetracks, so the clip never refilled, and Weapon::ShouldReload latches TRUE on an empty clip
+    // independently of its own flag (weapon.cpp:3980) - hence 'stuck in the reload and cannot shoot'.
+    // The clip really was empty (bug-2113, bug-2109).
+    //
+    // Weight is safe to touch where the animation is not. Notetracks are queued ONCE by
+    // Animate::NewAnim when the animation is set, and ANIMDONE is driven purely by elapsed time, so
+    // neither depends on weight - the reload's DURATION is therefore bit-for-bit unchanged, which the
+    // substitution approach could never promise (pistol_prone_reload is 1.50s against the Kar98's
+    // 3.37s - a 55% speed-up).
+    //
+    // Zero weight is not a new look: STAND already uses `none : default`, which is StopPartAnimating
+    // on the torso, and the prone legs animation is full-body (73 channels - spine, clavicles, arms,
+    // hands, both weapon tags). This reproduces the prone pose that already ships.
+    //
+    // frameInfo weight is networked, so this reaches every client with no cgame change.
+    if (m_bCoopProne && (client->ps.pm_flags & PMF_VIEW_PRONE) && currentState_Torso) {
+        static cvar_t *pPR = NULL;
+        if (!pPR) { pPR = gi.Cvar_Get("coop_proneReloadFlat", "1", CVAR_ARCHIVE); }
+        // [user 2026-08-26] RELOAD_PISTOL is EXEMPT: pistols now play their NATIVE prone reload
+        // (the one class whose body-space prone reload ships), so hiding the torso would hide the
+        // only real prone reload in the game. The revolver chains (WEBLEY/NAGANTREV) stay flat -
+        // their per-round loops have no prone variant.
+        // [user 2026-08-26] SUPINE holds the WHOLE body: no on-back torso animations exist, so any
+        // torso action over the supine base reads as sitting up to fire - the user's one condition
+        // for shipping it ('would possibly be fine as long as my torso doesn't sit up every time I
+        // fire'). Same weight-zero mechanic as the prone reload: notetracks are queued when the
+        // animation is SET and ANIMDONE runs on elapsed time, so rounds still fire and reloads still
+        // fill while the body stays flat on its back.
+        // NARROWED [user 2026-08-26]: supine aim and fire now play REAL flipped animations
+        // (skc_flip.py - the prone anims rolled 180 onto their back), so hiding the whole torso
+        // would hide exactly the recoil the flip earned. Only RELOADS stay held flat while on the
+        // back - no flipped reload exists yet - which still honours the user's one condition:
+        // firing can never sit the torso up, because the fire anim IS a lying-on-back anim now.
+        // [spec A7] EXTENDED beyond reloads: every action-class prone/standing anim carries the
+        // ROOT rot channel (measured - there is no harmless torso-only case), so any unflipped
+        // torso action blending over the flipped base rolls the whole body ~90 degrees onto its
+        // side for the anim's length. Until each gets a flipped copy (spec P2/P3), the body holds
+        // flat and the alias notetracks still do the work (queued at set, time-driven): bolt
+        // rechambers, weapon switches, grenade charge/throw, and reloads.
+        // [pass3, bug-2126] gate widened over the flip windows: both flip-out paths clear
+        // m_bCoopSupine at the START of the 0.9-1.0s roll, so a still-running hidden action
+        // (grenade charge, putaway, rechamber) snapped from weight 0 to 1 unflipped over the
+        // rolling body - the same ordering pass2 already fixed for the movement-zero.
+        // [pass4, bug-2127] during the flip WINDOWS every torso action hides regardless of
+        // prefix: firing mid-flip-out redispatches the ATTACK state, whose rows select the
+        // unflipped belly anim (COOP_SUPINE already false) at weight 1 over the rolling
+        // on-back body - ~90 deg sideways per shot. Notetracks still fire the rounds.
+        // Settled supine keeps the narrow prefix list so flipped fire anims stay visible.
+        if ((client->ps.pm_flags & PMF_VIEW_PRONE)
+            && (level.time < m_fCoopSupineFlip
+                || (m_bCoopSupine
+            && (!Q_stricmpn(currentState_Torso->getName(), "RELOAD_", 7)
+                || !Q_stricmpn(currentState_Torso->getName(), "PUTAWAY_", 8)
+                || !Q_stricmpn(currentState_Torso->getName(), "RAISE_", 6)
+                || !Q_stricmpn(currentState_Torso->getName(), "CHARGE_ATTACK_GRENADE", 21)
+                || !Q_stricmpn(currentState_Torso->getName(), "RELEASE_ATTACK_GRENADE", 22)
+                || !Q_stricmp(currentState_Torso->getName(), "ATTACK_SPRINGFIELD_RECHAMBER")
+                || !Q_stricmp(currentState_Torso->getName(), "ATTACK_RIFLE_RECHAMBER"))))) {
+            SetWeight(iPartSlot, 0.0f);
+            SetWeight(iOldPartSlot, 0.0f);
+            edict->s.actionWeight = 0.0f;
+            m_sCoopHiddenTorso = partAnim[torso]; // [pass2] remember what we hid - see the tail block
+        } else
+        if (pPR->integer && !Q_stricmpn(currentState_Torso->getName(), "RELOAD_", 7)
+            && Q_stricmp(currentState_Torso->getName(), "RELOAD_PISTOL")) {
+            SetWeight(iPartSlot, 0.0f);
+            SetWeight(iOldPartSlot, 0.0f); // and the crossblend-out slot
+            edict->s.actionWeight = 0.0f;
+            m_sCoopHiddenTorso = partAnim[torso]; // [pass3, bug-2126] this branch never latched
+                // the tail cover, so every belly-prone rifle/SMG/MG reload still sat the body up
+                // during its ~0.2s crossblend-out - the exact defect pass2 fixed one branch above.
+        }
+    }
+
+    // [pass2, bug-2125] THE CROSSBLEND-OUT TAIL. The hide composite keys on the CURRENT torso
+    // state - but when a hidden state ends, its anim moves to the OLD slot and renders at up to
+    // ~0.75 weight for the ~0.2s crossblend while the current state is already STAND/aim: the
+    // body visibly sat up at the END of every hidden supine action. Keep zeroing the old slot
+    // while the anim we hid is the one blending out; release the latch the moment it is not.
+    if (m_sCoopHiddenTorso.length()) {
+        if (!(m_bCoopProne && (client->ps.pm_flags & PMF_VIEW_PRONE))) {
+            // [pass4, bug-2127] stood up mid-hidden-action: the anim is legitimately visible
+            // now, so its crossblend-out must not be clipped on the standing body. Flip-outs
+            // keep m_bCoopProne until the deferred stand, so the latch still covers them.
+            m_sCoopHiddenTorso = "";
+        } else if (partOldAnim[torso] == m_sCoopHiddenTorso && m_fPartBlends[torso] > 0.0f) {
+            SetWeight(m_iPartSlot[torso] ^ 1, 0.0f);
+        } else if (partAnim[torso] != m_sCoopHiddenTorso) {
+            m_sCoopHiddenTorso = "";
+        }
+    }
+
     if (m_fPainBlend) {
         if (m_sPainAnim == "") {
             StopAnimating(ANIMSLOT_PAIN);

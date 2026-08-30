@@ -730,9 +730,22 @@ void CL_MouseMove( usercmd_t *cmd ) {
 				camera_offset[PITCH] = 0;
 			}
 		}
+		// HZM coop [user 2026-08-27] THE ORBIT MUST SURVIVE THE ADS HANDOFF. cg_freecamFold has
+		// NO publisher anywhere in the tree (grep: this file is its only reader), so the fold
+		// below was dead code and every capture drop silently THREW THE ORBIT AWAY, restoring
+		// the frozen pre-orbit aim: "when I move the camera behind me and then hold right mouse
+		// to go over shoulder it just forces my crosshair back in front of my player where he was
+		// aiming before". Folding on EVERY drop is the [226] intent stated in the comments above
+		// ("the shoulder aim opens exactly where the camera was looking") and is what makes the
+		// prone roll-onto-your-back reachable from free cam at all: orbit behind, hold ADS, and
+		// the aim - now really pointing behind you - trips the supine latch.
 		if ( bWasFreecamCapture ) {
+			static cvar_t *cl_freecamFoldAds = NULL;
+			if ( !cl_freecamFoldAds ) {
+				cl_freecamFoldAds = Cvar_Get( "cl_freecamFoldAds", "1", CVAR_ARCHIVE );
+			}
 			bWasFreecamCapture = qfalse;
-			if ( cl_freecamFold->integer ) {
+			if ( cl_freecamFold->integer || cl_freecamFoldAds->integer ) {
 				cl.viewangles[YAW]    = AngleNormalize180( cl.viewangles[YAW] + camera_offset[YAW] );
 				cl.viewangles[PITCH] += camera_offset[PITCH];
 				if ( cl.viewangles[PITCH] > 85.0f ) {
@@ -757,6 +770,51 @@ void CL_MouseMove( usercmd_t *cmd ) {
 		cl.viewangles[PITCH] += m_pitch->value * my;
 	else
 		cmd->forwardmove = ClampChar(cmd->forwardmove - m_forward->value * my);
+
+	// HZM coop [user 2026-08-27] MOUNTED AIM ARC - you pivot ON the rest.
+	//
+	// [bug-2133] PLACED AFTER the mouse deltas, and comparing in the EFFECTIVE aim frame.
+	// Two bugs lived in the first cut. It ran BEFORE this frame's delta was added, so the angle
+	// actually packed into the usercmd was the clamped angle plus a whole frame of mouse movement -
+	// a fast sweep parked the aim well outside the cone and the view snapped back the moment the
+	// mouse stopped. And it compared cl.viewangles against a centre published from ps.viewangles;
+	// those frames differ by delta_angles (spawn facing, script nudges, and recoil, which rewrites
+	// pitch on every shot), so mounting yanked the aim by that offset. The server now publishes the
+	// command-frame yaw, and pitch is compared with delta_angles folded in the way the free-cam
+	// clamp above already does.
+	//
+	// This is the trade that makes mounting a MODE rather than a free buff: the gun is steadier, but
+	// your field of fire is a cone and someone coming round your flank is a real problem.
+	{
+		static cvar_t *cl_braceView = NULL;
+		static cvar_t *cl_braceYaw  = NULL;
+		static cvar_t *cl_braceArc  = NULL;
+		static cvar_t *cl_braceUp   = NULL;
+		static cvar_t *cl_braceDn   = NULL;
+		if ( !cl_braceView ) {
+			cl_braceView = Cvar_Get( "coop_braceView", "0", 0 );
+			cl_braceYaw  = Cvar_Get( "coop_braceYaw", "0", 0 );
+			cl_braceArc  = Cvar_Get( "coop_braceArc", "40", CVAR_ARCHIVE );
+			cl_braceUp   = Cvar_Get( "coop_braceArcUp", "25", CVAR_ARCHIVE );
+			cl_braceDn   = Cvar_Get( "coop_braceArcDown", "20", CVAR_ARCHIVE );
+		}
+		if ( cl_braceView->integer > 50 && cl_braceArc->value > 1.0f && cl.snap.valid ) {
+			float off = AngleNormalize180( cl.viewangles[YAW] - (float)cl_braceYaw->integer );
+			float arc = cl_braceArc->value;
+			float pit = cl.viewangles[PITCH] + SHORT2ANGLE( cl.snap.ps.delta_angles[PITCH] );
+			pit = AngleNormalize180( pit );
+			if ( off > arc ) {
+				cl.viewangles[YAW] -= ( off - arc );
+			} else if ( off < -arc ) {
+				cl.viewangles[YAW] -= ( off + arc );
+			}
+			if ( pit < -cl_braceUp->value ) {
+				cl.viewangles[PITCH] -= ( pit + cl_braceUp->value );
+			} else if ( pit > cl_braceDn->value ) {
+				cl.viewangles[PITCH] -= ( pit - cl_braceDn->value );
+			}
+		}
+	}
 
 	if (!isfinite(cl.viewangles[PITCH]) || !isfinite(cl.viewangles[YAW])) {
 		Com_DPrintf("Invalid client viewangles encountered (view pitch: %f, view yaw: %f)!\n", cl.viewangles[PITCH], cl.viewangles[YAW]);

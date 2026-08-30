@@ -58,7 +58,7 @@ float pm_friction         = 4.5f; // HZM coop [2026-08-21] was 6.0 - see pm_acce
 float pm_waterfriction    = 2.0f;
 float pm_slipperyfriction = 0.25f;
 float pm_strafespeed      = 0.85f;
-float pm_backspeed        = 0.80f;
+float pm_backspeed        = 0.72f;  // [coop directional] was 0.80 - see PM_CmdScale
 float pm_flightfriction   = 3.0f;
 float PM_NOCLIPfriction   = 5.0f;
 
@@ -203,7 +203,27 @@ static void PM_Friction(void)
     drop = 0;
 
     if (pml.walking) {
-        control = (speed < pm_stopspeed) ? pm_stopspeed : speed;
+        // HZM coop [user 2026-08-25] THE FRICTION FLOOR MUST SCALE WITH THE STANCE.
+        //
+        // pm_stopspeed is a FLAT 50 no matter how slowly you are trying to move, and PM_Accelerate only
+        // pushes by (pm_accelerate * wishspeed). So movement is possible at all only when
+        //     5.5 * wishspeed  >  50 * 4.5   =>  wishspeed > ~41
+        // Crawl speed was 45. That is 1.09x the threshold: net acceleration ~22 against 225 of drag, so
+        // a prone player took SECONDS to reach walking pace and any extra loss - a few degrees of slope,
+        // gravity - tipped it under and stopped them dead. Measured: at ps.speed 45 velocity sat at 1-5
+        // while nrmZ was 0.97-1.00 (essentially flat) and walking stayed 1; at 172 velocity matched the
+        // cap exactly. It read as a terrain bug and was never terrain.
+        //
+        // Scaling the floor with the cap fixes slow stances without touching anything else: the floor
+        // only drops below 50 once ps.speed falls under ~83, so standing (287) and crouching (~107) are
+        // bit-for-bit unchanged, and prone gets a 27 floor against its 45 cap - a real 2x margin.
+        {
+            float floorSpeed = (float)pm->ps->speed * 0.6f;
+            if (floorSpeed > pm_stopspeed || floorSpeed <= 0.0f) {
+                floorSpeed = pm_stopspeed;
+            }
+            control = (speed < floorSpeed) ? floorSpeed : speed;
+        }
 
         // if getting knocked back, no friction
         if (pml.groundTrace.surfaceFlags & SURF_SLICK) {
@@ -272,26 +292,60 @@ without getting a sqrt(2) distortion in speed.
 */
 static float PM_CmdScale(usercmd_t *cmd)
 {
-    int   max;
+    float max;   // [coop directional] was int - the blended limit is fractional, and truncating it
+                 // toward zero cost up to 0.8% of speed on every direction that is not straight forward
     float total;
     float scale;
     float fmove, smove;
 
     PM_GetMove(&fmove, &smove);
 
-    max = fabs(fmove);
-    if (fabs(smove) > max) {
-        max = fabs(smove);
-    }
-    if (fabs(cmd->upmove) > max) {
-        max = fabs(cmd->upmove);
-    }
-    if (!max) {
-        return 0;
+    // [coop directional] The vanilla magnitude was max(|fmove|, |smove|, |upmove|) taken AFTER
+    // PM_GetMove had already scaled each axis by pm_backspeed / pm_strafespeed. Because a max only
+    // ever reports one axis, the penalty on the OTHER axis was discarded whenever both were held:
+    // W+D ran at a full 1.00 with the strafe penalty gone, and - the actual defect - S+D ran at 0.85,
+    // making a diagonal backpedal FASTER than a straight one. The directional limits existed but were
+    // escapable by holding a second key, which is precisely what a player does while fighting.
+    //
+    // Instead: take the magnitude from the raw stick/key deflection, then apply ONE multiplier blended
+    // across the direction actually being asked for, weighted L1 so the weights sum to 1. Pure inputs
+    // reproduce vanilla exactly (1.00 / 0.72 / 0.85); a diagonal now interpolates between its two
+    // limits rather than inheriting the kinder one. The magnitude still comes from a max rather than a
+    // length, so the classic sqrt(2) diagonal speed-up stays fixed - that is what this max was FOR,
+    // and it is kept.
+    //
+    // Weight is deliberately NOT reintroduced here. It already multiplies ps->speed upstream, so it
+    // rides through this term proportionally; a second factor would double-dip and quietly make heavy
+    // weapons twice as slow as the tuned table says.
+    {
+        float fRawF = pm->cmd.forwardmove;
+        float fRawS = pm->cmd.rightmove;
+        float fL1   = fabs(fRawF) + fabs(fRawS);
+        float fMag, fDir;
+
+        if (fL1 < 1.0f) {
+            // no horizontal input at all - fall back to the vertical axis exactly as vanilla did, so
+            // crouch/jump-only frames keep their existing scale
+            max = fabs(cmd->upmove);
+            if (max < 0.5f) {
+                return 0;
+            }
+        } else {
+            fMag = fabs(fRawF);
+            if (fabs(fRawS) > fMag) {
+                fMag = fabs(fRawS);
+            }
+            fDir = (fabs(fRawF) / fL1) * ((fRawF < 0) ? pm_backspeed : 1.0f)
+                 + (fabs(fRawS) / fL1) * pm_strafespeed;
+            max = fMag * fDir;
+            if (max < 0.5f) {
+                return 0;
+            }
+        }
     }
 
     total = sqrt((float)(fmove * fmove + smove * smove + cmd->upmove * cmd->upmove));
-    scale = (float)pm->ps->speed * max / (127.0 * total);
+    scale = (float)pm->ps->speed * max / (127.0f * total);
 
     return scale;
 }
@@ -883,6 +937,8 @@ PM_GroundTrace
 */
 static void PM_GroundTrace(void)
 {
+    // HZM coop diagnostic - published every ground trace, read by the CRAWL probe
+    pm->coopDbgGroundNormalZ = pml.groundTrace.plane.normal[2];
     vec3_t  point;
     trace_t trace;
 
@@ -1044,7 +1100,16 @@ static void PM_CheckDuck(void)
         //
         // Prone was removed in 2.0
         //
-        if (pm->ps->pm_flags & PMF_DUCKED) {
+        // HZM coop [user 2026-08-24] PRONE RE-ADDED. The comment above is literally true - 2.0 removed
+        // prone - and coop runs the 2.0+ protocol (com_target_game 2), so this branch had NO prone case
+        // at all. The statemap would set maxs.z 20 / viewheight 16 on entry and PM_CheckDuck reset it to
+        // 94 / 82 on the very next pmove frame: "my eyes and gun are standing up, not on ground level".
+        // Ordered FIRST because a prone player also carries PMF_DUCKED in some transitions and the duck
+        // case would otherwise win and pin him at crouch height.
+        if (pm->ps->pm_flags & PMF_VIEW_PRONE) {
+            pm->maxs[2]        = 20.0f;
+            pm->ps->viewheight = PRONE_VIEWHEIGHT;
+        } else if (pm->ps->pm_flags & PMF_DUCKED) {
             pm->maxs[2]        = 54.f;
             pm->ps->viewheight = CROUCH_VIEWHEIGHT;
         } else if (pm->ps->pm_flags & PMF_VIEW_JUMP_START) {
@@ -1329,6 +1394,17 @@ void PmoveSingle(pmove_t *pmove)
     }
 
     if (pm->ps->pm_type == PM_CLIMBWALL) {
+        pm->ps->fLeanAngle = 0.0f;
+        pm->cmd.buttons &= ~(BUTTON_LEAN_LEFT | BUTTON_LEAN_RIGHT);
+    }
+
+    // [pass3, bug-2126] a lying body must not corkscrew: lean had no stance gate, so
+    // HOLDING a lean key (the very key the prone evasive roll binds) ramped fLeanAngle
+    // toward 45 - a networked ~36-degree PELVIS roll on the prone/supine body plus a
+    // ~20u lateral 1P eye pivot at a 16u viewheight. Same recipe as the climbwall guard
+    // above; living in the shared bg file keeps server and cgame predictor in lockstep.
+    // TickCoopProne's roll edge-detect reads last_ucmd, not this copy - unaffected.
+    if (pm->ps->pm_flags & PMF_VIEW_PRONE) {
         pm->ps->fLeanAngle = 0.0f;
         pm->cmd.buttons &= ~(BUTTON_LEAN_LEFT | BUTTON_LEAN_RIGHT);
     }

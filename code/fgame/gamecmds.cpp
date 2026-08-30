@@ -1,4 +1,4 @@
-/*
+﻿/*
 ===========================================================================
 Copyright (C) 2023 the OpenMoHAA team
 
@@ -117,7 +117,42 @@ static qboolean G_SurfScanCmd(gentity_t *ent)
     return qtrue;
 }
 
+// HZM coop [user 2026-08-24] QUICK GRENADE. Registered as +/- console commands because the usercmd
+// button field has no free bits left (bit 13 was documented as the last one). See Player::TickCoopNade.
+static qboolean G_CoopNadeDownCmd(gentity_t *ent)
+{
+    if (ent && ent->entity && ent->entity->isSubclassOf(Player)) {
+        ((Player *)ent->entity)->CoopNadeDown();
+    }
+    return qtrue;
+}
+
+static qboolean G_CoopNadeUpCmd(gentity_t *ent)
+{
+    if (ent && ent->entity && ent->entity->isSubclassOf(Player)) {
+        ((Player *)ent->entity)->CoopNadeUp();
+    }
+    return qtrue;
+}
+
+// HZM coop [user 2026-08-24] engagement-distance histogram - see weaputils.cpp CoopShotDistRecord.
+extern void CoopShotDistDump(void);
+extern void CoopShotDistReset(void);
+
+static qboolean G_CoopShotDistCmd(gentity_t *ent)
+{
+    if (gi.Argc() > 1 && !Q_stricmp(gi.Argv(1), "reset")) {
+        CoopShotDistReset();
+    } else {
+        CoopShotDistDump();
+    }
+    return qtrue;
+}
+
 consolecmd_t G_ConsoleCmds[] = {
+    {"coop_shotdump",   G_CoopShotDistCmd,    qtrue },
+    {"+coopnade",      G_CoopNadeDownCmd,    qtrue },
+    {"-coopnade",      G_CoopNadeUpCmd,      qtrue },
     {"coop_surfscan",   G_SurfScanCmd,        qtrue },
     //   command name       function             available in multiplayer?
     {"say",             G_SayCmd,             qtrue },
