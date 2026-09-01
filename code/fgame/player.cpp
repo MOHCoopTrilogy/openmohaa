@@ -16660,7 +16660,7 @@ void Player::TickCoopCover()
                         // COVERSIDE samples, so the only distribution we have is from a build two
                         // fixes ago. Same failure as the gun-visibility probe (bug-2048). Flags 0,
                         // never CVAR_ARCHIVE, so it cannot fossilise into a saved config (TRAPS T7).
-                        pPr = gi.Cvar_Get("coop_coverProbe", "1", 0);
+                        pPr = gi.Cvar_Get("coop_coverProbe", "0", 0);
                     }
                     // [bug-2072] RATE-LIMITED, because this ships. GUNVIS could default ON safely
                     // because it is EDGE-triggered - a handful of lines a session. This one is
@@ -16695,7 +16695,7 @@ void Player::TickCoopCover()
                     static cvar_t *pPrNo   = NULL;
                     static float   s_nextNo = 0.0f;
 
-                    if (!pPrNo) { pPrNo = gi.Cvar_Get("coop_coverProbe", "1", 0); }
+                    if (!pPrNo) { pPrNo = gi.Cvar_Get("coop_coverProbe", "0", 0); }
                     // level.time restarts at 0 on every map load while this static does not, so a
                     // stale future stamp would silence the probe for up to the PREVIOUS map's
                     // length - the same staleness trap the camera/sprint/vault reseeds all carry.

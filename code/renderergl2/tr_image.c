@@ -2212,6 +2212,7 @@ image_t *R_CreateImage2( const char *name, byte *pic, int width, int height, GLe
 	qboolean    isLightmap = qfalse, scaled = qfalse;
 	long        hash;
 	int         glWrapClampMode, mipWidth, mipHeight, miplevel;
+	int         glWrapS, glWrapT;                  // HZM gl2 (bug-2227) - per-axis, see below
 	qboolean    rgba8 = picFormat == GL_RGBA8 || picFormat == GL_SRGB8_ALPHA8_EXT;
 	qboolean    mipmap = !!(flags & IMGFLAG_MIPMAP);
 	qboolean    cubemap = !!(flags & IMGFLAG_CUBEMAP);
@@ -2242,10 +2243,18 @@ image_t *R_CreateImage2( const char *name, byte *pic, int width, int height, GLe
 
 	image->width = width;
 	image->height = height;
+	// HZM gl2 (bug-2227): S and T are resolved SEPARATELY now. IMGFLAG_CLAMPTOEDGE still means
+	// "clamp both", which is what every other caller in the renderer wants; the two _X/_Y flags come
+	// from MOHAA's clampmapx / clampmapy and clamp one axis while the other keeps repeating.
+	// glWrapClampMode itself is left as the both-axis answer because the R axis (cubemaps) below
+	// still uses it, and no cubemap is ever single-axis clamped.
 	if (flags & IMGFLAG_CLAMPTOEDGE)
 		glWrapClampMode = GL_CLAMP_TO_EDGE;
 	else
 		glWrapClampMode = GL_REPEAT;
+
+	glWrapS = (flags & (IMGFLAG_CLAMPTOEDGE | IMGFLAG_CLAMPTOEDGE_X)) ? GL_CLAMP_TO_EDGE : GL_REPEAT;
+	glWrapT = (flags & (IMGFLAG_CLAMPTOEDGE | IMGFLAG_CLAMPTOEDGE_Y)) ? GL_CLAMP_TO_EDGE : GL_REPEAT;
 
 	if (!internalFormat)
 		internalFormat = RawImage_GetFormat(pic, width * height, picFormat, isLightmap, image->type, image->flags);
@@ -2353,8 +2362,8 @@ image_t *R_CreateImage2( const char *name, byte *pic, int width, int height, GLe
 		ri.Hunk_FreeTempMemory(resampledBuffer);
 
 	// Set all necessary texture parameters.
-	qglTextureParameterfEXT(image->texnum, textureTarget, GL_TEXTURE_WRAP_S, glWrapClampMode);
-	qglTextureParameterfEXT(image->texnum, textureTarget, GL_TEXTURE_WRAP_T, glWrapClampMode);
+	qglTextureParameterfEXT(image->texnum, textureTarget, GL_TEXTURE_WRAP_S, glWrapS);
+	qglTextureParameterfEXT(image->texnum, textureTarget, GL_TEXTURE_WRAP_T, glWrapT);
 
 	if (cubemap)
 		qglTextureParameteriEXT(image->texnum, textureTarget, GL_TEXTURE_WRAP_R, glWrapClampMode);

@@ -649,6 +649,14 @@ typedef struct shader_s {
 	qboolean	hasAlphaTest;
 
 	fogPass_t	fogPass;				// draw a blended pass, possibly with depth test equals
+	qboolean	noGlobalFog;			// [HZM 2026-08-31] shader asked for "nofog". gl1 honours this
+										// (renderergl1/tr_shader.c:881 sets fogBits = GLS_FOG); gl2
+										// parsed the keyword and threw it away with a FIXME, so every
+										// nofog surface got fogged anyway. Invisible until the forward
+										// global fog landed on 2026-08-03 - after which retail's own
+										// nofog tracers and muzzle flashes fogged toward BLACK (the
+										// correct target for an additive stage) and rendered as dark
+										// bands in heavy fog. User-reported on e1l1, which is thick dust.
 
 	int         vertexAttribs;          // not all shaders will need all data to be gathered
 

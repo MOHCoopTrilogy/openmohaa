@@ -3524,8 +3524,13 @@ static int S_HZM_CueTier(const char *name)
         || strstr(name, "coop_rankup")) {
         return 2;
     }
+    // HZM coop [2026-08-31] coop_tinnitus/ ADDED. The concussion wash is the one cue that exists
+    // specifically to be heard THROUGH a duck - the design is "the ring arrives first and the world
+    // comes rushing back underneath it" - and it was the one cue not on this list. Falling to tier 0
+    // meant gain *= s_sfxduck below, so on Omaha it played at 3% and rose in lockstep with the world
+    // instead of over it: the beat did not exist. Catches ring.wav and shellshock01.wav both.
     if (strstr(name, "coop_sprint/") || strstr(name, "coop_injury/") || strstr(name, "gasmask")
-        || strstr(name, "Mec_SteamLoop_01")) {
+        || strstr(name, "Mec_SteamLoop_01") || strstr(name, "coop_tinnitus/")) {
         return 1;
     }
     return 0;

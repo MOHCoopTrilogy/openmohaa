@@ -1419,6 +1419,14 @@ void RB_SetGlobalFogUniforms( shaderProgram_t *sp, int stateBits, qboolean fogAs
 	if ( tr.sunRaysFbo && glState.currentFBO == tr.sunRaysFbo ) {
 		goto upload;
 	}
+	/* [HZM 2026-08-31] The shader asked for "nofog", or the sun flare set the flag by hand
+	   around its own draws (tr_sun_flare.cpp:539/603).
+	   Read shader->noGlobalFog here rather than assigning it into tess in RB_BeginSurface:
+	   the flare raises tess.no_global_fog and then issues ordinary surface draws inside that
+	   window, so an assignment in RB_BeginSurface would clobber the flare's flag back off. */
+	if ( tess.no_global_fog || ( tess.shader && tess.shader->noGlobalFog ) ) {
+		goto upload;
+	}
 	if ( tr.renderCubeFbo && glState.currentFBO == tr.renderCubeFbo ) {
 		goto upload;
 	}

@@ -810,14 +810,35 @@ static qboolean ParseStage( shaderStage_t *stage, char **text )
         //=========================
 		{
 			imgType_t type = IMGTYPE_COLORALPHA;
-			imgFlags_t flags = IMGFLAG_CLAMPTOEDGE;
+			imgFlags_t flags;
 
-            // OPENMOHAA-specific stuff
-            //=========================
-            // FIXME:
-            //  Support clampmapx and clampmapy
-            //  Also add IMGFLAG_CLAMP along IMGFLAG_CLAMPTOEDGE
-            //=========================
+			// HZM gl2 (bug-2227) - the FIXME that used to sit here is now done.
+			//
+			// This branch matches "clampmap" as an 8-CHARACTER PREFIX, so clampmapx and clampmapy
+			// landed in it too and were given the both-axis IMGFLAG_CLAMPTOEDGE. gl1 has always
+			// resolved the two axes separately (renderergl1/tr_shader.c:938-978).
+			//
+			// It matters on exactly one surface in the shipped game, and it is a surface players
+			// stare at: textures/mohtest/omaha_set4_shoreline, the wet-sand strip at Omaha's
+			// waterline, is the ONLY clampmapy in main/mainta/maintt (the two others are in the
+			// unused scripts/test.shader). It is authored to REPEAT along the beach and CLAMP across
+			// the strip, so the one wet->dry gradient reads once from waterline to dry sand. Clamping
+			// S as well pinned the S coordinate at the edge texel and stretched a single texel column
+			// along the whole 15,000-unit beach - which is precisely the "blurred texture where the
+			// water meets the sand" that has been reported since gl2 became the renderer we ship.
+			if (!token[8]) {
+				flags = IMGFLAG_CLAMPTOEDGE;                       // clampmap  - both axes
+			} else if (token[8] == 'x' && !token[9]) {
+				flags = IMGFLAG_CLAMPTOEDGE_X;                     // clampmapx - S only
+			} else if (token[8] == 'y' && !token[9]) {
+				flags = IMGFLAG_CLAMPTOEDGE_Y;                     // clampmapy - T only
+			} else {
+				// gl1 prints this and then skips the keyword entirely (:974). Matching it: fall back
+				// to the both-axis behaviour rather than dropping the image, so an unknown suffix
+				// degrades to what gl2 did before instead of leaving the stage with no texture.
+				ri.Printf( PRINT_WARNING, "WARNING: Converting unknown clampmap type '%s' to clampmap in shader '%s'\n", token, shader.name );
+				flags = IMGFLAG_CLAMPTOEDGE;
+			}
 
 			token = COM_ParseExt( text, qfalse );
 			if ( !token[0] )
@@ -1887,7 +1908,10 @@ static qboolean ParseStage( shaderStage_t *stage, char **text )
 		}
 		else if (!Q_stricmp(token, "nofog"))
 		{
-			// FIXME: unimplemented
+			// [HZM 2026-08-31] Was "FIXME: unimplemented". gl1 implements this
+			// (renderergl1/tr_shader.c:881). Consumed by RB_SetGlobalFogUniforms via
+			// tess.no_global_fog, which already existed for the sun flare.
+			shader.noGlobalFog = qtrue;
 			continue;
 		}
 		else if (!Q_stricmp(token, "depthmask"))
@@ -4243,11 +4267,47 @@ return NULL if not found
 If found, it will return a valid shader
 =====================
 */
+/*
+====================
+FindShaderInShaderText
+
+HZM gl2 (bug-2228) - RETURNS THE LAST OCCURRENCE, NOT THE FIRST. Returning the first inverted shader
+precedence on gl2 relative to gl1, which silently killed every mod shader override that shadows a
+retail name - on the renderer we actually ship.
+
+The two halves have to be read together:
+
+  * ScanAndLoadShaderFiles concatenates the files in REVERSE FS-list order
+    (`for (i = numShaderFiles - 1; i >= 0; i--)`), in BOTH renderers. FS_ListFiles returns the
+    highest-priority pak's files FIRST, so a LOW FS index means HIGH priority - and reverse
+    concatenation therefore puts a low index LATE in s_shaderText.
+
+  * gl1 walks s_shaderText forward and PREPENDS each block to its bucket
+    (renderergl1/tr_shader.c:77-89 AddShaderTextToHash, called from FindShadersInShaderText at
+    :3856-3885), then FindShaderText returns the chain HEAD (:111-129). Head == last prepended ==
+    LAST text occurrence == LOWEST FS index == HIGHEST-priority pak. Correct.
+
+  * gl2 walks s_shaderText forward and APPENDS to its bucket array, then returned the FIRST match -
+    the first text occurrence, i.e. the HIGHEST FS index, i.e. the LOWEST-priority pak. Backwards.
+
+Measured on the live install: zz_coop_shoreline.shader is FS index 93 and retail misc_outside.shader
+is 212, so gl2 handed textures/misc_outside/deepbluesea_shoreline to Pak0 and discarded the mod's
+override entirely - along with coop_water_overrides.shader (index 77) and every other name-shadowing
+override. Those overrides were not subtly wrong; they were never parsed. That is why the 2026-08-28
+deformVertexes flap and the 2026-08-31 blood stage produced no visible change.
+
+Returning the last match makes gl2 agree with gl1. Note this also changes which RETAIL pak wins where
+a name is defined more than once: main/Pak0, mainta/pak1 and maintt/pak1 all ship misc_outside.shader,
+and gl2 was picking main's copy even under Breakthrough. gl1 picks maintt's. Matching gl1 is the whole
+point - it is the reference implementation for this engine.
+====================
+*/
 static char *FindShaderInShaderText( const char *shadername ) {
 
 	char *token, *p;
 
 	int i, hash;
+	char *last = NULL;      // HZM gl2 (bug-2228) - keep the LAST match, see the note above
 
 	hash = generateHashValue(shadername, MAX_SHADERTEXT_HASH);
 
@@ -4258,8 +4318,14 @@ static char *FindShaderInShaderText( const char *shadername ) {
 			p = shaderTextHashTable[hash][i];
 			token = COM_ParseExt(&p, qtrue);
 		
+			// The bucket is filled by a forward walk of s_shaderText, so it is in text order.
+			// Run to the end and keep the last hit rather than returning the first.
 			if(!Q_stricmp(token, shadername))
-				return p;
+				last = p;
+		}
+
+		if (last) {
+			return last;
 		}
 	}
 
@@ -4277,7 +4343,10 @@ static char *FindShaderInShaderText( const char *shadername ) {
 		}
 
 		if ( !Q_stricmp( token, shadername ) ) {
-			return p;
+			// Same rule as the hashed path above, so the fallback can never disagree with the fast
+			// path about which definition wins.
+			last = p;
+			SkipBracedSection( &p, 0 );
 		}
 		else {
 			// skip the definition
@@ -4285,7 +4354,7 @@ static char *FindShaderInShaderText( const char *shadername ) {
 		}
 	}
 
-	return NULL;
+	return last;
 }
 
 

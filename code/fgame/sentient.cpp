@@ -1590,8 +1590,31 @@ void Sentient::ArmorDamage(Event *ev)
     // NPCs now set `blastshield 1` and keep exactly the old protection; ordinary allied AI take the
     // blast, bleed and gib, and via coop_mod/allysquad.scr go DOWN rather than die outright - so
     // losing them is recoverable instead of instant.
-    if (g_gametype->integer != GT_SINGLE_PLAYER && meansofdeath == MOD_EXPLOSION && IsSubclassOfActor()
-        && m_Team == TEAM_AMERICAN && (!attacker || (Entity *)attacker == (Entity *)world)) {
+    // [user 2026-08-31] bug-2193 - THE OPT-IN TERM ABOVE WAS NEVER ADDED. Everything the bug-1586 note
+    // describes was written except the one thing that makes it opt-in: m_bCoopBlastShield is declared
+    // (sentient.h:246), initialised (sentient.cpp:831) and set by the script event (sentient.cpp:3917),
+    // and until this line was read NOWHERE in the tree. So the blanket immunity bug-1586 says it removed
+    // was still live, and every world-attributed explosion in coop did exactly nothing to allied AI.
+    // That is not just a missing gore path: script `radiusdamage` is world-attributed (ScriptThread::
+    // EventRadiusDamage -> RadiusDamage(origin, world, world, ..., MOD_EXPLOSION)), so any retail set
+    // piece that kills its own allied extras with radiusdamage silently failed in coop and left them
+    // alive, frozen in whatever animation they were holding, forever. m3l1a's body-drag pair is the
+    // reported case: dragging_guys_blow (:4431) plays drag_dragging / drag_beingdragged, waits 7s and
+    // fires `radiusdamage 4000 256` to finish both men. The blast never arrived, so the two stood there
+    // for the rest of the map - one miming a drag with empty hands, the other lying beside him.
+    // Adding the term restores the documented intent exactly:
+    //   * opted-in NPCs keep the old protection - across the whole mod that is precisely two actors,
+    //     t1l3's captain and private (maps/t1l3.scr:122-123), the case the shield was written for.
+    //   * ordinary allied AI take the blast again, so they bleed, gib, and go DOWN rather than die
+    //     outright via coop_mod/allysquad.scr, which manages the authored friendly squad only.
+    //   * scripted extras that are not in that squad - like the drag pair - simply die, which is what
+    //     their set piece has been waiting on.
+    // Not a risk to t1l3's colonel despite what the note above implies: he is a GERMAN officer (the
+    // map's objective 1 is "Track and Eliminate the Colonel"), and this gate only ever applied to
+    // m_Team == TEAM_AMERICAN.
+    if (m_bCoopBlastShield && g_gametype->integer != GT_SINGLE_PLAYER && meansofdeath == MOD_EXPLOSION
+        && IsSubclassOfActor() && m_Team == TEAM_AMERICAN
+        && (!attacker || (Entity *)attacker == (Entity *)world)) {
         return;
     }
 
@@ -2737,7 +2760,12 @@ void Sentient::CoopGoreThrowChunks(const Vector &pos, const Vector &dir, int n, 
     if (!pOn) {
         pOn   = gi.Cvar_Get("coop_goreChunks", "1", CVAR_ARCHIVE);
         pBud  = gi.Cvar_Get("coop_goreChunkBudget", "6", 0);
-        pLife = gi.Cvar_Get("coop_decapLife", "4", CVAR_ARCHIVE);
+        // [user 2026-08-31] bug-2191 - CHUNKS ARE NOT HEADS. This read coop_decapLife, whose
+        // SHIPPED value is 0 (coop_defaults.cfg:323) meaning "heads persist like corpses" - so the
+        // bounded fallback below gave every kill 2-5 spinning blood quads lying around the body for
+        // 25 SECONDS. That is its own "small objects floating around the body" report, independent
+        // of the wound-prop geometry. Chunks now carry their own lifetime.
+        pLife = gi.Cvar_Get("coop_goreChunkLife", "6", CVAR_ARCHIVE);
     }
     if (!pOn->integer || !com_blood->integer) {
         return;
@@ -2760,9 +2788,8 @@ void Sentient::CoopGoreThrowChunks(const Vector &pos, const Vector &dir, int n, 
         chunk->velocity =
             dir * (90.0f + G_Random(160.0f)) + Vector(G_CRandom(70.0f), G_CRandom(70.0f), 150.0f + G_Random(140.0f));
         chunk->avelocity = Vector(G_CRandom(400.0f), G_CRandom(400.0f), G_CRandom(400.0f));
-        // coop_decapLife 0 is seeded as "persist like corpses" - honor it BOUNDED (25s), because
-        // a literal never-remove accumulates entities all map on count-scaled hordes (bug-856 class)
-        chunk->PostEvent(EV_Remove, (pLife->value > 0.5f) ? pLife->value : 25.0f);
+        // 0 or unset falls back to 6s, not 25s - a thrown chunk is debris, not a body.
+        chunk->PostEvent(EV_Remove, (pLife->value > 0.5f) ? pLife->value : 6.0f);
     }
 }
 
@@ -2893,6 +2920,10 @@ void Sentient::CoopGoreTryWoundProp(int location, int meansofdeath, const Vector
     float          locRadius;
     vec3_t         locOffset;
     int            i, slot, tagnum, maxProps;
+    float          propScale;
+    static cvar_t *pPivot      = NULL; // HZM coop [user 2026-08-31] bug-2191 A/B: 0 = old world-aligned edge pivot
+    static cvar_t *pWoundScale = NULL; // HZM coop [user 2026-08-31] live size multiplier for wound patches
+    static cvar_t *pProud      = NULL; // HZM coop [user 2026-08-31] how far proud of the skin a wound sits
     static cvar_t *pWoundMax = NULL; // HZM coop [user 2026-08-17] - per-body hole ceiling
     Animate       *prop;
     Vector         attachOfs;
@@ -2966,6 +2997,18 @@ void Sentient::CoopGoreTryWoundProp(int location, int meansofdeath, const Vector
     }
 
     slot = -1;
+    // [user 2026-08-31] bug-2191 - RESOLVE THE BONE BEFORE CLAIMING A SLOT. These two returns used to
+    // sit AFTER the recycle below, so on a full body a hit whose tag lookup failed removed the oldest
+    // hole and then bailed - a wound vanishing with nothing put back in its place.
+    tagname = gi.CM_GetHitLocationInfo(location, &locRadius, locOffset);
+    if (!tagname || !*tagname) {
+        return;
+    }
+    tagnum = gi.Tag_NumForName(edict->tiki, tagname);
+    if (tagnum < 0) {
+        return; // not a biped rig (or bone missing) - skip silently
+    }
+
     for (i = 0; i < maxProps; i++) {
         if (!m_pCoopWoundProp[i]) {
             slot = i;
@@ -2981,15 +3024,6 @@ void Sentient::CoopGoreTryWoundProp(int location, int meansofdeath, const Vector
         }
     }
     m_iCoopWoundNext = (slot + 1) % maxProps;
-
-    tagname = gi.CM_GetHitLocationInfo(location, &locRadius, locOffset);
-    if (!tagname || !*tagname) {
-        return;
-    }
-    tagnum = gi.Tag_NumForName(edict->tiki, tagname);
-    if (tagnum < 0) {
-        return; // not a biped rig (or bone missing) - skip silently
-    }
 
     // bug-735: attach at the BULLET ENTRY POINT, not the bone-sphere center. The LBD sphere center sits
     // INSIDE the mesh (radius 4-9u) while the prop spans only ~4u, so center-attached props were swallowed
@@ -3008,8 +3042,37 @@ void Sentient::CoopGoreTryWoundProp(int location, int meansofdeath, const Vector
         local.z    = DotProduct(delta, tagOr.axis[2]);
         fromCenter = local - Vector(locOffset);
         len        = fromCenter.length();
+        // [user 2026-08-31] bug-2191 - KEEP THE TRUE HIT DISTANCE and nudge 1u proud, instead of
+        // snapping onto the primary sphere's shell. On a primary-sphere hit the two are identical
+        // (position is trace.endpos, the ray/sphere ENTRY point, so len == locRadius by construction) -
+        // which is why this line was NOT the torso bug it looked like. It matters on the paths where the
+        // identity breaks: the trace reports the SAME location index for a hit on the SECONDARY sphere
+        // while this code reads only the primary table (thigh 12->22, calf 8->19, upper arm 4->11.5,
+        // forearm 5->11.5), and CheckHitLocation remaps a helmetless head hit onto a sphere 6.5u away.
+        // In both cases len > locRadius strictly, and the old form dragged the prop up to ~14u back
+        // toward the primary centre - the distal half of every arm and leg.
+        // [user 2026-08-31] TWO CORRECTIONS to the change above, after the user reported wounds had got
+        // SMALLER and rarer rather than better-placed.
+        //
+        // (a) Use whichever standoff is LARGER. Plain (len + 1) was a REGRESSION on primary-sphere hits:
+        //     `position` is the ray/sphere entry point, which for a body shot is INSIDE the cloth, so a
+        //     1u nudge no longer cleared the mesh and the patch was swallowed - which is bug-735, the
+        //     exact defect the (locRadius + 1) form was written to fix. Taking the max keeps the old
+        //     clearance everywhere it mattered and only pushes FURTHER out on the secondary-sphere and
+        //     remapped-head hits, which is the case that was actually broken.
+        // (b) Guard restored to 6.0. Tightening it to 3.0 bought nothing measurable and could only ever
+        //     reject hits the old code accepted - fewer wounds, which is half the user's report.
+        // [user 2026-08-31] HOW FAR PROUD IS NOW TUNABLE. The user has reported three times that the
+        // patches read as floating ABOVE the model rather than sitting in the cloth. The 1.0 here was
+        // the clearance that stopped them being swallowed (bug-735), but combined with the pivot fix -
+        // which now lands the art CENTRE on the hit instead of an edge - a full unit is visibly proud.
+        // Exposed rather than guessed at a fourth time: coop_goreWoundProud 0 puts them flush.
+        if (!pProud) {
+            pProud = gi.Cvar_Get("coop_goreWoundProud", "0.25", CVAR_ARCHIVE);
+        }
+        float standoff = (len > locRadius) ? len : locRadius;
         if (len > 0.25f && len < locRadius * 6.0f) {
-            fromCenter *= (locRadius + 1.0f) / len;
+            fromCenter *= (standoff + pProud->value) / len;
             attachOfs = Vector(locOffset) + fromCenter;
         }
     }
@@ -3017,9 +3080,50 @@ void Sentient::CoopGoreTryWoundProp(int location, int meansofdeath, const Vector
     prop = new Animate;
     prop->setModel("models/fx/coop_wound1.tik");
     prop->setSolidType(SOLID_NOT);
-    prop->setScale(0.8f + G_Random(0.5f)); // slight size variety so stacked hits don't read as copies
+    // [user 2026-08-31] SIZE IS NOW TUNABLE. The user remembers these reading as massive holes and
+    // wants that back; the base patch is only ~4u across, so rather than guess a new constant this is a
+    // live multiplier. coop_goreWoundScale 1 is the shipped look, 2 doubles it.
+    if (!pWoundScale) {
+        pWoundScale = gi.Cvar_Get("coop_goreWoundScale", "1.6", CVAR_ARCHIVE);
+    }
+    propScale = 0.8f + G_Random(0.5f); // slight size variety so stacked hits don't read as copies
+    if (pWoundScale->value > 0.05f) {
+        propScale *= pWoundScale->value;
+    }
+    prop->setScale(propScale);
+
+    // [user 2026-08-31] bug-2191 - THE ACTUAL "FLOATING WOUNDS" CAUSE, measured from the retail mesh.
+    // models/fx/xbeam.skd (parsed out of Pak0) is ONE-SIDED along its long axis: 8 verts, bone-local X
+    // and Z centred at +/-0.953, but Y running 0..+1.90625, and the SKC frame-0 model-space bounds are
+    // min(-1.90625,-0.953,-0.953) max(0,0.953,0.953). So the crossed quads run one-sided along model -X
+    // and the attach origin is the middle of one EDGE of the cross, not its centre. Attached with
+    // use_angles = qfalse the prop ALSO kept the world basis (cg_modelanim.c has no else branch, and
+    // nothing ever sets the prop's angles), so every wound hung ~1.7-2.7u toward world -X regardless of
+    // which limb was hit or which way the body faced - and appeared to swim around the corpse as it
+    // turned. That is the reported symptom, and it is why the offset maths above was never the cause.
+    //
+    // qtrue puts the mesh's -X on the TAG's -X, and the half-beam push along the tag's +X lands the art
+    // CENTRE on the hit. Both terms then live in the same frame and cancel exactly in every pose.
+    // attach_offset is applied UNSCALED (cg_modelanim.c applies it before the scale multiply), so the
+    // half-length must carry the full effective scale: 0.953125 raw * 2.2 (the `scale 2.2` in
+    // models/fx/coop_wound1.tik - the engine mirrors that number here) * this prop's own scale.
+    //
+    // BEHIND A CVAR ON PURPOSE. This flips use_angles on the bip01 rig, which is exactly what bug-535
+    // got burned by (helmets landing sideways on Bip01 Head). The maths cancels regardless of per-bone
+    // roll, but whether it READS well is a visual judgement only a playtest settles - and
+    // coop_goreWoundPivot 0 restores the old behaviour live instead of via a rebuild.
+    if (!pPivot) {
+        pPivot = gi.Cvar_Get("coop_goreWoundPivot", "1", CVAR_ARCHIVE);
+    }
+    if (pPivot->integer) {
+        attachOfs.x += 0.953125f * 2.2f * propScale;
+    }
+
     // small jitter so repeat hits to one segment don't z-fight on the exact same spot
-    if (!prop->attach(entnum, tagnum, qfalse, attachOfs + Vector(G_CRandom(0.75f), G_CRandom(0.75f), G_CRandom(0.75f)))) {
+    if (!prop->attach(entnum,
+                      tagnum,
+                      pPivot->integer ? qtrue : qfalse,
+                      attachOfs + Vector(G_CRandom(0.75f), G_CRandom(0.75f), G_CRandom(0.75f)))) {
         delete prop;
         return; // parent's child table full (helmet + drip + props) - skip
     }

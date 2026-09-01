@@ -48,6 +48,13 @@ typedef enum
 	IMGFLAG_NOLIGHTSCALE   = 0x0020,
 	IMGFLAG_CLAMPTOEDGE    = 0x0040,
 	IMGFLAG_GENNORMALMAP   = 0x0080,
+	// HZM gl2 (bug-2227) - PER-AXIS clamp, for MOHAA's clampmapx / clampmapy. gl2 had only the
+	// both-axis IMGFLAG_CLAMPTOEDGE and matched "clampmap" as an 8-char PREFIX, so clampmapy was
+	// silently clamping S as well as T. Appended deliberately: the values above are stored in
+	// image_s.flags and compared in both renderers and tr_gore.c, so renumbering them would change
+	// the meaning of every flag word already in flight.
+	IMGFLAG_CLAMPTOEDGE_X  = 0x0100,   // clamp S only; T repeats
+	IMGFLAG_CLAMPTOEDGE_Y  = 0x0200,   // clamp T only; S repeats
 } imgFlags_t;
 
 typedef struct image_s {

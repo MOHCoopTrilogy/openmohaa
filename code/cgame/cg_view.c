@@ -4383,7 +4383,7 @@ static void CG_UpdateAdsStage(void)
 
                 if (iSide != s_sideSeen) {
                     s_sideSeen = iSide;
-                    if (cgi.Cvar_Get("coop_coverProbe", "1", 0)->integer) {
+                    if (cgi.Cvar_Get("coop_coverProbe", "0", 0)->integer) {
                         cgi.Printf("^~^~^ COVERSIDE-CLIENT side=%d covered=%d manual=%d "
                                    "shEnv=%.2f fpEnv=%.2f\n",
                                    iSide, bCovered, s_coverManual, s_adsShoulderEnv, s_adsFpEnv);
@@ -5022,6 +5022,36 @@ static int CG_CalcFov(void)
             if ((trw.surfaceFlags & SURF_SKY) || trw.fraction >= 0.999f) {
                 target = cg.rain.density * 2.5f;   // ~0.4 peak -> 1.0 (r_ppRainAmount is the final dial)
                 if (target > 1.0f) { target = 1.0f; }
+            }
+        }
+
+        // [user 2026-08-31] COMING OUT OF THE WATER WETS THE LENS TOO. The user: "our water and blood
+        // effects on screen should also play a role as we are moving out of the water once off the
+        // higgins boat." This is the same pass the rain already drives, so wading ashore now beads the
+        // lens and the existing ~2.5s dry-out makes it linger up the sand exactly as it should.
+        //
+        // waterlevel is on the playerState (bg_public.h:336): 1 = feet, 2 = waist, 3 = fully under.
+        // Waist-deep and over saturates; ankle-deep is a partial wetting. Taken as a MAX against the
+        // rain target rather than replacing it, so wading in the rain does not read as drier than rain.
+        // waterlevel lives on pmove_t, not the playerState, so cgame cannot read it here. Sample the
+        // world instead with the same call cg_parsemsg.cpp uses to decide a bullet started in water:
+        // one point at chest height and one at the feet, which distinguishes wading from a ducking.
+        {
+            vec3_t vChest, vFeet;
+            float  wtarget = 0.0f;
+
+            VectorCopy(cg.refdef.vieworg, vChest);
+            vChest[2] -= 24.0f;
+            VectorCopy(cg.refdef.vieworg, vFeet);
+            vFeet[2] -= 56.0f;
+
+            if (cgi.CM_PointContents(vChest, 0) & CONTENTS_FLUID) {
+                wtarget = 1.0f;            // waist-deep or worse - soaked
+            } else if (cgi.CM_PointContents(vFeet, 0) & CONTENTS_FLUID) {
+                wtarget = 0.45f;           // ankle to knee - spray and beads, not a soaking
+            }
+            if (wtarget > target) {
+                target = wtarget;
             }
         }
 
