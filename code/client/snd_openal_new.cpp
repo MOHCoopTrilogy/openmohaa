@@ -108,6 +108,17 @@ static int    al_occ_nexttrace[MAX_SOUNDSYSTEM_CHANNELS_3D];
 static int    al_occ_stamp[MAX_SOUNDSYSTEM_CHANNELS_3D];    // channel iStartTime when last traced
 cvar_t       *s_occlusion;
 cvar_t       *s_occlusionStrength;
+// HZM coop [user 2026-09-04] CONCUSSION MUFFLE. One GLOBAL lowpass, not a per-wall one, and ONE
+// shared filter object because the value is identical for every channel. EFX copies a filter's
+// parameters into the source at alSourcei time, so RE-ATTACHING is how a change is published -
+// which is why the occlusion code re-attaches every frame.
+static ALuint al_mfl_filter   = 0;
+static float  al_mfl_strength = 0.f;   // recomputed ONCE per Respatialize, not per channel
+static float  al_mfl_applied[MAX_SOUNDSYSTEM_POSITION_CHANNELS];  // 2D range: last pushed value
+static int    al_mfl_armed    = 0;     // marker edge state
+cvar_t       *s_muffleHF;
+cvar_t       *s_muffleGain;
+cvar_t       *s_muffleCurve;
 cvar_t       *s_reverbGain; // HZM coop
 
 // MSS reverb preset indices 0-25 mapped to EFX EAXREVERB parameters (from efx-presets.h)
@@ -182,6 +193,8 @@ static int
 S_OPENAL_SpatializeStereoSound(const vec3_t listener_origin, const vec3_t listener_left, const vec3_t origin);
 static void   S_OPENAL_reverb(int iChannel, int iReverbType, float fReverbLevel);
 static float  S_HZM_LocalPanAmount(const openal_channel *pChannel);   // HZM coop - pannable local sound
+static int    S_HZM_CueTier(const char *name);      // HZM coop - defined below; needed by the muffle
+static bool   S_HZM_DuckExempt(const char *name);   // HZM coop - defined below; needed by the muffle
 
 // How far off-centre a fully-panned local sound sits. Small on purpose: the listener is AT the
 // origin, so this reads as an angle rather than a distance, and 64 units is already hard over.
@@ -447,6 +460,26 @@ static bool S_OPENAL_InitEFX()
             if (qalGetError() == AL_NO_ERROR) {
                 al_use_occlusion = true;
                 Com_Printf("OpenAL: occlusion lowpass filters initialized.\n");
+
+                // HZM coop [user 2026-09-04] the concussion muffle's own filter object.
+                // DELIBERATELY INSIDE THIS BRANCH. Sitting above it, this block's qalGetError()
+                // calls would have consumed the very error the enclosing test reads, so a device
+                // whose 96 qalFilteri calls FAILED would still have set al_use_occlusion = true
+                // and then driven invalid filter names every frame. Opens by CLEARING the error
+                // state rather than closing by clearing it, for the same reason.
+                qalGetError();
+                qalGenFilters(1, &al_mfl_filter);
+                if (qalGetError() == AL_NO_ERROR && al_mfl_filter) {
+                    qalFilteri(al_mfl_filter, AL_FILTER_TYPE, AL_FILTER_LOWPASS);
+                } else {
+                    al_mfl_filter = 0;   // no muffle on this device; occlusion is unaffected
+                }
+                for (j = 0; j < MAX_SOUNDSYSTEM_POSITION_CHANNELS; j++) {
+                    al_mfl_applied[j] = 0.f;   // fresh sources carry no filter, so 0 is accurate
+                }
+                al_mfl_strength = 0.f;
+                al_mfl_armed    = 0;
+                qalGetError();
             } else {
                 ok = false;
             }
@@ -472,6 +505,10 @@ static void S_OPENAL_DestroyEFX()
         qalDeleteFilters(MAX_SOUNDSYSTEM_CHANNELS_3D, al_occ_filter); // HZM coop - occlusion filters
         memset(al_occ_filter, 0, sizeof(al_occ_filter));
     }
+    if (al_mfl_filter && qalDeleteFilters) {
+        qalDeleteFilters(1, &al_mfl_filter);
+    }
+    al_mfl_filter = 0;
     al_use_occlusion = false;
     if (al_efx_effect && qalDeleteEffects) {
         qalDeleteEffects(1, &al_efx_effect);
@@ -1031,6 +1068,9 @@ qboolean S_OPENAL_Init()
     s_reverb                 = Cvar_Get("s_reverb", "1", CVAR_SOUND_LATCH | CVAR_ARCHIVE); // HZM coop - default ON (auto env reverb)
     s_occlusion              = Cvar_Get("s_occlusion", "1", CVAR_ARCHIVE);           // HZM coop - muffle sounds behind walls
     s_occlusionStrength      = Cvar_Get("s_occlusionStrength", "1.0", CVAR_ARCHIVE); // HZM coop - 0..1 lowpass depth
+    s_muffleHF    = Cvar_Get("s_muffleHF",    "0.95", CVAR_ARCHIVE); // HZM coop - HF shelf depth at full muffle
+    s_muffleGain  = Cvar_Get("s_muffleGain",  "0.10", CVAR_ARCHIVE); // HZM coop - broadband loss at full muffle
+    s_muffleCurve = Cvar_Get("s_muffleCurve", "2.0",  CVAR_ARCHIVE); // HZM coop - how the muffle tracks the duck
     s_reverbGain             = Cvar_Get("s_reverbGain", "3.0", CVAR_ARCHIVE);        // HZM coop - master wet-level boost (stock triple-multiply lands at -28dB)
     s_show_cpu               = Cvar_Get("s_show_cpu", "0", 0);
     s_show_num_active_sounds = Cvar_Get("s_show_num_active_sounds", "0", 0);
@@ -1873,7 +1913,27 @@ static void S_OPENAL_Start2DSound(
                 pChannel->iTime = 0;
             }
 
-            if (s_entity[iEntNum].time < pChannel->iTime) {
+            // HZM coop [user 2026-09-04] iRealEntNum, NOT iEntNum - test the entity this channel
+            // was BOUND to three lines above. It used to test the UNMASKED number, which is a
+            // different entity entirely for anything numbered 1024-2047.
+            //
+            // S_FLAG_DO_CALLBACK is 0x400, bit 10. Retail entity numbers were 10 bits so that bit
+            // was free to steal as a flag; this fork raised the pool to 4096, so entities 1024-2047
+            // carry it as part of their own number and :1802 strips it unconditionally. The 3D path
+            // at :2053/:2063 binds and tests the same masked number and is correct; only this one
+            // disagreed with itself.
+            //
+            // The failure was silent and total. MISSING_ENT exists to stop a sound being killed
+            // when its entity is absent from the snapshot (see the OPM note below). Asking about
+            // the UNMASKED number asks about an entity that IS present, so the flag was never set,
+            // and S_OPENAL_Respatialize's end_sample() then stopped the channel on the very next
+            // frame - with no print on any path. ALL dialogue is `streamed`, and streamed sounds
+            // take this 2D path, so every speaker above entity 1024 was mute while his mouth kept
+            // moving (lipsync runs off the .skc, independent of audio).
+            // Measured on m3l1a: shingle_ranger1 = 1784, center_radioman = 1644 - both silent.
+            // higgins1_ranger10 = 119, bangalore_wave1 = 20 - both audible. Entity numbers recycle,
+            // which is why this read as intermittent rather than as a hard break.
+            if (s_entity[iRealEntNum].time < pChannel->iTime) {
                 // Fixed in OPM
                 //  Not sure if it's the real solution, but script_origin entities are usually
                 //  never sent to client so the sound will immediately get stopped
@@ -2748,6 +2808,184 @@ void S_OPENAL_AddLoopSounds(const vec3_t vTempAxis)
 S_OPENAL_Respatialize
 ==============
 */
+
+/*
+==============
+S_HZM_MuffleClamp
+
+HZM coop [user 2026-09-04] s_muffleHF and s_muffleGain are CVAR_ARCHIVE, so a player can set them to
+anything. `1 - v * strength` goes NEGATIVE above about 1.1, and alFilterf then returns
+AL_INVALID_VALUE and SILENTLY DOES NOTHING - leaving the filter object holding the PREVIOUS frame's
+parameters while it is re-attached anyway. In the composed 3D path that also freezes the occlusion
+value for that channel. The user-visible symptom would be "I turned the muffle up and it got weaker,
+then stuck", which is the worst available failure mode for a knob that invites being turned up.
+==============
+*/
+static float S_HZM_MuffleClamp(float v)
+{
+    if (v < 0.f) {
+        return 0.f;
+    }
+    if (v > 1.f) {
+        return 1.f;
+    }
+    return v;
+}
+
+/*
+==============
+S_HZM_UpdateMuffle
+
+HZM coop [user 2026-09-04] THE CONCUSSION MUFFLE - "kinda muffled as though we are sorta zoned out
+... it becomes clear by the time all audio has been restored from the duck effect".
+
+DERIVED FROM THE DUCK, NOT FADED ALONGSIDE IT. coop_cvarFade is perceptual now, so a second fade
+would have to reproduce that curve and stay in sync with it forever. Instead the muffle is a
+function OF s_sfxduck, so it rides the identical curve because it IS the identical number, and
+reaches exactly 0 on the frame the duck reaches 1.
+
+And that is also the strand-proofing. The muffle CANNOT outlive the duck: coop_muffle only scales
+something that is already zero once s_sfxduck is 1. A crash, a death, a disconnect or the watchdog
+killing the beach-audio thread leaves nothing muffled, and s_sfxduck itself self-heals on the next
+map load.
+
+WHERE IT ACTUALLY READS, measured rather than hoped: during the cinematic itself almost everything
+audible is already exempt (the music is on a channel outside the loop; the whistle, coop_memory/,
+coop_heart/ and coop_swim/ are DuckExempt; coop_tinnitus/ and coop_injury/ are cue tier 1), and what
+is left is the world bed at s_sfxduck 0.05 - i.e. 26 dB down, where an HF shelf is close to
+inaudible. The muffle does its real work across the 34-SECOND RECOVERY, when the world climbs back
+toward 1.0 while the muffle is still falling. That is exactly the user's ask - "clear by the time
+all audio has been restored" - but it means the right expectation is "the world comes back muffled
+and clears", not "you are underwater during the cutscene".
+
+Computed once per frame, not once per channel: the value is global.
+==============
+*/
+static void S_HZM_UpdateMuffle(void)
+{
+    static cvar_t *s_coopMuffle = NULL;
+    float          fCut, fDuck, fCurve, fStrength;
+
+    fStrength = 0.f;
+    fDuck     = 1.f;
+
+    if (al_use_occlusion && al_mfl_filter) {
+        // Registered eagerly in snd_dma_new.cpp too - Cvar_Command only sets a cvar that already
+        // EXISTS, so a server stufftext would otherwise be an unknown command on the one frame the
+        // cinematic needs it. That is the coop_voxCut trap.
+        if (!s_coopMuffle) {
+            s_coopMuffle = Cvar_Get("coop_muffle", "0", 0);
+        }
+        fCut = S_HZM_MuffleClamp(s_coopMuffle->value);
+        fDuck = (s_sfxduck ? s_sfxduck->value : 1.f);
+        if (fDuck < 0.f) {
+            fDuck = 0.f;
+        }
+        if (fCut > 0.f && fDuck < 1.f) {
+            fCurve = s_muffleCurve->value;
+            if (fCurve < 0.1f) {
+                fCurve = 0.1f;
+            }
+            fStrength = powf(1.f - fDuck, fCurve) * fCut;
+            if (fStrength > 1.f) {
+                fStrength = 1.f;
+            }
+        }
+    }
+
+    al_mfl_strength = fStrength;
+
+    if (fStrength > 0.001f && !al_mfl_armed) {
+        al_mfl_armed = 1;
+        Com_Printf("^~^~^ MUFFLE arm str=%.2f duck=%.3f hf=%.2f gain=%.2f curve=%.2f\n",
+                   fStrength, fDuck, s_muffleHF->value, s_muffleGain->value, s_muffleCurve->value);
+    } else if (fStrength <= 0.001f && al_mfl_armed) {
+        al_mfl_armed = 0;
+        Com_Printf("^~^~^ MUFFLE clear duck=%.3f\n", fDuck);
+    }
+}
+
+/*
+==============
+S_HZM_MuffleFor
+
+THE MUFFLE COVERS EXACTLY WHAT THE DUCK COVERS, so there is no second list to keep in sync. The
+tinnitus ring and injury cues (tier 1), the whistle and the coop_memory/ flashback voices
+(DuckExempt) stay CRISP over a muffled world - which is the beat each of those exemptions exists to
+protect. Menu chrome is excluded so menus stay usable whatever the mix is doing.
+
+THE CUE-TIER TEST IS GATED ON `not looping`, and that is not cosmetic: openal_channel::set_gain
+computes cueTier only for a NON-looping channel, so it FORCES tier 0 on a looping one and ducks it.
+Consulting CueTier unconditionally here would exempt a looping tier-1 path from the muffle while the
+duck still applied to it - a divergence between two lists that are supposed to be one list.
+
+DIALOGUE IS IN SCOPE, DELIBERATELY. The user asked for it by name ("all dialogue (pain, normal
+dialogue, etc.)"). CHAN_DIALOG carries speech at 300-3400 Hz and the shelf is above 5 kHz, so
+intelligibility survives - but this is the exact family behind bug-2298 / 2318 / 2354 / 2369 / 2395
+/ 2406, so if it ever reads wrong the one-line escape hatch is to return 0.f here for
+CHAN_DIALOG and CHAN_DIALOG_SECONDARY.
+==============
+*/
+static float S_HZM_MuffleFor(const openal_channel *pChannel)
+{
+    const char *name;
+
+    if (al_mfl_strength <= 0.f) {
+        return 0.f;   // the whole cost outside a cinematic: one float compare per channel
+    }
+    if (pChannel->iEntChannel == CHAN_MENU) {
+        return 0.f;
+    }
+    name = pChannel->pSfx ? pChannel->pSfx->name : NULL;
+    if (name) {
+        if (!(pChannel->iFlags & CHANNEL_FLAG_LOOPING) && S_HZM_CueTier(name) > 0) {
+            return 0.f;
+        }
+        if (S_HZM_DuckExempt(name)) {
+            return 0.f;
+        }
+    }
+    return al_mfl_strength;
+}
+
+/*
+==============
+S_HZM_Muffle2D
+
+HZM coop [user 2026-09-04] 2D AND 2D-STREAM CHANNELS (96..159) TAKE THE MUFFLE ONLY.
+
+There is no occlusion to compute for them - they are not in the world - but AL_DIRECT_FILTER is a
+per-SOURCE property, not a 3D one: set_no_3d only sets AL_SOURCE_RELATIVE, which changes the
+coordinate frame and says nothing about the dry path. This is the ONLY reason dialogue could not be
+muffled before: every streamed sound is forced down the 2D path and the occlusion array stops at 96.
+
+Only the OFF state is cached, and only as a float compare. Attaching every frame while muffled is
+what the 3D path already does for 96 channels, so that cost is proven; the cache exists so a player
+who never sees a cinematic pays nothing. A channel index owns one AL source for the life of the
+process, so al_mfl_applied[i] is a safe per-source record - and the detach must HAPPEN, not merely
+be skipped, or a stale filter would muffle the next sound that channel plays.
+==============
+*/
+static void S_HZM_Muffle2D(int i, openal_channel *pChannel)
+{
+    float fMuffle = S_HZM_MuffleFor(pChannel);
+
+    if (fMuffle <= 0.f) {
+        if (al_mfl_applied[i] != 0.f) {
+            al_mfl_applied[i] = 0.f;
+            qalSourcei(pChannel->source, AL_DIRECT_FILTER, AL_FILTER_NULL);
+            qalGetError();
+        }
+        return;
+    }
+
+    al_mfl_applied[i] = fMuffle;
+    qalFilterf(al_mfl_filter, AL_LOWPASS_GAIN,   1.0f - S_HZM_MuffleClamp(s_muffleGain->value) * fMuffle);
+    qalFilterf(al_mfl_filter, AL_LOWPASS_GAINHF, 1.0f - S_HZM_MuffleClamp(s_muffleHF->value) * fMuffle);
+    qalSourcei(pChannel->source, AL_DIRECT_FILTER, al_mfl_filter);
+    qalGetError();
+}
+
 /*
 ==============
 S_OPENAL_UpdateOcclusion
@@ -2765,7 +3003,14 @@ static void S_OPENAL_UpdateOcclusion(int i, openal_channel *pChannel, const vec3
     float fStrength;
     float fLerp;
 
-    if (!al_use_occlusion || i >= MAX_SOUNDSYSTEM_CHANNELS_3D || !pChannel->source) {
+    if (!al_use_occlusion || i >= MAX_SOUNDSYSTEM_POSITION_CHANNELS || !pChannel->source) {
+        return;
+    }
+
+    // HZM coop [user 2026-09-04] channels 96..159 are 2D / 2D-streamed: no trace, muffle only.
+    // This is where ALL dialogue lives - every streamed sound is forced down the 2D path.
+    if (i >= MAX_SOUNDSYSTEM_CHANNELS_3D) {
+        S_HZM_Muffle2D(i, pChannel);
         return;
     }
 
@@ -2823,9 +3068,25 @@ static void S_OPENAL_UpdateOcclusion(int i, openal_channel *pChannel, const vec3
         fStrength = 1;
     }
 
-    qalFilterf(al_occ_filter[i], AL_LOWPASS_GAIN, 1.0f - 0.45f * fStrength);
-    qalFilterf(al_occ_filter[i], AL_LOWPASS_GAINHF, 1.0f - 0.88f * fStrength);
-    qalSourcei(pChannel->source, AL_DIRECT_FILTER, al_occ_filter[i]);
+    {
+        // HZM coop [user 2026-09-04] compose the concussion muffle onto the same filter object.
+        // A source has exactly ONE AL_DIRECT_FILTER, so the two effects must be multiplied into
+        // one write rather than fight over the slot. Gains MULTIPLY because they are gains: a
+        // sound both behind a wall and heard through a concussion is muffled twice, which is
+        // correct. This runs even when s_occlusion is 0 (fStrength is then 0), so turning
+        // occlusion off does not turn the muffle off.
+        float fGain   = 1.0f - 0.45f * fStrength;
+        float fGainHF = 1.0f - 0.88f * fStrength;
+        float fMuffle = S_HZM_MuffleFor(pChannel);
+
+        if (fMuffle > 0.f) {
+            fGain   *= 1.0f - S_HZM_MuffleClamp(s_muffleGain->value) * fMuffle;
+            fGainHF *= 1.0f - S_HZM_MuffleClamp(s_muffleHF->value) * fMuffle;
+        }
+        qalFilterf(al_occ_filter[i], AL_LOWPASS_GAIN, fGain);
+        qalFilterf(al_occ_filter[i], AL_LOWPASS_GAINHF, fGainHF);
+        qalSourcei(pChannel->source, AL_DIRECT_FILTER, al_occ_filter[i]);
+    }
 }
 
 void S_OPENAL_Respatialize(int iEntNum, const vec3_t vHeadPos, const vec3_t vAxis[3])
@@ -2887,6 +3148,9 @@ void S_OPENAL_Respatialize(int iEntNum, const vec3_t vHeadPos, const vec3_t vAxi
 
     fVolume = 1;
     iPan    = 64;
+
+    // HZM coop - global concussion muffle; one powf per frame, not one per channel.
+    S_HZM_UpdateMuffle();
 
     for (i = 0; i < MAX_SOUNDSYSTEM_POSITION_CHANNELS; i++) {
         pChannel   = openal.channel[i];
@@ -3647,6 +3911,25 @@ static bool S_HZM_DuckExempt(const char *name)
     // from the duck, arming nothing. The samples are normalised to -24 LUFS and play 3D with
     // mindist 140, so distance and the mix still place them under the score.
     if (strstr(name, "coop_memory/")) {
+        return true;
+    }
+    // HZM coop [user 2026-09-04] the Omaha underwater heartbeat - "heart rate should play
+    // repeatedly until we are out of the water". It loops for the whole ramp-drop beat, and
+    // coop_rampAudioCut holds s_sfxduck at 0.05 across that beat, so without this it plays at five
+    // percent and does not exist. Same failure as coop_memory/ above and as bug-2298.
+    //
+    // IT HAS TO BE HERE AND NOT IN S_HZM_CueTier, for two independent reasons. First, a cue tier
+    // physically cannot exempt it: set_gain computes cueTier only `if (!bMusic && !bLoop && pSfx)`,
+    // and this channel IS a loop, so its tier is always 0. Second, a tier also arms the sidechain,
+    // and a heart re-striking every 1.2 seconds would pump the music and the underwater wash under
+    // it for the entire sequence - the same thing the user rejected for the remembered voices.
+    if (strstr(name, "coop_heart/")) {
+        return true;
+    }
+    // ...and the swim, for the same reason and in the same beat: one swoosh per stroke, six
+    // strokes, all of them inside the same s_sfxduck 0.05 window. Not a cue tier - six sidechain
+    // arms in twelve seconds would pump the music under the whole swim.
+    if (strstr(name, "coop_swim/")) {
         return true;
     }
     return false;

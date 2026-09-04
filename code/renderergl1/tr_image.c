@@ -1596,14 +1596,79 @@ static void LoadDDS(const char* name, byte** pic, int* width, int* height, qbool
 		numMips = 1;
 	}
 
+	//
+	// HZM coop [2026-09-04] SIZE THE BUFFER FROM THE IMAGE, NEVER FROM pitchOrFirstMipSize.
+	//
+	// That field is a UNION - with _DDSFLAGS_PITCH (0x8) it is BYTES PER SCANLINE, with
+	// _DDSFLAGS_FIRSTMIPSIZE (0x80000) it is the whole first mip. Both constants are #defined a few
+	// hundred lines above and neither was ever tested: the old code just took the field and
+	// multiplied it by intSize. On a DDS written with the pitch flag that allocates a small fraction
+	// of the real chain, and UploadCompressed - which advances `offset` per mip with no bound - then
+	// walks off the end and hands the pointer to the driver.
+	//
+	// That is a REPORTED CRASH, not a theoretical one: a player's minidump on 1.5.0 loading m3l1a
+	// faults 0xC0000005 READ inside nvoglv64.dll with UploadCompressed+0x210 and R_CreateImageOld on
+	// the stack. It is content-dependent, which is why it hits some installs and not others.
+	//
+	// A DXT chain's size is fully determined by width, height, format and mip count, so compute it -
+	// and count only the mips whose bytes are ACTUALLY PRESENT in the file. numMips is then reported
+	// as what really fits, which is the invariant UploadCompressed's `i < iMipmapsAvailable` advance
+	// relies on. A truncated or mislabelled file now loses its tail mips instead of crashing.
+	// intSize is 2 for DXT1 and 4 for DXT3/DXT5, so intSize * 4 is exactly the DXT block size.
+	//
+	{
+		int iBlockSize = intSize * 4;
+		int iAvail     = len - (int)(4 + sizeof(ddsHeader));
+		int iMipW      = *width;
+		int iMipH      = *height;
+		int iFit       = 0;
+		int m;
+
+		if (iAvail < 0) {
+			iAvail = 0;
+		}
+
+		size = 0;
+		for (m = 0; m < numMips; m++) {
+			int bw = (iMipW + 3) / 4;
+			int bh = (iMipH + 3) / 4;
+			int mipSize;
+
+			if (bw < 1) { bw = 1; }
+			if (bh < 1) { bh = 1; }
+			mipSize = iBlockSize * bw * bh;
+
+			if (size + mipSize > iAvail) {
+				break;
+			}
+			size += mipSize;
+			iFit++;
+
+			iMipW >>= 1;
+			iMipH >>= 1;
+			if (!iMipW) { iMipW = 1; }
+			if (!iMipH) { iMipH = 1; }
+		}
+
+		if (iFit < 1) {
+			// not even the top level is present - a truncated or lying header. Refuse it rather
+			// than uploading whatever happens to follow the allocation.
+			ri.Printf(PRINT_ALL, "LoadDDS: %s claims %d mip(s) of %dx%d but holds only %d payload bytes - skipped.\n",
+				name, numMips, *width, *height, iAvail);
+			ri.FS_CloseFile(handle);
+			return;
+		}
+
+		if (iFit < numMips) {
+			ri.Printf(PRINT_DEVELOPER, "LoadDDS: %s declares %d mips but only %d fit in %d bytes - using %d.\n",
+				name, numMips, iFit, iAvail, iFit);
+			numMips = iFit;
+		}
+	}
+
 	*piMipmapsAvailable = numMips;
 	if (*numMipmaps) {
 		*numMipmaps = numMips;
-	}
-
-	size = ddsHeader.pitchOrFirstMipSize;
-	if (*piMipmapsAvailable > 1) {
-		size = intSize * ddsHeader.pitchOrFirstMipSize;
 	}
 
 	*pic = ri.Malloc(size);

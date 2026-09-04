@@ -141,6 +141,36 @@ void CG_EntityEffects(centity_t *cent)
 CG_General
 ==================
 */
+// HZM coop [user 2026-09-04] IS THIS LOOP SOUND SOMEBODY ELSE'S LOCAL SOUND?
+//
+// loopSoundFlags 1 is LOOPSOUND_FLAG_NO_PAN, which S_OPENAL_AddLoopingSound routes to the
+// CHANNEL_FLAG_LOCAL_LISTENER branch (snd_openal_new.cpp:2367, :2508-2520): pan hard-centred, and
+// the distance clamp in the else-branch skipped entirely. That is exactly right for the sound of
+// your OWN body - a heartbeat, laboured breathing, the shellshock wash - and exactly wrong for
+// anyone else's, because loopSound travels in entityState to every client that can see the entity.
+// So without this test every player renders every other player's private body sounds at full
+// volume, dead centre, at any distance.
+//
+// They do not merge, either: duplicate loop sounds only share one channel when bCombine is set, and
+// bCombine is `VectorCompare(vVelocity, vec_zero) == 0` (:2196) evaluated on a velocity that both
+// callers pass as vec3_origin - so it is false for every one of these. Four men glued in the same
+// Higgins boat therefore means four heartbeats stacked in each man's head, not one.
+//
+// NARROW ON PURPOSE - PLAYERS ONLY. Entity::LoopSound (entity.cpp:3348) sets the same flag for any
+// entity whose alias sits on CHAN_LOCAL, and those are world objects everybody is meant to hear;
+// keying on the flag alone would silence them. `number < cgs.maxclients` is the established "is a
+// client entity" test in this codebase (cg_ragdoll.c:2036, :2878).
+qboolean CG_LoopSoundIsForeignLocal(const entityState_t *s1)
+{
+    if (!s1 || !(s1->loopSoundFlags & 1)) {
+        return qfalse;
+    }
+    if (s1->number >= cgs.maxclients) {
+        return qfalse; // a world object on CHAN_LOCAL - everyone hears it
+    }
+    return (s1->number != cg.snap->ps.clientNum) ? qtrue : qfalse;
+}
+
 void CG_General(centity_t *cent)
 {
     refEntity_t    ent;
@@ -150,8 +180,8 @@ void CG_General(centity_t *cent)
 
     s1 = &cent->currentState;
 
-    // add loop sound
-    if (s1->loopSound) {
+    // add loop sound - never another player's private 2D one (CG_LoopSoundIsForeignLocal)
+    if (s1->loopSound && !CG_LoopSoundIsForeignLocal(s1)) {
         cgi.S_AddLoopingSound(
             cent->lerpOrigin,
             vec3_origin,

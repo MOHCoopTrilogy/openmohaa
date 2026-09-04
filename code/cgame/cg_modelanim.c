@@ -1801,8 +1801,11 @@ void CG_ModelAnim(centity_t *cent, qboolean bDoShaderTime)
         sNext = &cent->nextState;
     }
 
-    // add loop sound only if it is not attached
-    if (s1->loopSound && (s1->parent == ENTITYNUM_NONE)) {
+    // add loop sound only if it is not attached, and never another player's private 2D one -
+    // see CG_LoopSoundIsForeignLocal (cg_ents.c). This is the site the Omaha heartbeat runs
+    // through: the body is hidden for the whole beat, and that is fine, because the RF_DONTDRAW
+    // gate is further down at the R_AddRefEntityToScene call - a hidden entity still sounds.
+    if (s1->loopSound && (s1->parent == ENTITYNUM_NONE) && !CG_LoopSoundIsForeignLocal(s1)) {
         cgi.S_AddLoopingSound(
             cent->lerpOrigin,
             vec3_origin,
@@ -2165,7 +2168,7 @@ void CG_ModelAnim(centity_t *cent, qboolean bDoShaderTime)
             }
         }
 
-        if (s1->loopSound) {
+        if (s1->loopSound && !CG_LoopSoundIsForeignLocal(s1)) {
             cgi.S_AddLoopingSound(
                 model.origin,
                 vec3_origin,

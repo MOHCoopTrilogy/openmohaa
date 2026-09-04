@@ -112,6 +112,7 @@ void S_Init(qboolean full_startup)
     // touch it is the very frame the cinematic needs it in.
     Cvar_Get("coop_voxCut", "1", 0);
     Cvar_Get("coop_cueCut", "1", 0);   // [bug-2369] same reasoning, for tier-1 cues
+    Cvar_Get("coop_muffle", "0", 0);   // HZM coop - concussion muffle scale; same eager registration
     s_separation     = Cvar_Get("s_separation", "0.5", CVAR_ARCHIVE);
     s_khz            = Cvar_Get("s_khz", "44", CVAR_ARCHIVE | CVAR_SOUND_LATCH);
     s_loadas8bit     = Cvar_Get("s_loadas8bit", "0", CVAR_ARCHIVE | CVAR_LATCH);
@@ -333,6 +334,18 @@ void S_BeginRegistration()
         cvar_t *pCueCut = Cvar_Get("coop_cueCut", "1", 0);
         if (pCueCut && pCueCut->value < 1.0f) {
             Cvar_Set("coop_cueCut", "1");
+        }
+    }
+
+    // HZM coop [user 2026-09-04] and the concussion muffle. Belt and braces only - the muffle is
+    // already incapable of outliving the duck (it is coop_muffle * (1 - s_sfxduck)^curve, and the
+    // duck is cleared above), and flags 0 means it can never reach a config. This closes the last
+    // gap: a latched value surviving a map change inside one session.
+    {
+        cvar_t *pMuffle = Cvar_Get("coop_muffle", "0", 0);
+        if (pMuffle && pMuffle->value > 0.f) {
+            Com_DPrintf("S_BeginRegistration: clearing a latched coop_muffle (%.2f)\n", pMuffle->value);
+            Cvar_Set("coop_muffle", "0");
         }
     }
 

@@ -4145,7 +4145,11 @@ void ClientGameCommandManager::StopLoopSound(Event* ev)
         return;
     }
 
-    cgi.DPrintf("\n\nClientGameCommandManager::StopLoopSound\n\n");
+    // [user 2026-09-03] REMOVED: an ungated trace print on a routine event. It fired on every
+    // stoploopsound, five console lines at a time (its format string carried two leading and two
+    // trailing newlines), and it named neither the sound nor the entity - so it carried no
+    // diagnostic value while burying the markers a dev session actually needs. 1,150 of them in
+    // one playtest log. The current_centity guard above IS a real error and stays.
     current_centity->tikiLoopSound = (sfxHandle_t)0;
 }
 
