@@ -95,7 +95,11 @@ typedef struct {
 // the parseEntities array must be large enough to hold PACKET_BACKUP frames of
 // entities, so that when a delta compressed message arives from the server
 // it can be un-deltad from the original
-#define	MAX_PARSE_ENTITIES	8192	// HZM 07-20 (bug-934): was 2048 - used as a power-of-two ring (& MASK); with 2048-entity snapshots (GENTITYNUM_BITS 11) the old ring wrapped within one busy snapshot -> CL_GetSnapshot overflow -> session abort at the minefield (detector reveals mines = more snapshot entities). 4 max-size snapshots of headroom.
+// [bug-2283] 8192 -> 16384. This is a power-of-two RING indexed with a mask, and the comment below
+// sizes it at four max-size snapshots of headroom; with snapshots now 4096 entities wide, 8192
+// would be two, and a busy frame would wrap the ring inside a single snapshot - the exact
+// CL_GetSnapshot overflow bug-934 was.
+#define	MAX_PARSE_ENTITIES	16384	// HZM 07-20 (bug-934): was 2048 - used as a power-of-two ring (& MASK); with 2048-entity snapshots (GENTITYNUM_BITS 11) the old ring wrapped within one busy snapshot -> CL_GetSnapshot overflow -> session abort at the minefield (detector reveals mines = more snapshot entities). 4 max-size snapshots of headroom.
 
 extern int g_console_field_width;
 extern int g_console_charWidth;

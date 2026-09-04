@@ -154,6 +154,7 @@ protected:
     void             EventCoopGoreReset(Event *ev);          // HZM coop - gore tier 1: script heal hook
     void             CoopGoreTryGibSkins(int meansofdeath, Entity *inflictor); // HZM coop - gore tier 1e: extreme explosion-death skins (index 3)
     void             EventCoopGoreGibMark(Event *ev);        // HZM coop - gore tier 1e: script mark for scripted blasts
+    void             EventCoopGoreDecapMark(Event *ev);      // HZM coop [user 2026-09-03] - script-forced decapitation (authored set piece)
     void             EventCoopBlastShield(Event *ev);        // HZM coop - bug-1586: mission-critical blast immunity
     void             CoopGoreTryWoundProp(int location, int meansofdeath, const Vector &position); // HZM coop - gore tier 3: wound prop at the hit point (bug-735: entry-point attach)
     void             CoopHeadshotKillFx(const Vector &pos, const Vector &dir); // HZM coop - guaranteed burst+wall-splat on a confirmed headshot kill
@@ -245,6 +246,8 @@ public:
     qboolean          m_bCoopGoreGibMark;      // HZM coop - gore tier 1e: script flagged us inside a scripted blast
     qboolean          m_bCoopBlastShield;      // HZM coop - bug-1586: opt-in immunity to world-attributed blasts
     float             m_fCoopGoreGibMarkTime;  // HZM coop - gore tier 1e: level.time the script mark expires
+    qboolean          m_bCoopGoreDecapForce;   // HZM coop [user 2026-09-03]: a script demanded THIS death take the head off
+    float             m_fCoopGoreDecapForceTime; // HZM coop [user 2026-09-03]: level.time the forced-decap mark expires
     void              CoopGoreHeal(float amount); // HZM coop - gore tier 1: healed -> reduce gore, retier
     Vector            m_vCoopPoolPos;          // HZM coop - gore tier 2: floor point of the growing corpse pool
     Vector            m_vCoopPoolNormal;       // HZM coop - gore tier 2: floor normal of the growing corpse pool

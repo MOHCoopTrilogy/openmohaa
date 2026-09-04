@@ -1178,7 +1178,13 @@ extern	refimport_t		ri;
 #define	MAX_DRAWIMAGES			4096
 #define	MAX_LIGHTMAPS			256
 #define	MAX_SKINS				1024
-#define MAX_SPHERE_LIGHTS		512
+// HZM coop [user 2026-09-01, bug-2283] 512 -> 2048. Nine "Ran out of space in the sphere array"
+// lines fired in the seconds before the Omaha edict crash. This is the per-frame list of
+// spherical lightgrid samples the backend keeps for animated models, so it scales with how many
+// SKELETAL models are on screen at once - and that beach now has ~140 actors plus boats, crates
+// and gore. Running out is not fatal, it silently drops the lighting sphere for the models past
+// the cap, which is a visible pop as men light differently from the man beside them.
+#define MAX_SPHERE_LIGHTS		2048
 
 #define	MAX_DRAWSURFS			0x10000
 #define	MAX_SPRITESURFS			0x8000

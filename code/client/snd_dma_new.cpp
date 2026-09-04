@@ -106,6 +106,12 @@ void S_Init(qboolean full_startup)
     s_musicVolume    = Cvar_Get("s_musicvolume", "0.9", CVAR_ARCHIVE);
     s_ambientVolume  = Cvar_Get("s_ambientvolume", "0.6", CVAR_ARCHIVE);
     s_sfxduck        = Cvar_Get("s_sfxduck", "1", CVAR_ARCHIVE); // HZM coop - effect-channel duck (music exempt)
+    // HZM coop [user 2026-09-02, bug-2318] REGISTERED EAGERLY, not lazily inside set_gain.
+    // Cvar_Command only sets a cvar that already EXISTS, so a server stufftext of "coop_voxCut 0"
+    // would be an unknown command until something had touched it - and the first thing that would
+    // touch it is the very frame the cinematic needs it in.
+    Cvar_Get("coop_voxCut", "1", 0);
+    Cvar_Get("coop_cueCut", "1", 0);   // [bug-2369] same reasoning, for tier-1 cues
     s_separation     = Cvar_Get("s_separation", "0.5", CVAR_ARCHIVE);
     s_khz            = Cvar_Get("s_khz", "44", CVAR_ARCHIVE | CVAR_SOUND_LATCH);
     s_loadas8bit     = Cvar_Get("s_loadas8bit", "0", CVAR_ARCHIVE | CVAR_LATCH);
@@ -291,6 +297,45 @@ S_BeginRegistration
 */
 void S_BeginRegistration()
 {
+    // [user 2026-09-01, bug-2298] A STUCK CINEMATIC DUCK MUST NOT SURVIVE A MAP LOAD.
+    //
+    // s_sfxduck is CVAR_ARCHIVE, and the only thing that restores it is a script thread that fades
+    // it back up at the end of the beat. Any path that kills that thread first - the player dying
+    // mid-fade, a disconnect, a map change, a crash - leaves the duck latched AND WRITES IT TO THE
+    // CONFIG, so every later session starts with the world at whatever fraction it was left on.
+    // That is not hypothetical: G:/mohaa-gl2/home/maintt/configs/omconfig.presweep.cfg was found
+    // carrying `seta s_sfxduck "0.030"`, i.e. a 3% world persisted across restarts.
+    //
+    // A cinematic duck is by definition scoped to one moment, so nothing legitimate can want it to
+    // outlive a level load. Clearing it here makes the whole class self-healing: whatever goes wrong
+    // mid-scene, the next map starts at full volume. The script fade still owns it during play.
+    if (s_sfxduck && s_sfxduck->value < 1.0f) {
+        Com_DPrintf("S_BeginRegistration: clearing a latched s_sfxduck (%.3f) - see bug-2298\n",
+                    s_sfxduck->value);
+        Cvar_Set("s_sfxduck", "1");
+    }
+
+    // [bug-2318] the same self-heal for the dialogue cut. coop_voxCut is bounded and restored on
+    // four separate paths in script, but a crash mid-cinematic must not carry a silenced captain
+    // into the next map. It has flags 0 so it can never reach a config, but it CAN survive a map
+    // change within one session, which is exactly what this closes.
+    {
+        cvar_t *pVoxCut = Cvar_Get("coop_voxCut", "1", 0);
+        if (pVoxCut && pVoxCut->value < 1.0f) {
+            Com_DPrintf("S_BeginRegistration: clearing a latched coop_voxCut (%.2f)\n", pVoxCut->value);
+            Cvar_Set("coop_voxCut", "1");
+        }
+    }
+
+    // [bug-2369] and the cue cut, for the same reason: a crash during the music takeover must not
+    // carry permanently quiet injury and sprint sounds into the next map.
+    {
+        cvar_t *pCueCut = Cvar_Get("coop_cueCut", "1", 0);
+        if (pCueCut && pCueCut->value < 1.0f) {
+            Cvar_Set("coop_cueCut", "1");
+        }
+    }
+
     int i;
 
     Com_Printf("------- Sound Begin Registration -------\n");

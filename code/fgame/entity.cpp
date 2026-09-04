@@ -4466,6 +4466,69 @@ void Entity::AttachEvent(Event *ev)
     }
 }
 
+// HZM coop [2026-09-01, bug-2241] THE RELOAD MAGAZINE'S FINISH.
+//
+// The magazine you see in your left hand during a reload is NOT the gun and NOT the hands mesh: it
+// is a separate networked Animate, spawned by a frame command in the third-person reload alias
+//     models/player/base/anims_smg.txt:14
+//         4  attachmodel models/ammo/thompson_clip.tik tag_weapon_left
+// and drawn in first person because cg_modelanim.c:2030 whitelists tag_weapon_left/right onto the
+// FPS model - the same branch that draws the held gun. (The gun's own Clip surface is nodrawn for
+// exactly the frames the hand model is up, so the two never overlap.)
+//
+// AttachModelEvent copies NOTHING from the parent - no shader, no skin, no surface bits - so the
+// magazine has always rendered stock while the gun wore its finish. That is the whole defect, open
+// since 2026-08-18.
+//
+// The mod's finishes are whole-TIK swaps (thompsonsmg_gold.tik and friends), so the finish is
+// readable straight off the active weapon's model path. Map that to 1..7 and stamp it into the
+// child's per-surface skin bits, which is the same 3-bit bus SurfaceModelEvent already uses for the
+// armory glove (entity.cpp:4363-4378). The clip TIKs carry a matching 8-entry skin list.
+//
+// DELIBERATELY NOT a model swap. RemoveAttachedModelEvent matches by NAME (entity.cpp:4611), and
+// the retail remove command passes the stock string - swap the attach and the magazine welds to the
+// hand for the rest of that life. Keeping the path identical leaves removal, precache and
+// networking untouched.
+static int CoopClipFinishIndex(Entity *parent)
+{
+    static const char *finish[7] = {
+        "_gold", "_chrome", "_blued", "_bloody", "_camo_woodland", "_camo_winter", "_camo_desert"
+    };
+    Sentient   *sent;
+    Weapon     *weap;
+    const char *mdl;
+    size_t      len, flen;
+    int         i;
+
+    if (!parent || !parent->IsSubclassOfSentient()) {
+        return 0;
+    }
+    sent = (Sentient *)parent;
+    weap = sent->GetActiveWeapon(WEAPON_MAIN);
+    if (!weap) {
+        return 0;
+    }
+    mdl = weap->getModel();
+    if (!mdl || !*mdl) {
+        return 0;
+    }
+
+    // match the suffix BEFORE the extension: models/weapons/thompsonsmg_gold.tik -> 1
+    len = strlen(mdl);
+    if (len > 4 && !Q_stricmp(mdl + len - 4, ".tik")) {
+        len -= 4;
+    }
+    for (i = 0; i < 7; i++) {
+        flen = strlen(finish[i]);
+        // longest-match order matters: _camo_winter must not be shadowed by a shorter entry, and
+        // none of these seven is a suffix of another, so a straight scan is safe.
+        if (len >= flen && !Q_stricmpn(mdl + len - flen, finish[i], (int)flen)) {
+            return i + 1;
+        }
+    }
+    return 0;
+}
+
 void Entity::AttachModelEvent(Event *ev)
 {
     Animate    *obj;
@@ -4540,6 +4603,21 @@ void Entity::AttachModelEvent(Event *ev)
     }
 
     obj->setModel(modelname);
+
+    // HZM coop [2026-09-01, bug-2241] carry the gun's finish onto the reload magazine. Scoped to
+    // models/ammo/ so only the ammunition props are touched - every other attachmodel in the game
+    // (helmets, gear, scripted props) keeps skin 0 exactly as before.
+    if (!Q_stricmpn(modelname.c_str(), "models/ammo/", 12)) {
+        int fin = CoopClipFinishIndex(this);
+        if (fin > 0) {
+            // index 0..7 across the 3-bit bus: bits 0-1 here, bit 2 lands at BIT2 (1<<6).
+            byte bits = (byte)((fin & 3) | ((fin & 4) << 4));
+            int  i;
+            for (i = 0; i < MAX_MODEL_SURFACES; i++) {
+                obj->edict->s.surfaces[i] = bits;
+            }
+        }
+    }
 
     tagnum = gi.Tag_NumForName(edict->tiki, bone);
     if (tagnum >= 0) {

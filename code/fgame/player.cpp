@@ -14164,11 +14164,65 @@ void Player::TickCoopProne()
                 }
             }
 
-            // Blocked means genuinely no headroom. The player ASKED to get up, so refusing is correct -
-            // but it must never be permanent, and it is no longer time-based: they can simply press
-            // again, and each press re-runs the honest trace.
+            // Blocked means no headroom WHERE YOU ARE LYING. The player ASKED to get up, so refusing
+            // outright is wrong even though refusing to clip through a wall is right.
+            //
+            // [user 2026-09-01, bug-2247] "still getting stuck in prone a lot". A prone body is 20
+            // units tall and occupies a footprint it could never have STOOD in - under a Higgins ramp,
+            // inside a hedgehog, beneath the lip of the shingle, half under a corpse or a squadmate
+            // (MASK_PLAYERSOLID catches actors too, and Omaha now has a lot of them). You go down
+            // somewhere you fit lying and then there is genuinely nowhere to rise, so every press
+            // re-ran the same honest trace, got the same honest no, and the player was pinned.
+            //
+            // SHUFFLE OUT. Before refusing, look for standing room within one body-width and take it.
+            // Eight compass offsets at two radii, nearest first, each one traced properly from the
+            // current position so the move itself cannot pass through a wall. This is the same thing a
+            // person does - shove sideways and get up - and it cannot teleport: the reachability trace
+            // uses the PRONE hull, and the clearance trace at the candidate uses the crouch hull, so
+            // both the path and the destination have to be genuinely open.
+            //
+            // If nothing within 40 units works, the refusal stands and pressing again re-runs it all.
             if (tr.startsolid || tr.allsolid) {
-                return;
+                static const float kDir[8][2] = {
+                    { 1.0f,  0.0f}, {-1.0f,  0.0f}, { 0.0f,  1.0f}, { 0.0f, -1.0f},
+                    { 0.707f, 0.707f}, {-0.707f, 0.707f}, { 0.707f, -0.707f}, {-0.707f, -0.707f}
+                };
+                static const float kRad[2] = {20.0f, 40.0f};
+                qboolean bMoved = qfalse;
+                int      iRad, iDir;
+
+                for (iRad = 0; iRad < 2 && !bMoved; iRad++) {
+                    for (iDir = 0; iDir < 8 && !bMoved; iDir++) {
+                        Vector  vTry = origin;
+                        trace_t trMove, trFit;
+                        Vector  vFitMaxs = maxs;
+
+                        vTry[0] += kDir[iDir][0] * kRad[iRad];
+                        vTry[1] += kDir[iDir][1] * kRad[iRad];
+
+                        // can the body actually slide there, lying down?
+                        trMove = G_Trace(origin, mins, maxs, vTry, this, MASK_PLAYERSOLID, false,
+                                         "Player::TickCoopProne shuffle");
+                        if (trMove.startsolid || trMove.allsolid || trMove.fraction < 0.99f) {
+                            continue;
+                        }
+
+                        // and is there room to come up to crouch once it is there?
+                        vFitMaxs[2] = 60.0f;
+                        trFit = G_Trace(vTry, mins, vFitMaxs, vTry, this, MASK_PLAYERSOLID, false,
+                                        "Player::TickCoopProne shuffle fit");
+                        if (trFit.startsolid || trFit.allsolid) {
+                            continue;
+                        }
+
+                        setOrigin(vTry);
+                        bMoved = qtrue;
+                    }
+                }
+
+                if (!bMoved) {
+                    return;
+                }
             }
         }
 

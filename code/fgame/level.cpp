@@ -1758,7 +1758,23 @@ gentity_t *Level::AllocEdict(Entity *entity)
         // pressure, each spawn STOMPING the previous occupant with no cleanup. That aliasing was
         // the producer of the entire stale-entity crash family (bugs 914/915/917/919/920/924/925).
         // The wire cannot address entities >= ENTITYNUM_WORLD regardless of the cvar (GENTITYNUM_BITS wide).
-        if (i >= ENTITYNUM_WORLD || i == globals.max_entities - 2.0f) {
+        // [user 2026-09-01, bug-2293] `>=` ON BOTH, AND AGAINST THE POOL, NOT JUST THE PROTOCOL.
+        //
+        // This test used to read `i >= ENTITYNUM_WORLD || i == globals.max_entities - 2.0f`, and the
+        // second half is an EXACT equality against a ceiling the loop can step straight past. It only
+        // ever worked because the first half caught everything first: at 11 bits ENTITYNUM_WORLD is
+        // 2046 and the pool was 2048, so `i >= 2046` fired and you got the clean ERR_DROP below.
+        //
+        // At 12 bits ENTITYNUM_WORLD is 4094, so for a 2048-entity pool the first half can NEVER fire,
+        // and the second half only fires if num_entities lands on exactly 2046. Miss it by one and the
+        // whole guard is skipped, and we fall through to LL_Remove() on &g_entities[num_entities] - a
+        // slot that was never on the free list, whose next/prev are NULL. That is a null deref inside
+        // AllocEdict, i.e. a hard crash on map load where the correct behaviour is a clean "no free
+        // edicts" drop. It is the same defect shape as bug-926: a ceiling test that was only ever
+        // correct because of a coincidence between two constants.
+        //
+        // Both halves are now `>=`, and the pool half is integer. Whichever ceiling is lower binds.
+        if (i >= ENTITYNUM_WORLD || i >= globals.max_entities - 2) {
             // Try one more time before failing, relax timing completely
 
             edict = &g_entities[game.maxclients];
@@ -1769,7 +1785,7 @@ gentity_t *Level::AllocEdict(Entity *entity)
                 }
             }
 
-            if (i >= ENTITYNUM_WORLD || i == globals.max_entities - 2.0f) {
+            if (i >= ENTITYNUM_WORLD || i >= globals.max_entities - 2) {
                 gi.Error(ERR_DROP, "Level::AllocEdict: no free edicts");
             }
         }

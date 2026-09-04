@@ -1400,6 +1400,63 @@ void CG_DrawSpectatorView()
     }
 }
 
+// [user 2026-09-03] CINEMATIC CROSSHAIR SUPPRESSION - a NON-ARCHIVED, SELF-EXPIRING hold.
+//
+// WHAT IS DELIBERATELY NOT DONE. ui_crosshair (cg_main.c) and cg_crosshair are BOTH CVAR_ARCHIVE -
+// the player's own saved preference, and CVAR_ARCHIVE is exactly what Cvar_WriteVariables persists.
+// A scene that wrote one and then failed to restore it - death, disconnect, map change, a Script
+// Error that skipped the restore statement - would latch his crosshair off in his config FOREVER.
+// That is bug-2298's shape, so neither is written.
+//
+// WHAT IS DONE. The server pokes coop_cineHud with a HOLD IN SECONDS. Three properties, in the
+// order they matter:
+//   1. flags 0 - it can never reach a config, because Cvar_WriteVariables writes only ARCHIVE.
+//   2. it EXPIRES. The value is consumed into a deadline and the cvar cleared, so if the server
+//      stops re-arming for ANY reason - the script thread dies, the map changes, the player
+//      disconnects mid-beat - the crosshair returns on its own inside the hold. The script's
+//      explicit release is a LATENCY fix, not the thing that makes this safe.
+//   3. the hold is CLAMPED here, so no value on the wire can buy a long hide.
+// An EMPTY string is the idle/consumed state; any non-empty value is a pending message, and "0"
+// is an explicit immediate release. cg_main.c's hzmClearFx list writes "0" on every CG_Init, so
+// a fresh connect or map load always releases on its first drawn frame.
+static int s_coopCineHudUntil = 0;
+
+static qboolean CG_CoopCineHudActive(void)
+{
+    static cvar_t *pCine = NULL;
+
+    if (!pCine) {
+        pCine = cgi.Cvar_Get("coop_cineHud", "0", 0);
+    }
+
+    if (pCine->string[0]) {
+        float hold = pCine->value;
+
+        if (hold > 8.0f) {
+            hold = 8.0f;    // a hostile or garbage value cannot buy a long hide
+        }
+        if (hold <= 0.0f) {
+            s_coopCineHudUntil = 0;
+        } else {
+            s_coopCineHudUntil = cg.time + (int)(hold * 1000.0f);
+        }
+        cgi.Cvar_Set("coop_cineHud", "");   // consumed, as coop_dizzy / coop_lensSplash are
+    }
+
+    if (!s_coopCineHudUntil) {
+        return qfalse;
+    }
+
+    // cg.time runs BACKWARDS across a map load, and this static outlives one. Treat any backward
+    // jump larger than the clamp as an expiry, so a stale deadline can never outlast the level it
+    // was set in even if the hzmClearFx write above were somehow missed.
+    if (cg.time >= s_coopCineHudUntil || cg.time < s_coopCineHudUntil - 9000) {
+        s_coopCineHudUntil = 0;
+        return qfalse;
+    }
+    return qtrue;
+}
+
 // [2026-08-28] Hit-marker state. Declared HERE rather than beside CG_DrawHitMarker because
 // CG_DrawCrosshair - which is defined above it - writes the aim point every frame.
 static float s_coopAimX = -1.0f, s_coopAimY = -1.0f;
@@ -2671,9 +2728,16 @@ void CG_Draw2D(void)
     CG_UpdateAttackerDisplay();
     CG_DrawVote();
     CG_DrawInstantMessageMenu();
-    CG_DrawCrosshair();
-    CG_DrawBracePip();          // HZM coop - gun-brace indicator, drawn over the crosshair
-    CG_DrawHitMarker();         // HZM coop - hit/kill confirmation at the true aim point
+    // HZM coop [user 2026-09-03] "ensure crosshair is off during the full intro and cinematic".
+    // All three go together: the brace pip and the hit marker are drawn AT the crosshair's aim
+    // point and read as part of it. The accessor must be called every frame regardless of the
+    // outcome - it is what consumes the cvar and ages the deadline - so it stays the condition,
+    // never something short-circuited away.
+    if (!CG_CoopCineHudActive()) {
+        CG_DrawCrosshair();
+        CG_DrawBracePip();      // HZM coop - gun-brace indicator, drawn over the crosshair
+        CG_DrawHitMarker();     // HZM coop - hit/kill confirmation at the true aim point
+    }
     CG_DrawDamageIndicator();
     CG_DrawCoopIcons();
     CG_DrawMGHeat();

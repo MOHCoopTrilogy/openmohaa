@@ -193,10 +193,36 @@ void G_AllocGameData(void)
     // initialize all entities for this game
     game.maxentities = maxentities->integer;
 
-    g_entities = (gentity_t *)gi.Malloc(game.maxentities * sizeof(g_entities[0]));
+    // HZM coop [user 2026-09-01, bug-2291] THE POOL BUFFER FOLLOWS THE PROTOCOL, NOT THE CVAR.
+    //
+    // This one line is why raising GENTITYNUM_BITS to 12 crashed on map load, twice (bug-2283,
+    // reverted by bug-2285 with the cause unknown, then again today). The world entity does not live
+    // at the top of the POOL - it lives at a fixed PROTOCOL index, ENTITYNUM_WORLD == MAX_GENTITIES-2,
+    // and g_spawn.cpp:1253 writes g_entities[ENTITYNUM_WORLD] unconditionally during every spawn.
+    // Raise GENTITYNUM_BITS to 12 and that index becomes 4094, while every shipped config pins
+    // `maxentities 2048` - so the write lands 2046 slots past the end of this malloc. Access
+    // violation during spawn, no ERR_DROP, no console line. SV_GentityNum() indexes the same buffer
+    // from the server side and would have done the same.
+    //
+    // The note at q_shared.h:1689 asserted the opposite - that "a 2048-slot pool under a 4096-wide
+    // protocol does not over-read". That was wrong, and it was written by me; it is corrected there
+    // now. The lesson worth keeping is that the pool size and the protocol width are two different
+    // numbers, and anything indexed by an ENTITYNUM_* constant is sized by the PROTOCOL one.
+    //
+    // So: always allocate the full protocol range. maxentities still governs how many edicts the
+    // allocator hands out (globals.max_entities below is untouched), so lowering it still lowers the
+    // budget - it just can no longer make a fixed protocol index point outside the buffer. The extra
+    // slack when maxentities < MAX_GENTITIES is 2048 gentity_t of never-touched memory, which is the
+    // cheapest possible price for making this class of crash structurally impossible.
+    {
+        int allocEntities = game.maxentities;
+        if (allocEntities < MAX_GENTITIES) {
+            allocEntities = MAX_GENTITIES;
+        }
+        g_entities = (gentity_t *)gi.Malloc(allocEntities * sizeof(g_entities[0]));
+        memset(g_entities, 0, allocEntities * sizeof(g_entities[0]));
+    }
 
-    // clear out the entities
-    memset(g_entities, 0, game.maxentities * sizeof(g_entities[0]));
     globals.gentities    = g_entities;
     globals.max_entities = game.maxentities;
 

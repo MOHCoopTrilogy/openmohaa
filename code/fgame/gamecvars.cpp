@@ -320,7 +320,10 @@ void CVAR_Init(void)
     // ever overrides maxentities, so a fresh boot silently mallocs g_entities[] at 1024 slots
     // while Level::AllocEdict's free-slot scan can walk up to ENTITYNUM_WORLD (2046) - an
     // out-of-bounds heap write once the pool is busy enough to need slots past 1024.
-    maxentities = gi.Cvar_Get("maxentities", "2048", CVAR_LATCH);
+    // [bug-2283] 2048 -> 4096 with GENTITYNUM_BITS. This is the number of slots actually malloc'd;
+    // leaving it behind the wire width is what bug-1167 was - AllocEdict scans up to ENTITYNUM_WORLD
+    // and writes past the end of a smaller array.
+    maxentities = gi.Cvar_Get("maxentities", "4096", CVAR_LATCH);
 
     password           = gi.Cvar_Get("password", "", CVAR_USERINFO);
     sv_privatePassword = gi.Cvar_Get("sv_privatePassword", "", CVAR_TEMP);

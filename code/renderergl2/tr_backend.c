@@ -1427,6 +1427,7 @@ the world was drawn. Latching here removes that entire class of divergence.
 =============
 */
 globalFogState_t rb_globalFog;
+viewProjLatch_t  rb_viewProj;
 
 void RB_SetupGlobalFog( void ) {
 	const float	*m;
@@ -1437,6 +1438,7 @@ void RB_SetupGlobalFog( void ) {
 	// disarm the world pass, and it stops a stale latch leaking into a worldless frame.
 	if ( backEnd.refdef.rdflags & RDF_NOWORLDMODEL ) {
 		rb_globalFog.active = qfalse;
+		rb_viewProj.valid   = qfalse;
 		return;
 	}
 
@@ -1446,6 +1448,29 @@ void RB_SetupGlobalFog( void ) {
 	if ( backEnd.viewParms.isPortal || backEnd.viewParms.isPortalSky
 		|| ( backEnd.viewParms.flags & (VPF_SHADOWMAP | VPF_DEPTHSHADOW) ) ) {
 		return;
+	}
+
+	// HZM [UNDERWATER VOLUME v3] Unconditional projection latch. This sits ABOVE every
+	// fog-specific test on purpose - see viewProjLatch_t in tr_local.h. It cannot alter fog
+	// behaviour: it writes only rb_viewProj and returns nothing. It sits BELOW the portal /
+	// sky-portal / shadow guard on purpose too, so a sub-view can never supply the matrix.
+	{
+		const float *pm = backEnd.viewParms.projectionMatrix;
+
+		// same well-formed-perspective test the fog uses below: anything else (ortho, an
+		// oblique portal matrix, an uninitialised one) cannot be inverted the way the shader
+		// does, so refuse rather than hand out a wrong distance
+		if ( pm[14] < 0.0f && pm[10] < -1.0f ) {
+			rb_viewProj.projMat10 = pm[10];
+			rb_viewProj.projMat14 = pm[14];
+			rb_viewProj.projMat0  = pm[0];
+			rb_viewProj.projMat5  = pm[5];
+			rb_viewProj.zNear     = pm[14] / ( pm[10] - 1.0f );
+			rb_viewProj.zFar      = pm[14] / ( pm[10] + 1.0f );
+			rb_viewProj.valid     = qtrue;
+		} else {
+			rb_viewProj.valid     = qfalse;
+		}
 	}
 
 	rb_globalFog.active = qfalse;

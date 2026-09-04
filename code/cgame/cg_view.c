@@ -173,6 +173,10 @@ static qboolean CoopWeaponFeelOn(void)
 // the translation budget exists to prevent.
 static float    s_fRollBase = 0.0f;
 static qboolean s_bRollBase = qfalse;
+// [2026-09-01] the roll channel's answer to s_vFeelExempt: AUTHORED roll, registered here so
+// the +-6 delta clamp below can tell a body rolling over from six jitter layers peaking
+// together. Cleared beside s_fRollBase, so it can never be stale on a frame the clamp runs.
+static float    s_fRollExempt = 0.0f;
 static vec3_t   s_vFeelExempt = {0, 0, 0};
 static vec3_t   s_vFeelBase = {0, 0, 0};
 // Surface-visibility probe published by cg_modelanim.c at submit time: 2 bits per surface
@@ -192,6 +196,212 @@ static float s_shakeAmp   = 0.0f;   // handling-tremor AMPLITUDE, eased. The osc
                                     // is stateless - computed at apply time. See bug note below.
 static float s_reloadLift = 0.0f;   // eased pitch, degrees; advanced once per frame
 static float s_reloadRoll = 0.0f;   // roll companion, eased separately
+
+// HZM coop [user 2026-09-01] PRONE ROLL BANK - "when rolling left and right when prone in first
+// person, the camera should actually rotate as if you were actually rolling left or right in prone."
+//
+// Driven by the ANIMATION THE BODY IS ACTUALLY PLAYING, never by the lean buttons. That choice is
+// the whole design, and it was forced:
+//
+//   * MIRRORING THE INPUT WOULD LIE. The server gates the evasive roll on m_bCoopSupine,
+//     m_fCoopSupineFlip and m_fCoopProneExitAt (fgame/player.cpp:14043-14045) and not one of the
+//     three is ever written into client->ps. A client that watched last_ucmd's lean edge would
+//     bank while supine, during a supine flip window and during an armed deferred prone exit -
+//     three cases where the body does not roll at all and the camera would be the only thing
+//     moving.
+//   * PUBLISHING THE STATE IS NOT CHEAP. net_pm_flags is a hard 16-bit netfield in BOTH protocol
+//     tables (qcommon/msg.cpp:3373, :3435) and bits 0..15 are all allocated (fgame/bg_public.h
+//     :256-276), so a new pmove bit is a wire-format change - exe+cgame+game shipped together.
+//     cg_predict.c:645 records this project hitting that exact wall once already, for cover.
+//   * READING THE ANIMATION CANNOT DISAGREE WITH THE BODY, and costs nothing on the wire: the
+//     local player's own entity is always in his own snapshot (server/sv_snapshot.c:1137) and
+//     frameInfo index/time/weight are netfields under both protocols. cgame-only change.
+//
+// The clips are coop_prone_rolll / coop_prone_rollr (models/player/base/anims_shared.txt:790-791),
+// played by the legs states PRONE_ROLL_LEFT / PRONE_ROLL_RIGHT (coop_mod/player_legs.st:2577-2613).
+// They are ALSO the supine flip's clips (SUPINE_FLIP_IN_L/R and SUPINE_FLIP_OUT_L/R, player_legs.st
+// :2399-2467) and that is deliberately NOT distinguished here: the flip is the body rolling over
+// too, so a camera that banks through it is telling the truth. It could not be distinguished
+// anyway - supine is invisible to the client, see above.
+//
+// LENGTH IS READ, NOT ASSUMED. rolll is 9 frames and rollr is 10 (the note at fgame/player.cpp
+// :14650), so a hardcoded 0.9s - which is what the server's own roll window uses for BOTH
+// directions at player.cpp:14052 - would run ~11% fast on a right roll and snap the camera level
+// while the body was still turning. cgi.Anim_Time returns the real per-clip length, so the bank
+// ends exactly when the body does, in both directions, with no table and nothing to keep in sync.
+//
+// NO STATE, ON PURPOSE. Direction comes from WHICH clip is playing, the envelope from that clip's
+// own phase, and the amplitude from that clip's own blend weight - so the ease in and the ease
+// back to level ARE the engine's crossblend. The frame the clip stops playing this returns 0.0
+// and the camera is level. There is nothing that can get stuck, which is bug-1984's rule ("never
+// write a periodic term into the state variable an exponential ease is tracking") satisfied by
+// having no eased state at all rather than by clearing it on every early return.
+//
+// SIGN. Leaning LEFT drives fLeanAngle negative (fgame/bg_pmove.cpp:1451-1456) and the lean roll
+// is `refdefViewAngles[2] += fLeanAngle * leanRoll`, so left is NEGATIVE roll. The strafe bank
+// below agrees (moving right gives a positive side dot and a positive tgtRoll). Rolling left
+// therefore banks negative, matching the two roll terms that already ship.
+static float CoopProneRollBank(dtiki_t *tiki, const frameInfo_t *fi)
+{
+    static cvar_t *pBank = NULL, *pAds = NULL, *pPeak = NULL;
+    float          fBest = 0.0f; // best blend weight seen
+    float          fBank, fLen, p, pk, e;
+    int            iBest = -1;
+    int            iDir  = 0;
+    int            i;
+
+    if (!pBank) {
+        pBank = cgi.Cvar_Get("coop_proneRollBank", "14", CVAR_ARCHIVE);      // peak degrees
+        pAds  = cgi.Cvar_Get("coop_proneRollBankAds", "0.35", CVAR_ARCHIVE); // scalar under sights
+        pPeak = cgi.Cvar_Get("coop_proneRollBankPeak", "0.4", CVAR_ARCHIVE); // phase of the peak
+    }
+    if (!tiki || !fi || !cg.snap || pBank->value == 0.0f || CoopCamMotion() <= 0.0f) {
+        return 0.0f;
+    }
+
+    // Pick the DOMINANT slot rather than assuming one. The legs animation lives in frameInfo 0/1
+    // and the engine flips between the two on every crossblend (m_iPartSlot[slot] ^= 1,
+    // fgame/player_animation.cpp:98), so "slot 0" is only right half the time, and mid-blend both
+    // slots carry something. Same scan cg_ragdoll.c:2769-2779 does.
+    //
+    // Matched BY NAME with Anim_NameForNum, not by caching an index from Anim_NumForName: the
+    // latter picks a RANDOM member of an aliased group and mutates TAF_AUTOSTEPS on the way
+    // (tiki/tiki_anim.cpp:112-172), which is not something a per-frame camera read should do.
+    // Anim_NameForNum is a bounds-checked, NULL-safe table read (tiki_anim.cpp:66-79), so a model
+    // whose skin never included anims_shared.txt simply never matches and never banks.
+    for (i = 0; i < MAX_FRAMEINFOS; i++) {
+        const char *nm;
+
+        if (fi[i].weight <= 0.0f || fi[i].weight <= fBest) {
+            continue;
+        }
+        nm = cgi.Anim_NameForNum(tiki, fi[i].index);
+        if (!nm) {
+            continue;
+        }
+        if (!Q_stricmp(nm, "coop_prone_rolll")) {
+            fBest = fi[i].weight;
+            iBest = i;
+            iDir  = -1;
+        } else if (!Q_stricmp(nm, "coop_prone_rollr")) {
+            fBest = fi[i].weight;
+            iBest = i;
+            iDir  = 1;
+        }
+    }
+    if (iBest < 0) {
+        return 0.0f;
+    }
+
+    fLen = cgi.Anim_Time(tiki, fi[iBest].index);
+    if (fLen <= 0.001f) {
+        return 0.0f; // unloaded or delta-driven with no frames - do not divide by it
+    }
+    p = fi[iBest].time / fLen;
+    if (p < 0.0f) {
+        p = 0.0f;
+    } else if (p > 1.0f) {
+        p = 1.0f;
+    }
+
+    // ENVELOPE: throw out fast, settle back slow. A symmetric sine peaks at the halfway point and
+    // reads as a wobble; a real roll is a shove and a recovery. Both halves are quarter-cosines so
+    // the slope is zero at 0, at the peak and at 1 - the camera leaves level and returns to level
+    // with no corner at either end, and the shape is recomputed from scratch every frame rather
+    // than integrated, so a frame hitch cannot leave it displaced.
+    pk = pPeak->value;
+    if (pk < 0.05f) {
+        pk = 0.05f;
+    } else if (pk > 0.95f) {
+        pk = 0.95f;
+    }
+    if (p < pk) {
+        e = (float)sin(0.5 * M_PI * (p / pk));
+    } else {
+        e = (float)cos(0.5 * M_PI * ((p - pk) / (1.0f - pk)));
+    }
+
+    // The blend weight IS the ease. It ramps up over the crossblend into the roll state and back
+    // down over the crossblend out - including the early exit the right-hand roll actually takes,
+    // where player_legs.st:2607-2611 leaves PRONE_ROLL_RIGHT on !COOP_PRONE_ROLLL/R at the server's
+    // 0.9s while the clip still has 0.1s to run. Riding the weight means that ends smoothly
+    // instead of cutting.
+    fBank = (float)iDir * pBank->value * e * fBest;
+
+    // Under sights the world rolls beneath a level sight picture - the exact complaint that made
+    // cg_adsLeanRoll default to 0 in the lean block below, and that made CG_ApplyReloadFeel zero
+    // its roll entirely while aiming. Damp hard. Scoped is worse than damped-worthy: the zoom
+    // overlay is a screen-space quad, so ANY roll under it reads as a rendering fault rather than
+    // as the body moving. Zero, not scaled.
+    if (cg.snap->ps.stats[STAT_INZOOM]) {
+        fBank = 0.0f; // NOT an early return - the probe below must still see the zoomed frames,
+                      // otherwise "no bank while scoped" and "the clip never matched at all" print
+                      // identically and the probe cannot tell them apart.
+    } else if (CG_AimingDownSights()) {
+        fBank *= pAds->value;
+    }
+
+    fBank *= CoopCamMotion(); // one master knob; 0 restores a perfectly rigid camera
+
+    // This term is EXEMPT from the +-6 delta budget by design, which makes it the one roll
+    // contributor with nothing above it. Give it its own ceiling so a mistyped cvar cannot invert
+    // the horizon.
+    if (fBank > 25.0f) {
+        fBank = 25.0f;
+    } else if (fBank < -25.0f) {
+        fBank = -25.0f;
+    }
+
+    // PROBE (coop_proneRollDebug 1 = one line per roll, 2 = one line per frame). Machine-parseable
+    // ^~^~^ prefix, per the project convention, so a dedicated-server log can be diffed instead of
+    // a human being asked to judge a camera by feel. It answers the three questions this feature
+    // cannot answer by reading source:
+    //
+    //   * did the clip name resolve at all on THIS player model - the one way the whole feature can
+    //     be silently dead is a skin whose tik never included anims_shared.txt, and then `nm` never
+    //     matches and this never prints,
+    //   * what cgi.Anim_Time actually reports for each direction - which settles empirically whether
+    //     rolll/rollr really are 0.9s/1.0s (the claim at fgame/player.cpp:14650 is a code comment,
+    //     not a measurement) and therefore whether the server's flat 0.9s window at player.cpp:14052
+    //     truly cuts the right-hand roll 10% early,
+    //   * what peak degrees the shipped envelope actually reaches, which is the number
+    //     coop_proneRollBank has to be tuned against.
+    //
+    // The statics here are PRINT-ONLY. They are never read back into fBank - the bank stays a pure
+    // function of the clip - so this cannot become bug-1984's "periodic term written into an eased
+    // state" by a later edit that only touches the probe.
+    {
+        static cvar_t *pDbg = NULL;
+        static int     s_iDbgIdx  = -1;   // index the last printed roll was playing
+        static float   s_fDbgPeak = 0.0f; // largest |bank| seen during it
+
+        if (!pDbg) { pDbg = cgi.Cvar_Get("coop_proneRollDebug", "0", 0); } // never archive (TRAPS T7)
+        if (pDbg->integer) {
+            float fAbs = (fBank < 0.0f) ? -fBank : fBank;
+
+            if (fi[iBest].index != s_iDbgIdx) {
+                s_iDbgIdx  = fi[iBest].index;
+                s_fDbgPeak = 0.0f;
+                cgi.Printf("^~^~^ PRONEROLL start t=%d anim='%s' idx=%d dir=%d len=%.3f\n",
+                           cg.time, cgi.Anim_NameForNum(tiki, fi[iBest].index), fi[iBest].index,
+                           iDir, fLen);
+            }
+            if (fAbs > s_fDbgPeak) {
+                s_fDbgPeak = fAbs;
+                if (pDbg->integer < 2) {
+                    cgi.Printf("^~^~^ PRONEROLL peak t=%d p=%.3f wt=%.3f bank=%.2f\n",
+                               cg.time, p, fBest, fBank);
+                }
+            }
+            if (pDbg->integer >= 2) {
+                cgi.Printf("^~^~^ PRONEROLL t=%d p=%.3f e=%.3f wt=%.3f bank=%.2f zoom=%d ads=%d\n",
+                           cg.time, p, e, fBest, fBank, cg.snap->ps.stats[STAT_INZOOM] ? 1 : 0,
+                           CG_AimingDownSights() ? 1 : 0);
+            }
+        }
+    }
+    return fBank;
+}
 
 // HZM coop [user 2026-08-20] DYNAMIC RELOAD FEEL. v1 timed the entire camera excursion off a
 // hardcoded 900ms while the viewmodel reload clips actually run 0.63s (shotgun fill) to 4.80s
@@ -1901,8 +2111,9 @@ void CG_OffsetFirstPersonView(refEntity_t *pREnt, qboolean bUseWorldPosition)
         VectorCopy(pREnt->origin, s_vFeelBase);
         VectorClear(s_vFeelExempt);
         s_bFeelBase = qtrue;
-        s_fRollBase = cg.refdefViewAngles[2];
-        s_bRollBase = qtrue;
+        s_fRollBase   = cg.refdefViewAngles[2];
+        s_fRollExempt = 0.0f;
+        s_bRollBase   = qtrue;
 
         // HZM coop - ADS SWAY + RECOIL. Both are applied to the view weapon (hands + gun) ONLY - they move
         // the weapon model in view space, NOT the actual aim/bullet direction, so they're immersion-only and
@@ -3756,14 +3967,68 @@ void CG_OffsetFirstPersonView(refEntity_t *pREnt, qboolean bUseWorldPosition)
         VectorAdd(s_vFeelBase, vFeel, pREnt->origin);
         s_bFeelBase = qfalse;
     }
-    if (s_bRollBase) {
-        float dRoll = cg.refdefViewAngles[2] - s_fRollBase;
-        if (dRoll > 6.0f) {
-            cg.refdefViewAngles[2] = s_fRollBase + 6.0f;
-        } else if (dRoll < -6.0f) {
-            cg.refdefViewAngles[2] = s_fRollBase - 6.0f;
+    // HZM coop [user 2026-09-01] PRONE ROLL BANK, APPLY SITE. The bank itself is computed by
+    // CoopProneRollBank() at the top of this file, from the roll clip the BODY is actually playing -
+    // see the long note there for why it is not mirrored from the lean buttons.
+    //
+    // APPLIED HERE, between the roll-base capture (~1900 lines up) and the +/-6 delta clamp
+    // immediately below, and registered in s_fRollExempt so the clamp treats it as an authored pose.
+    // Anywhere else is wrong: after the clamp it would escape the budget the way the strafe bank
+    // does, and at the CG_CalcViewValues tail the camera pitch is already baked into the ARMS bone
+    // controller, so the iron sights would follow the lie (the reason the reload hook lives here).
+    // A write here reaches only the camera, because cg_modelanim.c:2675 rebuilds cg.refdef.viewaxis
+    // from these angles the moment this function returns.
+    //
+    // GATES. Most are satisfied by the CALL SITE rather than re-tested: cg_modelanim.c:2670-2676
+    // calls this function only when NOT third person - which covers the chase camera, cover-3P, the
+    // ADS shoulder stage and spectate-follow, all of which route through bThirdPerson - only outside
+    // a camera view, and only while alive. bUseWorldPosition is the corpse path, and it ends by
+    // overwriting all three angles from the head bone anyway. Left to test here: a turret (whose
+    // camera the server owns, and where PMF_TURRET can keep bThirdPerson false), and DBNO - which
+    // can legitimately BE first person, and whose camera is already deliberately woozy at
+    // coop_dbnoSwayMult 1.6 from a viewheight that once put the eye under the map.
+    if (!bUseWorldPosition && cg.snap && cg.snap->ps.stats[STAT_HEALTH] > 0
+        && !(cg.snap->ps.pm_flags
+             & (PMF_SPECTATING | PMF_INTERMISSION | PMF_CAMERA_VIEW | PMF_TURRET | PMF_FROZEN
+                | PMF_LEVELEXIT))) {
+        static cvar_t *pDbnoV = NULL;
+
+        if (!pDbnoV) {
+            pDbnoV = cgi.Cvar_Get("coop_dbnoView", "0", 0); // never archived - bug-1202
         }
-        s_bRollBase = qfalse;
+        if (!pDbnoV->integer) {
+            // frameInfo from the refEntity, not from currentState: CG_InterpolateAnimParms
+            // (cg_modelanim.c:1967) has already interpolated it between snapshots, so the phase is
+            // smooth at any snapshot rate instead of stepping 10-20 times a second.
+            //
+            // ...but the TIKI is the function's own `tiki`, resolved at the top of this function
+            // from cgs.model_draw[modelindex] - NOT pREnt->tiki. In first person cg_modelanim.c:2432
+            // has already swapped pREnt->tiki to <skin>_fps.tik, whose anim indices do not
+            // correspond, while frameInfo still carries WORLD-model indices from the interpolation
+            // that ran before the swap. Reading the name against the fps tiki would match the wrong
+            // clip or none at all.
+            // pREnt is not null-checked because it CANNOT be null here - this function has already
+            // dereferenced it unconditionally 2300 lines up (pREnt->origin, pREnt->axis). The
+            // fallback that used to sit here read pCent->currentState.frameInfo, which is the
+            // UN-interpolated state and would have stepped the phase at snapshot rate; a dead
+            // branch that silently degrades the thing it is guarding is worse than no branch.
+            float fBank = CoopProneRollBank(tiki, pREnt->frameInfo);
+
+            cg.refdefViewAngles[2] += fBank;
+            s_fRollExempt          += fBank;
+        }
+    }
+    if (s_bRollBase) {
+        // subtract the AUTHORED roll before clamping and add it back after - exactly what the
+        // translation budget does with s_vFeelExempt twenty lines up, and for the same reason.
+        float dRoll = cg.refdefViewAngles[2] - s_fRollBase - s_fRollExempt;
+        if (dRoll > 6.0f) {
+            cg.refdefViewAngles[2] = s_fRollBase + s_fRollExempt + 6.0f;
+        } else if (dRoll < -6.0f) {
+            cg.refdefViewAngles[2] = s_fRollBase + s_fRollExempt - 6.0f;
+        }
+        s_bRollBase   = qfalse;
+        s_fRollExempt = 0.0f;
     }
 
     // HZM coop [user 2026-08-21] CAMERA MOTION - "momentum and acceleration to movement would make
@@ -4634,6 +4899,52 @@ static coopPrecipType_t CG_CoopPrecipType(void)
     return (cg.rain.speed > 800.0f) ? PRECIP_RAIN : PRECIP_SNOW;
 }
 
+// HZM coop [user 2026-09-01] LENS SPLASH - see the block in CG_CalcFov that consumes this.
+//
+// One float, raised by whoever saw the splash and decayed here. Deliberately NOT a cvar internally:
+// the cvar is only the server's way in, and it is consumed and cleared on read so a stufftext cannot
+// latch the lens wet forever if the player disconnects mid-decay.
+static float s_coopSplashWet = 0.0f;
+
+void CG_CoopLensSplash(float amt)
+{
+    if (amt <= 0.0f) {
+        return;
+    }
+    if (amt > 1.0f) {
+        amt = 1.0f;
+    }
+    // raise only - a light bullet splash must never cut short the soaking from a shell
+    if (amt > s_coopSplashWet) {
+        s_coopSplashWet = amt;
+    }
+}
+
+float CG_CoopLensSplashLevel(float dt)
+{
+    static cvar_t *s_lensSplash = NULL;
+
+    if (!s_lensSplash) {
+        s_lensSplash = cgi.Cvar_Get("coop_lensSplash", "0", 0);
+    }
+    if (s_lensSplash && s_lensSplash->value > 0.0f) {
+        CG_CoopLensSplash(s_lensSplash->value);
+        // consumed: the script pokes it, we own the decay from here
+        cgi.Cvar_Set("coop_lensSplash", "0");
+    }
+
+    if (s_coopSplashWet > 0.0f) {
+        // [user 2026-09-01] "waster splash worked but didnt last nearly long enough" - 1.4s was
+        // gone before the column of water it came from had finished falling. 3.6s here, and the
+        // wet-lens ease downstream stretches it further still, so beads linger the way rain's do.
+        s_coopSplashWet -= dt / 3.6f;
+        if (s_coopSplashWet < 0.0f) {
+            s_coopSplashWet = 0.0f;
+        }
+    }
+    return s_coopSplashWet;
+}
+
 static int CG_CalcFov(void)
 {
     float x;
@@ -5002,6 +5313,7 @@ static int CG_CalcFov(void)
     {
         static int   s_lastWetTime = 0;
         static float s_rainWet     = 0.0f;
+        float        splash;
         float        dtw, target = 0.0f, k;
 
         if (s_lastWetTime == 0) { s_lastWetTime = cg.time; }
@@ -5053,6 +5365,24 @@ static int CG_CalcFov(void)
             if (wtarget > target) {
                 target = wtarget;
             }
+        }
+
+        // [user 2026-09-01] A SHELL IN THE WATER BESIDE YOU WETS THE LENS TOO.
+        //
+        // The user, on Omaha: "no water drops on screen when the bomb beside us hits the water or the
+        // water near us gets shot". Wading already beads the lens (the block above) and rain already
+        // beads it, but a near miss - the single wettest thing that happens on that beach - did not,
+        // because nothing was looking at impacts.
+        //
+        // Fed from two places, both of which only ever RAISE it (CG_CoopLensSplash):
+        //   * the script, through coop_lensSplash, for shell and bomb splashes - the server already
+        //     knows where those land and how far away the player is, so no new network message.
+        //   * cg_parsemsg.cpp, for bullets that enter water close to the eye.
+        // Decays on its own here and is MAXed into the same target the rain and the wading use, so
+        // the existing ~2.5s dry-out carries it and one dial (r_ppRainAmount) still governs the look.
+        splash = CG_CoopLensSplashLevel(dtw);
+        if (splash > target) {
+            target = splash;
         }
 
         // ease: wet up over ~0.6s, dry out over ~2.5s (beads linger after you reach cover)
@@ -5108,6 +5438,63 @@ static int CG_CalcFov(void)
         if (s_underwater < 0.0f) { s_underwater = 0.0f; }
         if (s_underwater > 1.0f) { s_underwater = 1.0f; }
         cgi.Cvar_Set("r_ppUnderwater", va("%g", s_underwater));
+    }
+
+    // HZM coop [user 2026-09-02, bug-2360] BLOOD ON THE LENS.
+    //
+    // "when the higgins door opens as soon as the allies start getting shot we should throw blood
+    // effects onto the screen to get washed off my the water."
+    //
+    // Same bridge as coop_lensSplash: the SERVER pokes an amount into coop_lensBlood, this consumes
+    // it, and the client owns the decay from here - a server that dies mid-cinematic cannot leave
+    // blood welded to the screen. Raise-only for the same reason the splash is: a second man opened
+    // up next to you must not shorten the first one.
+    //
+    // AND THE WATER WASHES IT OFF, which is the half the user actually asked for. While the view is
+    // submerged the decay runs ~6x, so the plunge strips the glass in about a second instead of the
+    // ~7s it takes in air. It keys off `inwater`, the function-scope flag CG_CalcFov already computed
+    // for the FOV warp - which is the whole reason this publish lives here rather than beside the
+    // splash. (The eased s_underwater above is block-scoped and deliberately not reached for.)
+    {
+        static cvar_t *s_lensBlood = NULL;
+        static cvar_t *s_ppBlood   = NULL;
+        static float   s_bloodAmt  = 0.0f;
+        static int     s_lastBlood = 0;
+        float          dtb, rate;
+
+        if (!s_lensBlood) {
+            s_lensBlood = cgi.Cvar_Get("coop_lensBlood", "0", 0);
+        }
+        if (!s_ppBlood) {
+            s_ppBlood = cgi.Cvar_Get("r_ppBlood", "0", 0);
+        }
+        // [2026-09-03] the hzmClearFx list in cg_main.c now zeroes r_ppBlood on every connect and
+        // map change - but s_bloodAmt is a DLL STATIC that survives both, so on its own that
+        // clear is undone by this block's own publish on the very next frame, and the new map
+        // opens with the old blood still on the glass. Treat an externally zeroed r_ppBlood as
+        // authoritative. This runs BEFORE the coop_lensBlood raise below, so a poke arriving in
+        // the same frame is not lost. It also makes typing `r_ppBlood 0` at the console a working
+        // manual kill switch, which there was no way to do before.
+        if (s_ppBlood && s_ppBlood->value <= 0.0f) { s_bloodAmt = 0.0f; }
+        if (s_lensBlood && s_lensBlood->value > 0.0f) {
+            if (s_lensBlood->value > s_bloodAmt) {
+                s_bloodAmt = s_lensBlood->value;
+            }
+            cgi.Cvar_Set("coop_lensBlood", "0");
+        }
+
+        if (s_lastBlood == 0) { s_lastBlood = cg.time; }
+        dtb = (cg.time - s_lastBlood) / 1000.0f;
+        s_lastBlood = cg.time;
+        if (dtb < 0.0f) { dtb = 0.0f; } else if (dtb > 0.5f) { dtb = 0.5f; }
+
+        if (s_bloodAmt > 0.0f) {
+            rate = 1.0f / 7.0f;                      /* in air: about seven seconds */
+            if (inwater) { rate = 1.0f; }            /* submerged: about one */
+            s_bloodAmt -= dtb * rate;
+            if (s_bloodAmt < 0.0f) { s_bloodAmt = 0.0f; }
+        }
+        cgi.Cvar_Set("r_ppBlood", va("%g", s_bloodAmt));
     }
 
     // set it

@@ -691,6 +691,51 @@ Event EV_Sentient_CoopGoreGibMark
     "HZM coop - gore tier 1e: mark this sentient as dying to a scripted explosion (optional window, default 2s)"
 );
 
+// HZM coop [user 2026-09-03] - SCRIPT-FORCED DECAPITATION, for authored set pieces.
+//
+// gore_gibmark above makes a scripted death LOOK like an explosion for the corpse skin tier. This is
+// its missing other half: it makes one nominated death take the head off, guaranteed, whatever MOD the
+// map's own damage helper happens to carry.
+//
+// Written for m3l1a's Higgins ramp drop. The five rangers cut down in the doorway die to
+// maps/m3l1a.scr::bhit -> global/bullethit.scr:93 -> `damage NULL <dmg> NULL (0 0 0) <dir> (0 0 0)
+// <force> 16 17 <loc>`. That 17 is MOD_IMPACT (bg_public.h:496), NOT MOD_BULLET - bullethit.scr's own
+// comment table is retail's, which has no MOD_GRENADE and is therefore off by one from index 14 down,
+// so the script author wrote "bullet" and this engine hears "impact". CoopGoreModIsExplosive HAS a
+// MOD_IMPACT case (:3247) and rejects this anyway, because bullethit passes a NULL inflictor rather
+// than a projectile. Measured over every m3l1a log in the repo: 393 kills, 346 mod=17 / 47 mod=9, and
+// all 22 `DECAPTRY fired` lines are mod=9. The shipped decap has never once fired on a bhit death.
+//
+// ROUTES CONSIDERED AND WHY THIS ONE. (1) Have the script deal an explosive MOD: CoopGoreDeathKinetics
+// reads the SAME classifier (:2852) and runs FIRST (:1895), so its bBoom branch nodraws the head and
+// this function's `already headless` guard bails - you get a thrown blob, not the man's face; it also
+// drags an american Actor with a NULL attacker through the m_bCoopBlastShield gate at :1617, whose
+// scope has been widened and re-narrowed twice; and it is still a 30% roll. (2) Keep MOD_IMPACT and
+// supply a projectile inflictor - newly visible once the enum is read correctly, and it fails
+// identically, because that is exactly what makes CoopGoreModIsExplosive (and therefore bBoom) true.
+// (3) Deal MOD_SHOTGUN (27 - note 26 is MOD_BASH) - the one value that passes the gate below WITHOUT
+// passing CoopGoreModIsExplosive, so kinetics stays dormant and the good decap runs. Needs no engine
+// change at all, and is the right fallback if this event is ever refused - but it is still a 30% roll,
+// and a set piece that no-shows on 70% of runs is not a set piece. (4) Widen the MOD_IMPACT case to
+// accept a NULL inflictor: one line, and it would flip 88% of this map's deaths onto the explosive
+// path. Rejected on the measurement above. (5) Let gore_gibmark satisfy this gate too: one line, but
+// its only caller in the mod (maps/t1l1.scr:232) would silently start decapitating truck passengers.
+//
+// ONE-SHOT AND NARROW. The mark is read and cleared before any early-out below, so it can never carry
+// onto an unrelated body. It bypasses exactly two things - the MOD gate and the chance roll - and
+// nothing else: the dead-gate, the no-gore-on-players rule (bug-785/792), com_blood, the coop_decap
+// master switch, the flesh check and the head-surface resolution all still apply. The per-frame budget
+// that is the whole reason bug-856 stopped hurting is respected too: a forced decap gets ONE reserved
+// slot per server frame on top of it, so the worst case rises from N to N+1 and no further.
+Event EV_Sentient_CoopGoreDecapMark
+(
+    "gore_decap",
+    EV_DEFAULT,
+    "F",
+    "window_seconds",
+    "HZM coop - set piece: the next death inside the window decapitates, guaranteed (optional window, default 2s)"
+);
+
 CLASS_DECLARATION(Animate, Sentient, NULL) {
     {&EV_Sentient_ReloadWeapon,           &Sentient::ReloadWeapon                 },
     {&EV_Sentient_Attack,                 &Sentient::FireWeapon                   },
@@ -762,6 +807,7 @@ CLASS_DECLARATION(Animate, Sentient, NULL) {
     {&EV_Sentient_CoopGorePoolGrow,       &Sentient::EventCoopGorePoolGrow        }, // HZM coop - gore tier 2
     {&EV_Sentient_CoopGoreReset,          &Sentient::EventCoopGoreReset           }, // HZM coop - gore tier 1
     {&EV_Sentient_CoopGoreGibMark,        &Sentient::EventCoopGoreGibMark         }, // HZM coop - gore tier 1e
+    {&EV_Sentient_CoopGoreDecapMark,      &Sentient::EventCoopGoreDecapMark       }, // HZM coop [user 2026-09-03]
     {&EV_Sentient_CoopBlastShield,        &Sentient::EventCoopBlastShield         }, // HZM coop - bug-1586
     {NULL,                                NULL                                    }
 };
@@ -830,6 +876,8 @@ Sentient::Sentient()
     m_iCoopWoundNext        = 0;            // HZM coop [user 2026-08-17] - wound-prop recycle cursor
     m_bCoopBlastShield      = qfalse;       // HZM coop - bug-1586: opt-in, NOT team-wide (see TakeDamage)
     m_fCoopGoreGibMarkTime  = 0;            // HZM coop - gore tier 1e
+    m_bCoopGoreDecapForce     = qfalse;     // HZM coop [user 2026-09-03] - script-forced decap mark
+    m_fCoopGoreDecapForceTime = 0;          // HZM coop [user 2026-09-03]
     m_vCoopPoolPos          = vec_zero;     // HZM coop - gore tier 2
     m_vCoopPoolNormal       = vec_zero;     // HZM coop - gore tier 2
     m_iCoopPoolGen          = 0;            // HZM coop - gore tier 2 (bug-817: continuous pool growth)
@@ -3159,6 +3207,7 @@ void Sentient::EventCoopGoreReset(Event *ev)
 
     m_fCoopGoreDamage   = 0;
     m_bCoopGoreGibMark  = qfalse; // HZM coop - gore tier 1e: a heal/revive also clears a pending script mark
+    m_bCoopGoreDecapForce = qfalse; // HZM coop [user 2026-09-03] - and drops a pending forced-decap mark
 
     // [user 2026-08-03] bug-1320 - same standing rule as the monotonic guard in
     // CoopGoreUpdateSkinTier. The no-arg script "gore_reset" is called by revive / canteen-heal /
@@ -3598,6 +3647,8 @@ void Sentient::CoopGoreTryDecapitate(int meansofdeath, Entity *inflictor)
     static cvar_t *pOn = NULL, *pChance = NULL, *pBudget = NULL, *pDbg = NULL;
     static float   sBudgetTime  = -1.0f;
     static int     sBudgetCount = 0;
+    static qboolean sForcedThisFrame = qfalse; // HZM coop [user 2026-09-03] - one reserved forced slot per frame
+    qboolean       bForced = qfalse;           // HZM coop [user 2026-09-03] - a script demanded THIS head
     HeadGibObject *gib;
     Animate       *cap;
     orientation_t  tagOr;
@@ -3622,17 +3673,42 @@ void Sentient::CoopGoreTryDecapitate(int meansofdeath, Entity *inflictor)
         pBudget = gi.Cvar_Get("coop_decapBudget", "3", CVAR_ARCHIVE);
         pDbg    = gi.Cvar_Get("coop_goreDebug", "0", 0);
     }
+
+    // [user 2026-09-03] SCRIPT-FORCED DECAP (script event "gore_decap"). Read and CLEARED here,
+    // ahead of every early-out below, so the mark is strictly one-shot: whether this death takes the
+    // head off or fails a later gate, it can never survive onto some unrelated body. It sits AFTER
+    // the cvar init so pOn is valid, and BEFORE the coop_decap test on purpose - if the user has gore
+    // switched off the set piece silently does not happen, and the mark is still cleaned up.
+    bForced = (m_bCoopGoreDecapForce && level.time <= m_fCoopGoreDecapForceTime) ? qtrue : qfalse;
+    m_bCoopGoreDecapForce = qfalse;
+
     if (!pOn->integer) {
-        return;
+        if (bForced) {
+            // [user 2026-09-03] coop_decap is CVAR_ARCHIVE and seeded in coop_defaults.cfg:336, so a
+            // stale `seta coop_decap "0"` in a player's own config beats both. That is the exact
+            // fossil that hid coop_goreWounds for weeks, and it would make an authored set piece
+            // silently no-show. Script cannot check it for us: script `getcvar` is
+            // gi.Cvar_Get(name, "", 0) (scriptthread.cpp:2627) and coop_decap is NOT in G_InitGame's
+            // pre-registration list, so a script read would CREATE it empty and permanently disable
+            // every decapitation in the game (bug-1669). So the engine says it, here.
+            gi.Printf("^~^~^ DECAPFORCE FAILED ent=%d - coop_decap is 0 (gore master switch off)\n", entnum);
+        }
+        return; // gore master switch - a set piece does not get to override the user's own choice
     }
     if (!GetBloodSplatName().length()) {
+        if (bForced) {
+            gi.Printf("^~^~^ DECAPFORCE FAILED ent=%d model=%s - no blood splat name (not flesh)\n",
+                      entnum, model.c_str());
+        }
         return; // non-flesh doesn't come apart
     }
 
     // [user 2026-08-17] "certain weapons should decapitate... rockets, grenades, shotguns,
     // artillery". CoopGoreModIsExplosive already classifies the blast set and is shared with the
     // gib skins, so it is reused rather than duplicated; shotgun is added here only.
-    allowed = CoopGoreModIsExplosive(meansofdeath, inflictor);
+    // [user 2026-09-03] ...or an authored set piece said so. A forced decap skips the MOD test and
+    // the chance roll below, because a set piece that lands 30% of the time is not a set piece.
+    allowed = bForced || CoopGoreModIsExplosive(meansofdeath, inflictor);
     if (!allowed && meansofdeath == MOD_SHOTGUN) {
         allowed = qtrue;
     }
@@ -3640,32 +3716,55 @@ void Sentient::CoopGoreTryDecapitate(int meansofdeath, Entity *inflictor)
         return;
     }
 
-    if (G_Random(100.0f) >= (float)pChance->integer) {
+    if (!bForced && G_Random(100.0f) >= (float)pChance->integer) {
         return; // deliberately not guaranteed
     }
 
     // --- the per-frame budget ---
     if (sBudgetTime != level.time) {
-        sBudgetTime  = level.time;
-        sBudgetCount = 0;
+        sBudgetTime      = level.time;
+        sBudgetCount     = 0;
+        sForcedThisFrame = qfalse;
     }
     if (sBudgetCount >= (pBudget->integer > 0 ? pBudget->integer : 3)) {
-        if (pDbg->integer) {
-            gi.Printf("^~^~^ DECAPFRAME budget hit at t=%.2f, skipping ent=%d\n", level.time, entnum);
+        // [user 2026-09-03] A forced decap gets ONE reserved slot per server frame, and no more. The
+        // budget is why bug-856 stopped hurting (dozens of decaps in a single frame), so it is not
+        // simply bypassed - worst case rises from N to N+1.
+        if (bForced && !sForcedThisFrame) {
+            sForcedThisFrame = qtrue;
+        } else {
+            if (pDbg->integer) {
+                gi.Printf("^~^~^ DECAPFRAME budget hit at t=%.2f, skipping ent=%d\n", level.time, entnum);
+            }
+            if (bForced) {
+                // UNGATED: a set piece that silently did not fire is the exact hole this project has
+                // fallen into twice on this feature. Say so.
+                gi.Printf("^~^~^ DECAPFORCE FAILED ent=%d - frame budget full at t=%.2f\n", entnum, level.time);
+            }
+            return;
         }
-        return;
     }
 
     headSurf = gi.Surface_NameToNum(edict->tiki, "head");
     headTag  = gi.Tag_NumForName(edict->tiki, "Bip01 Head");
     if (headSurf < 0 || headSurf >= MAX_MODEL_SURFACES || headTag < 0) {
+        if (bForced) {
+            gi.Printf("^~^~^ DECAPFORCE FAILED ent=%d model=%s - headSurf=%d headTag=%d (no head surface, or no Bip01 Head tag)\n",
+                      entnum, model.c_str(), headSurf, headTag);
+        }
         return; // helmeted/wrapped variants and non-bipeds simply do not decapitate
     }
     if (edict->s.surfaces[headSurf] & MDL_SURFACE_NODRAW) {
+        if (bForced) {
+            gi.Printf("^~^~^ DECAPFORCE FAILED ent=%d model=%s - already headless\n", entnum, model.c_str());
+        }
         return; // already headless
     }
 
     sBudgetCount++;
+    if (bForced) {
+        gi.Printf("^~^~^ DECAPFORCE fired ent=%d mod=%d model=%s\n", entnum, meansofdeath, model.c_str());
+    }
 
     // [user 2026-08-17] DECAPSURF probe. Reported symptom: "only really notice a random set of hands
     // appearing that kinda float, not a head. Their head is still attached." Both halves of that point
@@ -3809,6 +3908,11 @@ void Sentient::CoopGoreTryDecapitate(int meansofdeath, Entity *inflictor)
                     gi.Printf("^~^~^ DECAP unavailable for %s - the gib composite has no head surface\n",
                               model.c_str());
                 }
+            }
+            if (bForced) {
+                // [user 2026-09-03] the dedupe above can swallow this one; a FORCED failure never is.
+                gi.Printf("^~^~^ DECAPFORCE FAILED ent=%d model=%s - gib composite has no head surface\n",
+                          entnum, model.c_str());
             }
             return;
         }
@@ -4033,6 +4137,26 @@ void Sentient::EventCoopGoreGibMark(Event *ev)
     }
     m_bCoopGoreGibMark     = qtrue;
     m_fCoopGoreGibMarkTime = level.time + window;
+}
+
+// HZM coop [user 2026-09-03] - the script-side forced-decap mark ("gore_decap"). See the event
+// declaration for why this exists. One-shot: CoopGoreTryDecapitate reads it and clears it. The only
+// two call sites of that function are the killing blow (ArmorDamage, :1945) and a hit into a corpse
+// (CoopGoreCorpseDamage, :3493), and ArmorDamage returns at IsDead() (:1537) before the living
+// pipeline - so the first read after a mark is always the killing blow, and a mark on a man who
+// survives simply expires.
+void Sentient::EventCoopGoreDecapMark(Event *ev)
+{
+    float window = 2.0f;
+
+    if (ev->NumArgs() > 0) {
+        window = ev->GetFloat(1);
+        if (window <= 0.0f) {
+            window = 2.0f;
+        }
+    }
+    m_bCoopGoreDecapForce     = qtrue;
+    m_fCoopGoreDecapForceTime = level.time + window;
 }
 
 // HZM coop - BLOOD TRAIL. A wounded (health below a fraction of max) AI that is MOVING drips ground

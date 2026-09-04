@@ -1295,6 +1295,9 @@ public:
     virtual void SetMoveInfo(mmove_t *mm) override;
     virtual void GetMoveInfo(mmove_t *mm) override;
     void         DoFailSafeMove(vec3_t dest);
+    // HZM [2026-09-01] failsafe destination validation - see actor.cpp Actor::CoopFailSafeGround.
+    bool         CoopFailSafeGround(const Vector& vFrom, Vector& vGroundOut);
+    bool         CoopFailSafeDestSane(const Vector& vDest);
     void         TouchStuff(mmove_t *mm);
     void         ExtractConstraints(mmove_t *mm);
     void         EventGiveWeaponInternal(Event *ev);

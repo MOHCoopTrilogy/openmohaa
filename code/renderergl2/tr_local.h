@@ -82,7 +82,13 @@ typedef unsigned int vaoCacheGlIndex_t;
 // OPENMOHAA-specific stuff
 //=========================
 
-#define MAX_SPHERE_LIGHTS		512
+// HZM coop [user 2026-09-01, bug-2283] 512 -> 2048. Nine "Ran out of space in the sphere array"
+// lines fired in the seconds before the Omaha edict crash. This is the per-frame list of
+// spherical lightgrid samples the backend keeps for animated models, so it scales with how many
+// SKELETAL models are on screen at once - and that beach now has ~140 actors plus boats, crates
+// and gore. Running out is not fatal, it silently drops the lighting sphere for the models past
+// the cap, which is a visible pop as men light differently from the man beside them.
+#define MAX_SPHERE_LIGHTS		2048
 #define	MAX_SPRITESURFS			0x8000
 
 // HZM (engine-limits audit): one sprite surf is emitted per visible refSprite PER VIEW
@@ -2301,6 +2307,7 @@ typedef struct {
 	shaderProgram_t heatHazeShader;     // HZM gl1-parity heat haze + localized muzzle shimmer
 	shaderProgram_t dofShader;          // HZM gl1-parity depth of field (r_ppDoF)
 	shaderProgram_t underwaterShader;   // HZM NEW: underwater/slime/lava screen distortion (r_ppUnderwaterFx)
+	shaderProgram_t bloodSpatterShader; // HZM NEW [bug-2360]: blood on the lens (r_ppBloodFx)
 	shaderProgram_t chromabShader;      // HZM NEW: chromatic aberration (r_ppChromaticAberration)
 	shaderProgram_t motionBlurShader;   // HZM NEW: camera motion blur (r_ppMotionBlur)
 	shaderProgram_t filmgrainShader;    // HZM NEW: film grain (r_ppFilmGrain)
@@ -2728,6 +2735,28 @@ typedef struct {
 } globalFogState_t;
 
 extern globalFogState_t	rb_globalFog;
+
+// HZM [UNDERWATER VOLUME v3, 2026-09-03] The projection terms a depth-reading POST pass needs,
+// latched UNCONDITIONALLY. rb_globalFog above carries the same two numbers, but only assigns
+// them when farplane fog is ACTIVE - SIX early returns sit above that assignment in
+// RB_SetupGlobalFog (no world model, a portal/shadow sub-view, no farplane distance,
+// r_farplane_nofog, r_globalFog 0, a degenerate matrix). On a map with no farplane fog it
+// therefore still holds the LAST FOGGED MAP's matrix, so any pass that trusted it would
+// reconstruct eye distances from a projection that never rasterised this view. Same latch point
+// and same view policy as the fog, none of its preconditions. It is a file-scope global, so
+// valid is qfalse before the first frame without an explicit initialiser.
+// Read by RB_HZMExtraFx (tr_postprocess.c).
+typedef struct {
+	qboolean	valid;
+	float		projMat10;		// projectionMatrix[10] actually used for this view
+	float		projMat14;		// projectionMatrix[14] actually used for this view
+	float		projMat0;		// projectionMatrix[0]
+	float		projMat5;		// projectionMatrix[5]
+	float		zNear;			// derived from the matrix, for logging only
+	float		zFar;			// derived from the matrix, for logging only
+} viewProjLatch_t;
+
+extern viewProjLatch_t	rb_viewProj;
 
 void RB_SetupGlobalFog( void );
 
@@ -3320,6 +3349,11 @@ void GLSL_VertexAttribPointers(uint32_t attribBits);
 void GLSL_BindProgram(shaderProgram_t * program);
 
 void GLSL_SetUniformInt(shaderProgram_t *program, int uniformNum, GLint value);
+// HZM [UNDERWATER VOLUME v3] Read back the value an int uniform (in practice: a SAMPLER UNIT)
+// was last set to. Returns -1 when the shader never declared that uniform. See the comment on
+// the definition in tr_glsl.c - this exists so a pass can PROVE in one printed integer that its
+// depth sampler is not silently pointing at texture unit 0.
+int  GLSL_GetUniformIntValue(shaderProgram_t *program, int uniformNum);
 void GLSL_SetUniformFloat(shaderProgram_t *program, int uniformNum, GLfloat value);
 void GLSL_SetUniformFloat5(shaderProgram_t *program, int uniformNum, const vec5_t v);
 void GLSL_SetUniformVec2(shaderProgram_t *program, int uniformNum, const vec2_t v);

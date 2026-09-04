@@ -64,6 +64,7 @@ extern const char *fallbackShader_hitblood_fp;
 extern const char *fallbackShader_heathaze_fp;
 extern const char *fallbackShader_dof_fp;
 extern const char *fallbackShader_underwater_fp;
+extern const char *fallbackShader_bloodspatter_fp;
 extern const char *fallbackShader_chromab_fp;
 extern const char *fallbackShader_motionblur_fp;
 extern const char *fallbackShader_filmgrain_fp;
@@ -764,6 +765,29 @@ void GLSL_InitUniforms(shaderProgram_t *program)
 	}
 
 	program->uniformBuffer = ri.Malloc(size);
+
+	// HZM [UNDERWATER VOLUME v3, 2026-09-03] ZERO IT. This is not tidiness, it is a correctness
+	// fix, and it is the reason a depth sampler can be assigned and still not arrive.
+	//
+	// ri.Malloc is CL_RefMalloc (cl_main.cpp) -> Z_TagMalloc, which is a bare malloc() with no
+	// clear (qcommon/memory.c), so this buffer arrives holding recycled heap bytes. Every
+	// GLSL_SetUniform* below uses it as a REDUNDANCY CACHE and SKIPS the GL upload when the new
+	// value already matches what is stored. An uninitialised slot that happens to hold the value
+	// being set therefore makes that first - and for a sampler, only - upload disappear, while
+	// every read-back of our own state cheerfully reports success.
+	//
+	// For a sampler that is fatal and invisible: the uniform keeps GL default of 0, i.e.
+	// texture unit 0 = the scene COLOUR, while the engine believes it points at TB_LEVELSMAP.
+	// The pass then reconstructs eye distance from scene brightness - a plausible-looking
+	// wrong answer, which is the single class of failure this project keeps mis-diagnosing.
+	// Nondeterministic per launch, which is worse than a hard failure, not better.
+	//
+	// Zeroing makes the cache honest and is safe for every uniform type, because GL itself
+	// defaults uniforms to 0 - so a first set-to-zero that the honest cache now skips was
+	// already a no-op.
+	if (size > 0) {
+		Com_Memset(program->uniformBuffer, 0, size);
+	}
 }
 
 void GLSL_FinishGPUShader(shaderProgram_t *program)
@@ -794,6 +818,37 @@ void GLSL_SetUniformInt(shaderProgram_t *program, int uniformNum, GLint value)
 	*compare = value;
 
 	qglProgramUniform1iEXT(program->program, uniforms[uniformNum], value);
+}
+
+/*
+=============
+GLSL_GetUniformIntValue
+
+HZM [UNDERWATER VOLUME v3, 2026-09-03] Read back the texture unit an int uniform - in practice a
+SAMPLER - was last set to, straight out of the shadow copy GLSL_SetUniformInt maintains. The
+shadow copy is trustworthy only because GLSL_InitUniforms now zeroes it; see the comment there.
+
+Returns -1 when the shader did not declare that uniform at all (location -1), which is a
+DIFFERENT failure from declared-but-pointing-at-the-wrong-unit and has to stay distinguishable
+in a log: the first needs a shader edit, the second needs a GLSL_SetUniformInt call.
+
+This exists so a depth-reading post pass can PROVE in one printed integer that its sampler is on
+the depth image. qglGetUniformiv is not declared in this fork (renderercommon/qgl.h has
+GetUniformLocation and nothing else), so asking GL directly is not an option here.
+=============
+*/
+int GLSL_GetUniformIntValue(shaderProgram_t *program, int uniformNum)
+{
+	if (!program || !program->uniformBuffer)
+		return -1;
+
+	if (program->uniforms[uniformNum] == -1)
+		return -1;
+
+	if (uniformsInfo[uniformNum].type != GLSL_INT)
+		return -1;
+
+	return (int)*(GLint *)(program->uniformBuffer + program->uniformBufferOffsets[uniformNum]);
 }
 
 void GLSL_SetUniformFloat(shaderProgram_t *program, int uniformNum, GLfloat value)
@@ -1616,7 +1671,26 @@ void GLSL_InitGPUShaders(void)
 
 	GLSL_InitUniforms(&tr.underwaterShader);
 	GLSL_SetUniformInt(&tr.underwaterShader, UNIFORM_TEXTUREMAP, TB_COLORMAP);
+	// [UNDERWATER VOLUME v3] MANDATORY, NOT OPTIONAL. The pass now samples scene DEPTH as well,
+	// on the same TMU the global-fog pass uses (tr_glsl.c globalFogShader, and tonemapShader
+	// above). Without this line the sampler defaults to unit 0 and the shader reads the COLOUR
+	// image as depth - which is not a crash, it is a plausible-looking wrong answer, and every
+	// downstream term (absorption, blur radius, shafts, the sky-to-silt bonus) is then driven by
+	// scene brightness. RB_HZMExtraFx re-asserts it per submersion and prints smp= so its
+	// absence is visible in the log; do not delete this line on the strength of that.
+	GLSL_SetUniformInt(&tr.underwaterShader, UNIFORM_LEVELSMAP,  TB_LEVELSMAP);
 	GLSL_FinishGPUShader(&tr.underwaterShader);
+
+	// HZM [bug-2360] blood on the lens. Same shape as the underwater pass above: a full-screen blit
+	// over the tonemap vertex shader, one sampler, all parameters carried in u_Color.
+	if (!GLSL_InitGPUShader(&tr.bloodSpatterShader, "bloodspatter", attribs, qtrue, extradefines, qtrue, fallbackShader_tonemap_vp, fallbackShader_bloodspatter_fp))
+	{
+		ri.Error(ERR_FATAL, "Could not load bloodspatter shader!");
+	}
+
+	GLSL_InitUniforms(&tr.bloodSpatterShader);
+	GLSL_SetUniformInt(&tr.bloodSpatterShader, UNIFORM_TEXTUREMAP, TB_COLORMAP);
+	GLSL_FinishGPUShader(&tr.bloodSpatterShader);
 
 	numEtcShaders++;
 
@@ -1891,6 +1965,7 @@ void GLSL_ShutdownGPUShaders(void)
 	GLSL_DeleteGPUShader(&tr.hitBloodShader);   // HZM coop [user 08-02]
 	GLSL_DeleteGPUShader(&tr.dofShader);
 	GLSL_DeleteGPUShader(&tr.underwaterShader);
+	GLSL_DeleteGPUShader(&tr.bloodSpatterShader);
 	GLSL_DeleteGPUShader(&tr.chromabShader);
 	GLSL_DeleteGPUShader(&tr.motionBlurShader);
 	GLSL_DeleteGPUShader(&tr.filmgrainShader);

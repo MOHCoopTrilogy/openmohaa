@@ -181,6 +181,11 @@ static void S_OPENAL_Pitch();
 static int
 S_OPENAL_SpatializeStereoSound(const vec3_t listener_origin, const vec3_t listener_left, const vec3_t origin);
 static void   S_OPENAL_reverb(int iChannel, int iReverbType, float fReverbLevel);
+static float  S_HZM_LocalPanAmount(const openal_channel *pChannel);   // HZM coop - pannable local sound
+
+// How far off-centre a fully-panned local sound sits. Small on purpose: the listener is AT the
+// origin, so this reads as an angle rather than a distance, and 64 units is already hard over.
+#define HZM_LOCALPAN_RADIUS 64.f
 static bool   S_OPENAL_LoadMP3_Codec(const char *_path, sfx_t *pSfx);
 static ALuint S_OPENAL_Format(float width, int channels);
 
@@ -2120,7 +2125,7 @@ void S_OPENAL_AddLoopingSound(
         return;
     }
 
-    for (i = 0; i < (MAX_SOUNDSYSTEM_CHANNELS_3D + MAX_SOUNDSYSTEM_CHANNELS_2D); i++) {
+    for (i = 0; i < MAX_SOUNDSYSTEM_LOOP_SOUNDS; i++) {
         pLoopSound = &openal.loop_sounds[i];
         if (pLoopSound->pSfx == pSfx && !pLoopSound->bInUse) {
             iFreeLoopSound = i;
@@ -2129,7 +2134,7 @@ void S_OPENAL_AddLoopingSound(
     }
 
     if (iFreeLoopSound < 0) {
-        for (i = 0; i < (MAX_SOUNDSYSTEM_CHANNELS_3D + MAX_SOUNDSYSTEM_CHANNELS_2D); i++) {
+        for (i = 0; i < MAX_SOUNDSYSTEM_LOOP_SOUNDS; i++) {
             pLoopSound = &openal.loop_sounds[i];
             if (!pLoopSound->pSfx && !pLoopSound->bInUse) {
                 iFreeLoopSound       = i;
@@ -2161,7 +2166,7 @@ void S_OPENAL_AddLoopingSound(
     pLoopSound->bCombine    = VectorCompare(vVelocity, vec_zero) == 0;
 
     if (pLoopSound->bCombine) {
-        for (i = 0; i < (MAX_SOUNDSYSTEM_CHANNELS_3D + MAX_SOUNDSYSTEM_CHANNELS_2D); i++) {
+        for (i = 0; i < MAX_SOUNDSYSTEM_LOOP_SOUNDS; i++) {
             if (openal.loop_sounds[i].pSfx == pSfx && openal.loop_sounds[i].bInUse) {
                 pLoopSound->iStartTime = openal.loop_sounds[i].iStartTime;
                 if (openal.loop_sounds[i].bPlaying) {
@@ -2190,7 +2195,7 @@ void S_OPENAL_StopLoopingSound(openal_loop_sound_t *pLoopSound)
     bMayStop = true;
 
     if (pLoopSound->bCombine) {
-        for (i = 0; i < (MAX_SOUNDSYSTEM_CHANNELS_3D + MAX_SOUNDSYSTEM_CHANNELS_2D); i++) {
+        for (i = 0; i < MAX_SOUNDSYSTEM_LOOP_SOUNDS; i++) {
             if (openal.loop_sounds[i].pSfx == pLoopSound->pSfx && openal.loop_sounds[i].bInUse) {
                 bMayStop = false;
                 break;
@@ -2213,7 +2218,7 @@ void S_OPENAL_StopLoopingSound(openal_loop_sound_t *pLoopSound)
     pLoopSound->bPlaying = false;
 
     if (pLoopSound->bCombine) {
-        for (i = 0; i < (MAX_SOUNDSYSTEM_CHANNELS_3D + MAX_SOUNDSYSTEM_CHANNELS_2D); i++) {
+        for (i = 0; i < MAX_SOUNDSYSTEM_LOOP_SOUNDS; i++) {
             if (openal.loop_sounds[i].pSfx == pLoopSound->pSfx) {
                 openal.loop_sounds[i].bPlaying = false;
                 openal.loop_sounds[i].pSfx     = NULL;
@@ -2231,7 +2236,7 @@ void S_OPENAL_ClearLoopingSounds()
 {
     int i;
 
-    for (i = 0; i < (MAX_SOUNDSYSTEM_CHANNELS_3D + MAX_SOUNDSYSTEM_CHANNELS_2D); i++) {
+    for (i = 0; i < MAX_SOUNDSYSTEM_LOOP_SOUNDS; i++) {
         openal.loop_sounds[i].bInUse = false;
     }
 }
@@ -2243,9 +2248,23 @@ S_OPENAL_StopLoopingSounds
 */
 void S_OPENAL_StopLoopingSounds()
 {
+    // HZM coop [user 2026-09-02, bug-2315] THE BOUND IS THE ARRAY'S OWN SIZE, NOT THE CHANNEL COUNT.
+    //
+    // This and six sibling loops walked openal.loop_sounds[] using
+    // (MAX_SOUNDSYSTEM_CHANNELS_3D + MAX_SOUNDSYSTEM_CHANNELS_2D) as the bound. The array is sized
+    // MAX_SOUNDSYSTEM_LOOP_SOUNDS = 64, and 32 + 32 was exactly 64 - in bounds by coincidence, with
+    // zero margin, and nothing anywhere saying the two had to match. Raising the 3D channels to 96
+    // for bug-2309 made the bound 128, and this function wrote 64 entries off the end of the array:
+    // openmohaa.exe died at launch inside S_StopAllSounds, before the main menu.
+    //
+    // THIS IS THE SAME DEFECT AS bug-2292 (TIKI_End walking MAX_GENTITIES over a TIKI_MAX_ENTITIES
+    // array), and I had written it into docs/TRAPS.md T4 the day before - "two constants that agree
+    // by COINCIDENCE are a bomb with no label" - and then walked straight into it while raising a
+    // pool. Knowing the trap did not prevent it. Only the #error in snd_local_new.h does, which is
+    // what that same TRAPS entry already said: turn every capacity rule into a build break.
     int i;
 
-    for (i = 0; i < (MAX_SOUNDSYSTEM_CHANNELS_3D + MAX_SOUNDSYSTEM_CHANNELS_2D); i++) {
+    for (i = 0; i < MAX_SOUNDSYSTEM_LOOP_SOUNDS; i++) {
         openal.loop_sounds[i].bInUse = false;
         S_OPENAL_StopLoopingSound(&openal.loop_sounds[i]);
     }
@@ -2864,6 +2883,8 @@ void S_OPENAL_Respatialize(int iEntNum, const vec3_t vHeadPos, const vec3_t vAxi
 
     VectorCopy(vAxis[1], vTempAxis);
 
+    float fLocalPan;
+
     fVolume = 1;
     iPan    = 64;
 
@@ -2888,10 +2909,13 @@ void S_OPENAL_Respatialize(int iEntNum, const vec3_t vHeadPos, const vec3_t vAxi
 
             if (pChannel->iFlags & CHANNEL_FLAG_LOCAL_LISTENER) {
                 VectorCopy(vListenerOrigin, vOrigin);
+                fLocalPan = S_HZM_LocalPanAmount(pChannel);   // HZM coop - pannable local sound
                 if (i >= MAX_SOUNDSYSTEM_CHANNELS_3D) {
                     fVolume = fMaxVolume;
-                    iPan    = 64;
+                    iPan    = 64 + (int)(fLocalPan * 63.f);
                 } else {
+                    // +vTempAxis is LEFT, fLocalPan is +right, hence the negation.
+                    VectorMA(vOrigin, -fLocalPan * HZM_LOCALPAN_RADIUS, vTempAxis, vOrigin);
                     pChannel->set_position(vOrigin[0], vOrigin[1], vOrigin[2]);
                 }
             } else {
@@ -2914,10 +2938,13 @@ void S_OPENAL_Respatialize(int iEntNum, const vec3_t vHeadPos, const vec3_t vAxi
             }
         } else if (pChannel->iFlags & CHANNEL_FLAG_LOCAL_LISTENER) {
             VectorCopy(vListenerOrigin, vOrigin);
+            fLocalPan = S_HZM_LocalPanAmount(pChannel);   // HZM coop - pannable local sound
             if (i >= MAX_SOUNDSYSTEM_CHANNELS_3D) {
                 fVolume = fMaxVolume;
-                iPan    = 64;
+                iPan    = 64 + (int)(fLocalPan * 63.f);
             } else {
+                // +vTempAxis is LEFT, fLocalPan is +right, hence the negation.
+                VectorMA(vOrigin, -fLocalPan * HZM_LOCALPAN_RADIUS, vTempAxis, vOrigin);
                 pChannel->set_position(vOrigin[0], vOrigin[1], vOrigin[2]);
             }
         } else {
@@ -3511,6 +3538,7 @@ extern cvar_t *s_dialogscale;
 // Tuning lives in one cvar: s_cueDuck scales the whole effect (0 = off, 1 = as designed).
 static int   s_hzmCueDuckUntil = 0;   // cls.realtime ms
 static int   s_hzmCueDuckTier  = 0;
+static int   s_hzmVoxDuckUntil = 0;
 static cvar_t *s_cueDuck       = NULL;
 
 // 0 = not a cue, 1 = subtle, 2 = standout. Matched on the sample path because that is what the
@@ -3534,6 +3562,94 @@ static int S_HZM_CueTier(const char *name)
         return 1;
     }
     return 0;
+}
+
+// HZM coop [user 2026-09-01, bug-2276] SOUNDS THAT THE CINEMATIC DUCK MUST NOT TOUCH.
+//
+// The user, on the Omaha ramp-drop beat: "I think the whistle on the higgins boat should not be faded
+// at all." It was - coop_m3l1a_beachAudio pulls s_sfxduck down to 0.02 so AfterTheDrop.mp3 owns the
+// scene, and the whistle is an ordinary world sound, so it went with everything else.
+//
+// THIS IS DELIBERATELY NOT S_HZM_CueTier. A cue tier does two things - it exempts the sound AND it arms
+// a sidechain that ducks music and ambience underneath it. Putting the whistle on that list would have
+// it duck the very track the same beat is swelling to 4.6x, which is the opposite of what was asked
+// for. This predicate only ever says "leave this one alone".
+//
+// Matched on the sample path, because that is what the channel carries this far down (pSfx->name);
+// alias names are long gone. Mec_Whistle_01 is the wav behind BOTH retail's higgins_whistle and our
+// wider-range coop_beach_whistle, so one entry covers the ramp cue and the beach advance signal.
+// HZM coop - PANNABLE LOCAL SOUND.
+//
+// [user 2026-09-03] "the shellshock should only be heard by the player thats being shellshocked ...
+// thats not a global sound everyone hears." Correct, and it is why the script plays this wash with
+// playlocalsound in the first place. But a local sound cannot pan: both CHANNEL_FLAG_LOCAL_LISTENER
+// branches in S_OPENAL_Respatialize pin the sound to the listener - dead centre, iPan 64 - and
+// EV_Player_PlayLocalSound is "sBF" (soundName loop time), so there is no pan argument to reach for.
+//
+// The resolution is that the two requirements were never actually in conflict. playlocalsound is
+// per-client by CONSTRUCTION - the server sends it to one player and nobody else ever holds the
+// channel. Panning it is therefore a purely client-side rendering decision, so we can offset the
+// VIRTUAL position around that client own listener and the sound stays private. An earlier attempt
+// moved a carrier entity through the world instead, which panned correctly and broadcast the wash
+// to every player in earshot - the exact thing the user rejected.
+//
+// Matched on the sample path (pSfx->name), like S_HZM_DuckExempt, because the alias name is long
+// gone by the time a channel exists. Scoped to the shellshock wav alone, so no other local sound -
+// menu clicks, the tinnitus ring, DBNO - can ever be dragged off centre by this cvar.
+//
+// Sign convention, from S_OPENAL_SpatializeStereoSound: pan = sep + (1-sep) * -DotProduct(
+// listener_left, source_vec), scaled to 0..127. A source to the LEFT gives dot +1 and pan 0; to the
+// RIGHT, dot -1 and pan 127; centre is 64. So +vTempAxis points LEFT, and this returns the intuitive
+// -1 = hard left, +1 = hard right - which is why the 3D path negates it and the 2D path does not.
+static float S_HZM_LocalPanAmount(const openal_channel *pChannel)
+{
+    static cvar_t *s_coopShellPan = NULL;
+    float          fPan;
+
+    if (!pChannel || !pChannel->pSfx || !pChannel->pSfx->name[0]) {
+        return 0.f;
+    }
+    if (!strstr(pChannel->pSfx->name, "coop_shellshock")) {
+        return 0.f;
+    }
+    if (!s_coopShellPan) {
+        // no CVAR_ARCHIVE: a transient scripted sweep, never a saved preference.
+        s_coopShellPan = Cvar_Get("coop_shellPan", "0", 0);
+    }
+    fPan = s_coopShellPan->value;
+    if (fPan < -1.f) {
+        fPan = -1.f;
+    } else if (fPan > 1.f) {
+        fPan = 1.f;
+    }
+    return fPan;
+}
+
+static bool S_HZM_DuckExempt(const char *name)
+{
+    if (!name || !*name) {
+        return false;
+    }
+    // an NCO's whistle is a command, not atmosphere - it is meant to cut through the mix
+    if (strstr(name, "Mec_Whistle_01") || strstr(name, "mec_whistle_01")) {
+        return true;
+    }
+    // HZM coop [user 2026-09-02, bug-2344] the Omaha underwater "voices from the past".
+    //
+    // These play DURING the ramp cinematic, and coop_rampAudioCut has already pulled s_sfxduck to
+    // 0.05 by then - so as tier 0 they played at five percent and the whole beat did not exist. That
+    // is bug-2298 exactly: a scripted voice turned down to nothing while its mouth kept moving.
+    //
+    // DELIBERATELY HERE AND NOT IN S_HZM_CueTier, for the reason this predicate was created: a cue
+    // tier also ARMS the sidechain (see the hold at cueTier > 0 below), so tier 1 would have each
+    // remembered line duck the music underneath it every second or two. The user's requirement is the
+    // opposite - "make sure you can hear the music over it still, that is the whole point". Exempt
+    // from the duck, arming nothing. The samples are normalised to -24 LUFS and play 3D with
+    // mindist 140, so distance and the mix still place them under the score.
+    if (strstr(name, "coop_memory/")) {
+        return true;
+    }
+    return false;
 }
 
 void openal_channel::set_gain(float gain)
@@ -3583,6 +3699,46 @@ void openal_channel::set_gain(float gain)
         }
     }
 
+    // --- DIALOGUE SIDECHAIN [user 2026-09-01] ---
+    //
+    // The user, on Omaha: "I dont hear the captains dialogue... he may be getting drowned out im not
+    // sure". He is. The scripted VO on that beach competes with MG42s, a naval barrage, six fires and
+    // a surf bed, and nothing was giving way for it - the cue sidechain below covers the mod's own
+    // feedback cues (typewriter, sprint breath, rank-up) and has never covered speech.
+    //
+    // So: any live dialogue channel holds a short window open, and everything that is not dialogue,
+    // not music and not ambience steps back inside it. Music and ambience are left alone on purpose -
+    // the score under a line is atmosphere, the machine gun over it is the problem. set_gain runs
+    // every frame for every live channel (S_OPENAL_Respatialize re-applies it), so a speaking channel
+    // re-arms the window continuously and it closes by itself when the line ends.
+    {
+        static cvar_t *s_voxDuck = NULL;
+        if (!s_voxDuck) {
+            s_voxDuck = Cvar_Get("s_voxDuck", "0.35", CVAR_ARCHIVE);
+        }
+        if (s_voxDuck->value > 0.0f) {
+            if (!bMusic && !bLoop
+                && (iEntChannel == CHAN_DIALOG || iEntChannel == CHAN_DIALOG_SECONDARY)) {
+                // the speaker holds the window open; it is never ducked by its own duck
+                if (cls.realtime + 250 > s_hzmVoxDuckUntil) {
+                    s_hzmVoxDuckUntil = cls.realtime + 250;
+                }
+            } else if (!bMusic && !bLoop && cls.realtime < s_hzmVoxDuckUntil
+                       && !(pSfx && S_HZM_DuckExempt(pSfx->name))) {
+                float fVoxAmt  = s_voxDuck->value;
+                int   iVoxLeft = s_hzmVoxDuckUntil - cls.realtime;
+                if (fVoxAmt > 0.85f) {
+                    fVoxAmt = 0.85f;   // never mute the firefight outright
+                }
+                // release over the last 200ms so the level does not snap back audibly
+                if (iVoxLeft < 200) {
+                    fVoxAmt *= (float)iVoxLeft / 200.0f;
+                }
+                gain *= (1.0f - fVoxAmt);
+            }
+        }
+    }
+
     // --- cue sidechain (see S_HZM_CueTier above) ---
     {
         int   cueTier = 0;
@@ -3599,8 +3755,70 @@ void openal_channel::set_gain(float gain)
 
         // cinematic effects duck (music exempt so the soundtrack stays full while effects recede,
         // and standout CUES exempt so an unlock cue is never ducked by its own duck)
-        if (s_sfxduck && s_sfxduck->value < 1.f && !bMusic && cueTier == 0) {
-            gain *= s_sfxduck->value;
+        // [user 2026-09-01] ...and the whistle, which is an order rather than atmosphere - see
+        // S_HZM_DuckExempt above for why that is a separate list from the cue tiers.
+        // [user 2026-09-01, bug-2298] *** DIALOGUE IS NOT ATMOSPHERE. ***
+        //
+        // The user, third report on this: "I cant hear the captains dialogue still, i see his mouth
+        // moving, either it's being overwritten by everything else or idk what" - and then, correctly,
+        // "could it be that the dialogue audio that gets ducked for the cinematic scene never comes
+        // back up". That was the right diagnosis and it beat two of mine.
+        //
+        // This test exempted MUSIC and standout CUES. It never exempted SPEECH. coop_m3l1a_beachAudio
+        // fades s_sfxduck to 0.03 for a ~76 second music takeover on Omaha, so every scripted line
+        // spoken inside that window - including the captain's - played at THREE PERCENT. The lipsync
+        // runs off the .skc and is completely independent of the audio, so the mouth moved normally
+        // and nothing came out. That is the entire reported symptom, and it is not a missing file.
+        //
+        // I had previously told the user the audio simply was not shipped in War Chest. That was
+        // WRONG: their own session log contains no "Couldn't load sound" for any m3l1 dialogue, and
+        // the engine does log those. The files load; they were being turned down to nothing.
+        //
+        // The duck exists to clear room for a cue. Speech is the thing you most want to hear in that
+        // room, so it gets a FLOOR rather than the full duck. Default 1 = dialogue is untouched by
+        // the cinematic duck entirely; lower it if a scene ever genuinely needs speech pushed back.
+        // Same reasoning as S_HZM_DuckExempt for the whistle: an order is not ambience.
+        if (s_sfxduck && s_sfxduck->value < 1.f && !bMusic && cueTier == 0
+            && !(pSfx && S_HZM_DuckExempt(pSfx->name))) {
+            float fDuck = s_sfxduck->value;
+            if (iEntChannel == CHAN_DIALOG || iEntChannel == CHAN_DIALOG_SECONDARY) {
+                static cvar_t *s_sfxduckVoxFloor = NULL;
+                static cvar_t *s_coopVoxCut      = NULL;
+                float          fFloor;
+                if (!s_sfxduckVoxFloor) {
+                    s_sfxduckVoxFloor = Cvar_Get("s_sfxduckVoxFloor", "1", CVAR_ARCHIVE);
+                }
+                // HZM coop [user 2026-09-02, bug-2318] A TIME-VARYING VOX FLOOR.
+                //
+                // bug-2298 gave speech a permanent floor, which is right for a 76-second music
+                // takeover and wrong for the one frame a shell lands next to you. The user wants
+                // both: dialogue audible through the level, and dialogue CUT with everything else
+                // at the blast that throws you out of the boat.
+                //
+                // coop_voxCut SCALES the floor rather than replacing it: 1 = exactly bug-2298's
+                // behaviour, 0 = speech takes the full cinematic duck. FLAGS 0 ON PURPOSE - only
+                // CVAR_ARCHIVE cvars are written by Cvar_WriteVariables, so this one is physically
+                // incapable of latching to a config. That is the bug-2298 failure mode removed by
+                // construction rather than by discipline, and it is why the scale is a new cvar
+                // instead of just driving s_sfxduckVoxFloor to 0.
+                if (!s_coopVoxCut) {
+                    s_coopVoxCut = Cvar_Get("coop_voxCut", "1", 0);
+                }
+                fFloor = s_sfxduckVoxFloor->value;
+                {
+                    float fCut = s_coopVoxCut->value;
+                    if (fCut < 0.0f) {
+                        fCut = 0.0f;
+                    } else if (fCut > 1.0f) {
+                        fCut = 1.0f;
+                    }
+                    fFloor *= fCut;
+                }
+                if (fDuck < fFloor) {
+                    fDuck = fFloor;
+                }
+            }
+            gain *= fDuck;
         }
 
         if (!s_cueDuck) {
@@ -3617,6 +3835,47 @@ void openal_channel::set_gain(float gain)
         //   s_cueGain  - standout tier (challenge typewriter, rank-up ping)
         //   s_cueGain2 - subtle tier (sprint breath, injury cough, MG overheat)
         // Applied to the cue ITSELF, on top of its alias volume and the SFX slider.
+        // HZM coop [user 2026-09-02, bug-2369] A CUE CUT, matching the dialogue one.
+        //
+        // The user, twice: "the voice dialogue lines and injury sounds all play way over the music
+        // still. Nothing has changed there." The dialogue half is the vox floor below. THIS is the
+        // other half, and it is why the injury sounds in particular sit on top of everything:
+        // sound/coop_injury/ is a TIER 1 CUE (S_HZM_CueTier), which means it is exempt from the
+        // cinematic duck entirely AND is then multiplied by s_cueGain2 on top. During a sixty-second
+        // music takeover that is precisely backwards.
+        //
+        // coop_cueCut scales tier-1 cues the way coop_voxCut scales speech: 1 = today's behaviour,
+        // lower = the cue recedes under the music. FLAGS 0 ON PURPOSE - only CVAR_ARCHIVE cvars are
+        // written by Cvar_WriteVariables, so this one physically cannot latch into a config and
+        // silently suppress every injury sound in the game forever. That is the bug-2298 failure
+        // mode removed by construction, and it is why this is a new cvar rather than a script
+        // driving the archived s_cueGain2.
+        if (cueTier > 0) {
+            static cvar_t *s_coopCueCut = NULL;
+            float          fCueCut;
+            if (!s_coopCueCut) {
+                s_coopCueCut = Cvar_Get("coop_cueCut", "1", 0);
+            }
+            fCueCut = s_coopCueCut->value;
+            if (fCueCut < 0.0f) {
+                fCueCut = 0.0f;
+            } else if (fCueCut > 1.0f) {
+                fCueCut = 1.0f;
+            }
+            // [user 2026-09-02, bug-2373] TINNITUS IS EXEMPT FROM THE CUE CUT.
+            //
+            // "i dont think the shellshock sound is playing thru either... if it is its so low you
+            // cant even tell." That was me: coop_tinnitus/ is a tier-1 cue like coop_injury/, so the
+            // coop_cueCut I added one change earlier to push the injury sounds under the music was
+            // pushing the ring and the concussion wash under it too. The whole design of that beat -
+            // written into coop_rampAudioCut's own header - is that the ring arrives OVER everything
+            // and the world comes back underneath it. Cutting it defeats the thing the cut exists to
+            // make room for.
+            if (fCueCut < 1.0f && !(pSfx && strstr(pSfx->name, "coop_tinnitus/"))) {
+                gain *= fCueCut;
+            }
+        }
+
         if (cueTier > 0) {
             static cvar_t *s_cueGain  = NULL;
             static cvar_t *s_cueGain2 = NULL;

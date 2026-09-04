@@ -1415,7 +1415,22 @@ and rain gating - no new detection logic, only new publishes).
 */
 void RB_HZMExtraFx(FBO_t *srcFbo, ivec4_t srcBox)
 {
-	static cvar_t *r_ppUnderwaterFx = NULL, *r_ppUnderwater = NULL;
+	static cvar_t *r_ppUnderwaterFx = NULL, *r_ppUnderwater = NULL, *r_ppUnderwaterAmt = NULL;
+	// [UNDERWATER VOLUME v3, 2026-09-03]
+	static cvar_t *r_ppUnderwaterVis = NULL, *r_ppUnderwaterBlur = NULL;
+	static cvar_t *r_ppUnderwaterParticles = NULL, *r_ppUnderwaterShafts = NULL;
+	static cvar_t *r_ppUnderwaterRipple = NULL, *r_ppUnderwaterSilt = NULL;
+	static cvar_t *r_ppUnderwaterSiltBoost = NULL, *r_ppUnderwaterDebug = NULL;
+	static int     s_uwLastActive = -100000, s_uwNextLog = 0;
+	static cvar_t *r_ppBloodFx = NULL, *r_ppBlood = NULL, *r_ppBloodAmt = NULL;
+	// [2026-09-03 bug-2360 rebuild] the blood pass now needs an AGE rather than absolute level
+	// time, plus three artist knobs. r_ppBloodAmt is deliberately NOT repurposed: it is already
+	// archived at "1.0" in omconfig.cfg:4340, so changing its default would have no effect on any
+	// existing install - the intended look has to be the look the shader produces at 1.0.
+	static cvar_t *r_ppBloodRefract = NULL, *r_ppBloodRun = NULL, *r_ppBloodScale = NULL;
+	static float   s_bloodPrev  = 0.0f;
+	static float   s_bloodEpoch = 0.0f;
+	static int     s_bloodMark  = 0;
 	static cvar_t *r_ppFrost = NULL, *r_ppFrostAmt = NULL;
 	static cvar_t *r_ppChromaticAberration = NULL, *r_ppChromaticAberrationAmount = NULL;
 	static cvar_t *r_ppFilmGrain = NULL, *r_ppFilmGrainAmount = NULL;
@@ -1426,6 +1441,49 @@ void RB_HZMExtraFx(FBO_t *srcFbo, ivec4_t srcBox)
 	if (!r_ppUnderwaterFx) {
 		r_ppUnderwaterFx              = ri.Cvar_Get("r_ppUnderwaterFx",              "1",   CVAR_ARCHIVE);
 		r_ppUnderwater                = ri.Cvar_Get("r_ppUnderwater",                "0",   0);   // cgame-published
+		// [user 2026-09-02, bug-2355] artist scalar for the murk, so the underwater look can be tuned
+		// live instead of through a renderer rebuild. 1.0 = as authored in underwater_fp.glsl; the
+		// shader clamps the PRODUCT, not this, so values above 1 legitimately deepen the water.
+		r_ppUnderwaterAmt             = ri.Cvar_Get("r_ppUnderwaterAmt",             "1.0", CVAR_ARCHIVE);
+		// [user 2026-09-03] UNDERWATER VOLUME v3 dials. Every one is read every frame, so the
+		// whole look is tunable live from the console with no rebuild and no map reload.
+		//   Vis        - reference distance in GAME UNITS at which green transmittance falls to
+		//                37%. Lower = thicker water. 900 is tuned for the Omaha ramp beat: bodies
+		//                at 100-400 units stay readable while the far seabed goes solid, which is
+		//                also what keeps the unfinished underwater geometry off screen (bug-2320).
+		//   Blur       - scale on the depth-scaled scatter blur. 1.0 = 9 texels at 1080p, at full
+		//                murk. 0 skips 12 taps outright (the shader branch is uniform).
+		//   Particles  - mote brightness/density scale. 0 = none.
+		//   Shafts     - light-shaft shimmer scale. 0 = none.
+		//   Ripple     - refraction scale. 1.0 = the v2 amplitude, unchanged.
+		//   Silt       - the water colour, as r g b. Grey-green and silt-laden: the Channel off
+		//                Normandy, not the Caribbean.
+		//   SiltBoost  - multiplies that colour, so brightness can move without touching hue.
+		//   Debug      - 1 per-channel absorption, 2 murk, 3 distance ramp, 4 RAW DEPTH (the
+		//                sampler test); 1-4 also add a 1 Hz log line.
+		r_ppUnderwaterVis             = ri.Cvar_Get("r_ppUnderwaterVis",             "900", CVAR_ARCHIVE);
+		r_ppUnderwaterBlur            = ri.Cvar_Get("r_ppUnderwaterBlur",            "1.0", CVAR_ARCHIVE);
+		r_ppUnderwaterParticles       = ri.Cvar_Get("r_ppUnderwaterParticles",       "1.0", CVAR_ARCHIVE);
+		r_ppUnderwaterShafts          = ri.Cvar_Get("r_ppUnderwaterShafts",          "1.0", CVAR_ARCHIVE);
+		r_ppUnderwaterRipple          = ri.Cvar_Get("r_ppUnderwaterRipple",          "1.0", CVAR_ARCHIVE);
+		r_ppUnderwaterSilt            = ri.Cvar_Get("r_ppUnderwaterSilt",            "0.075 0.155 0.135", CVAR_ARCHIVE);
+		r_ppUnderwaterSiltBoost       = ri.Cvar_Get("r_ppUnderwaterSiltBoost",       "1.0", CVAR_ARCHIVE);
+		r_ppUnderwaterDebug           = ri.Cvar_Get("r_ppUnderwaterDebug",           "0",   0);
+		// [user 2026-09-02, bug-2360] blood thrown onto the camera. r_ppBlood is published by the
+		// cgame from the script-pokeable coop_lensBlood, exactly like coop_lensSplash - the script
+		// pokes an amount, the client owns the decay, and the renderer only ever reads a 0..1.
+		r_ppBloodFx                   = ri.Cvar_Get("r_ppBloodFx",                   "1",   CVAR_ARCHIVE);
+		r_ppBlood                     = ri.Cvar_Get("r_ppBlood",                     "0",   0);   // cgame-published
+		r_ppBloodAmt                  = ri.Cvar_Get("r_ppBloodAmt",                  "1.0", CVAR_ARCHIVE);
+		// None of these three exists in any shipped config yet, so unlike r_ppBloodAmt the C
+		// default here IS what every install gets on first run - and it therefore has to be the
+		// look that is wanted, not a round number. refract/run 1.0 = the shader as authored.
+		// scale 0.55 = the drop size the RENDER picked: at 1.0 the largest drop is a 189 px
+		// radius on a 3440x1440 frame, 26% of its height, and it reads as red gel rather than
+		// blood on glass. The measured ladder is in the SIZE note in bloodspatter_fp.glsl.
+		r_ppBloodRefract              = ri.Cvar_Get("r_ppBloodRefract",              "1.0",  CVAR_ARCHIVE);
+		r_ppBloodRun                  = ri.Cvar_Get("r_ppBloodRun",                  "1.0",  CVAR_ARCHIVE);
+		r_ppBloodScale                = ri.Cvar_Get("r_ppBloodScale",                "0.55", CVAR_ARCHIVE);
 		r_ppFrost                     = ri.Cvar_Get("r_ppFrost",                     "0",   CVAR_ARCHIVE);   // [user 08-07] frost removed; cgame no longer publishes r_ppFrostAmt
 		r_ppFrostAmt                  = ri.Cvar_Get("r_ppFrostAmt",                  "0",   0);   // cgame-published
 		r_ppChromaticAberration       = ri.Cvar_Get("r_ppChromaticAberration",       "0",   CVAR_ARCHIVE);   // opt-in
@@ -1438,10 +1496,249 @@ void RB_HZMExtraFx(FBO_t *srcFbo, ivec4_t srcBox)
 	if (!srcFbo || !tr.screenScratchFbo)
 		return;
 
+	// [user 2026-09-03] UNDERWATER VOLUME v3. The pass now READS THE DEPTH BUFFER, so the water
+	// behaves like a volume with things at different distances inside it instead of a filter over
+	// the whole picture. Three structural notes, all load-bearing:
+	//
+	//  * THIS IS THE ONE BLIT IN THIS FUNCTION THAT DOES NOT GO TO tr.screenScratchFbo, AND THAT
+	//    IS DELIBERATE. Do not tidy it back into line with the blood / frost / chromab / grain
+	//    blits below. Those four do not sample depth; this one does. tr.screenScratchFbo has
+	//    tr.renderDepthImage bound as its DEPTH attachment (tr_fbo.c:314-317), and rendering into
+	//    an FBO while sampling one of its own attachments is a rendering feedback loop with an
+	//    undefined fetch. tr.globalFogFbo is the colour-only alias of the SAME colour image that
+	//    exists for exactly this reason (tr_fbo.c:320-329), which is why the FastBlit back still
+	//    reads the right pixels. RB_GlobalFog is the worked example.
+	//    (It is also why this pass does NOT copy depth into tr.hdrDepthImage the way RB_HZMDof
+	//    has to: DoF composites INTO srcFbo, we do not, so we get the depth for one bind.)
+	//
+	//  * The projection terms come from rb_viewProj, NOT rb_globalFog. rb_globalFog only latches
+	//    them when farplane fog is active - six early returns sit above its assignment - so on an
+	//    unfogged map it holds the LAST FOGGED MAP's matrix. See viewProjLatch_t in tr_local.h.
+	//
+	//  * The depth SAMPLER is assigned at program-init in tr_glsl.c and re-asserted here. An
+	//    unassigned sampler defaults to unit 0 = the scene colour, which produces a
+	//    plausible-looking wrong answer rather than a visible failure. smp= in the marker below
+	//    reports the state as it ARRIVED (read before the re-assert), so the log can tell you the
+	//    init line went missing even though the picture still looks right.
 	if (r_ppUnderwaterFx->integer && r_ppUnderwater->value > 0.001f)
 	{
-		VectorSet4(color, r_ppUnderwater->value, backEnd.refdef.floatTime, 0.0f, 1.0f);
-		FBO_Blit(srcFbo, srcBox, NULL, tr.screenScratchFbo, srcBox, &tr.underwaterShader, color, 0);
+		FBO_t   *uwDst;
+		vec4_t   viewInfo, absorb, silt, params;
+		float    vis, farClamp, blurPx;
+		float    s0 = 0.075f, s1 = 0.155f, s2 = 0.135f;
+		float    centerZw = -1.0f, centerDist = -1.0f;
+		qboolean depthOk, announce;
+		int      smpUnit, now;
+
+		now      = ri.Milliseconds();
+		announce = (now - s_uwLastActive > 5000) ? qtrue : qfalse;
+
+		// Destination: the colour-only alias when we have it. If it is somehow absent we fall
+		// back to screenScratchFbo, and that fallback is SAFE only because of the two steps
+		// below, both of which must stay true together:
+		//   (1) depthOk requires tr.globalFogFbo, so we bind tr.whiteImage rather than
+		//       tr.renderDepthImage, and
+		//   (2) with u_ViewInfo.z = 0 the shader never samples u_LevelsMap at all.
+		// So no attachment of the bound draw FBO is ever sampled. Break either step and this
+		// becomes the feedback loop the alias exists to avoid.
+		uwDst   = tr.globalFogFbo ? tr.globalFogFbo : tr.screenScratchFbo;
+		depthOk = (tr.globalFogFbo && tr.renderDepthImage && rb_viewProj.valid) ? qtrue : qfalse;
+
+		vis = r_ppUnderwaterVis->value;
+		if (vis < 32.0f) {
+			vis = 32.0f;   // below this the absorption saturates inside the near plane
+		}
+		farClamp = vis * 6.0f;   // six e-foldings of green: T_g = 0.0025, i.e. solid silt
+
+		// silt colour as a string so it can be dialled live. Any parse failure falls back to the
+		// authored value rather than to whatever sscanf managed to fill in.
+		if (sscanf(r_ppUnderwaterSilt->string, "%f %f %f", &s0, &s1, &s2) != 3) {
+			s0 = 0.075f;
+			s1 = 0.155f;
+			s2 = 0.135f;
+		}
+
+		// blur radius in TEXELS of the SOURCE FBO - which is the space u_InvTexRes is in
+		// (tr_fbo.c:601-602 divides by src->width/height), not the space glConfig.vidWidth is in.
+		// Normalised so the look is resolution-independent: 9 texels at 1080p and the same
+		// apparent softness at 1440p/4K. srcFbo is non-NULL - the function returns above if not.
+		blurPx = r_ppUnderwaterBlur->value * 9.0f * ((float)srcFbo->height / 1080.0f);
+		if (blurPx < 0.0f) {
+			blurPx = 0.0f;
+		}
+
+		// ---- INDEPENDENT DEPTH CHECK, done BEFORE the pass so the log describes what the shader
+		// is about to read. Same idiom as RB_GlobalFog debug block: bind srcFbo, read the raw
+		// window depth at screen centre off the real depth attachment, rebind. qglReadPixels
+		// stalls the pipe, so this runs once per SUBMERSION (about once per 17-second beat) and
+		// otherwise only under r_ppUnderwaterDebug.
+		if (announce || r_ppUnderwaterDebug->integer)
+		{
+			FBO_t *oldFbo = glState.currentFBO;
+
+			FBO_Bind(srcFbo);
+			qglReadPixels(srcBox[0] + srcBox[2] / 2, srcBox[1] + srcBox[3] / 2, 1, 1,
+				GL_DEPTH_COMPONENT, GL_FLOAT, &centerZw);
+			FBO_Bind(oldFbo);
+
+			if (depthOk && centerZw >= 0.0f)
+			{
+				float denom = rb_viewProj.projMat10 + (2.0f * centerZw - 1.0f);
+
+				if (denom > -1e-6f) {
+					denom = -1e-6f;
+				}
+
+				centerDist = rb_viewProj.projMat14 / denom;
+
+				if (centerDist < 0.0f) {
+					centerDist = 0.0f;
+				}
+				if (centerDist > farClamp) {
+					centerDist = farClamp;
+				}
+			}
+		}
+
+		// ---- READ THE SAMPLER BEFORE REPAIRING IT. This ordering is the whole diagnostic: it
+		// reports the unit u_LevelsMap arrived pointing at, so a missing tr_glsl.c init line is
+		// visible in the log even though the very next call papers over it for this frame.
+		//   1  correct (TB_LEVELSMAP).
+		//   0  the tr_glsl.c GLSL_SetUniformInt(UNIFORM_LEVELSMAP, ...) line is gone - put it back.
+		//  -1  the shader has no u_LevelsMap declaration at all - depth cannot work, fix the GLSL.
+		smpUnit = GLSL_GetUniformIntValue(&tr.underwaterShader, UNIFORM_LEVELSMAP);
+		GLSL_SetUniformInt(&tr.underwaterShader, UNIFORM_LEVELSMAP, TB_LEVELSMAP);
+
+		VectorSet4(viewInfo, rb_viewProj.projMat10, rb_viewProj.projMat14,
+			depthOk ? 1.0f : 0.0f, (float)r_ppUnderwaterDebug->integer);
+
+		// per-channel extinction, 1/units. The RATIOS are fixed so the hue stays put while
+		// r_ppUnderwaterVis moves the visibility: red 3.1x green (absorbed first and hardest),
+		// blue 1.9x (silt scatters and absorbs blue - the Channel is green, not tropical).
+		VectorSet4(absorb, 3.10f / vis, 1.00f / vis, 1.90f / vis, farClamp);
+		VectorSet4(silt, s0, s1, s2, r_ppUnderwaterSiltBoost->value);
+		VectorSet4(params, blurPx, r_ppUnderwaterParticles->value,
+			r_ppUnderwaterShafts->value, r_ppUnderwaterRipple->value);
+
+		VectorSet4(color, r_ppUnderwater->value, backEnd.refdef.floatTime, r_ppUnderwaterAmt->value, 1.0f);
+
+		// FBO_Blit binds the colour on TB_COLORMAP itself and pushes only MVP / COLOR / INVTEXRES /
+		// HZMPARAMS / AUTOEXPOSUREMINMAX / TONEMINAVGMAXLINEAR (tr_fbo.c:592-611). TMU1 and
+		// UNIFORM_VIEWINFO / FOGDISTANCE / FOGCOLORMASK are untouched, so everything set here
+		// survives into the draw. GLSL_SetUniform* are DSA (qglProgramUniform*EXT), addressed to
+		// the named program, so setting them before FBO_Blit's internal bind is correct. Same
+		// contract RB_GlobalFog and RB_HZMDof both rely on.
+		// FBO_SetHzmParams is NOT automatic - FBO_BlitFromTexture pushes a file-static that the
+		// last effect left behind unless we bracket the blit, exactly as RB_HZMDof does.
+		GL_BindToTMU(depthOk ? tr.renderDepthImage : tr.whiteImage, TB_LEVELSMAP);
+		GLSL_SetUniformVec4(&tr.underwaterShader, UNIFORM_VIEWINFO,     viewInfo);
+		GLSL_SetUniformVec4(&tr.underwaterShader, UNIFORM_FOGDISTANCE,  absorb);
+		GLSL_SetUniformVec4(&tr.underwaterShader, UNIFORM_FOGCOLORMASK, silt);
+		FBO_SetHzmParams(params);
+
+		FBO_Blit(srcFbo, srcBox, NULL, uwDst, srcBox, &tr.underwaterShader, color, 0);
+
+		FBO_SetHzmParams(NULL);
+
+		FBO_FastBlit(uwDst, srcBox, srcFbo, srcBox, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+
+		// ^~^~^ MARKER. One line per SUBMERSION, not per frame: the pass has to have been idle
+		// for 5s to re-announce. That gives a log census exactly one row for the Omaha ramp beat
+		// (and one per swim), which is the whole point - three systems were mis-diagnosed as
+		// absent today purely because they printed nothing.
+		//
+		// THE THREE FIELDS THAT PROVE THE PASS IS REALLY DEPTH-DRIVEN, and each proves a
+		// different link in the chain, which is why none of them can be dropped:
+		//   depth=      the PROJECTION latch (rb_viewProj.valid) and the FBO alias exist
+		//   smp=        the SAMPLER points at the depth image and not at the scene colour
+		//   centerDist= the DEPTH BUFFER holds real geometry, reconstructed on the CPU from the
+		//               same two projection terms, so it is an independent check and not an echo
+		if (announce)
+		{
+			ri.Printf(PRINT_ALL,
+				"^~^~^ UWFX v3 enter amt=%.3f depth=%d smp=%d vis=%.0f blurpx=%.2f part=%.2f "
+				"shaft=%.2f silt=%.3f %.3f %.3f P10=%.4f P14=%.1f centerZw=%.7f centerDist=%.1f\n",
+				r_ppUnderwater->value, depthOk ? 1 : 0, smpUnit, vis, blurPx,
+				r_ppUnderwaterParticles->value, r_ppUnderwaterShafts->value,
+				s0, s1, s2, rb_viewProj.projMat10, rb_viewProj.projMat14,
+				centerZw, centerDist);
+		}
+
+		s_uwLastActive = now;
+
+		// r_ppUnderwaterDebug additionally logs at 1 Hz, with the three transmittances worked out
+		// at the centre distance. Red must always be the smallest of the three and the gap must
+		// widen with distance; three equal numbers mean absorption is not working.
+		if (r_ppUnderwaterDebug->integer && now >= s_uwNextLog)
+		{
+			ri.Printf(PRINT_ALL,
+				"^~^~^ UWFX debug centerZw=%.7f centerDist=%.1f T=%.3f %.3f %.3f murk=%.3f\n",
+				centerZw, centerDist,
+				exp(-(3.10f / vis) * centerDist),
+				exp(-(1.00f / vis) * centerDist),
+				exp(-(1.90f / vis) * centerDist),
+				1.0 - exp(-(1.00f / vis) * centerDist));
+
+			s_uwNextLog = now + 1000;
+		}
+	}
+
+	// [bug-2360] blood on the lens. AFTER the underwater pass on purpose: if you are hit at the ramp
+	// and then thrown into the water, the blood is on the glass and the water is between you and the
+	// world, so the water must not tint the blood - it sits on top of it.
+	if (r_ppBloodFx->integer && r_ppBlood->value > 0.001f)
+	{
+		float  now     = (float)backEnd.refdef.floatTime;
+		float  bh      = (srcBox && srcBox[3]) ? (float)srcBox[3] : (float)glConfig.vidHeight;
+		float  bw      = (srcBox && srcBox[2]) ? (float)srcBox[2] : (float)glConfig.vidWidth;
+		float  bAspect = (bh > 0.0f) ? (bw / bh) : 1.7778f;
+		float  age;
+		vec4_t bparams;
+
+		// [2026-09-03] THE AGE EPOCH. The shader used to receive backEnd.refdef.floatTime and
+		// drive its runs off it - which is ABSOLUTE LEVEL TIME (tr_local.h, tr.refdef.time/1000).
+		// Measured: only 3 of the 14 old drops had a meaningful run coefficient, they were the
+		// three LARGEST, and by 300 s of uptime all three had been pushed off the TOP of the
+		// screen (they ran up), taking any-trace coverage from 15.49% to 8.04%. So the effect
+		// silently lost exactly the drops that were meant to dominate, and it looked different
+		// every session depending on how long the map had been up.
+		//
+		// r_ppBlood only ever RISES when the script pokes it - cg_view.c raises on a poke and
+		// then decays monotonically - so a rise IS the landing event. Stamp an epoch there and
+		// hand the shader an AGE. floatTime going backwards means the map changed, so re-stamp on
+		// that too. All of this is renderer-side on purpose: it keeps this a renderer-only ship.
+		if (r_ppBlood->value > s_bloodPrev + 0.0005f || now < s_bloodEpoch) {
+			s_bloodEpoch = now;
+			s_bloodMark  = 0;
+		}
+		s_bloodPrev = r_ppBlood->value;
+
+		age = now - s_bloodEpoch;
+		if (age < 0.0f) { age = 0.0f; }
+
+		// One marker per blood event, in the CLIENT log. Its ABSENCE is also the detector for a
+		// half-applied patch: no LENSBLOOD line means this hunk did not land and the shader is
+		// running on its own fallback path.
+		if (!s_bloodMark) {
+			s_bloodMark = 1;
+			ri.Printf(PRINT_ALL,
+				"^~^~^ LENSBLOOD amt=%.3f master=%.2f aspect=%.3f refract=%.2f run=%.2f scale=%.2f uw=%.2f\n",
+				r_ppBlood->value, r_ppBloodAmt->value, bAspect, r_ppBloodRefract->value,
+				r_ppBloodRun->value, r_ppBloodScale->value, r_ppUnderwater->value);
+		}
+
+		// u_Color.y is now AGE, not floatTime. u_Color.w carries the submersion so the shader can
+		// kill the specular and sluice the film while you are under. Nothing else reads either.
+		VectorSet4(color, r_ppBlood->value, age, r_ppBloodAmt->value, r_ppUnderwater->value);
+
+		// aspect + the three knobs ride the spare vec4. Set before the blit and cleared after,
+		// the same discipline RB_HZMDoF uses at tr_postprocess.c:1390/1395 - shaders that do not
+		// declare u_HzmParams resolve it to -1 and the set is a no-op (tr_fbo.c:506-513, :611).
+		VectorSet4(bparams, bAspect, r_ppBloodRefract->value, r_ppBloodRun->value,
+			r_ppBloodScale->value);
+		FBO_SetHzmParams(bparams);
+		FBO_Blit(srcFbo, srcBox, NULL, tr.screenScratchFbo, srcBox, &tr.bloodSpatterShader, color, 0);
+		FBO_SetHzmParams(NULL);
 		FBO_FastBlit(tr.screenScratchFbo, srcBox, srcFbo, srcBox, GL_COLOR_BUFFER_BIT, GL_NEAREST);
 	}
 

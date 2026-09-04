@@ -1795,10 +1795,46 @@ static void RB_IterateStagesGeneric( shaderCommands_t *input )
 		// in RB_CalcAlphaFromTexCoords (renderergl1/tr_shade_calc.c). The two clamps are BYTE fields,
 		// so normalise them here rather than in GLSL. Uploaded ONLY on this path - ForwardDlight uses
 		// tr.dlightallShader, which has no CalcColor, so the uniform would resolve to -1 there.
+		//
+		// HZM coop (bug-2226): THE CLAMP MUST NEVER BE HANDED min > max.
+		//
+		// gl1's alphaGen sCoord/tCoord takes FOUR parameters - min, max, constMin, const - and
+		// the last two are the clamps. Almost nothing supplies the fourth: across every shipped
+		// pak, 6 uses give all four and 55 give only two. When it is missing the parser leaves
+		// alphaConst at its -1 SENTINEL (renderergl1/tr_shader.c:1533, mirrored in this
+		// renderer's tr_shader.c) - and note the 3-parameter path continues WITHOUT a warning,
+		// so nothing is ever logged.
+		//
+		// gl1 then does the clamp in integer 0-255 space, and with the cap at -1 the arithmetic
+		// in RB_CalcAlphaFromTexCoords drives alpha to exactly 0 for every input - so the stage
+		// draws nothing. Every retail shader was authored against that, which is why the water
+		// shaders look right on gl1.
+		//
+		// Normalising -1 by /255 and passing it straight through gave GLSL
+		// clamp(f, 0.0, -0.0039) - MIN GREATER THAN MAX, which the GLSL spec leaves UNDEFINED.
+		// A driver is free to compute min(max(x,lo),hi) or max(min(x,hi),lo); those happen to
+		// give -0.0039 and 0 respectively, so it lands on invisible here and matches gl1 by luck.
+		// It is luck, not correctness: fold it differently and those 55 stages become VISIBLE,
+		// which paints an extra ocean layer over the surf - a hard flat waterline and a pale
+		// additive band, the exact symptom bug-1249 was originally reported for.
+		//
+		// So collapse the sentinel HERE, deterministically, and keep GLSL's clamp well defined.
+		// clamp(f, 0, 0) is 0 for every f, which is precisely what gl1 produces.
 		{
 			vec4_t agp;
-			VectorSet4(agp, pStage->alphaMin, pStage->alphaMax,
-			                pStage->alphaConstMin / 255.0f, pStage->alphaConst / 255.0f);
+			float  aLo = pStage->alphaConstMin / 255.0f;
+			float  aHi = pStage->alphaConst / 255.0f;
+
+			if (pStage->alphaConst < 0) {
+				// the missing-4th-parameter sentinel - gl1 yields alpha 0
+				aLo = 0.0f;
+				aHi = 0.0f;
+			} else if (aHi < aLo) {
+				// any other inversion an author could write; pin it rather than leave it undefined
+				aHi = aLo;
+			}
+
+			VectorSet4(agp, pStage->alphaMin, pStage->alphaMax, aLo, aHi);
 			GLSL_SetUniformVec4(sp, UNIFORM_ALPHAGENPARAMS, agp);
 		}
 

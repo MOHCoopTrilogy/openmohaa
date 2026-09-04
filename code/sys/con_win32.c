@@ -193,7 +193,22 @@ static void CON_Show( void )
 	CHAR_INFO line[ MAX_EDIT_LINE ];
 	WORD attrib;
 
-	GetConsoleScreenBufferInfo( qconsole_hout, &binfo );
+	// HZM coop [bug-2362] THE INTERMITTENT 0xC0000005 ON DEDICATED BOOT WAS HERE.
+	//
+	// The return value used to be discarded and `binfo` - an UNINITIALISED stack local - used
+	// anyway. NUL is a perfectly valid HANDLE, so when stdout is redirected to it (which is exactly
+	// what docs/tools/check_map_compiles.py does: stdout=subprocess.DEVNULL) CON_Init's
+	// INVALID_HANDLE_VALUE guard passes and we get here with a handle that is not a console. Every
+	// GetConsoleScreenBufferInfo on it then FAILS and leaves binfo holding whatever was on the
+	// stack. writeArea.Top/Bottom are taken straight from binfo.dwCursorPosition.Y below, so a
+	// negative residue made WriteConsoleOutput read tens of KB past the 1 KB `line` array and
+	// fault inside ntdll. Intermittent and load-correlated purely because it depended on the stack
+	// residue - which is why nine dumps and several bisects never converged on it.
+	//
+	// There is nothing to echo to a non-console, so returning is the correct behaviour, not a
+	// workaround.
+	if( !GetConsoleScreenBufferInfo( qconsole_hout, &binfo ) )
+		return;
 
 	// if we're in the middle of printf, don't bother writing the buffer
 	if( !qconsole_drawinput )
@@ -309,8 +324,15 @@ void CON_Init( void )
 
 	FlushConsoleInputBuffer( qconsole_hin ); 
 
-	GetConsoleScreenBufferInfo( qconsole_hout, &info );
-	qconsole_attrib = info.wAttributes;
+	// HZM coop [bug-2362] same defect, same function family: the return was discarded and `info`
+	// read uninitialised. With stdout redirected this call always fails, and the crash dump showed
+	// the fallout - qconsole_attrib came out as 0x6340, where a real white-on-black attribute is
+	// 0x07. Fall back to the documented default instead of using stack residue as a colour.
+	if( GetConsoleScreenBufferInfo( qconsole_hout, &info ) ) {
+		qconsole_attrib = info.wAttributes;
+	} else {
+		qconsole_attrib = FOREGROUND_BLUE | FOREGROUND_GREEN | FOREGROUND_RED;
+	}
 	qconsole_backgroundAttrib = qconsole_attrib & (BACKGROUND_BLUE|BACKGROUND_GREEN|BACKGROUND_RED|BACKGROUND_INTENSITY);
 
 	SetConsoleTitle(CLIENT_WINDOW_TITLE " Dedicated Server Console");

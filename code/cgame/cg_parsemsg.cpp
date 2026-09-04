@@ -762,6 +762,23 @@ static void CG_MakeBulletTracerInternal(
                             } else if ((trace.contents & CONTENTS_FLUID) || (trace.surfaceFlags & SURF_PUDDLE)) {
                                 VectorCopy(trace.endpos, vTrailStart);
                                 bInWater = qtrue;
+
+                                // HZM coop [user 2026-09-01] rounds cracking into the water beside you
+                                // put spray on the lens. This is the exact instant the engine already
+                                // decided a bullet crossed into fluid, so there is no new trace and no
+                                // new detection here - only a distance test and a raise.
+                                {
+                                    // [user 2026-09-01] "needs to be more frequent when water
+                                    // effects play near the player" - 300u only caught rounds
+                                    // landing almost at your feet. 650 covers the water you are
+                                    // actually wading through.
+                                    float fSplashDist = Distance(trace.endpos, cg.refdef.vieworg);
+                                    if (fSplashDist < 650.0f) {
+                                        // 0.7 at your feet down to nothing at 650u: a real wetting,
+                                        // still short of the full soaking a shell column gives.
+                                        CG_CoopLensSplash(0.7f * (1.0f - fSplashDist / 650.0f));
+                                    }
+                                }
                             }
 
                             VectorMA(trace.endpos, 2.0, vDir, vTraceStart);

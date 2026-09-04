@@ -32,7 +32,15 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 // raise only as its own deliberate, separately-approved gl1 change, not a side effect of gl2 work.
 #define	MAX_ENTITIES	1023
 #define MAX_POINTS     32
-#define MAX_SPRITES    2048
+// HZM coop [2026-09-01, bug-2242] 2048 -> 8192. RE_AddRefSpriteToScene reported
+// "MAX_SPRITES (2048) exceeded - sprites dropped" in a live session, and the drop is SILENT after
+// the first line because the warning sits behind a static overflowWarned - so every subsequent lost
+// sprite is invisible. It sizes backEndData_t::sprites[] in BOTH renderers (renderergl1
+// tr_local.h:2594, renderergl2 tr_local.h:3874); MAX_SPRITESURFS is 0x8000 and a compile-time
+// #error already enforces SPRITESURFS >= SPRITES, so 8192 keeps a 4x margin under that guard.
+// Raising cg_max_tempmodels to 2048 on the same day makes this MORE likely, not less: more live
+// particles means more sprites submitted per frame, so the two want raising together.
+#define MAX_SPRITES    8192
 
 #define MAX_MARK_FRAGMENTS   128
 #define MAX_MARK_POLYVERTS   384

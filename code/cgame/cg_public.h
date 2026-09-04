@@ -38,7 +38,9 @@ extern "C" {
     // multiple commands may be combined into a single packet, so this
     // needs to be larger than PACKET_BACKUP
 
-#define MAX_ENTITIES_IN_SNAPSHOT 2048 // HZM 07-20 (bug-934): follow MAX_GENTITIES - 1024 silently truncated what cgame could see
+// HZM 07-20 (bug-934): follow MAX_GENTITIES - 1024 silently truncated what cgame could see.
+// [bug-2283] 2048 -> 4096 with the pool. Undersizing this does not error, it truncates.
+#define MAX_ENTITIES_IN_SNAPSHOT 4096
 
     // snapshots are a view of the server at a given time
 

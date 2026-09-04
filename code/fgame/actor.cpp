@@ -3370,12 +3370,138 @@ void Actor::SetMoveInfo(mmove_t *mm)
 
 /*
 ===============
+Actor::CoopFailSafeGround
+
+HZM [user 2026-09-01] Root-cause guard for "the box-carrying soldiers warp under the map when they
+run into the tank traps" (m3l1a Omaha, and any other map with the same shape of bug).
+
+Runs the failsafe drop-to-ground probe from vFrom and reports whether it found honest ground. The
+validity test is not new - it is the one the engine already applies to every other drop-to-ground
+in the game, Entity::droptofloor (entity.cpp:2669-2672):
+
+    if (trace.fraction == 1 || trace.startsolid || trace.allsolid || !trace.ent) return false;
+
+We drop the !trace.ent clause so this can never reject a case that works today.
+
+Why fraction == 1 is the one that matters: CM_Trace copies the RAW, unmodified end point into
+endpos when nothing was hit (cm_trace.c:1398-1400), so a probe that misses hands back
+vFrom - (0,0,16384). And a probe that starts under the ground DOES miss: MOHAA terrain is only a
+32-unit-thick collision shell (CM_CheckStartInsideTerrain, cm_terrain.c:911-914; CM_CheckTerrainPlane,
+cm_terrain.c:348-356 reports no hit once both ends are deeper than 32), and CM_TraceThroughBrush
+leaves fraction at 1 for any brush the trace starts inside but exits (cm_trace.c:659-668) - which a
+16384-unit downward endpoint always does.
+===============
+*/
+bool Actor::CoopFailSafeGround(const Vector& vFrom, Vector& vGroundOut)
+{
+    trace_t trace;
+
+    trace = G_Trace(
+        vFrom,
+        PLAYER_BASE_MIN,
+        PLAYER_BASE_MAX,
+        vFrom - Vector(0, 0, 16384),
+        (Entity *)NULL,
+        MASK_MOVEINFO,
+        false,
+        "Actor::CoopFailSafeGround"
+    );
+
+    if (trace.fraction == 1.0f || trace.startsolid || trace.allsolid) {
+        return false;
+    }
+
+    vGroundOut = trace.endpos;
+
+    return true;
+}
+
+/*
+===============
+Actor::CoopFailSafeDestSane
+
+HZM [user 2026-09-01] Last line of defence, applied to EVERY failsafe destination whichever caller
+produced it. A point outside the world model bounds is not somewhere an actor can legally be, and
+no legitimate ground point is ever outside them.
+===============
+*/
+bool Actor::CoopFailSafeDestSane(const Vector& vDest)
+{
+    int    i;
+    Vector vMin;
+    Vector vMax;
+
+    // NaN/inf can only reach here from a corrupt trace. Written as !(in range) so NaN fails.
+    for (i = 0; i < 3; i++) {
+        if (!(vDest[i] > -1.0e9f && vDest[i] < 1.0e9f)) {
+            return false;
+        }
+    }
+
+    if (!world) {
+        return true;
+    }
+
+    vMin = world->GetMinBounds();
+    vMax = world->GetMaxBounds();
+
+    // World::World() early-returns long before it reaches the gi.ModelBoundsFromName call
+    // (worldspawn.cpp:562-565, :639) whenever LoadingSavegame is set, and World::Archive
+    // (worldspawn.cpp:1175) never stores bounds - so after a savegame load these are the zero
+    // Vectors the ctor left behind. Degenerate bounds are not evidence of anything: skip the test
+    // rather than gate live AI on garbage.
+    if (vMax[0] - vMin[0] < 1.0f || vMax[1] - vMin[1] < 1.0f || vMax[2] - vMin[2] < 1.0f) {
+        return true;
+    }
+
+    // 64 units of slack. The probe hull is PLAYER_BASE (+-15.5 in x/y, zero height) and a real
+    // ground point sits ON the world model surface, never outside its bounding box.
+    for (i = 0; i < 3; i++) {
+        if (vDest[i] < vMin[i] - 64.0f || vDest[i] > vMax[i] + 64.0f) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+/*
+===============
 Actor::DoFailSafeMove
 
 ===============
 */
 void Actor::DoFailSafeMove(vec3_t dest)
 {
+    // HZM [user 2026-09-01] Choke point. Both callers - the ANIM_MODE_DEST probe in
+    // Actor::GetMoveInfo and node->point on the ANIM_MODE_PATH side - land here, and what happens
+    // next has no collision at all: Think_NoClip (actor_noclip.cpp:50-66) lerps origin toward
+    // m_NoClipDest and commits it with SafeSetOrigin, a bare setOrigin with no trace, and it does
+    // not call PostThink, so DoMove/MmoveSingle never runs for the duration. Collision is not
+    // bypassed for one write, it is absent for the whole move. A destination outside the world
+    // therefore drops a live actor out of the map with nothing to stop him. Refuse it here rather
+    // than trusting the caller, and say so out loud instead of corrupting his position silently.
+    if (!CoopFailSafeDestSane(Vector(dest))) {
+        // hit_obstacle_time is a dead field (written once in Actor::Actor, archived, never read),
+        // reused here purely as a 1 Hz print throttle - a blocked actor re-enters this path every
+        // frame. No savegame format change: it was already archived.
+        if (level.inttime >= hit_obstacle_time + 1000) {
+            hit_obstacle_time = level.inttime;
+            gi.Printf(
+                "^~^~^ FAILSAFE REJECT ent=%d '%s' dest (%.0f %.0f %.0f) is outside the world - actor left in "
+                "place\n",
+                entnum,
+                targetname.c_str(),
+                dest[0],
+                dest[1],
+                dest[2]
+            );
+        }
+
+        VectorClear(velocity);
+        return;
+    }
+
     Com_Printf("(entnum %d, radnum %d) blocked, doing failsafe\n", entnum, radnum);
 
     VectorCopy(dest, m_NoClipDest);
@@ -3427,8 +3553,6 @@ Fetch current move information from mm.
 */
 void Actor::GetMoveInfo(mmove_t *mm)
 {
-    trace_t trace;
-
     m_walking     = mm->walking;
     m_groundPlane = mm->groundPlane;
     VectorCopy(mm->groundPlaneNormal, m_groundPlaneNormal);
@@ -3439,18 +3563,40 @@ void Actor::GetMoveInfo(mmove_t *mm)
     switch (m_eAnimMode) {
     case ANIM_MODE_DEST:
         if (!mm->hit_temp_obstacle && mm->hit_obstacle) {
-            trace = G_Trace(
-                m_Dest,
-                PLAYER_BASE_MIN,
-                PLAYER_BASE_MAX,
-                m_Dest - Vector(0, 0, 16384),
-                (Entity *)NULL,
-                MASK_MOVEINFO,
-                false,
-                "Actor::GetMoveInfo"
-            );
+            Vector vGround;
 
-            DoFailSafeMove(trace.endpos);
+            // HZM [user 2026-09-01] The failsafe probes straight DOWN FROM THE WAYPOINT, not from
+            // the actor - so a buried waypoint, not the tank trap, is what decides where he ends
+            // up. The old code fed trace.endpos to DoFailSafeMove unconditionally; when the probe
+            // found nothing, that value is m_Dest - (0,0,16384). Validate it first
+            // (Actor::CoopFailSafeGround) and only then use it. Every case that works today takes
+            // this branch and behaves exactly as before.
+            if (CoopFailSafeGround(m_Dest, vGround)) {
+                DoFailSafeMove(vGround);
+            } else {
+                // Second chance from a start known NOT to be in solid: the destination x/y at the
+                // actor own head height. He is standing on legal ground this frame, so that start
+                // is legal ground plus at most 94 units. This only ever runs in cases that used to
+                // produce the 16384-unit drop, so it cannot regress a working one. Arrival is
+                // tested in x/y only (UpdatePatrolCurrentNode), so recovering the correct z here
+                // still lets the script waittill movedone fire.
+                Vector vRetry(m_Dest[0], m_Dest[1], origin[2] + MAXS[2]);
+
+                if (CoopFailSafeGround(vRetry, vGround)) {
+                    DoFailSafeMove(vGround);
+                } else if (level.inttime >= hit_obstacle_time + 1000) {
+                    hit_obstacle_time = level.inttime;
+                    gi.Printf(
+                        "^~^~^ FAILSAFE NOGROUND ent=%d '%s' waypoint (%.0f %.0f %.0f) has no ground under it - "
+                        "actor left in place\n",
+                        entnum,
+                        targetname.c_str(),
+                        m_Dest[0],
+                        m_Dest[1],
+                        m_Dest[2]
+                    );
+                }
+            }
         } else if (mm->hit_temp_obstacle && (mm->hit_temp_obstacle & 1)) {
             Player *p;
 

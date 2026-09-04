@@ -356,15 +356,39 @@ static void TIKI_DeleteSkeletor(int entnum)
 {
     skeletor_c *skel;
     int         i;
+    int         index;
 
     if (entnum == ENTITYNUM_NONE) {
         return;
     }
 
+    // HZM coop [user 2026-09-01, bug-2292] *** THIS IS THE GENTITYNUM_BITS 12 MAP-LOAD CRASH. ***
+    //
+    // TIKI_GetSkeletor wraps its index with `entnum % TIKI_MAX_ENTITIES` when it WRITES the cache.
+    // This function, which frees it, did not - it indexed straight off entnum. The two agreed only
+    // because TIKI_MAX_ENTITIES was hardcoded 2048 and MAX_GENTITIES was also 2048, so TIKI_End()'s
+    // `for (i = 0; i < MAX_GENTITIES; i++)` topped out at index 2047*2+1 == 4095, the last slot of a
+    // 4096-pointer array. Exactly in bounds, by coincidence, with zero margin.
+    //
+    // Raise GENTITYNUM_BITS to 12 and MAX_GENTITIES becomes 4096 while the cache stayed 2048 wide, so
+    // the same loop ran to index 8191 - reading 4096 pointers of whatever follows the array and calling
+    // `delete` on each one. Hence a 0xC0000005 inside skeletor_c::~skeletor_c during map load, with no
+    // ERR_DROP and nothing in the console: bug-2283, which bug-2285 reverted with the cause unknown.
+    //
+    // FOUND BY THE FAULT ADDRESS, after two rounds of plausible-looking fixes to other things missed it.
+    // WER logs the faulting RVA for every crash (Get-WinEvent -ProviderName 'Application Error'), the
+    // linker already emits a .map, and the two together name the function in about a minute - no
+    // debugger needed. That is the tool to reach for first on any silent AV, not inspection.
+    //
+    // Wrapped to match the writer, and the slot is cleared - it was left dangling before, which is a
+    // double-free waiting for any second caller. TIKI_End is the only caller today and TIKI_Begin
+    // zeroes the table afterwards, so that half was latent rather than live.
     for (i = 0; i < TIKI_MAX_ENTITY_CACHE_PER_ENT; i++) {
-        skel = skel_entity_cache[entnum * TIKI_MAX_ENTITY_CACHE_PER_ENT + i];
+        index = ((entnum % TIKI_MAX_ENTITIES) * TIKI_MAX_ENTITY_CACHE_PER_ENT) + i;
+        skel  = skel_entity_cache[index];
         if (skel) {
             delete skel;
+            skel_entity_cache[index] = NULL;
         }
     }
 }
@@ -394,7 +418,9 @@ void TIKI_End(void)
 {
     int i;
 
-    for (i = 0; i < MAX_GENTITIES; i++) {
+    // [bug-2292] the CACHE's width, not the entity pool's - see TIKI_DeleteSkeletor. These are
+    // now the same number again, but they are different quantities and must not be conflated.
+    for (i = 0; i < TIKI_MAX_ENTITIES; i++) {
         TIKI_DeleteSkeletor(i);
     }
 

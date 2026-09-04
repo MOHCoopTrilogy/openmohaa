@@ -1664,7 +1664,54 @@ typedef enum
 // operations). ENTITYNUM_WORLD/NONE become 2046/2047 automatically; the AllocEdict protocol
 // clamp (level.cpp) follows ENTITYNUM_WORLD symbolically. maxentities 2048 in the coop server
 // cfgs is now an honest value.
-#define	GENTITYNUM_BITS		11
+// HZM coop [user 2026-09-01, bug-2283] ENTITY POOL 2048 -> 4096. The live crash was
+// `ERROR: Level::AllocEdict: no free edicts` with the tracer reading slot=2045 num_entities=2046
+// max=2048 - a hard ceiling, not a leak (the actor census sat flat at ~140 for the whole run).
+// Omaha's coop layer places several hundred scenery entities on top of retail's own.
+//
+// FIVE CONSTANTS MOVE TOGETHER OR NOT AT ALL, and the previous raise (10 -> 11) left the list in
+// sv_snapshot.c's own warning text: GENTITYNUM_BITS (q_shared.h), MAX_SNAPSHOT_ENTITIES
+// (sv_snapshot.c), MAX_ENTITIES_IN_SNAPSHOT (cgame/cg_public.h), MAX_PARSE_ENTITIES
+// (client/client.h) and the `maxentities` cvar default (fgame/gamecvars.cpp). GENTITYNUM_BITS is
+// the WIRE WIDTH of every entity number (msg.cpp writes groundEntityNum and every snapshot index
+// with it), so openmohaa.exe, cgame.dll and game.dll must ship as one set - a mismatched pair
+// desynchronises every snapshot.
+// HZM coop [2026-09-02] *** READ THE DEFINE, NOT THIS HEADER. GENTITYNUM_BITS IS 12. ***
+// The line that used to open this block said "REVERTED to 11 - the 4096 attempt crashed on map
+// load", and it was left standing after the raise was re-landed. It described bug-2285, which was
+// superseded within a day: the crash was NOT the pool width. It was the skeletor cache sized by
+// TIKI_MAX_ENTITIES (bug-2292) and an exact-equality guard in AllocEdict (bug-2293), both since
+// fixed. The user's standing directive is "id rather the pool get increased than we lose content",
+// and 12 is what is shipped and tested.
+//
+// Left as a warning about the failure mode itself: a stale comment that contradicts its own define
+// is worse than no comment, because the next session trusts it and reverts working code. That is
+// docs/TRAPS.md T11 in one line.
+//
+// bug-2283 raised this to 12 to fix `Level::AllocEdict: no free edicts`, moving all five
+// constants the previous 10->11 raise had documented (MAX_SNAPSHOT_ENTITIES,
+// MAX_ENTITIES_IN_SNAPSHOT, MAX_PARSE_ENTITIES, the maxentities cvar default). All three
+// binaries rebuilt and shipped as a set; game.dll reported ENTBITS=12 correctly. The map then
+// died during spawn with no ERR_DROP and no console line - a hard fault, not a clean error.
+//
+// WHAT WAS RULED OUT before reverting: the binaries were a consistent set (all four stamped
+// 17:35-17:37); AllocEdict's free-slot scan is bounded by globals.num_entities, not by
+// ENTITYNUM_WORLD.  *** THE LINE THAT USED TO SIT HERE WAS WRONG. *** It claimed a 2048-slot pool
+// under a 4096-wide protocol "does not over-read". It does: ENTITYNUM_WORLD is a fixed PROTOCOL
+// index (MAX_GENTITIES-2 == 4094 at 12 bits) and g_spawn.cpp:1253 writes g_entities[] at it every
+// spawn, so a pool malloc'd at maxentities==2048 was written 2046 slots past its end. That was the
+// bug-2283 map-load crash, and believing this comment is why bug-2285 reverted the raise instead of
+// fixing it. g_main.cpp now always allocates the full protocol range; see the note there.
+// svs.snapshotEntities is sized PACKET_BACKUP*MAX_CLIENTS*4 per client and never referenced
+// MAX_SNAPSHOT_ENTITIES, so it was already large enough; and the big arrays this widens
+// (cg.activeSnapshots, cl.parseEntities) are statics rather than stack locals.
+//
+// So the cause is still unknown, and shipping a second guess on top of the first is not a fix.
+// Reverted whole. The pool pressure that motivated it was ALSO addressed from the other side in
+// the same session - gore cut from ~322 scenery entities to ~100, and six actor populations cut
+// by roughly 40% - so 2048 has real headroom again. Re-open this with a debugger attached
+// (docs: cdb is NOT currently installed on this machine) and a dump, not by inspection.
+#define	GENTITYNUM_BITS		12
 #define	MAX_GENTITIES		(1<<GENTITYNUM_BITS)
 
 // entitynums are communicated with GENTITY_BITS, so any reserved

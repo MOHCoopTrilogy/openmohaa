@@ -282,6 +282,9 @@ Build a client snapshot structure
 // The qsort in SV_BuildClientSnapshot is O(n log n) per client per snapshot and roughly doubles
 // in the worst case. Server-side only: this define appears nowhere in cgame/ or fgame/, so only
 // the engine exe needs rebuilding.
+// HZM coop [bug-2283] follows MAX_GENTITIES, which is now 4096. This is the cap bug-1186 raised
+// from 1024 after finding it was SILENTLY discarding entities; the warning below still names the
+// other three constants that have to move with it.
 #define	MAX_SNAPSHOT_ENTITIES	2048
 typedef struct {
 	int		numSnapshotEntities;

@@ -662,6 +662,9 @@ const adsGunTune_t *CG_FindAdsTune(const char *wpn);
     float    CG_GetLandingSeverity(void);   // HZM coop - 0..1 shared landing latch (cg_view.c); 0 = no recent landing
     float CG_AdsShoulderFrac(void); // HZM coop - shoulder-stage camera envelope 0..1 (2D ADS effects follow the camera ease)
     qboolean CG_AdsShoulderWheelActive(void); // HZM coop - wheel steals ADS-stage events this frame (FALSE for scoped rifles)
+    // HZM coop [user 2026-09-01] lens splash - raised by anything that throws water at the eye
+    void  CG_CoopLensSplash(float amt);
+    float CG_CoopLensSplashLevel(float dt);
     qboolean CG_FreecamCaptureActive(void); // HZM coop - free-cam orbit owns the mouse this frame (crosshair hides: camera != aim)
     void  CG_HudFadeTouch(void); // HZM coop - HUD fade: mark HUD-relevant activity (objective updates, suppression, ...)
     void  CG_AddSuppression(float amount); // HZM coop - bump the under-fire suppression FX (near-miss zings / hits)

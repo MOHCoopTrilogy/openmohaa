@@ -89,7 +89,11 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 // rebuilt and deployed together, exactly like the GENTITYNUM_BITS / MAX_SOUNDS family.
 #define TIKI_MAX_COMMANDS    256
 
-#define TIKI_MAX_ENTITIES              2048
+// HZM coop [user 2026-09-01, bug-2292] this is the skeletor cache's own width, and it was a hardcoded
+// 2048 that happened to equal MAX_GENTITIES at 11 bits. TIKI_End() walks i < MAX_GENTITIES, so the two
+// numbers being equal was load-bearing and nothing said so. Tie it to the pool so they cannot diverge
+// again; at 12 bits this is 4096*2 pointers, 64 KB, which is nothing.
+#define TIKI_MAX_ENTITIES              MAX_GENTITIES
 #define TIKI_MAX_ENTITY_CACHE_PER_ENT  2
 #define TIKI_MAX_ENTITY_CACHE          (TIKI_MAX_ENTITIES*TIKI_MAX_ENTITY_CACHE_PER_ENT)
 

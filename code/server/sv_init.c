@@ -29,7 +29,25 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 
 static char last_mapname[ MAX_QPATH ];
 static int g_iSvsTimeFixupCount;
-static int *g_piSvsTimeFixups[ 2048 ];
+// HZM coop [user 2026-09-01, bug-2290] THIS ARRAY IS WHY GENTITYNUM_BITS 12 CRASHED.
+//
+// SV_AddSvsTimeFixup below writes `g_piSvsTimeFixups[g_iSvsTimeFixupCount++]` with NO BOUNDS CHECK,
+// and the array was a hardcoded 2048 sized for an era when MAX_GENTITIES was smaller. The one caller
+// is fgame/archive.cpp:552, which registers one fixup per archived TIME FIELD - so the count scales
+// with how many objects the level archives, i.e. with the entity count. Raise the pool to 4096, fill
+// Omaha, and the write walks off the end of a static array into whatever follows it: an access
+// violation (0xC0000005) during map spawn, with no ERR_DROP and no console line, which is exactly the
+// crash bug-2283 produced and bug-2285 had to revert.
+//
+// FOUND BY BISECTION on a dedicated server, not by inspection - two rounds of reading the diff missed
+// it. The dedicated harness was what made that cheap: the crash reproduces headlessly in 55 seconds,
+// and because a dedicated server loads neither cgame nor the client it immediately ruled out two of
+// the five constants that had been changed together.
+//
+// Sized off MAX_GENTITIES now so it can never fall behind the pool again, and bounds-checked so that
+// if it ever does fill, it drops the fixup with one visible warning instead of corrupting the heap.
+#define MAX_SVSTIME_FIXUPS (MAX_GENTITIES * 4)
+static int *g_piSvsTimeFixups[ MAX_SVSTIME_FIXUPS ];
 
 /*
 ===============
@@ -63,6 +81,17 @@ SV_AddSvsTimeFixup
 */
 void SV_AddSvsTimeFixup( int *piTime )
 {
+	// [bug-2290] the bounds check this never had - see the note on the array above
+	if ( g_iSvsTimeFixupCount >= MAX_SVSTIME_FIXUPS ) {
+		static qboolean warned = qfalse;
+		if ( !warned ) {
+			warned = qtrue;
+			Com_Printf( "WARNING: SV_AddSvsTimeFixup hit MAX_SVSTIME_FIXUPS (%d) - dropping further "
+				"fixups this pass. Raise it in sv_init.c; it is sized off MAX_GENTITIES.\n",
+				MAX_SVSTIME_FIXUPS );
+		}
+		return;
+	}
 	g_piSvsTimeFixups[ g_iSvsTimeFixupCount++ ] = piTime;
 }
 

@@ -735,7 +735,18 @@ public:
     byte     modulate[4];
 };
 
-#define MAX_TEMPMODELS 2048
+// HZM coop [2026-09-01, bug-2242] 2048 -> 4096, as BURST HEADROOM above the eviction line.
+//
+// "Out of tempmodels" fired six times in a live session while cg_max_tempmodels was still 1100 -
+// i.e. with 948 array slots spare. That is the tell: FreeSomeTempModels (cg_tempmodels.cpp:140)
+// begins `if (!m_free_tempmodels) return;`, so it cannot help once the free list is ALREADY empty,
+// and a single dense burst drains it faster than the per-frame eviction can trim. Raising the cvar
+// alone would not fix that - it moves the eviction line, not the pool.
+//
+// The cvar stays at 2048, so steady state is still trimmed to max-minus-reserve; the extra 2048
+// slots exist purely to absorb a burst. m_tempmodels is a flat array in ClientGameCommandManager,
+// so the cost is bounded and paid once at load.
+#define MAX_TEMPMODELS 4096
 #define MAX_BEAMS      4096
 
 class ClientGameCommandManager : public Listener

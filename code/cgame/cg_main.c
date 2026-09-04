@@ -205,6 +205,13 @@ void CG_RegisterCvars(void)
         cg_crosshair_friend = cgi.Cvar_Get("cg_crosshair_friend", "textures/hud/crosshair", CVAR_ARCHIVE);
     }
     ui_crosshair                  = cgi.Cvar_Get("ui_crosshair", "0", CVAR_ARCHIVE); // HZM coop - default OFF (was autoexec seta, which stomped the archived user choice every launch)
+    // HZM coop [user 2026-09-03] CINEMATIC CROSSHAIR HOLD. Registered EAGERLY and with flags 0.
+    // Eagerly, because a server stufftext of "coop_cineHud 5" goes through Cvar_Command, which
+    // only sets a cvar that ALREADY EXISTS - the same trap that made coop_voxCut a no-op on the
+    // first frame it was needed (bug-2318, snd_dma_new.cpp:110). flags 0, because the two cvars
+    // directly above are CVAR_ARCHIVE - the player's own saved preference - and nothing the
+    // server can drive may ever be able to reach his config.
+    cgi.Cvar_Get("coop_cineHud", "0", 0);
     vm_offset_max                 = cgi.Cvar_Get("vm_offset_max", "8.0", 0);
     vm_offset_speed               = cgi.Cvar_Get("vm_offset_speed", "8.0", 0);
     vm_sway_front                 = cgi.Cvar_Get("vm_sway_front", "0.1", 0);
@@ -822,13 +829,24 @@ void CG_Init(clientGameImport_t *imported, int serverMessageNum, int serverComma
     {
         static const char *const hzmClearFx[] = {
             "r_ppHeat", "r_ppSuppress", "r_ppHit", "r_ppRainWet", "coop_dbnoView", "coop_medkitView",
+            // [2026-09-03] bug-1202 again, with a member nobody enumerated. r_ppBlood is
+            // published from CG_CalcFov exactly like every name above it, and coop_lensBlood is
+            // the script-poked input it consumes. Without these, dropping out mid-ramp with 0.85
+            // on the glass leaves the blood welded to the screen. See the companion change in
+            // cg_view.c: zeroing the cvar here is not sufficient on its own.
+            "r_ppBlood", "coop_lensBlood",
             // bug-1307: the scripted-suppression floor and one-shot bump. Without these a
             // disconnect mid-set-piece leaves a permanently forced blur - bug-1202 again.
             "coop_suppHold", "coop_suppBump",
             // [2026-08-21] coop_vaultView is a COUNTER, so a stale value is not a stuck view -
             // but zeroing it on a fresh connect keeps the client edge-detector in step with a
             // server that starts its own counter at 0 again.
-            "coop_vaultView"
+            "coop_vaultView",
+            // [user 2026-09-03] the cinematic crosshair hold. flags 0, so it can never reach a
+            // config - but it CAN survive a map change inside one session, and the "0" written
+            // here is read by CG_CoopCineHudActive as an explicit release on the first CG_Draw2D
+            // of the new map. Same reasoning as coop_voxCut's self-heal in S_BeginRegistration.
+            "coop_cineHud"
         };
         int i;
         for (i = 0; i < (int)(sizeof(hzmClearFx) / sizeof(hzmClearFx[0])); i++) {
