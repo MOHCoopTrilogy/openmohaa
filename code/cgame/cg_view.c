@@ -3780,6 +3780,75 @@ void CG_OffsetFirstPersonView(refEntity_t *pREnt, qboolean bUseWorldPosition)
 
                 VectorMA(pREnt->origin, s_lagX, mat[1], pREnt->origin); // left/right trail
                 VectorMA(pREnt->origin, s_lagY, mat[2], pREnt->origin); // up/down trail
+
+                // [user 2026-09-06, bug-2502] THE HANDS FOLLOW THE SWING. "when you move your weapon left or
+                // right on a two handed weapon the hand doesnt follow it correctly (the left hand holding the
+                // grip area)". The rotational lag (bug-2459) was applied to the WEAPON refEntity alone, about
+                // tag_weapon_right, in cg_modelanim.c - the gun swung and the arms, which are pREnt (the
+                // <skin>_fps.tik body), stayed where the clip put them, so the left hand came off the
+                // fore-grip by the whole swing once cg_weaponLagRot was raised to a visible 1.8 deg/unit.
+                // Now the swing is applied HERE, to the body, about the same grip point, with the same
+                // tag-pivot fix the idle-inspect body turn uses above: read where tag_weapon_right sits,
+                // turn the body's axes about the view up (yaw) and view left (pitch), then move the body so
+                // the tag has not moved. The weapon is attached to that tag and inherits the turn, so the
+                // gun-only rotation in cg_modelanim.c is scaled by (1 - cg_weaponLagBody); at the default
+                // 1 the gun and both hands turn as one rigid thing, which is what a held rifle does. The
+                // body pivot is ~25 units in front of the eye, so a 6 deg swing moves the shoulder caps
+                // under 3 units sideways and 0.14 toward the eye - nowhere near r_znear (bug-2462's 52 deg
+                // was the problem, not 6). cg_weaponLagBody 0 restores the gun-only swing for an A/B.
+                {
+                    static cvar_t *pLagBody = NULL;
+                    float          fLy = 0.0f, fLp = 0.0f, fBodyFrac;
+                    if (!pLagBody) {
+                        pLagBody = cgi.Cvar_Get("cg_weaponLagBody", "1", CVAR_ARCHIVE);
+                    }
+                    fBodyFrac = pLagBody->value;
+                    if (fBodyFrac < 0.0f) { fBodyFrac = 0.0f; }
+                    if (fBodyFrac > 1.0f) { fBodyFrac = 1.0f; }
+                    CG_CoopLagAngles(&fLy, &fLp);
+                    fLy *= fBodyFrac;
+                    fLp *= fBodyFrac;
+                    if (fLy > 0.01f || fLy < -0.01f || fLp > 0.01f || fLp < -0.01f) {
+                        static int    s_iLagTag  = -2;
+                        static int    s_iLagTiki = 0;
+                        vec3_t        vLgBefore, vLgAfter, vLgFix, vLgTagOfs, vLgTmp;
+                        orientation_t oLg;
+                        int           iLr;
+                        if (s_iLagTiki != (int)(size_t)pREnt->tiki) {
+                            s_iLagTag  = cgi.Tag_NumForName(pREnt->tiki, "tag_weapon_right");
+                            s_iLagTiki = (int)(size_t)pREnt->tiki;
+                        }
+                        VectorClear(vLgBefore);
+                        VectorClear(vLgTagOfs);
+                        if (s_iLagTag >= 0) {
+                            oLg = cgi.TIKI_Orientation(pREnt, s_iLagTag);
+                            VectorCopy(oLg.origin, vLgTagOfs);
+                            for (iLr = 0; iLr < 3; iLr++) {
+                                VectorMA(vLgBefore, vLgTagOfs[iLr], pREnt->axis[iLr], vLgBefore);
+                            }
+                        }
+                        if (fLy > 0.01f || fLy < -0.01f) {
+                            for (iLr = 0; iLr < 3; iLr++) {
+                                RotatePointAroundVector(vLgTmp, mat[2], pREnt->axis[iLr], fLy);
+                                VectorCopy(vLgTmp, pREnt->axis[iLr]);
+                            }
+                        }
+                        if (fLp > 0.01f || fLp < -0.01f) {
+                            for (iLr = 0; iLr < 3; iLr++) {
+                                RotatePointAroundVector(vLgTmp, mat[1], pREnt->axis[iLr], fLp);
+                                VectorCopy(vLgTmp, pREnt->axis[iLr]);
+                            }
+                        }
+                        if (s_iLagTag >= 0) {
+                            VectorClear(vLgAfter);
+                            for (iLr = 0; iLr < 3; iLr++) {
+                                VectorMA(vLgAfter, vLgTagOfs[iLr], pREnt->axis[iLr], vLgAfter);
+                            }
+                            VectorSubtract(vLgBefore, vLgAfter, vLgFix);
+                            VectorAdd(pREnt->origin, vLgFix, pREnt->origin);
+                        }
+                    }
+                }
             }
 
             // HZM coop - FREE-AIM: shift the gun toward the off-centre reticle so the weapon visibly leads to

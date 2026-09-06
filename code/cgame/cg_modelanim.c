@@ -2511,8 +2511,21 @@ void CG_ModelAnim(centity_t *cent, qboolean bDoShaderTime)
                 // Yaw turns forward+left about UP; pitch turns forward+up about LEFT - the same axis the droop
                 // uses, so the two compose rather than fight.
                 {
-                    float fLagYaw = 0.0f, fLagPitch = 0.0f;
+                    float          fLagYaw = 0.0f, fLagPitch = 0.0f;
+                    static cvar_t *pLagBodyM = NULL;
+                    float          fGunShare;
                     CG_CoopLagAngles(&fLagYaw, &fLagPitch);
+                    // [user 2026-09-06, bug-2502] the BODY now carries cg_weaponLagBody of the swing about the
+                    // same grip (cg_view.c, the lag block), and the gun inherits that through tag_weapon_right;
+                    // only the remainder is applied to the gun alone here, so the hands stay on the fore-grip.
+                    if (!pLagBodyM) {
+                        pLagBodyM = cgi.Cvar_Get("cg_weaponLagBody", "1", CVAR_ARCHIVE);
+                    }
+                    fGunShare = 1.0f - pLagBodyM->value;
+                    if (fGunShare < 0.0f) { fGunShare = 0.0f; }
+                    if (fGunShare > 1.0f) { fGunShare = 1.0f; }
+                    fLagYaw   *= fGunShare;
+                    fLagPitch *= fGunShare;
                     if (fLagYaw > 0.01f || fLagYaw < -0.01f) {
                         vec3_t vLgA, vLgB;
                         RotatePointAroundVector(vLgA, model.axis[2], model.axis[0], fLagYaw);
