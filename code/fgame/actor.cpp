@@ -2908,8 +2908,12 @@ const_str Actor::m_csThinkStateNames[NUM_THINKSTATES] = {
     STRING_ATTACK,
     STRING_CURIOUS,
     STRING_DISGUISE,
-    STRING_GRENADE,
+    // [2026-09-05, bug-2484] BADPLACE before GRENADE, matching eThinkState (actor.h): the two were
+    // swapped here, so the script getter `thinkstate` (EventGetThinkState indexes this table by
+    // m_ThinkState) reported "badplace" for an actor throwing a grenade and "grenade" for one
+    // fleeing a bad spot. Nothing in the trilogy scripts had ever compared against either string.
     STRING_BADPLACE, // Added in 2.0
+    STRING_GRENADE,
     STRING_NOCLIP
 };
 
@@ -5419,6 +5423,78 @@ Called from STRING_GLOBAL_WEAPON_SCR.
 void Actor::EventGiveWeaponInternal(Event *ev)
 {
     const str weapName = ev->GetString(1);
+
+    // HZM coop [user 2026-09-04, bug-2450] RESTORE VANILLA'S DISARM.
+    //
+    // `gun "none"` is how retail disarms radiomen, medics, patients, prisoners and pilots, and the
+    // ONLY mechanism behind it is this function stripping the weapon on an EMPTY give:
+    // global/weapon.scr `case "none": case "": local.name = ""` -> `self weapon_internal ""`.
+    // bug-1959b (78d56f96, 2026-08-19) turned an empty give into an early return. That fixed the
+    // real bug it was aimed at - an UNHANDLED weapon name also resolves to "", which used to
+    // disarm the actor permanently and then respin every think tick - but it killed the disarm
+    // too. Since then every such actor has kept whatever his TIKI's init block gave him:
+    // models/human/dday_29th_private_radio.tik declares `weapon "M1 Garand"`, and the model key is
+    // posted at EV_PRIORITY_SPAWNACTOR while `gun` is posted at EV_SPAWNACTOR (g_spawn.cpp:533/539),
+    // so the TIKI always lands first and nothing takes it back. Measured on m3l1a 2026-09-04:
+    // center_radioman (ent 1561) reported wg=rifle while carrying the radio set, and every
+    // dday_ranger_medic - whose TIKI declares no weapon - reported wg=unarmed. The TIKI init line
+    // is the only variable.
+    //
+    // Strip ONLY on an EXPLICIT disarm: the literal name "none", or an empty give from an actor
+    // whose current loadout is "none". An unhandled-name "" (whose loadout is a real weapon
+    // string) still no-ops, exactly as bug-1959b intended.
+    //
+    // NOTE the literal-"none" test below is currently UNREACHABLE: global/weapon.scr maps
+    // case "none" to "" before calling, and no other weapon_internal call site passes "none".
+    // The m_csLoadOut test is therefore the ONLY live path - do not delete it as redundant. It
+    // depends on global/weapon.scr reaching `self weapon_internal` with no wait after `gun` is
+    // dispatched (verified wait-free 2026-09-04); if a wait is ever added there, this stops
+    // firing. m_csLoadOut also persists for the rest of the map, so a LATER empty give on the same
+    // actor strips too - harmless, he is already unarmed.
+    //
+    // Live kill switch: `set coop_gunNoneStrips 0` restores the 2026-08-19 behaviour with no
+    // rebuild. Flags 0, not CVAR_ARCHIVE, so a test toggle cannot persist into a player's config.
+    {
+        static cvar_t *pGunNone = NULL;
+
+        if (!pGunNone) {
+            pGunNone = gi.Cvar_Get("coop_gunNoneStrips", "1", 0);
+        }
+
+        if (pGunNone->integer) {
+            qboolean bExplicitNone = qfalse;
+
+            if (!Q_stricmp(weapName.c_str(), "none")) {
+                bExplicitNone = qtrue;
+            } else if (!weapName.length() && m_csLoadOut != STRING_EMPTY
+                       && !Q_stricmp(Director.GetString(m_csLoadOut).c_str(), "none")) {
+                bExplicitNone = qtrue;
+            }
+
+            if (bExplicitNone) {
+                static cvar_t *pWeapDbg4 = NULL;
+
+                if (!pWeapDbg4) {
+                    pWeapDbg4 = gi.Cvar_Get("coop_weapDebug", "0", 0);
+                }
+                if (pWeapDbg4->integer) {
+                    Weapon *pHad = GetActiveWeapon(WEAPON_MAIN);
+
+                    gi.Printf(
+                        "^~^~^ WEAPDBG GUN-NONE actor=%d '%s' stripped='%s' t=%.1f\n",
+                        entnum,
+                        TargetName().c_str(),
+                        pHad ? pHad->GetItemName() : "<none held>",
+                        level.time
+                    );
+                }
+
+                Holster();
+                RemoveWeapons();
+                return;
+            }
+        }
+    }
 
     // HZM coop bug-1959b (caught live 20:18, actor 703 scene1_ai_wave1_1): an EMPTY give
     // used to Holster + RemoveWeapons FIRST and only then fail - so ONE "" give (weapon.scr's

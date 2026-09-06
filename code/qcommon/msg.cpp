@@ -3206,7 +3206,10 @@ void MSG_ReadSounds(msg_t* msg, server_sound_t* sounds, int* snapshot_number_of_
 			*snapshot_number_of_sounds = fubar;
 			for (i = 0; i < fubar; i++) {
 				if (MSG_ReadBits(msg, 1) == 1) {
-					sounds[i].entity_number = MSG_ReadBits(msg, 10);
+					// HZM coop [bug-2449] 10 -> GENTITYNUM_BITS. A stop record carries a bare entnum;
+					// 10 bits truncated every entity above 1023, so a stop aimed at 1694 stopped the
+					// channel of entity 670 and left 1694 playing. Must match MSG_WriteSounds.
+					sounds[i].entity_number = MSG_ReadBits(msg, GENTITYNUM_BITS);
 					sounds[i].channel = MSG_ReadBits(msg, 7);
 					sounds[i].stop_flag = qtrue; // su44 was here
 				}
@@ -3223,7 +3226,8 @@ void MSG_ReadSounds(msg_t* msg, server_sound_t* sounds, int* snapshot_number_of_
 						sounds[i].origin[1] = 0;
 						sounds[i].origin[2] = 0;
 					}
-					sounds[i].entity_number = MSG_ReadBits(msg, 11);
+					// HZM coop [bug-2449] 11 -> SOUND_ENTNUM_BITS; must match MSG_WriteSounds.
+					sounds[i].entity_number = MSG_ReadBits(msg, SOUND_ENTNUM_BITS);
 					sounds[i].channel = MSG_ReadBits(msg, 7);
 					// HZM COOP: 9->10->11 bits (MAX_SOUNDS 512->1024->1280->1600); must match
 					// MSG_WriteSounds. Now driven by SOUND_INDEX_BITS in q_shared.h, which carries
@@ -3291,7 +3295,8 @@ void MSG_WriteSounds(msg_t* msg, server_sound_t* sounds, int snapshot_number_of_
 					MSG_WriteFloat(msg, sounds[i].origin[1]);
 					MSG_WriteFloat(msg, sounds[i].origin[2]);
 				}
-				MSG_WriteBits(msg, sounds[i].entity_number, 11);
+				// HZM coop [bug-2449] 11 -> SOUND_ENTNUM_BITS; must match MSG_ReadSounds.
+				MSG_WriteBits(msg, sounds[i].entity_number, SOUND_ENTNUM_BITS);
 				MSG_WriteBits(msg, sounds[i].channel, 7);
 				// HZM COOP: 9->10->11 bits (MAX_SOUNDS 512->1024->1280->1600); must match
 				// MSG_ReadSounds. Now driven by SOUND_INDEX_BITS in q_shared.h, which carries
@@ -3326,7 +3331,8 @@ void MSG_WriteSounds(msg_t* msg, server_sound_t* sounds, int snapshot_number_of_
 			}
 			else {
 				MSG_WriteBits(msg, 1, 1);
-				MSG_WriteBits(msg, sounds[i].entity_number, 10);
+				// HZM coop [bug-2449] 10 -> GENTITYNUM_BITS; must match MSG_ReadSounds.
+				MSG_WriteBits(msg, sounds[i].entity_number, GENTITYNUM_BITS);
 				MSG_WriteBits(msg, sounds[i].channel, 7);
 			}
 		}

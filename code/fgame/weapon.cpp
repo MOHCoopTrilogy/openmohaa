@@ -1030,6 +1030,12 @@ Weapon::Weapon()
     m_fCoopSubNext        = 0.0f;   // player memory is not zeroed - seed every member
     m_fCoopMoveSpread     = 0.0f;
     m_fCoopMoveSpreadTime = 0.0f;
+    // HZM coop [user 2026-09-04] QUICK-DRAW SIDEARM. Same rule as the three above and for the same
+    // reason: BEFORE the LoadingSavegame return, and deliberately not archived. A garbage
+    // m_bCoopQDrawPosed on a savegame load would restore a junk angle onto a weapon in the
+    // player's hands the first time anything called CoopQDrawUnpose().
+    m_vCoopQDrawAng       = Vector(0, 0, 0);
+    m_bCoopQDrawPosed     = false;
 
     if (LoadingSavegame) {
         // Archive function will setup all necessary data
@@ -3171,6 +3177,84 @@ qboolean Weapon::ReadyToFire(firemode_t mode, qboolean playsound)
 //======================
 //Weapon::PutAway
 //======================
+// HZM coop [user 2026-09-04] QUICK-DRAW SIDEARM: an AUTHORED equip delay, with no statemap state.
+//
+// Weapon::ReadyToFire has NO weaponstate gate. Its only time test is
+//     m_eLastFireMode != mode || level.time > (m_fLastFireTime + FireDelay(mode))
+// so pinning BOTH fields turns that one existing line into a draw timer whose length I choose.
+// That is what makes the acceptance test ("faster than a reload AND faster than a manual swap")
+// winnable by design: the torso stays in STAND, whose attack rows are live immediately, so
+// without this the draw would cost a single server frame - not a trade, a teleport.
+//
+// NEVER SHORTENS an existing gate: if the gun already owes more delay than we are asking for
+// (it just fired), the larger value stands. FIRE_SECONDARY (rifle bash / pistol whip) is
+// deliberately unaffected - for that mode the first clause of the test is true and lets it
+// straight through, so a parked player can still bash.
+void Weapon::CoopSetDrawDelay(float fSeconds)
+{
+    float fTarget;
+
+    if (fSeconds <= 0.0f) {
+        return;
+    }
+
+    fTarget         = level.time + fSeconds - FireDelay(FIRE_PRIMARY);
+    m_eLastFireMode = FIRE_PRIMARY;
+    if (m_fLastFireTime < fTarget) {
+        m_fLastFireTime = fTarget;
+    }
+}
+
+// HZM coop [user 2026-09-04] QUICK-DRAW SIDEARM carry pose. AttachGun cannot do this: its
+// non-holster branch is a bare attach(owner->entnum, tag_num) with no offset - only the
+// HOLSTERING branch passes holsterOffset. So re-attach explicitly, using the holster path as the
+// precedent (setAngles then attach with use_angles + offset).
+//
+// Both attach_use_angles and attach_offset are entityState_t fields (q_shared.h:2289-2290), so the
+// pose REPLICATES: teammates on a dedicated server see the parked gun exactly where the shooter
+// does, drawn by the ordinary world-model branch on their copy of tag_weapon_left.
+//
+// The parent/tag are read back off the entity rather than looked up by name, so a weapon whose
+// TIK overrides attachToTag_offhand still parks on its own tag; and if ActivateWeapon's attach
+// silently failed (tag not found -> warning, no parent) this does nothing instead of guessing.
+void Weapon::CoopQDrawPark(int iParentNum, const Vector& vOfs, const Vector& vAng)
+{
+    int iTag;
+
+    if (edict->s.parent != iParentNum) {
+        return;
+    }
+
+    iTag = edict->s.tag_num;
+
+    // SAVE UNCONDITIONALLY. The flag exists purely so CoopQDrawUnpose() is a no-op on a weapon this
+    // feature never posed - that is the only job weapon.h claims for it - and making the SAVE
+    // conditional on it too was a latch bug: CoopQDrawExit's live path only unposes while
+    // `pPrimary->GetOwner() == this`, so a rifle dropped, removed or taken by a script mid-draw
+    // keeps m_bCoopQDrawPosed true for the life of that Weapon (the stranded-slot sweep cannot
+    // reach it either - that walks WEAPON_OFFHAND, which the exit already NULLed). Re-acquire the
+    // rifle, draw again, and the conditional would decline to refresh the angle and later restore
+    // the one captured during the FIRST draw. The condition bought nothing in the healthy case
+    // either: CoopQDrawPose is called exactly once per CoopQDrawEnter and entry requires
+    // !m_bCoopQDrawActive, so `angles` here is always the current in-hand angle.
+    m_vCoopQDrawAng   = angles;
+    m_bCoopQDrawPosed = true;
+
+    setAngles(vAng);
+    // Entity::attach detaches from the old parent itself, so no explicit detach() is needed.
+    attach(iParentNum, iTag, qtrue, vOfs);
+}
+
+void Weapon::CoopQDrawUnpose(void)
+{
+    if (!m_bCoopQDrawPosed) {
+        return;   // never posed by us - do NOT touch this weapon's angles
+    }
+
+    m_bCoopQDrawPosed = false;
+    setAngles(m_vCoopQDrawAng);
+}
+
 void Weapon::PutAway(void)
 {
     // set the putaway flag to true, so the state machine know to put this weapon away

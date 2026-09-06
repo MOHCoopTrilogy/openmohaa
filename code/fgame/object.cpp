@@ -610,6 +610,49 @@ void HeadGibObject::HeadGibStop(Event *ev)
     setMoveType(MOVETYPE_NONE);
 }
 
+// HZM coop [user 2026-09-04] MAGAZINE EJECT - see the class comment in object.h for why SOLID_NOT,
+// why MOVETYPE_BOUNCE and why this clipmask and not another.
+CLASS_DECLARATION(Entity, CoopMagObject, "coopmagobject") {
+    {&EV_Stop, &CoopMagObject::CoopMagStop},
+    {NULL,     NULL                       }
+};
+
+CoopMagObject::CoopMagObject()
+{
+    static cvar_t *pLife = NULL;
+
+    if (LoadingSavegame) {
+        return;
+    }
+
+    if (!pLife) {
+        pLife = gi.Cvar_Get("coop_magEjectLife", "20", CVAR_ARCHIVE);
+    }
+
+    setSolidType(SOLID_NOT);
+    setMoveType(MOVETYPE_BOUNCE);
+    edict->clipmask = MASK_SOLID & ~(CONTENTS_BODY | CONTENTS_BBOX);
+    // NO setSize HERE ON PURPOSE. Entity::setModel zeroes mins/maxs, calls SetSize(), and then
+    // overwrites both from gi.TIKI_CalculateBounds (entity.cpp:2098-2102), so a box set in a
+    // constructor is dead the moment the model is known. Sentient::CoopEjectMagazine sizes it
+    // immediately AFTER setModel instead, which is the only place it survives.
+
+    PostEvent(EV_Remove, pLife->value > 0 ? pLife->value : 20.0f);
+}
+
+void CoopMagObject::CoopMagStop(Event *ev)
+{
+    avelocity = vec_zero;
+    angles.x  = 0;
+    angles.z  = 0;
+    setAngles(angles);
+    setMoveType(MOVETYPE_NONE);
+    // the helmet's landing clatter at a third the volume - a magazine is not a steel pot. The
+    // grenade_bounce_metal1-3 alias family is in all three games' ubersounds, which HelmetTouch
+    // above already depends on.
+    Sound("grenade_bounce_metal", CHAN_BODY, 0.35f);
+}
+
 void HelmetObject::HelmetTouch(Event *ev)
 {
     avelocity = vec_zero;

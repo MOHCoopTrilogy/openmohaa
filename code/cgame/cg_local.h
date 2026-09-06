@@ -658,6 +658,8 @@ const adsGunTune_t *CG_FindAdsTune(const char *wpn);
     float CG_CoopBraceKick(void);     // HZM coop - mount-settle impulse 1..0
     float CoopGunHeft(void);          // HZM coop - 0..1 per-gun weight from the weapon class
     float CG_CoopDroopAngle(void);    // HZM coop - eased muzzle-droop degrees (applied at the grip)
+    void  CG_CoopLagAngles(float *pYaw, float *pPitch); // HZM coop - rotational weapon lag, degrees at the grip
+    float CG_CoopInspectRoll(void);   // HZM coop - idle-inspect roll moved off the body onto the gun (degrees at the grip)
     void  CG_NoteLocalFire(void);           // HZM coop - the local player pulled the trigger this frame
     void  CG_NoteFleshImpact(const vec3_t pos); // HZM coop - a bullet hit a body here (any shooter)
     float CG_GunBlood(void);                // HZM coop - 0..1 blood on the view weapon; rain washes it off

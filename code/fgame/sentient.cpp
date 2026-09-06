@@ -511,6 +511,20 @@ Event EV_Sentient_PopHelmet
     "Pops a sentient's helmet off if he's got one",
     EV_NORMAL
 );
+// HZM coop [user 2026-09-04] MAGAZINE EJECT, script entry point for AI. Called from
+// anim/reload.scr, which is the only place that knows an ordinary actor is really reloading: most
+// AI reload animations carry no attachmodel notetrack for the engine to hook (human_mp40.tik's
+// mp40_reload has only `client { entry sound mp40_reload_npc }`), and Weapon::StartReloading has
+// exactly one caller (Sentient::ReloadWeapon) that those actors never reach.
+Event EV_Sentient_CoopEjectMag
+(
+    "coop_ejectmag",
+    EV_DEFAULT,
+    "sS",
+    "modelname [tagname]",
+    "HZM coop - drop a spent magazine prop from this sentient's weapon",
+    EV_NORMAL
+);
 Event EV_Sentient_DropItems
 (
     "dropitems",
@@ -779,6 +793,7 @@ CLASS_DECLARATION(Animate, Sentient, NULL) {
     {&EV_Sentient_SetDamageMult,          &Sentient::SetDamageMult                },
     {&EV_Sentient_SetupHelmet,            &Sentient::EventSetupHelmet             },
     {&EV_Sentient_PopHelmet,              &Sentient::EventPopHelmet               },
+    {&EV_Sentient_CoopEjectMag,           &Sentient::EventCoopEjectMag            },
     {&EV_Sentient_GetThreatBias,          &Sentient::EventGetThreatBias           },
     {&EV_Sentient_SetThreatBias,          &Sentient::EventSetThreatBias           },
     {&EV_Sentient_SetThreatBias2,         &Sentient::EventSetThreatBias           },
@@ -878,6 +893,8 @@ Sentient::Sentient()
     m_fCoopGoreGibMarkTime  = 0;            // HZM coop - gore tier 1e
     m_bCoopGoreDecapForce     = qfalse;     // HZM coop [user 2026-09-03] - script-forced decap mark
     m_fCoopGoreDecapForceTime = 0;          // HZM coop [user 2026-09-03]
+    m_fCoopLastMagEject       = 0;          // HZM coop [user 2026-09-04] - magazine-eject debounce,
+    m_iCoopLastMagKey         = 0;          // HZM coop [user 2026-09-04]   keyed on (time, model)
     m_vCoopPoolPos          = vec_zero;     // HZM coop - gore tier 2
     m_vCoopPoolNormal       = vec_zero;     // HZM coop - gore tier 2
     m_iCoopPoolGen          = 0;            // HZM coop - gore tier 2 (bug-817: continuous pool growth)
@@ -5373,6 +5390,188 @@ void Sentient::EventPopHelmet(Event *ev)
     obj->avelocity.x = fPitchVelocity;
     obj->avelocity.y = fYawVelocity;
     obj->avelocity.z = crandom() * 300.0;
+}
+
+// HZM coop [user 2026-09-04] MAGAZINE EJECT.
+//
+// "on reload, magazines drop to the floor and bounce realistically; visible to ALL players;
+//  enemies and allies do it too ... lets make sure people dont be getting stuck on them."
+//
+// BUDGET, and why it is not optional. Level::AllocEdict answers pool exhaustion with
+// gi.Error(ERR_DROP, "Level::AllocEdict: no free edicts") (level.cpp:1789) - a hard server drop that
+// takes the whole coop game down, not a graceful degrade. The measured worst case is
+// level.coop_aiScaleHardCap (80, coop_mod/variables.scr:100) live actors plus 4 players = 84
+// possible reloaders, so this feature owns a fixed ceiling of its own and never leans on the pool:
+// 48 live props out of the 4096 pool is 1.2%.
+//
+// AT THE CAP THE OLDEST MAGAZINE IS RETIRED, NOT THE NEWEST SKIPPED - the same ring in the same
+// shape as CoopDecapRegisterHead above, for the same reason: the prop you just dropped is the one
+// the player is looking at. A separate per-frame budget covers the one-frame burst where a grenade
+// makes a dozen actors reload together, which is the bug-856 lesson.
+#define COOP_MAG_MAX 64 // ring size; coop_magEjectMax is clamped to this
+
+static SafePtr<Entity> s_coopMags[COOP_MAG_MAX];
+static int             s_coopMagNext      = 0;
+static int             s_coopMagFrame     = -1;
+static int             s_coopMagThisFrame = 0;
+static qboolean        s_coopMagArmed     = qfalse;
+
+static int CoopMagKey(const char *s)
+{
+    int h = 0;
+
+    while (s && *s) {
+        h = h * 31 + (int)(unsigned char)(*s++);
+    }
+    return h;
+}
+
+void Sentient::CoopEjectMagazine(const char *pszTik, const char *pszTag, int iSkinBits)
+{
+    static cvar_t *pOn = NULL, *pMax = NULL, *pBud = NULL, *pGap = NULL, *pDbg = NULL;
+
+    Vector         pos, fwd, right, up;
+    CoopMagObject *mag;
+    int            tagnum = -1;
+    int            i, idx, iMax, iLive, iKey;
+
+    if (!pOn) {
+        pOn  = gi.Cvar_Get("coop_magEject", "1", CVAR_ARCHIVE);
+        pMax = gi.Cvar_Get("coop_magEjectMax", "48", CVAR_ARCHIVE);
+        pBud = gi.Cvar_Get("coop_magEjectBudget", "4", 0);
+        pGap = gi.Cvar_Get("coop_magEjectMinGap", "0.35", 0);
+        pDbg = gi.Cvar_Get("coop_magEjectDebug", "0", 0);
+    }
+
+    if (!pOn->integer || !pszTik || !*pszTik || !edict->tiki) {
+        return;
+    }
+
+    // level.inttime going BACKWARDS is a map change: these statics outlive the level. The SafePtrs
+    // have already NULLed themselves against the freed entities, but the cursor, the frame budget
+    // and the one-shot census marker have not.
+    if (level.inttime < s_coopMagFrame) {
+        s_coopMagNext  = 0;
+        s_coopMagArmed = qfalse;
+    }
+    if (s_coopMagFrame != level.inttime) {
+        s_coopMagFrame     = level.inttime;
+        s_coopMagThisFrame = 0;
+    }
+    if (s_coopMagThisFrame >= pBud->integer) {
+        return; // budget spent this frame
+    }
+
+    // SAME-MODEL debounce - see m_iCoopLastMagKey in sentient.h. The Enfield's two different
+    // stripper clips on one frame both pass; the same prop re-attached once per round by the
+    // Springfield and the Nagant revolver loops is throttled.
+    iKey = CoopMagKey(pszTik);
+    if (m_fCoopLastMagEject > 0 && m_iCoopLastMagKey == iKey
+        && (level.time - m_fCoopLastMagEject) < pGap->value) {
+        return;
+    }
+
+    // Spawn point: the hand tag the animation named, then the mainhand weapon tag, then the hand
+    // bone, then a body-relative fallback. Entity::GetTag returns the WORLD position.
+    if (pszTag && *pszTag) {
+        tagnum = gi.Tag_NumForName(edict->tiki, pszTag);
+    }
+    if (tagnum < 0) {
+        tagnum = gi.Tag_NumForName(edict->tiki, "tag_weapon_right");
+    }
+    if (tagnum < 0) {
+        tagnum = gi.Tag_NumForName(edict->tiki, "Bip01 R Hand");
+    }
+    if (tagnum >= 0) {
+        GetTag(tagnum, &pos);
+    } else {
+        pos = origin + Vector(0, 0, 40);
+    }
+
+    iMax = pMax->integer;
+    if (iMax > COOP_MAG_MAX) {
+        iMax = COOP_MAG_MAX;
+    } else if (iMax < 1) {
+        iMax = 1;
+    }
+
+    iLive = 0;
+    for (i = 0; i < COOP_MAG_MAX; i++) {
+        if (s_coopMags[i]) {
+            iLive++;
+        }
+    }
+    if (iLive >= iMax) {
+        for (i = 0; i < COOP_MAG_MAX; i++) {
+            idx = (s_coopMagNext + i) % COOP_MAG_MAX;
+            if (s_coopMags[idx]) {
+                Event *fade = new Event(EV_Fade);
+                fade->AddFloat(1.0f); // Entity::Fade posts EV_Remove when alpha reaches 0
+                s_coopMags[idx]->PostEvent(fade, 0.0f);
+                s_coopMags[idx] = NULL;
+                iLive--;
+                break;
+            }
+        }
+    }
+
+    mag = new CoopMagObject();
+    mag->setModel(pszTik); // already precached: every weapon tik caches its own clip model in its
+                           // SERVER block (mp40.tik:146, bar.tik:152, kar98.tik:150, ...), and on
+                           // the animation path this is literally the model just attached
+    // AFTER setModel, never before: setModel re-derives the box from the TIKI bounds and throws
+    // away anything a constructor set (entity.cpp:2098-2102). A small explicit box also keeps the
+    // prop out of the bug-923 allsolid-freeze path when it is born against a wall.
+    mag->setSize(Vector(-1, -1, -1), Vector(1, 1, 1));
+    mag->setOrigin(pos);
+    mag->setAngles(angles);
+
+    AngleVectors(angles, fwd, right, up);
+    // half the owner's velocity so a sprinting player's magazine lands behind him instead of
+    // hanging in the air where he was, plus a small forward/lateral shove and a light push down out
+    // of the well.
+    mag->velocity = velocity * 0.5f + fwd * (6.0f + G_Random(10.0f)) + right * G_CRandom(8.0f)
+                  + Vector(0.0f, 0.0f, -10.0f);
+    mag->avelocity = Vector(G_CRandom(360.0f), G_CRandom(360.0f), G_CRandom(360.0f));
+
+    // carry the gun's finish across the bug-2241 3-bit surface bus. On the animation path these
+    // bits come straight off the in-hand magazine, so an ejected mag can never disagree with the
+    // one the player just watched go in.
+    if (iSkinBits) {
+        for (i = 0; i < MAX_MODEL_SURFACES; i++) {
+            mag->edict->s.surfaces[i] = (byte)iSkinBits;
+        }
+    }
+
+    s_coopMags[s_coopMagNext] = mag;
+    s_coopMagNext             = (s_coopMagNext + 1) % COOP_MAG_MAX;
+    s_coopMagThisFrame++;
+    m_fCoopLastMagEject = level.time;
+    m_iCoopLastMagKey   = iKey;
+
+    if (!s_coopMagArmed) {
+        // ONE unconditional line per map, so a default log census can see the feature is alive at
+        // all - every other marker here is behind coop_magEjectDebug, which ships 0, and a feature
+        // that is invisible to the log is a feature nobody can prove shipped.
+        s_coopMagArmed = qtrue;
+        gi.Printf("^~^~^ MAGEJECT ARMED first=%s cap=%d budget=%d\n", pszTik, iMax, pBud->integer);
+    }
+    if (pDbg->integer) {
+        // gi.Printf and NOT gi.DPrintf: DPrintf is Com_DPrintf, gated behind `developer`
+        // (qcommon/common.c:381), which would make this probe cost two cvars instead of one.
+        gi.Printf(
+            "^~^~^ MAGEJECT ent=%d tik=%s tag=%s live=%d cap=%d frame=%d\n", entnum, pszTik,
+            (pszTag && *pszTag) ? pszTag : "(fallback)", iLive + 1, iMax, s_coopMagThisFrame
+        );
+    }
+}
+
+void Sentient::EventCoopEjectMag(Event *ev)
+{
+    str tik = ev->GetString(1);
+    str tag = (ev->NumArgs() > 1) ? ev->GetString(2) : str("");
+
+    CoopEjectMagazine(tik.c_str(), tag.length() ? tag.c_str() : NULL, 0);
 }
 
 void Sentient::ReceivedItem(Item *item)

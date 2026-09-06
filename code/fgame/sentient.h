@@ -248,6 +248,27 @@ public:
     float             m_fCoopGoreGibMarkTime;  // HZM coop - gore tier 1e: level.time the script mark expires
     qboolean          m_bCoopGoreDecapForce;   // HZM coop [user 2026-09-03]: a script demanded THIS death take the head off
     float             m_fCoopGoreDecapForceTime; // HZM coop [user 2026-09-03]: level.time the forced-decap mark expires
+    float             m_fCoopLastMagEject;       // HZM coop [user 2026-09-04]: level.time of this sentient's last
+                                                 // ejected magazine, paired with the key below
+    int               m_iCoopLastMagKey;         // HZM coop [user 2026-09-04]: hash of that magazine's model name.
+                                                 // The pair is a SAME-MODEL debounce, not an owner debounce, and
+                                                 // the difference matters in both directions. enfield_reload
+                                                 // attaches TWO DIFFERENT clip props on the same frame 30
+                                                 // (anims_rifle.txt: enfield_clip1 to tag_weapon_right and
+                                                 // enfield_clip2 to "Bip01 R Hand") and both are genuinely
+                                                 // discarded, so an owner debounce would wrongly eat one; while
+                                                 // springfield_reload_loop and nagantrev_reload_loop re-attach the
+                                                 // SAME prop once per ROUND, so no debounce at all would put 5-7
+                                                 // props on the floor per reload.
+    // HZM coop [user 2026-09-04] MAGAZINE EJECT. PUBLIC on purpose: Entity::AttachModelEvent calls
+    // CoopEjectMagazine from outside the class, so it cannot sit in the protected block up at
+    // line 96 where EventPopHelmet and the rest of the helmet code lives. One implementation, two
+    // callers: AttachModelEvent for players (and for the five AI weapons whose own human_*.tik
+    // does carry an attachmodel notetrack - beretta, carcano, moschetto, vickers, piat), and the
+    // coop_ejectmag script event from anim/reload.scr for every other actor, whose reload
+    // animations carry no notetrack at all.
+    void CoopEjectMagazine(const char *pszTik, const char *pszTag, int iSkinBits);
+    void EventCoopEjectMag(Event *ev);
     void              CoopGoreHeal(float amount); // HZM coop - gore tier 1: healed -> reduce gore, retier
     Vector            m_vCoopPoolPos;          // HZM coop - gore tier 2: floor point of the growing corpse pool
     Vector            m_vCoopPoolNormal;       // HZM coop - gore tier 2: floor normal of the growing corpse pool

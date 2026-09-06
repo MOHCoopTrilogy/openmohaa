@@ -310,6 +310,10 @@ void G_InitGame(int levelTime, int randomSeed)
        These six are the measured collision set - engine default is non-empty AND a script getcvars
        the same name. Registering them here (G_InitGame runs before any script) makes the engine
        default authoritative again. Any NEW engine coop_* cvar that script also reads belongs here. */
+    // HZM coop - quick-draw sidearm cvar table, defined in fgame/player.cpp. Declared at the call
+    // site in the same style as gamecmds.cpp's CoopShotDistDump extern.
+    extern void CoopQDrawRegisterCvars(void);
+
     gi.Cvar_Get("coop_limp", "1", CVAR_ARCHIVE);
     gi.Cvar_Get("coop_limpStart", "0.30", CVAR_ARCHIVE);
     gi.Cvar_Get("coop_aiHideMaxMs", "15000", 0);
@@ -326,6 +330,22 @@ void G_InitGame(int levelTime, int randomSeed)
     gi.Cvar_Get("coop_painTiers",  "1",  CVAR_ARCHIVE);
     gi.Cvar_Get("coop_painTierLo", "5",  CVAR_ARCHIVE);
     gi.Cvar_Get("coop_painTierHi", "15", CVAR_ARCHIVE);
+
+    /* HZM [user 2026-09-04] MAGAZINE EJECT. Registered HERE and deliberately NOT seeded in
+       coop_defaults.cfg - an engine default and a cfg seed for the same CVAR_ARCHIVE cvar is one
+       decision living in two files, which is how coop_decapMax sat wrong for three days (bug-2017)
+       and how a stale coop_mg42AiSpread survived (bug-1940). One home. Registered before any script
+       runs so a future script getcvar cannot create one of them EMPTY and permanently defeat the
+       engine default (bug-1669).
+       coop_magEject ships 1 because the feature is the thing the user asked for; the other cosmetic
+       props that ship OFF (coop_corpseLife 0) do so because the user asked for the OFF behaviour,
+       not because OFF is this project's default posture. */
+    gi.Cvar_Get("coop_magEject",       "1",    CVAR_ARCHIVE);
+    gi.Cvar_Get("coop_magEjectLife",   "20",   CVAR_ARCHIVE);
+    gi.Cvar_Get("coop_magEjectMax",    "48",   CVAR_ARCHIVE);
+    gi.Cvar_Get("coop_magEjectBudget", "4",    0);
+    gi.Cvar_Get("coop_magEjectMinGap", "0.35", 0);
+    gi.Cvar_Get("coop_magEjectDebug",  "0",    0);
 
     /* HZM [user 2026-08-15, bug-1811] The dynamic-AI switches had NO engine registration at all -
        they existed only as `seta` lines in autoexec.cfg, and three scripts test them by string
@@ -364,6 +384,14 @@ void G_InitGame(int levelTime, int randomSeed)
        default and AFTER coop_defaults.cfg (1841), but BEFORE autoexec.cfg (1862). autoexec is the
        only file that can win, so the seed lives there. All three sources must read "on". */
     gi.Cvar_Get("coop_aiBound", "1", CVAR_ARCHIVE);
+
+    // HZM coop [user 2026-09-04] QUICK-DRAW SIDEARM (bind h "+coopsidearm"). The twelve coop_qdraw*
+    // defaults are written ONCE, in CoopQDrawRegisterCvars (fgame/player.cpp), and this call is the
+    // only reason they exist before any script runs. Repeating the table here instead would give
+    // one name two Cvar_Get calls with two default strings, which is itself the bug shape
+    // (bugs 2171/2172/2175); and leaving them lazy would let a script `getcvar` create one EMPTY
+    // and permanently defeat the engine's own default (bug-1669, three dead features).
+    CoopQDrawRegisterCvars();
 
     g_protocol    = gi.Cvar_Get("com_protocol", "", 0)->integer;
     g_target_game = (target_game_e)gi.Cvar_Get("com_target_game", "0", 0)->integer;

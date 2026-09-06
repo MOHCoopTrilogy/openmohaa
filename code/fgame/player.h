@@ -384,6 +384,33 @@ public:
     bool  m_bCoopNadeHeld;   // is the key still physically down
     float m_fCoopNadeT0;     // level.time the request began - timeout guard
     float m_fCoopNadeThrow;  // level.time the throw fired, for the restore delay
+    // HZM coop [user 2026-09-04] QUICK-DRAW SIDEARM - bind h "+coopsidearm".
+    // Hold to shove the long gun onto the left-hand tag and draw the pistol in ~0.25 s, fire one
+    // clip, then pay for it: the primary comes back with a charged return delay and still needs
+    // the reload you skipped. A panic button, not a DPS increase.
+    //
+    // THE SLOT INVERSION IS THE DESIGN. The PISTOL goes in WEAPON_MAIN and the long gun is PARKED
+    // in WEAPON_OFFHAND (attachToTag_offhand = "tag_weapon_left", weapon.cpp:1140). It has to be
+    // that way round: player.cpp:9018 reads GetActiveWeapon(WEAPON_MAIN) ONCE and drives
+    // activeItems[1] (the first-person arm prefix), STAT_EQUIPPED_WEAPON, STAT_AMMO, STAT_CLIPAMMO
+    // and STAT_CROSSHAIR (:9186) off it - so "the crosshair would need to respect the handgun"
+    // costs no code at all, and would be unfixable the other way round.
+    //
+    // NOT ARCHIVED, on purpose. The recovery point is the ungated stranded-slot sweep at the top
+    // of TickCoopSidearm, which runs AFTER Sentient::Archive has restored the slots and therefore
+    // cannot lose the ordering race a Player::Init hook would.
+    bool            m_bCoopQDrawActive;
+    bool            m_bCoopQDrawHeld;
+    float           m_fCoopQDrawT0;
+    float           m_fCoopQDrawCool;   // level.time before which re-entry is refused
+    SafePtr<Weapon> m_pCoopQDrawPrimary;
+    SafePtr<Weapon> m_pCoopQDrawPistol;
+    // Change-only publish latch for coop_qdrawOn, seeded to -1 so the first frame always sends.
+    // The CLIENT cannot see activeWeaponList, so the cgame ADS guard and the handling foley have no
+    // other way to know a draw is up - and without it that guard would have to key on the weapon
+    // TAG, which is not inert (tag_weapon_left carries the player's own rifle through every reload
+    // and every bolt cycle). Same wire and same shape as m_iCoopBraceMountedSent (player.cpp:15194).
+    int             m_iCoopQDrawSent;
     // HZM coop [user 2026-08-24] HEAD TRACKING + TORSO COUNTER-ROTATION.
     // Both ride bone controllers the player ALREADY registers but never drives
     // (player.cpp SetControllerTag HEAD_TAG/TORSO_TAG) - so neither costs a slot, which matters
@@ -1137,6 +1164,7 @@ public:
     void  TickSprint();
     void  TickSlide(); // HZM coop - sprint + crouch = a slide (must run AFTER TickSprint)
     void  TickCoopNade();  // HZM coop - quick-grenade state machine
+    void  TickCoopSidearm(); // HZM coop - quick-draw sidearm (MUST run after TickCoopNade)
     void  CoopDirectThrow(); // HZM coop - throw with NO weapon switch (coop_quickNade 2)
     void  TickCoopLook();  // HZM coop - head tracking + torso counter-rotation
     void  TickCoopProne(); // HZM coop - hold-crouch prone state machine
@@ -1154,6 +1182,27 @@ public:
     void  CoopProneBodyYaw(vec3_t vAngles); // HZM coop - P1 fluidity: rate-limited prone body yaw
     void  CoopNadeDown();  // HZM coop - '+coopnade' pressed
     void  CoopNadeUp();    // HZM coop - '-coopnade' released
+    // HZM coop [user 2026-09-04] QUICK-DRAW SIDEARM. Down/Up only record the key state and attempt
+    // entry; every EXIT decision is made in the tick, so a tap released before the draw has even
+    // finished still gives you the magazine instead of being swallowed.
+    // szWhy is the TRACE reason only - `coop_qdraw 1` prints the REFUSE lines (rate-limited) and
+    // `coop_qdraw 2` adds ENTER/EXIT/RETURN. Twenty separate guards can refuse entry, and a
+    // feature that silently refuses for twenty different reasons is the project's single most
+    // expensive bug shape (TRAPS T3, "we built X and it does nothing"). The reason is recorded at
+    // the guard itself, so the trace and the decision cannot disagree. THIS COUNT IS DERIVED, not
+    // typed: the fixer counts the QDRAW_REFUSE(" sites and writes the word in - see sidearm.py.
+    void     CoopQDrawDown();
+    void     CoopQDrawUp();
+    qboolean CoopQDrawEnter();
+    void     CoopQDrawExit(qboolean bDead, const char *szWhy = "unknown");
+    void     CoopQDrawPose(Weapon *pPrimary);
+    // Returns FALSE if it did nothing, which is the only honest answer when statemap_Torso has no
+    // STAND state to force: EvaluateState(NULL, NULL) is an ORDINARY evaluation, not a forced one,
+    // and RELOAD_* has no row that releases on a weapon change - so a silently-degraded call would
+    // leave the player firing a pistol inside a rifle reload animation. The caller refuses instead.
+    qboolean CoopQDrawCancelReload(Weapon *pPrimary);
+    qboolean CoopQDrawPerRoundReload(void);
+    qboolean CoopQDrawTorsoReloading(void);
     float GetRunSpeed() const;
     // HZM coop - is the player currently sprinting this frame (read by cgame-independent consumers if needed)
     bool  IsCoopSprinting() const { return m_bCoopSprinting; }

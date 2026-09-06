@@ -4489,6 +4489,74 @@ void Entity::AttachEvent(Event *ev)
 // the retail remove command passes the stock string - swap the attach and the magazine welds to the
 // hand for the rest of that life. Keeping the path identical leaves removal, precache and
 // networking untouched.
+// HZM coop [user 2026-09-04] MAGAZINE EJECT - the allowlist, and it is an ALLOWLIST on purpose.
+//
+// The first draft of this was a basename substring test ("clip" or "shell", minus "bazooka"). A
+// sweep of every `attachmodel` target in all 45 retail pk3s plus the whole mod tree (2026-09-04)
+// says a substring test on this asset set is a lottery and not a filter - it returns four things
+// that are emphatically not spent magazines:
+//   models/ammo/bazooka_shell.tik          anims_bazooka.txt frame 37 - a rocket going IN
+//   models/ammo/panzer_shell.tik           anims_bazooka.txt frame 45 - a rocket going IN
+//   models/ammo/piat_shell.tik             anims_piat.txt AND human_piat.tik frame 15 - a bomb
+//                                          going IN, on players AND on AI
+//   models/miscobj/attached_clipboard.tik  scripted/scientist.tik, "entry" (frame 0) - a CLIPBOARD,
+//                                          held by a scripted Actor (therefore a Sentient) in five
+//                                          retail missions, and it carries
+//                                          init { server { classname interactobject; setsize ... } }
+//                                          which setModel would then run through
+//                                          ProcessInitCommands, printing Bad-init-server-command
+//                                          lines into the ^~^~^ census as well.
+// The sweep is complete, so the answer is finite, so the table below IS the answer. 22 rows.
+//
+// garand_clip_reload.tik is deliberately absent even though rifle_reload attaches it at frame 4:
+// the M1's en-bloc clip is ALREADY ejected client-side by the weapon's own `fire_empty` block
+// (models/weapons/m1_garand.tik - `entry commanddelay 0.3 tagspawn tag_eject ( ... model
+// models/ammo/garand_clip_empty.tik ... )` followed by `entry commanddelay 0.3 sound snd_ping`).
+// That ping IS the Garand's magazine drop and it has shipped since 2002; adding a server-side one
+// on top puts two clips on the floor per cycle.
+static qboolean CoopIsMagazineProp(const char *mdl)
+{
+    static const char *mags[] = {
+        "bar_clip.tik",                // anims_mg.txt            @15   BAR / FG42
+        "colt_clip.tik",               // anims_pistol.txt        @0
+        "enfield_clip1.tik",           // anims_rifle.txt         @30   the Enfield discards two
+        "enfield_clip2.tik",           // anims_rifle.txt         @30
+        "g43_clip.tik",                // anims_rifle.txt         @15
+        "it_w_beretta_clip.tik",       // anims_beretta.txt  / human_beretta.tik   @0
+        "it_w_breda_clip.tik",         // anims_breda.txt         @0
+        "it_w_carcano_clip.tik",       // anims_carcano.txt  / human_carcano.tik   @0
+        "it_w_moschetto_clip.tik",     // anims_moschetto.txt/ human_moschetto.tik @16
+        "kar98_clip_reload.tik",       // anims_rifle.txt         @0
+        "mp40_clip.tik",               // anims_mp40.txt          @10
+        "mp44_clip.tik",               // anims_mp44.txt          @0
+        "nagant_pistol_shell.tik",     // anims_pistol.txt        @0    once per ROUND (debounced)
+        "p38_clip.tik",                // anims_pistol.txt        @0
+        "ppsh_clip_reload.tik",        // anims_smg.txt           @44
+        "silencedpistol_clip.tik",     // anims_pistol.txt        @0
+        "springfield_clip_reload.tik", // anims_rifle.txt         @0    once per ROUND (debounced)
+        "sten_clip.tik",               // anims_sten.txt          @12
+        "svt_clip_reload.tik",         // anims_rifle.txt         @19
+        "thompson_clip.tik",           // anims_smg.txt           @4
+        "uk_w_l42a1_clip.tik",         // anims_enfieldl42a1.txt  @30
+        "uk_w_vickers_clip.tik"        // anims_vickers.txt  / human_vickers.tik   "first"
+    };
+    const char *base;
+    int         i;
+
+    if (!mdl || !*mdl) {
+        return qfalse;
+    }
+    base = strrchr(mdl, '/');
+    base = base ? base + 1 : mdl;
+
+    for (i = 0; i < (int)(sizeof(mags) / sizeof(mags[0])); i++) {
+        if (!Q_stricmp(base, mags[i])) {
+            return qtrue;
+        }
+    }
+    return qfalse;
+}
+
 static int CoopClipFinishIndex(Entity *parent)
 {
     static const char *finish[7] = {
@@ -4623,6 +4691,33 @@ void Entity::AttachModelEvent(Event *ev)
     if (tagnum >= 0) {
         if (obj->attach(this->entnum, tagnum, true, offset)) {
             obj->NewAnim("idle");
+
+            // HZM coop [user 2026-09-04] MAGAZINE EJECT, ANIMATION-DRIVEN PATH. This is the
+            // mag-change instant, and it is the only server-side moment that NAMES the magazine
+            // model without a per-weapon table: the third-person reload alias attaches the fresh
+            // clip right here (anims_smg.txt smg_reload frame 4 thompson_clip.tik, anims_mp40.txt
+            // frame 10 mp40_clip.tik, anims_rifle.txt kar98_reload frame 0 kar98_clip_reload.tik,
+            // and 19 more). It covers every player weapon, and it also covers the five AI weapons
+            // whose own human_*.tik carries an attachmodel notetrack (beretta, carcano, moschetto,
+            // vickers, piat); the rest of the AI arrive through the coop_ejectmag script event from
+            // anim/reload.scr instead, because their reload animations carry no notetrack at all.
+            // Those five appear in neither list twice, so the two paths cannot double-fire.
+            //
+            // It sits INSIDE the successful-attach branch on purpose. If attach() failed the fresh
+            // magazine never appeared in the hand at all (the bug-1217 MAX_MODEL_CHILDREN path), so
+            // there is nothing to have dropped.
+            //
+            // DELIBERATELY NOT Weapon::StartReloading (weapon.cpp:4325), which fires one frame
+            // earlier and once per reload for EVERY gun: it does not know which prop to drop, so it
+            // would need a hand-maintained weapon-name -> model table across 45 guns and 357 finish
+            // variants. The animation already IS that table.
+            //
+            // DELIBERATELY NOT RemoveAttachedModelEvent below either: that frame is the FRESH
+            // magazine being seated in the gun, so dropping it there drops a full magazine.
+            if (IsSubclassOfSentient() && CoopIsMagazineProp(modelname.c_str())) {
+                ((Sentient *)this)
+                    ->CoopEjectMagazine(modelname.c_str(), bone.c_str(), (int)obj->edict->s.surfaces[0]);
+            }
         } else {
             warning("AttachModelEvent", "Could not attach model %s to tag \"%s\" on entnum #%d (targetname = %s)", modelname.c_str(), bone.c_str(), entnum, targetname.c_str());
             // HZM (bug-1217): this if/else is Entity::Delete() hand-inlined, and the `this` of the

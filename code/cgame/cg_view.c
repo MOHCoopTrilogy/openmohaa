@@ -104,6 +104,26 @@ static float    s_dbnoCamEnv     = 0.0f;
 // that lasts a bit longer". The server stuffs `set coop_dizzy <0..1>` on a near blast (same
 // trigger as the tinnitus ring); the view sways on decaying sinusoids for
 // coop_dizzyTime * severity seconds. Consumed-and-cleared so each blast restarts it.
+// HZM coop [bug-2459] Mirrors of the weapon-lag spring, written once per frame by the spring block
+// inside CG_OffsetFirstPersonView and read by CG_CoopLagAngles. File scope, and declared HERE rather
+// than beside the accessor, because the spring's own state is static INSIDE a block - invisible to
+// any other function - and the writer sits ~900 lines ABOVE the reader.
+static float s_lagPubX = 0.0f;
+static float s_lagPubY = 0.0f;
+
+// HZM coop [user 2026-09-04, bug-2462] IDLE INSPECT - the roll that was taken OFF THE BODY.
+// Same shape and same reason as the two lag mirrors directly above: the inspect's state is
+// static inside a BLOCK in CG_OffsetFirstPersonView, invisible to cg_modelanim.c, and the
+// writer sits ~1500 lines above the reader. Degrees, signed, in the SAME sense as the body
+// roll it was subtracted from. Written UNCONDITIONALLY every frame the first-person path
+// runs - set to 0 immediately before the gesture's own gate - so it is never stale and needs
+// no frame stamp; a stamp would zero the gun mid-gesture on any frame the publish is skipped,
+// which reads as a strobe rather than a graceful degradation.
+static float    s_inspPubRoll = 0.0f;
+// Mirror of coop_inspectGrip, so the compensation-exempt edit ~1000 lines below does not have
+// to carry a second copy of the cvar pointer.
+static qboolean s_bInspGripOn = qfalse;
+
 static float s_dizzySev   = 0.0f;
 static int   s_dizzyStart = 0;
 
@@ -1162,15 +1182,36 @@ static float    s_coopHit = 0.0f;
 //
 // Channel is auto (S_StartLocalSound), so these never cut another cue and are never cut by one -
 // handling foley overlapping a reload is correct. Rate limiting therefore has to live here.
-static void CoopGunFoley(const char *act, int cooldownMs)
+// HZM coop [user 2026-09-04] ONE class-name mapping, shared by the equipped-weapon path and the
+// quick-draw sidearm's explicit-class beats. It was written inline in one function; the quick draw
+// needs the same answer for a weapon that is NOT equipped, and two copies of a four-branch mapping
+// is how the two of them end up disagreeing about WEAPON_CLASS_HEAVY.
+static const char *CoopGunFoleyClassName(int iClass)
+{
+    if (iClass & WEAPON_CLASS_PISTOL) {
+        return "pistol";
+    }
+    if (iClass & WEAPON_CLASS_SMG) {
+        return "smg";
+    }
+    if (iClass & (WEAPON_CLASS_MG | WEAPON_CLASS_HEAVY)) {
+        return "mg";
+    }
+    return "rifle"; // also the fallback for anything untyped
+}
+
+// The body, with the class supplied by the caller. Take selection, the per-action cooldown table and
+// the never-repeat-a-take history all stay HERE - the quick draw shares them rather than duplicating
+// them, so its beats cannot double a take against a crouch or a sprint cue that fired on the same
+// frame, and cannot stack two sounds in one cooldown slot.
+static void CoopGunFoleyAs(const char *cls, const char *act, int cooldownMs)
 {
     static cvar_t *pOn = NULL;
     static int     s_last[8];   // last index played, per action slot
     static int     s_next[8];   // earliest time this slot may fire again
     static unsigned s_seed = 2463534242u;
-    const char    *cls;
     char           name[64];
-    int            slot, idx, iClass;
+    int            slot, idx;
 
     if (!pOn) {
         pOn = cgi.Cvar_Get("coop_gunFoley", "1", CVAR_ARCHIVE);
@@ -1197,17 +1238,7 @@ static void CoopGunFoley(const char *act, int cooldownMs)
     }
     s_next[slot] = cg.time + cooldownMs;
 
-    iClass = cg.snap->ps.stats[STAT_EQUIPPED_WEAPON];
-    if (iClass & WEAPON_CLASS_PISTOL) {
-        cls = "pistol";
-    } else if (iClass & WEAPON_CLASS_SMG) {
-        cls = "smg";
-    } else if (iClass & (WEAPON_CLASS_MG | WEAPON_CLASS_HEAVY)) {
-        cls = "mg";
-    } else {
-        cls = "rifle"; // also the fallback for anything untyped
-    }
-
+    // (the class is the caller's now - see CoopGunFoleyClassName and the CoopGunFoley wrapper below)
     s_seed ^= s_seed << 13;
     s_seed ^= s_seed >> 17;
     s_seed ^= s_seed << 5;
@@ -1221,6 +1252,16 @@ static void CoopGunFoley(const char *act, int cooldownMs)
     cgi.S_StartLocalSound(name, qfalse);
 }
 
+// HZM coop - the original entry point, behaviour UNCHANGED: resolve the class from whatever is
+// equipped right now. Every existing call site keeps using this and none of them were edited.
+// cg.snap is re-tested inside the body, so the ternary here is only about not dereferencing it while
+// picking the class.
+static void CoopGunFoley(const char *act, int cooldownMs)
+{
+    CoopGunFoleyAs(CoopGunFoleyClassName(cg.snap ? cg.snap->ps.stats[STAT_EQUIPPED_WEAPON] : 0),
+                   act, cooldownMs);
+}
+
 // Per-frame edge detection for the handling events whose state is reachable globally. The rest are
 // hooked inline where their own state lives.
 static void CoopGunFoleyThink(void)
@@ -1228,6 +1269,10 @@ static void CoopGunFoleyThink(void)
     static qboolean s_init = qfalse;
     static float    s_pAds = 0.0f, s_pCrouch = 0.0f, s_pSprint = 0.0f;
     static int      s_pWpn = -2, s_pAnim = -1;
+    // HZM coop [user 2026-09-04] QUICK-DRAW SIDEARM foley. s_qdMute suppresses the two GENERIC
+    // "grab" edges below for the length of one quick-draw transition, because the draw fires its own
+    // pair of beats with explicit classes and deliberate spacing - see the block after the seed.
+    static int      s_qdMute = 0;
     float           ads, crouch;
     int             iWpn, iAnim;
 
@@ -1249,6 +1294,95 @@ static void CoopGunFoleyThink(void)
         s_pWpn    = iWpn;
         s_pAnim   = iAnim;
         return;
+    }
+
+    // ============================================================================================
+    // HZM coop [user 2026-09-04] QUICK-DRAW SIDEARM - FOUR HANDLING BEATS, TWO PER TRANSITION.
+    //
+    //   drawing   0.00  the long gun swings across to the front grip   <primary> hhard
+    //             +gap  the pistol clears the holster                  pistol    grab
+    //   returning 0.00  the pistol settles away                        pistol    hsoft
+    //             +gap  the long gun comes back to the shoulder        <primary> grab
+    //
+    // hhard for the long gun going across and grab for re-gripping it: a rifle moved decisively
+    // across the body is a weighty sound, holstering a pistol is a soft settle. The gap is what stops
+    // a pair reading as one noise; both members of a pair sit in DIFFERENT cooldown slots (hhard=1,
+    // grab=2, hsoft=0) so they can never suppress each other.
+    //
+    // THE PRIMARY'S CLASS CANNOT COME FROM STAT_EQUIPPED_WEAPON. By the time the client can see the
+    // draw at all, the slot inversion has already put the PISTOL in WEAPON_MAIN and that stat IS the
+    // pistol - so both beats of the draw would be pistol takes. s_qdLong latches the last equipped
+    // class that was NOT a pistol, which by construction is the parked long gun (entry refuses
+    // anything outside coop_qdrawClasses, default RIFLE|SMG|MG). Latching "last frame's class"
+    // instead would be correct only if the cvar and the playerState changed on exactly the same
+    // client frame; they leave the server together but arrive by different paths - a stufftext
+    // through the command buffer, and the snapshot - and one frame of skew would silently produce
+    // two pistol beats with no error anywhere.
+    //
+    // coop_qdrawOn is the per-player draw state published by Player::TickCoopSidearm on the stufftext
+    // bus, the same channel and change-only shape as coop_braceMounted. It is the only thing the
+    // client is told about this feature, and it is also what makes the cg_modelanim.c ADS guard inert.
+    // coop_qdrawFoley 0 silences all four beats and nothing else.
+    // ============================================================================================
+    {
+        static cvar_t *pQdOn = NULL, *pQdFoley = NULL, *pQdGap = NULL;
+        static int     s_pQd    = -1;    // -1 = not yet seeded, same rule as every edge above
+        static int     s_qdLong = 0;     // last equipped class that was not a pistol = the primary
+        static int     s_qdBeat = 0;     // cg.time the deferred second beat fires; 0 = none pending
+        static const char *s_qdBeatCls = NULL;
+        static const char *s_qdBeatAct = NULL;
+        int iQd, iCls, iGapMs;
+
+        if (!pQdOn) {
+            pQdOn    = cgi.Cvar_Get("coop_qdrawOn", "0", 0);
+            pQdFoley = cgi.Cvar_Get("coop_qdrawFoley", "1", CVAR_ARCHIVE);
+            pQdGap   = cgi.Cvar_Get("coop_qdrawFoleyGap", "0.08", CVAR_ARCHIVE);
+        }
+
+        iCls = cg.snap->ps.stats[STAT_EQUIPPED_WEAPON];
+        if (!(iCls & WEAPON_CLASS_PISTOL)) {
+            s_qdLong = iCls;
+        }
+
+        iGapMs = (int)(pQdGap->value * 1000.0f);
+        if (iGapMs < 20) {
+            iGapMs = 20;    // below this the two beats fuse into one noise, which is the whole point
+        } else if (iGapMs > 400) {
+            iGapMs = 400;   // above this the second beat has left the transition it belongs to
+        }
+
+        // the deferred half of whichever transition is in flight
+        if (s_qdBeat && cg.time >= s_qdBeat) {
+            s_qdBeat = 0;
+            CoopGunFoleyAs(s_qdBeatCls, s_qdBeatAct, 120);
+        }
+
+        iQd = pQdOn->integer ? 1 : 0;
+        if (s_pQd < 0) {
+            s_pQd = iQd;   // seed on the first live frame - never fire an edge for a state we did
+                           // not watch change (a map load, a respawn, a third-person toggle)
+        } else if (iQd != s_pQd) {
+            if (pQdFoley->integer) {
+                if (iQd) {
+                    CoopGunFoleyAs(CoopGunFoleyClassName(s_qdLong), "hhard", 120);
+                    s_qdBeatCls = "pistol";
+                } else {
+                    CoopGunFoleyAs("pistol", "hsoft", 120);
+                    s_qdBeatCls = CoopGunFoleyClassName(s_qdLong);
+                }
+                s_qdBeatAct = "grab";
+                s_qdBeat    = cg.time + iGapMs;
+                // Suppress the GENERIC grab edges for this transition. activeItems[1] changes and
+                // iViewModelAnim goes to VM_ANIM_PULLOUT at BOTH ends of a draw, so without this the
+                // existing hooks fire their own "grab" at t=0 and the deliberate spacing collapses
+                // into one noise. The 60 ms of slack past the beat covers the snapshot arriving a
+                // frame after the stufftext. If the skew ever runs the other way the generic grab
+                // simply wins the slot-2 cooldown and OUR grab is dropped - still two separated
+                // beats, still the right class - so this is belt and braces rather than a race.
+                s_qdMute = cg.time + iGapMs + 60;
+            }
+            s_pQd = iQd;
+        }
     }
 
     if (ads > 0.5f && s_pAds <= 0.5f) {
@@ -1283,7 +1417,9 @@ static void CoopGunFoleyThink(void)
     }
     s_pSprint = s_spEnvCur;
 
-    if (iWpn != s_pWpn && s_pWpn != -2) {
+    // HZM coop - not during a quick-draw transition: that fires its own pair with explicit classes
+    // and a deliberate gap (see above). The edge is still CONSUMED, so no stale edge fires later.
+    if (iWpn != s_pWpn && s_pWpn != -2 && cg.time >= s_qdMute) {
         CoopGunFoley("grab", 200);
     }
     s_pWpn = iWpn;
@@ -1293,8 +1429,8 @@ static void CoopGunFoleyThink(void)
         && cg.snap->ps.stats[STAT_MAXCLIPAMMO] > 0 && cg.snap->ps.stats[STAT_CLIPAMMO] == 0) {
         CoopGunFoley("dry", 150);
     }
-    if (iAnim != s_pAnim && iAnim == VM_ANIM_PULLOUT) {
-        CoopGunFoley("grab", 200);
+    if (iAnim != s_pAnim && iAnim == VM_ANIM_PULLOUT && cg.time >= s_qdMute) {
+        CoopGunFoley("grab", 200);   // HZM coop - muted during a quick draw, same reason as above
     }
     s_pAnim = iAnim;
 }
@@ -2746,6 +2882,13 @@ void CG_OffsetFirstPersonView(refEntity_t *pREnt, qboolean bUseWorldPosition)
                         s_inspEnv += (tgt - s_inspEnv) * k;
                         if (s_inspEnv < 0.001f && tgt == 0.0f) { s_inspEnv = 0.0f; }
                     }
+
+                    // [bug-2462] Clear the grip-roll mirror EVERY frame this path runs, before
+                    // the gesture's own gate. The rotation block below re-publishes it when it
+                    // fires, so cg_modelanim.c always reads a value computed this frame and a
+                    // cancelled or finished inspect leaves nothing latched on the weapon.
+                    s_inspPubRoll = 0.0f;
+
                     if (s_inspEnv > 0.001f) {
                         // raise, draw toward the eye, and drift laterally - a look-over, not a spin
                         // [user 2026-08-21] "Gun inspection (at least for stg44) makes the back
@@ -2928,6 +3071,9 @@ void CG_OffsetFirstPersonView(refEntity_t *pREnt, qboolean bUseWorldPosition)
                             // right, return. coop_inspectBothSides 0 restores the single-sided look.
                             {
                                 static cvar_t *pBoth = NULL;
+                                // [bug-2462] the last sign the five-phase sweep actually
+                                // produced - see the release note on the else branch below.
+                                static float   s_sgnLast = 0.0f;
                                 float          p, sgn;
 
                                 if (!pBoth) { pBoth = cgi.Cvar_Get("coop_inspectBothSides", "1", CVAR_ARCHIVE); }
@@ -2961,10 +3107,120 @@ void CG_OffsetFirstPersonView(refEntity_t *pREnt, qboolean bUseWorldPosition)
                                         sgn = -1.0f + (t * t * (3.0f - 2.0f * t));
                                     }
                                 } else {
-                                    sgn = 1.0f;
+                                    // [user 2026-09-04, bug-2462] THE RELEASE SNAP. This else is
+                                    // reached in TWO different situations and they need opposite
+                                    // answers, which is why it was wrong.
+                                    //
+                                    //   coop_inspectBothSides 0 -> deliberate single-sided look,
+                                    //   sgn = +1 constant. Correct, kept.
+                                    //
+                                    //   s_inspEnd == 0 -> the window just expired (:2745) or the
+                                    //   gesture was cancelled (:2714). Both zero s_inspEnd, the
+                                    //   gate `s_inspEnd > s_inspStart` then fails, and control
+                                    //   fell in HERE and forced sgn to +1 while s_inspEnv was
+                                    //   still ~0.9-1.0. The sweep had just eased sgn to 0, so the
+                                    //   roll jumped 0 -> +34 (rifle) / +47 (pistol) degrees in a
+                                    //   SINGLE frame and then unwound over the 167 ms release.
+                                    //   That fires at the end of EVERY inspect and on every fire,
+                                    //   ADS, sprint or weapon-switch cancel, always onto the +1
+                                    //   flank - the one the user names. The comment at :2946
+                                    //   claims the five-phase ease-home leaves the release
+                                    //   nothing to undo; this branch is why it did not.
+                                    //
+                                    // Hold the last swept sign instead, so the envelope's own
+                                    // release eases the roll home from wherever the sweep left
+                                    // it - which is what the five phases were written to do.
+                                    sgn = pBoth->integer ? s_sgnLast : 1.0f;
                                 }
+                                s_sgnLast = sgn;
                                 fRoll = e * 42.0f * pInspRot->value * sgn;
                                 fYaw  = e * 8.0f  * pInspRot->value * sgn;
+
+                                // [user 2026-09-04, bug-2462] THE BODY IS WHAT CLIPS. "you're
+                                // shoulder clips right through the camera... happens slightly on
+                                // the other side too."
+                                //
+                                // fRoll and fYaw above are applied to pREnt->axis - the
+                                // FIRST-PERSON PLAYER ENTITY. In first person this engine draws
+                                // the player's own model with its tiki swapped to <skin>_fps.tik
+                                // (cg_modelanim.c:2478), so the "viewmodel" is a body: hands,
+                                // forearms and shoulder caps, all of it rolling up to 52 degrees.
+                                // The compensation below keeps the GUN in place; nothing keeps
+                                // the arms in place, and the trigger hand already sits ~1.5 units
+                                // in front of the eye at rest against an r_znear of 4
+                                // (renderergl2/tr_init.c:1916, CVAR_CHEAT - it cannot be lowered).
+                                //
+                                // ROLLING THE BODY IS ALSO THE WRONG AXIS FOR THE JOB. The roll is
+                                // about mat[0], the VIEW forward - so it ORBITS the whole rig
+                                // around screen centre and only incidentally turns the weapon:
+                                // measured against the posed rig, 38 degrees of body roll turns
+                                // the gun's flank normal by only ~11. Rolling the gun about ITS
+                                // OWN forward axis turns the flank 1:1 and orbits nothing. So
+                                // moving the angle onto the weapon shows MORE of the flank while
+                                // moving LESS geometry near the lens - it is not a compromise.
+                                //
+                                // SOFT KNEE, not a hard clamp. `cap * tanh(x/cap)` has the same
+                                // ceiling but is smooth everywhere; a hard clamp would drop the
+                                // body's angular velocity to zero in one frame at four points in
+                                // every gesture, and "isn't very fluid between flipping sides"
+                                // is a complaint this gesture has already had (2026-08-27).
+                                //
+                                // THE YAW STAYS ON THE BODY ONLY, and shrinks with it. A roll
+                                // about the view axis changes NO depth (it preserves the
+                                // component along the axis exactly); the yaw about mat[2] is the
+                                // only depth-changing rotation in the gesture and it carries the
+                                // same sign as the roll - which is precisely why one flank is bad
+                                // and the other is "slightly". Capping the roll caps the yaw with
+                                // it at the authored 8/42 ratio. Nothing is yawed at the grip:
+                                // a yaw applied after a roll would have to use the ALREADY-ROLLED
+                                // up axis, which leaks roll*yaw into muzzle PITCH, asymmetrically
+                                // between the two flanks - a new asymmetry in the one gesture
+                                // whose reported bug is that the flanks differ.
+                                //
+                                // WHAT IT COSTS, stated plainly: the gun now turns relative to
+                                // the hands (rifle ~16 deg at peak, pistol ~24), so the grip
+                                // surface slides a few tenths of a unit under the fingers. It
+                                // cannot leave the hand - the pivot IS the contact point. A
+                                // client-side bone controller on the wrist was considered and
+                                // rejected: refEntity_t::bone_tag/bone_quat do exist and this
+                                // file's neighbour already drives 8 of them (CoopFingerLife,
+                                // cg_modelanim.c:1470), but tag_weapon_right hangs off the RIGHT
+                                // hand only, so a wrist roll moves the trigger hand and the gun
+                                // together and puts the ENTIRE relative rotation onto the SUPPORT
+                                // hand, which is fully on screen at ~19 units and would need real
+                                // IK to follow. The split spends the slip on the hand that is
+                                // nearest the lens and most self-occluded, which is the cheaper
+                                // half. coop_inspectGripGain trades the two against each other.
+                                {
+                                    static cvar_t *pGrip = NULL, *pBodyT = NULL, *pGain = NULL;
+
+                                    if (!pGrip) {
+                                        pGrip = cgi.Cvar_Get("coop_inspectGrip", "1", CVAR_ARCHIVE);
+                                    }
+                                    if (!pBodyT) {
+                                        pBodyT = cgi.Cvar_Get("coop_inspectBodyTurn", "12", 0);
+                                    }
+                                    if (!pGain) {
+                                        pGain = cgi.Cvar_Get("coop_inspectGripGain", "0.6", 0);
+                                    }
+
+                                    s_bInspGripOn = (qboolean)(pGrip->integer ? qtrue : qfalse);
+                                    if (s_bInspGripOn) {
+                                        float fCap = pBodyT->value;
+                                        float fBody;
+
+                                        if (fCap < 0.0f) { fCap = 0.0f; }
+                                        if (fCap < 0.01f) {
+                                            fBody = 0.0f;   // everything goes to the grip
+                                        } else {
+                                            fBody = fCap * (float)tanh((double)(fRoll / fCap));
+                                        }
+                                        s_inspPubRoll = (fRoll - fBody) * pGain->value;
+                                        fRoll         = fBody;
+                                        // keep the authored 8/42 roll:yaw coupling on what is left
+                                        fYaw          = fRoll * (8.0f / 42.0f);
+                                    }
+                                }
                             }
 
                             // [user 2026-08-21] "when the idle side gun view comes up its practically
@@ -3029,6 +3285,32 @@ void CG_OffsetFirstPersonView(refEntity_t *pREnt, qboolean bUseWorldPosition)
                                     }
                                     VectorSubtract(vBefore, vAfter, vFix);
                                     VectorAdd(pREnt->origin, vFix, pREnt->origin);
+
+                                    // [user 2026-09-04, bug-2462] ...AND REGISTER IT AS AN
+                                    // AUTHORED POSE, BOUNDED. This VectorAdd is the whole reason
+                                    // the rotation pivots at the grip instead of at the player,
+                                    // but it was never mirrored into s_vFeelExempt - so the 9-unit
+                                    // feel-budget clamp ~900 lines below scales it along with
+                                    // breathing, sway, bob and lag. At the shipped roll |vFix| is
+                                    // 13-22 units against that 9, i.e. only 40-66 percent of the
+                                    // compensation is delivered and the rig is left 5-13 units
+                                    // from where this code intends. The residual carries sgn, so
+                                    // it does not cancel between the two flanks: it is itself a
+                                    // both-sides asymmetric artifact, and it is bug-2016's
+                                    // "way off to the right side" coming back by a second route.
+                                    //
+                                    // The exemption is BOUNDED AT THE BUDGET ITSELF. With the roll
+                                    // split above in force |vFix| is ~5 units and always passes.
+                                    // If the split is disabled by coop_inspectBodyTurn 999 the
+                                    // full-roll |vFix| exceeds 9 and the test fails, which leaves
+                                    // today's behaviour exactly - deliberate, because exempting a
+                                    // 22-unit shove while the body still rolls 52 degrees pushes
+                                    // MORE geometry through the near plane, not less. The two
+                                    // halves interlock; a compensation larger than the entire
+                                    // budget is not a compensation, it is a pose, and it stays in.
+                                    if (s_bInspGripOn && VectorLength(vFix) < 9.0f) {
+                                        VectorAdd(s_vFeelExempt, vFix, s_vFeelExempt);
+                                    }
                                 }
 
                                 // [2026-08-21] WHERE DOES THE GUN ACTUALLY END UP ON SCREEN?
@@ -3486,6 +3768,15 @@ void CG_OffsetFirstPersonView(refEntity_t *pREnt, qboolean bUseWorldPosition)
                     s_lagY += (0.0f - s_lagY) * k;
                     s_lagVX = s_lagVY = 0.0f;
                 }
+
+                // [user 2026-09-04, bug-2459] PUBLISH THE SPRING for the rotational channel. These
+                // statics are block-local, so cg_modelanim.c cannot see them; CG_CoopLagAngles()
+                // turns these two mirrors into degrees at the grip. Published BEFORE the translation
+                // below and on EVERY path, including the eased-out scoped/disabled branch, so the
+                // rotation decays with the spring instead of latching at its last value the moment
+                // the player scopes.
+                s_lagPubX = s_lagX;
+                s_lagPubY = s_lagY;
 
                 VectorMA(pREnt->origin, s_lagX, mat[1], pREnt->origin); // left/right trail
                 VectorMA(pREnt->origin, s_lagY, mat[2], pREnt->origin); // up/down trail
@@ -4379,6 +4670,75 @@ static int CG_BreathHoldMs(void)
 // Rotation about the GRIP is what a drooping muzzle is, and the weapon entity's origin already sits
 // at tag_weapon_right - so the fix is to rotate there, beside the per-gun ADS tune, where the pivot
 // is correct by construction and costs no compensation at all.
+// HZM coop [user 2026-09-04, bug-2459] ROTATIONAL WEAPON LAG - the spring's missing channel.
+//
+// The lag spring spends its whole output on translation (two VectorMA calls in
+// CG_OffsetFirstPersonView), which reads as DRAG. A gun is held at the grip with the muzzle a metre
+// out, so a fast turn swings the muzzle off the view axis and settles it back - rotation on a lever.
+// That is what separates a Panzerschreck from a Luger rather than just making it slower.
+//
+// Fed from the two mirrors above. Output is DEGREES at the grip:
+//   yaw   from s_lagPubX (the left/right trail)
+//   pitch from s_lagPubY (the up/down trail)
+// Applied in cg_modelanim.c beside the muzzle droop, where model.origin comes from tag_weapon_right
+// so the pivot is the GRIP. NEVER on pREnt->axis - that is bug-2142, where the player entity's
+// feet-level origin turned the same rotation into a ~60-unit lever and a parasitic forward shove.
+//
+// Scaled by (1 - CG_AdsPoseFactor()) for the same reason the droop is: 45 guns carry hand-dialled
+// sight alignments in s_adsGunTune[] and a live rotation would fight every one of them.
+// Clamped hard. 2.5 degrees sits under the 5.5 degree shell-shock roll, and this is on the WEAPON,
+// not the camera - a weapon that overshoots looks wrong, a camera that overshoots makes people ill.
+// cg_weaponLagRot 0 disables the layer outright, per the one-cvar-zeroes-it contract.
+void CG_CoopLagAngles(float *pYaw, float *pPitch)
+{
+    static cvar_t *pRot = NULL, *pRotMax = NULL;
+    static float   s_yaw = 0.0f, s_pitch = 0.0f;
+    static int     s_last = -1;
+    float          fScale, fMax;
+
+    if (!pRot) {
+        pRot    = cgi.Cvar_Get("cg_weaponLagRot", "0.6", CVAR_ARCHIVE);    // degrees per unit of trail
+        pRotMax = cgi.Cvar_Get("cg_weaponLagRotMax", "2.5", CVAR_ARCHIVE); // hard ceiling, degrees
+    }
+    if (s_last == cg.time) {
+        if (pYaw)   { *pYaw   = s_yaw; }
+        if (pPitch) { *pPitch = s_pitch; }
+        return;   // once per frame, not once per caller - as CG_CoopDroopAngle does
+    }
+    s_last = cg.time;
+
+    fScale = pRot ? pRot->value : 0.6f;
+    fMax   = pRotMax ? pRotMax->value : 2.5f;
+    if (fMax < 0.0f) { fMax = 0.0f; }
+
+    // ADS cancels it outright, exactly as the droop does.
+    fScale *= (1.0f - CG_AdsPoseFactor());
+
+    s_yaw   = s_lagPubX * fScale;
+    s_pitch = s_lagPubY * fScale;
+
+    if (s_yaw   >  fMax) { s_yaw   =  fMax; } else if (s_yaw   < -fMax) { s_yaw   = -fMax; }
+    if (s_pitch >  fMax) { s_pitch =  fMax; } else if (s_pitch < -fMax) { s_pitch = -fMax; }
+
+    if (pYaw)   { *pYaw   = s_yaw; }
+    if (pPitch) { *pPitch = s_pitch; }
+}
+
+// HZM coop [user 2026-09-04, bug-2462] IDLE-INSPECT ROLL AT THE GRIP.
+//
+// Degrees to roll the WEAPON about its own forward axis, published by the inspect block inside
+// CG_OffsetFirstPersonView and consumed in cg_modelanim.c beside the muzzle droop and the
+// rotational lag - the only place in the pipeline where model.origin has been set from
+// tag_weapon_right, so the pivot is the HAND rather than the player's feet (bug-2142).
+//
+// No cg.time cache and no ADS scale here, unlike CG_CoopDroopAngle: this is a plain published
+// value rather than an integrator, and ADS already cancels the whole gesture (bAds is in bBusy),
+// so by the time the ADS pose is non-zero the mirror is on its way to 0 through the envelope.
+float CG_CoopInspectRoll(void)
+{
+    return s_inspPubRoll;
+}
+
 float CG_CoopDroopAngle(void)
 {
     static cvar_t *pDroop = NULL, *pDroopMove = NULL;

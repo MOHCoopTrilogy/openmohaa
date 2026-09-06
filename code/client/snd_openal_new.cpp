@@ -58,6 +58,22 @@ cvar_t *s_reverb;
 cvar_t *s_show_cpu;
 cvar_t *s_show_num_active_sounds;
 cvar_t *s_show_sounds;
+
+// HZM coop [user 2026-09-04, bug-2457] SOUND-POOL GAUGE STATE. See the report block at the tail of
+// S_OPENAL_Respatialize for why a high-water mark is needed and the existing "Couldn't play" line
+// is not enough. Peaks are deliberately NOT reset per map: the question being asked is "how close
+// did we ever get on this build", and a per-map reset would hide the worst moment of a session.
+cvar_t *s_poolProbe          = NULL;
+static int s_iPoolCur3D      = 0;
+static int s_iPoolCur2D      = 0;
+static int s_iPoolPeak3D     = 0;
+static int s_iPoolPeak2D     = 0;
+static int s_iPoolLoops      = 0;
+static int s_iPoolDenied     = 0;   // 3D + 2D, the trigger for the immediate first report
+static int s_iPoolDenied3D   = 0;
+static int s_iPoolDenied2D   = 0;
+static int s_iPoolDeniedReported = 0;
+static int s_iPoolLastReport = 0;
 cvar_t *s_speaker_type;
 cvar_t *s_obstruction_cal_time;
 cvar_t *s_lastSoundTime;
@@ -1848,6 +1864,8 @@ static void S_OPENAL_Start2DSound(
     }
 
     if (iFreeChannel < 0) {
+        s_iPoolDenied2D++;   // HZM coop [bug-2457] pool gauge - see the report block in Respatialize
+        s_iPoolDenied++;
         Com_DPrintf(
             "OpenAL: Couldn't play %s sound '%s' for entity %i on channel %s\n",
             (pSfx->iFlags & SFX_FLAG_STREAMED) ? "2Dstreamed" : "2D",
@@ -1967,6 +1985,51 @@ static void S_OPENAL_Start2DSound(
     pChannel->set_gain(fRealVolume);
     pChannel->play();
 
+    // HZM coop [user 2026-09-04, bug-2449] ONE LINE PER DIALOGUE START, printing the number this
+    // hunt lacked: which entity the channel actually BOUND to, versus the number the caller passed.
+    // dist is measured to the BOUND entity, because that is what S_OPENAL_Respatialize attenuates
+    // against - NOT to the speaker, which is why "I was standing right in front of him" could not
+    // help. Printed AFTER set_gain so the duck / dialogue-slider state that set_gain applies is on
+    // the same line: a clean bind with a duck still down looks identical to a bad bind from outside.
+    // flags 0 deliberately - only CVAR_ARCHIVE cvars are written by Cvar_WriteVariables, so this can
+    // never latch into a player's config (the coop_voxCut / bug-1669 pattern).
+    if (iEntChannel == CHAN_DIALOG || iEntChannel == CHAN_DIALOG_SECONDARY) {
+        extern cvar_t *s_dialogscale;
+        static cvar_t *s_voxProbe = NULL;
+
+        if (!s_voxProbe) {
+            s_voxProbe = Cvar_Get("s_voxProbe", "1", 0);
+        }
+
+        if (s_voxProbe->value > 0.f) {
+            vec3_t vProbeListener, vProbeDelta;
+            float  fProbeDist = -1.f;
+
+            qalGetListenerfv(AL_POSITION, vProbeListener);
+            if (!(pChannel->iFlags & CHANNEL_FLAG_NO_ENTITY)) {
+                VectorSubtract(s_entity[pChannel->iEntNum].position, vProbeListener, vProbeDelta);
+                fProbeDist = VectorLength(vProbeDelta);
+            }
+
+            Com_Printf(
+                "^~^~^ VOXSTART %s chan=%i wire=%i bound=%i missing=%i noent=%i dist=%.0f min=%.0f "
+                "max=%.0f gain=%.3f dscale=%.2f duck=%.3f\n",
+                pSfx->name,
+                iFreeChannel,
+                iEntNum,
+                pChannel->iEntNum,
+                (pChannel->iFlags & CHANNEL_FLAG_MISSING_ENT) ? 1 : 0,
+                (pChannel->iFlags & CHANNEL_FLAG_NO_ENTITY) ? 1 : 0,
+                fProbeDist,
+                pChannel->fMinDist,
+                pChannel->fMaxDist,
+                fRealVolume,
+                s_dialogscale ? s_dialogscale->value : -1.f,
+                s_sfxduck ? s_sfxduck->value : -1.f
+            );
+        }
+    }
+
     if (s_show_sounds->integer > 0) {
         Com_DPrintf(
             "OpenAL: 2D - %d (#%i) - %s (vol %f, mindist %f, maxdist %f)\n",
@@ -2033,6 +2096,8 @@ void S_OPENAL_StartSound(
 
     iChannel = S_OPENAL_PickChannel3D(iEntNum, iEntChannel);
     if (iChannel < 0) {
+        s_iPoolDenied3D++;   // HZM coop [bug-2457] pool gauge - see the report block in Respatialize
+        s_iPoolDenied++;
         Com_DPrintf(
             "OpenAL: Couldn't play %s sound '%s' for entity %i on channel %s\n",
             (pSfx->iFlags & SFX_FLAG_STREAMED) ? "3Dstreamed" : "3D",
@@ -2341,6 +2406,13 @@ void S_OPENAL_StopSound(int iEntNum, int iEntChannel)
 
     for (i = 0; i < MAX_SOUNDSYSTEM_POSITION_CHANNELS; i++) {
         openal_channel *pChannel = openal.channel[i];
+
+        // HZM coop [2026-09-04] same defect class as the reorder in S_OPENAL_Respatialize: this
+        // dereferenced the array entry with no NULL test at all.
+        if (!pChannel) {
+            continue;
+        }
+
         if (!pChannel->is_free() && pChannel->iEntNum == iEntNum && pChannel->iEntChannel == iEntChannel) {
             pChannel->end_sample();
             break;
@@ -2613,6 +2685,11 @@ void S_OPENAL_AddLoopSounds(const vec3_t vTempAxis)
     qalGetListenerfv(AL_POSITION, alvec);
     VectorCopy(alvec, vListenerOrigin);
 
+    // HZM coop [bug-2457] pool gauge: per-FRAME count, so it is zeroed here rather than at init.
+    // This runs once per frame from the tail of S_OPENAL_Respatialize, immediately before the
+    // SNDPOOL line is printed, so the value reported is always this frame's.
+    s_iPoolLoops = 0;
+
     for (i = 0; i < MAX_SOUNDSYSTEM_LOOP_SOUNDS; i++) {
         vec3_t vDir;
 
@@ -2640,7 +2717,24 @@ void S_OPENAL_AddLoopSounds(const vec3_t vTempAxis)
         if (fVolume < 0) {
             fVolume = 1;
         }
-        fVolume = fVolume * s_fAmbientVolume;
+        // HZM coop [user 2026-09-04, bug-2454] A DUCK-EXEMPT LOOP IS NOT AMBIENCE, SO THE AMBIENCE
+        // DUCK MUST NOT REACH IT. The Omaha ramp beat runs `coop_cvarDuckStart "Ambient" 0.0 0.3 8`
+        // (coopified.scr:10957), which lerps s_ambientvolume to EXACTLY 0 for ~95 seconds. This
+        // multiply then zeroes every looping sound, and the epsilon cut below stops the channel
+        // outright - and both sit one level ABOVE openal_channel::set_gain, so the S_HZM_DuckExempt
+        // carve-out that protects the one-shots could never reach a loop. Net effect: the drowning
+        // heartbeat the user asked for ("heart rate should play repeatedly until we are out of the
+        // water"), started by coop_uwHeartStart as `playlocalsound coop_heartbeat 1`, has been
+        // silent for the whole submerged beat since the day it shipped.
+        // Scoped deliberately to the SAME predicate as the one-shot carve-out, so it covers exactly
+        // coop_heart/, coop_swim/, coop_memory/ and the NCO whistle and nothing else. Real ambience
+        // - wind, generators, room tone - is untouched and the Ambience slider still mutes it, which
+        // is what the epsilon below was added for in the first place. Distance culling is also
+        // untouched: an exempt loop that is genuinely far away still falls under the epsilon and
+        // stops, because fTotalVolume keeps its distance term.
+        if (!S_HZM_DuckExempt(pLoopSound->pSfx->name)) {
+            fVolume = fVolume * s_fAmbientVolume;
+        }
 
         fTotalVolume = 0.0;
         fMaxVolume   = 0.0;
@@ -2697,6 +2791,11 @@ void S_OPENAL_AddLoopSounds(const vec3_t vTempAxis)
         // HZM coop - also stop 2D/NO_PAN ambient loops (wind, generators, room tone) when they
         // fall silent. The original '&& !NO_PAN' left those looping forever at ~0 gain, so the
         // Ambience slider could never actually mute them. Small epsilon catches slider-near-zero.
+        // HZM coop [bug-2457] pool gauge: a loop that survives to here is one the mixer is paying
+        // for. Counted before the silence cut below so the number means "loops alive", not "loops
+        // audible". MAX_SOUNDSYSTEM_LOOP_SOUNDS is 128 and is a SEPARATE pool from the 3D channels.
+        s_iPoolLoops++;
+
         if (fTotalVolume <= 0.0005f) {
             if (pLoopSound->bPlaying) {
                 if (s_show_sounds->integer > 0) {
@@ -3152,16 +3251,31 @@ void S_OPENAL_Respatialize(int iEntNum, const vec3_t vHeadPos, const vec3_t vAxi
     // HZM coop - global concussion muffle; one powf per frame, not one per channel.
     S_HZM_UpdateMuffle();
 
+    s_iPoolCur3D = 0;
+    s_iPoolCur2D = 0;
+
     for (i = 0; i < MAX_SOUNDSYSTEM_POSITION_CHANNELS; i++) {
-        pChannel   = openal.channel[i];
-        fMaxVolume = S_GetBaseVolume() * pChannel->fVolume;
+        pChannel = openal.channel[i];
 
         if (!pChannel) {
             continue;
         }
 
+        // HZM coop [2026-09-04] moved BELOW the null check. openal.channel[] is NULLed at :1044 and
+        // only filled by S_OPENAL_InitChannel, so a device that cannot supply all 160 sources leaves
+        // live NULLs here and this line dereferenced one before testing it.
+        fMaxVolume = S_GetBaseVolume() * pChannel->fVolume;
+
         if (!pChannel->is_playing()) {
             continue;
+        }
+
+        // HZM coop [user 2026-09-04, bug-2457] POOL OCCUPANCY GAUGE. Counted here because this is
+        // the one place that already walks every channel every frame, so it costs an increment.
+        if (i < MAX_SOUNDSYSTEM_CHANNELS_3D) {
+            s_iPoolCur3D++;
+        } else {
+            s_iPoolCur2D++;
         }
 
         if (pChannel->iFlags & CHANNEL_FLAG_PAUSED) {
@@ -3276,6 +3390,50 @@ void S_OPENAL_Respatialize(int iEntNum, const vec3_t vHeadPos, const vec3_t vAxi
 
     S_OPENAL_AddLoopSounds(vTempAxis);
     s_bReverbChanged = false;
+
+    // HZM coop [user 2026-09-04, bug-2457] THE POOL GAUGE, REPORTED.
+    //
+    // WHY THIS EXISTS. Until now the ONLY signal that the sound pools were under pressure was the
+    // "Couldn't play" line at the two PickChannel failure sites - and that is a CLIFF, not a gauge:
+    // it fires only once every single channel is already taken, i.e. after sounds have been lost.
+    // Worse, it is Com_DPrintf, so with `developer 0` (which is what autoexec.cfg ships, and what
+    // every player runs) it prints NOTHING AT ALL. A log with zero "Couldn't play" lines therefore
+    // proves nothing whatsoever about headroom - it is the expected output either way. That is
+    // exactly the trap bug-2309 fell into from the other side.
+    //
+    // This reports the high-water mark instead, so the pool can be watched approaching the ceiling
+    // rather than discovered past it. Com_Printf, not DPrintf, so it survives `developer 0`.
+    // s_poolProbe is flags 0 and NOT CVAR_ARCHIVE - a probe must never be writable into a player's
+    // saved config, which is the bug-1669 lesson.
+    if (s_iPoolCur3D > s_iPoolPeak3D) {
+        s_iPoolPeak3D = s_iPoolCur3D;
+    }
+    if (s_iPoolCur2D > s_iPoolPeak2D) {
+        s_iPoolPeak2D = s_iPoolCur2D;
+    }
+    if (!s_poolProbe) {
+        s_poolProbe = Cvar_Get("s_poolProbe", "1", 0);
+    }
+    if (s_poolProbe->integer > 0) {
+        // every 5s, plus an immediate line the first time anything is ever denied
+        qboolean bDenialNew = (qboolean)(s_iPoolDenied > s_iPoolDeniedReported);
+        if (cls.realtime - s_iPoolLastReport > 5000 || (bDenialNew && s_iPoolDeniedReported == 0)) {
+            s_iPoolLastReport = cls.realtime;
+            Com_Printf(
+                "^~^~^ SNDPOOL 3d=%i/%i peak=%i 2d=%i/%i peak=%i loops=%i denied3d=%i denied2d=%i\n",
+                s_iPoolCur3D,
+                MAX_SOUNDSYSTEM_CHANNELS_3D,
+                s_iPoolPeak3D,
+                s_iPoolCur2D,
+                MAX_SOUNDSYSTEM_CHANNELS_2D + MAX_SOUNDSYSTEM_CHANNELS_2D_STREAM,
+                s_iPoolPeak2D,
+                s_iPoolLoops,
+                s_iPoolDenied3D,
+                s_iPoolDenied2D
+            );
+            s_iPoolDeniedReported = s_iPoolDenied;
+        }
+    }
 }
 
 /*

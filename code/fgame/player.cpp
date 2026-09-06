@@ -2272,6 +2272,15 @@ Player::Player()
     m_bCoopNadeHeld   = false;
     m_fCoopNadeT0     = 0;
     m_fCoopNadeThrow  = 0;
+    // HZM coop [user 2026-09-04] QUICK-DRAW SIDEARM. Player memory is not zeroed and Player::Archive
+    // persists none of these - the stranded-slot sweep is the recovery point, not the archive.
+    m_bCoopQDrawActive  = false;
+    m_bCoopQDrawHeld    = false;
+    m_fCoopQDrawT0      = 0;
+    m_fCoopQDrawCool    = 0;
+    m_pCoopQDrawPrimary = NULL;
+    m_pCoopQDrawPistol  = NULL;
+    m_iCoopQDrawSent    = -1;   // -1 = nothing published yet, so the first tick always sends
     m_fCoopHeadPitch  = 0;
     m_fCoopTorsoLag   = 0;
     m_fCoopPrevViewYaw = 0;
@@ -3504,6 +3513,16 @@ void Player::Killed(Event *ev)
     m_vCoopRecoilOwed     = Vector(0, 0, 0);
     m_fCoopRecoilRecenter = 0.0f;
     m_fCoopRecoilLast     = level.time;
+
+    // HZM coop [user 2026-09-04] QUICK-DRAW SIDEARM: unwind the slots on death, and do it HERE -
+    // Killed() runs on every death on the server frame itself, and it runs BEFORE the
+    // m_killedLabel early return below, before the inventory is dropped, and before
+    // DetachAllActiveWeapons. The dead path deliberately does NOT re-activate anything; attaching
+    // a gun to a corpse is a defect, and DetachAllActiveWeapons (sentient_combat.cpp:680-690) is
+    // the named site in the open m1l2a crash hunt, so we hand it a clean slot list.
+    // The Player object survives an MP respawn, so respawn needs no second hook - the
+    // stranded-slot sweep covers it.
+    CoopQDrawExit(qtrue, "killed");
 
     m_bCoopDiedSupine = (m_bCoopProne && m_bCoopSupine);
 
@@ -5690,6 +5709,12 @@ void Player::ClientThink(void)
     TickSprint();
     TickSlide(); // HZM coop - MUST follow TickSprint: it reads m_bCoopSprinting for THIS frame
     TickCoopNade(); // HZM coop - quick grenade (bind g "+coopnade")
+    // HZM coop - quick-draw sidearm (bind h "+coopsidearm"). MUST follow TickCoopNade, which owns
+    // the hands when both are requested in the same frame. Every test inside is an ELAPSED-time
+    // comparison against level.time rather than an integration of level.frametime, because
+    // ClientThink runs once per USERCMD and not once per server frame (TRAPS: com_maxfps 180
+    // against sv_fps 40 is ~4.5x, and it differs between players on one server).
+    TickCoopSidearm();
     TickCoopLook(); // HZM coop - head tracking + torso counter-rotation
     TickCoopProne(); // HZM coop - hold crouch to go prone
     TickCoopStress(); // HZM coop - server-side stress envelope (drives weapon spread)
@@ -6127,6 +6152,26 @@ void Player::Think(void)
         groundentity       = 0;
     } else {
         CheckMoveFlags();
+        // HZM coop [user 2026-09-04] QUICK-DRAW SIDEARM: E1 (the magazine is spent) ON THE SERVER
+        // FRAME, immediately before the statemap runs. TickCoopSidearm carries the same test, but it
+        // is called from ClientThink - once per USERCMD - while EvaluateState is called from here,
+        // once per server frame. Those are DIFFERENT CLOCKS: at sv_fps 40 against a client sending
+        // 20 cmds/s, or on any dropped packet, the statemap gets to look at an empty pistol sitting
+        // in WEAPON_MAIN before the tick does, takes STAND's `RELOAD_WEAPON : RELOAD` row
+        // (player_Torso.st:82) into RELOAD_PISTOL, and locks the torso for the full 2.4 s reload_colt
+        // - six times the advertised 0.400 s return - while its frame-0 notetrack drops
+        // models/ammo/colt_clip.tik onto tag_weapon_left, the tag the long gun is parked on.
+        // Testing here means the statemap can never observe that state at all. CoopQDrawExit no-ops
+        // when inactive, so this costs one bool test per frame with the feature off.
+        // (The Player::CondReload guard is the second half of the same fix and removes the pistol's
+        // auto-reload at source; this one also covers a manual +reload arriving on the same frame.)
+        if (m_bCoopQDrawActive) {
+            Weapon *pCoopQd = GetActiveWeapon(WEAPON_MAIN);
+
+            if (pCoopQd && pCoopQd->ClipAmmo(FIRE_PRIMARY) <= 0) {
+                CoopQDrawExit(qfalse, "E1-magazine-spent");
+            }
+        }
         EvaluateState();
     }
 
@@ -6289,6 +6334,17 @@ void Player::Think(void)
     }
 
     if (!IsDead()) {
+        // HZM coop - QUICK-DRAW SIDEARM: exit BEFORE the weapon command is dispatched, never one
+        // tick after. Two separate ways a late exit fuses both guns into one hand:
+        //   useWeapon unconditionally PutAway()s the offhand (sentient_combat.cpp:1268) and NO
+        //     statemap state consumes PUTAWAYOFFHAND, so the flag would never clear; and
+        //   RAISE_WEAPON's correctweaponattachments entrycommand relocates any weapon child from
+        //     tag_weapon_left onto tag_weapon_right, carrying our park offset with it
+        //     (Player::EventCorrectWeaponAttachments, player_combat.cpp).
+        // NON-NEGOTIABLE ORDERING.
+        if (m_bCoopQDrawActive && G_GetWeaponCommand(server_new_buttons)) {
+            CoopQDrawExit(qfalse, "weapon-command");
+        }
         m_iClientWeaponCommand = G_GetWeaponCommand(server_new_buttons);
 
         switch (m_iClientWeaponCommand) {
@@ -15828,6 +15884,896 @@ void Player::CoopNadeUp()
     m_bCoopNadeHeld = false;
 }
 
+// =================================================================================================
+// HZM coop [user 2026-09-04] QUICK-DRAW SIDEARM   (bind h "+coopsidearm")
+//
+// "hold down a key ... your primary moves to the left of your screen ... You then draw your handgun
+//  with your right hand and can fire a full clip of that, but once that is empty, you have to
+//  switch back and reload your primary."
+// "the draw for the sidearm should be FASTER than both a reload of the primary AND actually just
+//  swapping weapons to the sidearm manually."
+//
+// MEASURED, from the retail SKC headers (duration = frameTime * (numFrames - 1); every clip here
+// reports flags=0x00, so the TAF_DELTADRIVEN branch of tiki_anim.cpp:283-284 does not apply):
+//
+//     quick draw           0.250   coop_qdrawDelay - an authored number, see CoopSetDrawDelay
+//     mg    -> pistol      0.767   putaway_bar 0.300 + tps_pullout_colt 0.467   <- cheapest swap
+//     smg   -> pistol      0.933   lower_rifle_standplayer 0.467 + 0.467
+//     rifle -> pistol      1.067   lower_rifle_stand 0.600 + 0.467
+//     Garand reload        2.000   tps_garand_reload  61f @ 30
+//     Thompson/MP40        2.600   mp_thompson_reload 40f @ 15
+//     BAR / StG44          3.233   tps_reload_bar     98f @ 30
+//     Kar98 reload         3.333   tps_kar98_reload  101f @ 30
+//
+// 3.07x the cheapest manual swap, 8x the cheapest reload. g_immediateswitch 1 would collapse the
+// swap baseline to a bare 0.467 s raise (PUTAWAY_SKIPANIM has no animation at all), which this
+// still beats 1.87x. That cvar is DELIBERATELY LEFT ALONE: it is a global gameplay switch and this
+// feature has no business pinning one to protect its own benchmark.
+//
+// THE MECHANISM IS Weapon::CoopSetDrawDelay AND NOTHING ELSE. No statemap state is entered or
+// added, so there is no .st edit and therefore no ERR_DROP risk. The torso stays in STAND
+// (player_Torso.st:30-127), whose attack rows CHECK_PRIMARY_ATTACK_SEMIAUTO / _FULLAUTO (:98-99)
+// key on IS_WEAPON_READY_TO_FIRE "mainhand" and go live the moment the pistol is in WEAPON_MAIN.
+// (:97 is CHECK_MORTARRIFLE and carries no READY_TO_FIRE test, hence 98-99 and not 97-99.) The ADS
+// case is a DIFFERENT state: ATTACK_PISTOL_PRIMARY_AIM at :197 lives in state AIM (which opens at
+// :128), and keys on IS_WEAPONCLASS_READY_TO_FIRE "mainhand" "pistol". Both conditionals resolve
+// through Weapon::ReadyToFire (weapon.cpp:3110 - no weaponstate test, exactly the time test this
+// feature pins), so ONE pin covers hip fire and ADS alike.
+// =================================================================================================
+
+static cvar_t *s_coop_qdraw            = NULL;
+static cvar_t *s_coop_qdrawDelay       = NULL;
+static cvar_t *s_coop_qdrawReturn      = NULL;
+static cvar_t *s_coop_qdrawMinHold     = NULL;
+static cvar_t *s_coop_qdrawMaxHold     = NULL;
+static cvar_t *s_coop_qdrawSticky      = NULL;
+static cvar_t *s_coop_qdrawClasses     = NULL;
+static cvar_t *s_coop_qdrawShowPrimary = NULL;
+static cvar_t *s_coop_qdrawParkOfs     = NULL;
+static cvar_t *s_coop_qdrawParkAng     = NULL;
+static cvar_t *s_coop_qdrawCooldown    = NULL;
+static cvar_t *s_coop_qdrawInterrupt   = NULL;
+
+// EVERY DEFAULT IS WRITTEN EXACTLY ONCE, HERE. Two Cvar_Get calls for one name with different
+// default strings ARE the bug (bugs 2171/2172/2175), so g_main.cpp calls this rather than
+// repeating the table. Calling it from G_InitGame also means these exist before any script runs,
+// which is what stops a script `getcvar` creating one EMPTY and permanently defeating the engine's
+// own default - that single trap killed three shipped features at once (bug-1669).
+void CoopQDrawRegisterCvars(void)
+{
+    if (s_coop_qdraw) {
+        return;
+    }
+
+    s_coop_qdraw            = gi.Cvar_Get("coop_qdraw",            "1",         CVAR_ARCHIVE);
+    s_coop_qdrawDelay       = gi.Cvar_Get("coop_qdrawDelay",       "0.25",      CVAR_ARCHIVE);
+    s_coop_qdrawReturn      = gi.Cvar_Get("coop_qdrawReturn",      "0.40",      CVAR_ARCHIVE);
+    s_coop_qdrawMinHold     = gi.Cvar_Get("coop_qdrawMinHold",     "0.60",      CVAR_ARCHIVE);
+    s_coop_qdrawMaxHold     = gi.Cvar_Get("coop_qdrawMaxHold",     "12",        CVAR_ARCHIVE);
+    s_coop_qdrawSticky      = gi.Cvar_Get("coop_qdrawSticky",      "0",         CVAR_ARCHIVE);
+    s_coop_qdrawClasses     = gi.Cvar_Get("coop_qdrawClasses",     "14",        CVAR_ARCHIVE);
+    s_coop_qdrawShowPrimary = gi.Cvar_Get("coop_qdrawShowPrimary", "1",         CVAR_ARCHIVE);
+    s_coop_qdrawParkOfs     = gi.Cvar_Get("coop_qdrawParkOfs",     "-6 5 -4",   CVAR_ARCHIVE);
+    s_coop_qdrawParkAng     = gi.Cvar_Get("coop_qdrawParkAng",     "0 0 -25",   CVAR_ARCHIVE);
+    s_coop_qdrawCooldown    = gi.Cvar_Get("coop_qdrawCooldown",    "0",         CVAR_ARCHIVE);
+    // 1 = the draw CANCELS a running primary reload (the shipped behaviour, [user 2026-09-04]).
+    // 0 = the pre-decision behaviour, a flat refusal while mid-reload - kept as a ONE-FLIP REVERT
+    // because the interrupt is the only part of this feature that reaches into the reload path.
+    s_coop_qdrawInterrupt   = gi.Cvar_Get("coop_qdrawInterrupt",   "1",         CVAR_ARCHIVE);
+}
+
+static float CoopQDrawClamp(cvar_t *pVar, float fLo, float fHi)
+{
+    float f = pVar ? pVar->value : 0.0f;
+
+    if (f < fLo) {
+        f = fLo;
+    }
+    if (f > fHi) {
+        f = fHi;
+    }
+    return f;
+}
+
+// Twenty guards can refuse entry, and a feature that silently refuses for twenty different
+// reasons is TRAPS T3, the project's most expensive recurring shape ("we built X and it does nothing
+// / can't be felt"). Every refusal names its own guard AT the guard, so the trace cannot drift out of
+// step with the decision the way a probe nested inside the condition it measures does. gi.Printf is
+// not developer-gated, so this needs no `developer 1`.
+//
+// REFUSE PRINTS AT coop_qdraw 1 - THE DEFAULT - and only ENTER/EXIT/RETURN wait for 2. The whole
+// point of the trace is the first playtest, and the default seed is 1: a refusal that is silent on
+// the default install is indistinguishable from a dead bind, a dead cgame relay and a dead game.dll,
+// which is the exact debugging session the trace exists to prevent. Rate-limited to one line per
+// reason per second per player - the key is HELD, so an unlimited refusal would print at the usercmd
+// rate. The elapsed-time form (not `level.time < fNext`) is deliberate: level.time restarts at 0 on
+// a map change, and a stored absolute deadline from the previous map would mute the trace for
+// minutes on the next one.
+static void CoopQDrawTrace(int iEnt, const char *szWhat, const char *szWhy)
+{
+    static char  szLastRefuse[MAX_CLIENTS][32];
+    static float fLastRefuse[MAX_CLIENTS];
+    qboolean     bRefuse;
+
+    if (!s_coop_qdraw || !s_coop_qdraw->integer) {
+        return;
+    }
+
+    bRefuse = Q_stricmp(szWhat, "REFUSE") ? qfalse : qtrue;
+
+    if (!bRefuse && s_coop_qdraw->integer < 2) {
+        return;
+    }
+
+    if (bRefuse && s_coop_qdraw->integer < 2) {
+        int   i     = (iEnt >= 0 && iEnt < MAX_CLIENTS) ? iEnt : 0;
+        float fSince = level.time - fLastRefuse[i];
+
+        if (fSince >= 0.0f && fSince < 1.0f && !Q_stricmp(szLastRefuse[i], szWhy ? szWhy : "")) {
+            return;
+        }
+        Q_strncpyz(szLastRefuse[i], szWhy ? szWhy : "", sizeof(szLastRefuse[i]));
+        fLastRefuse[i] = level.time;
+    }
+
+    gi.Printf("^~^~^ QDRAW %-6s ent=%d why=%s t=%.2f\n", szWhat, iEnt, szWhy ? szWhy : "unknown",
+              level.time);
+}
+
+#define QDRAW_REFUSE(reason)                        \
+    do {                                            \
+        CoopQDrawTrace(entnum, "REFUSE", (reason)); \
+        return qfalse;                              \
+    } while (0)
+
+// IS THE PRIMARY MID-WAY THROUGH A ROUND-BY-ROUND RELOAD? This is the ONLY thing the balance guard
+// below needs to know, and the torso state is where the answer lives - the per-round guns run a
+// START / SINGLE / CHECK_CONTINUE / END chain (player_Torso.st:2702-3170) while every magazine-fed
+// gun sits in one state until ANIMDONE_TORSO.
+//
+// Cutting a per-round reload forfeits only the rounds not yet loaded, which is a trade RETAIL
+// ITSELF SHIPS: `RELOAD_SPRINGFIELD_END : +ATTACK_PRIMARY HAS_AMMO_IN_CLIP "mainhand" !RELOAD`
+// (player_Torso.st:3018, a transition row INSIDE state RELOAD_SPRINGFIELD_SINGLE - not a row of
+// RELOAD_SPRINGFIELD_END, which is at :3048) is the game cancelling its own reload the instant you
+// have one shell.
+// Cutting a MAGAZINE reload after its single clip_fill notetrack is a different thing entirely -
+// see the guard in CoopQDrawEnter.
+//
+// Named against the statemap rather than against a weapon list on purpose: the state names are what
+// actually decide which reload animation plays, and the fixer asserts every prefix here still
+// exists as a `state <PREFIX>...` in coop_mod/player_Torso.st, so a rename cannot silently
+// reclassify a gun. Defaults to "magazine-fed" (the strict answer) when the torso state is unknown.
+//
+// currentState_Torso is legitimately NULL before InitTorsoStateTable and on a portable turret
+// (EvaluateState nulls both current states there, player.cpp:6792), and State::getName can in
+// principle hand back NULL, so one helper answers "" for every un-nameable case and both predicates
+// below read it. Writing that test twice is how the two drift apart.
+static const char *CoopQDrawStateName(State *pState)
+{
+    const char *sz = pState ? pState->getName() : NULL;
+
+    return sz ? sz : "";
+}
+
+qboolean Player::CoopQDrawPerRoundReload(void)
+{
+    static const char *const szPerRound[] = {
+        "RELOAD_SPRINGFIELD", "RELOAD_SHOTGUN", "RELOAD_WEBLEY", "RELOAD_NAGANTREV"
+    };
+    const char *szState = CoopQDrawStateName(currentState_Torso);
+    int         i;
+
+    for (i = 0; i < (int)(sizeof(szPerRound) / sizeof(szPerRound[0])); i++) {
+        if (!Q_stricmpn(szState, szPerRound[i], strlen(szPerRound[i]))) {
+            return qtrue;
+        }
+    }
+
+    return qfalse;
+}
+
+// IS THE TORSO ITSELF PLAYING A RELOAD? THE TORSO STATE IS THE THING THAT OWNS THE NOTETRACKS, AND
+// weaponstate IS NOT A SUBSTITUTE FOR IT.
+//
+// The entry test used to be `pMain->GetState() == WEAPON_RELOADING` alone, and that leaves a real
+// hole at BOTH ends of the animation:
+//   the torso enters RELOAD_* first and the weapon only becomes WEAPON_RELOADING when the anim's
+//     `reloadweapon` notetrack fires -> Sentient::ReloadWeapon -> Weapon::StartReloading
+//     (weapon.cpp:4325). That notetrack is on `first` in every models/player/base/anims_*.txt
+//     reload block, NOT on a numbered frame; frame 1 is the separate `attachtohand offhand`; and
+//   the weapon leaves WEAPON_RELOADING at Weapon::DoneReloading (weapon.cpp:4347, `weaponstate =
+//     WEAPON_READY`) AND NOWHERE ELSE. `clip_fill` does NOT do it: Weapon::FillAmmoClip
+//     (weapon.cpp:4215-4241) moves the ammunition and calls SetShouldReload(qfalse) at :4240,
+//     and never touches weaponstate. DoneReloading is the end-event of the WEAPON MODEL's own
+//     "reload" animation (SetWeaponAnim("reload", EV_Weapon_DoneReloading), weapon.cpp:4331),
+//     whose length is unrelated to the TORSO clip's - measured from the retail SKC headers:
+//         models/weapons/kar98/reload_KAR98.skc   88f @30 = 2.900 s
+//         viewmodel/rifle/tps_kar98_reload.skc   101f @30 = 3.3333 s   -> a 0.433 s tail
+//         models/weapons/m1_garand/garand_reload.skc 60f = 1.9667 s
+//         viewmodel/rifle/tps_garand_reload.skc      61f = 2.0000 s    -> a 0.033 s tail
+//     so weaponstate reads READY for the last 0.433 s of a Kar98 reload while RELOAD_RIFLE is
+//     still running. (An EARLIER version of this comment claimed the exit was at clip_fill and
+//     derived 1.67 s from it. Both were wrong - 1.67 s is the clip_fill REMAINDER, which is the
+//     balance guard's number, not this one.) The stronger reason the torso state is the authority
+//     is the degenerate case: if a weapon tiki has no "reload" anim at all, StartReloading runs
+//     FillClip + DoneReloading immediately (weapon.cpp:4334-4336) and weaponstate NEVER enters
+//     WEAPON_RELOADING for a single frame.
+// In that tail the old test read bReloading = false, so CoopQDrawCancelReload was NEVER CALLED, the
+// abandoned animation's remaining notetracks stayed on the queue, and `attachtohand mainhand` fired
+// later against whatever WeaponCommand resolved "mainhand" to AT FIRE TIME (sentient_combat.cpp:1404)
+// - by then the SIDEARM. That is the same defect the both-slot cancel exists to prevent, reached by
+// a different door.
+//
+// Every reload state in coop_mod/player_Torso.st is named RELOAD_* - 27 of them, spanning
+// player_Torso.st:2539-3205: the RELOAD_WEAPON dispatcher, the six magazine-fed states, the four
+// per-round START/SINGLE/CHECK_CONTINUE/END chains and the four RELOAD_INTERUPTED* states - WITH
+// ONE EXCEPTION:
+// `state COOP_RELOAD_PRONE` at player_Torso.st:2514 is a coop-added prone reload that does NOT
+// carry the prefix. It is not a live hole today only because it is unreachable - its single
+// inbound route is commented out at player_Torso.st:2547
+// (`//COOP_RELOAD_PRONE : POSITION_TYPE "prone"`), and the note there keeps it as the starting
+// point for a third attempt. IF IT IS EVER RE-ENABLED this predicate must
+// become RELOAD_ or COOP_RELOAD, or a prone Kar98 reload becomes invisible to the interrupt and
+// the abandoned clip_fill lands on the sidearm. The fixer asserts both halves: that every RELOAD_
+// prefix still exists, and that COOP_RELOAD_PRONE has NOT been given a route back in.
+qboolean Player::CoopQDrawTorsoReloading(void)
+{
+    return Q_stricmpn(CoopQDrawStateName(currentState_Torso), "RELOAD_", 7) ? qfalse : qtrue;
+}
+
+// THE TWO EVENTS THE INTERRUPT BELOW ISSUES. Both are DEFINED at file scope, at weapon.cpp:98 (the
+// DoneReloading one) and weapon.cpp:727 (the AttachToHand one), and neither is externed in
+// weapon.h - that header externs about forty of the EV_Weapon_* set
+// and stops. Declared here rather than added to the shared header because this is the only site
+// outside weapon.cpp that needs them, which is the same call-site-extern shape g_main.cpp already
+// uses for CoopQDrawRegisterCvars. (The compiler is what found this: the first version simply named
+// them and did not build.) They sit ABOVE the banner on purpose - a function banner separated from
+// its function by two declarations reads as documentation for the declarations.
+extern Event EV_Weapon_AttachToHand;
+extern Event EV_Weapon_DoneReloading;
+
+// THE RELOAD INTERRUPT [user 2026-09-04, "let's go with 2"]. Retail's own interrupt is
+// RELOAD_INTERUPTED_CORRECT_ATTACHMENTS (player_Torso.st:3183): `correctweaponattachments` plus
+// `weaponcommand anim idle`. This is that, done from C++ because the trigger is a keypress and not a
+// statemap edge - plus the one thing the statemap version gets for free and this one does not.
+//
+// (1) CANCELFLAGGEDEVENTS ON BOTH TORSO SLOTS IS NOT OPTIONAL, AND IT IS THE SUBTLEST DEFECT IN THE
+//     WHOLE FEATURE. Animate::NewAnim queues EVERY numbered notetrack of an animation at
+//     animation-set time, flagged `1 << slot` (the two `PostEvent(ev, time, 1 << slot);` calls,
+//     animate.cpp:379 and :416), and cancels only the slot it is about to set
+//     (`CancelFlaggedEvents(1 << slot);`, :271). Player::SetPartAnim swaps to the OTHER torso slot
+//     (player_animation.cpp:98, `m_iPartSlot[slot] ^= 1`). So an abandoned reload's `clip_fill` is
+//     NOT cancelled by leaving the state: it fires later on wall clock, and Sentient::WeaponCommand
+//     resolves "mainhand" AT FIRE TIME (sentient_combat.cpp:1404) - by then the PISTOL. Symptom: the
+//     sidearm silently refills for free ~0.9 s after the draw. STAND's `none` action does call
+//     StopPartAnimating(torso), which cancels ONE of the two slots - never rely on that.
+// (2) correctweaponattachments is the ENGINE'S OWN DESIGNATED HOOK. Its description string is
+//     literally "makes sure the weapons is properly attached when interrupting a reload"
+//     (EV_Player_CorrectWeaponAttachments, player.cpp:283-290). It removes the reload magazine prop
+//     from either weapon tag and moves any weapon child from tag_weapon_left back to
+//     tag_weapon_right. Called directly, the way Player::DropCurrentWeapon already calls it
+//     (player.cpp:7228) - it ignores its Event*. NOT recursive: m_bCoopQDrawActive is still false
+//     here, so the quick-draw hook at the top of EventCorrectWeaponAttachments does nothing.
+// (3) Re-issue the abandoned animation's own final notetrack. correctweaponattachments re-attaches
+//     with the offset and use_angles it found on the LEFT tag and never touches current_attachToTag,
+//     which the reload's frame-1 `attachtohand offhand` left on "tag_weapon_left" and which
+//     Weapon::GetMuzzlePosition reads (weapon.cpp:1538). `attachtohand mainhand` fixes both. Issued
+//     NOW, while the primary is still WEAPON_MAIN - WeaponCommand resolves the hand at fire time, so
+//     one line later this would name the pistol.
+// (4) Weapon side back to WEAPON_READY with the reload DEBT INTACT, then the torso forced out.
+//
+// AMMO CANNOT BE LOST HERE AND NO BOOKKEEPING IS WRITTEN FOR IT. The transfer is a single notetrack
+// calling a single function with no interior state (clip_fill -> Weapon::FillAmmoClip
+// weapon.cpp:4215, clip_add 1 -> Weapon::AddToAmmoClip :4267): cut before it and clip and reserve
+// are untouched, cut after and the reload is already paid for and delivered.
+//
+// RETURNS FALSE IF IT DID NOTHING. Step (4b) needs a STAND state to force, and if FindState hands
+// back NULL then EvaluateState(NULL, NULL) is an ORDINARY evaluation - RELOAD_* has no transition
+// row that releases because the weapon changed hands, so the torso would simply stay in the reload
+// while the player fired a pistol. That is a call that looks like it worked. The test is made FIRST,
+// before anything irreversible, and the caller refuses entry outright rather than half-cancelling.
+qboolean Player::CoopQDrawCancelReload(Weapon *pPrimary)
+{
+    Event *evHand;
+    State *pStand;
+    int    iTorsoSlots;
+
+    pStand = statemap_Torso ? statemap_Torso->FindState("STAND") : NULL;
+    if (!pPrimary || !pStand) {
+        return qfalse;   // nothing has been touched yet - see the guard in CoopQDrawEnter
+    }
+
+    // (1) both torso slots - the live one and the one still crossblending out.
+    //
+    // WHY THE PAIR IS SAFE TO NAME THIS WAY, since the mask is the one thing here that could quietly
+    // hit the wrong thing: Player::Init seeds m_iPartSlot[legs] = 0 and m_iPartSlot[torso] = 2
+    // (player.cpp:2416-2417) and the ONLY writes anywhere are `^= 1` (player_animation.cpp:98 in
+    // SetPartAnim and :138 in StopPartAnimating). So each part owns a fixed even/odd PAIR of
+    // frameInfo slots - legs {0,1}, torso {2,3} - and x together with x^1 is always exactly one
+    // pair. The mask therefore cannot reach the legs slots and cancel their footstep and frame
+    // commands. The guard below is a one-comparison assertion of that invariant in shipped code: if
+    // the seeding convention is ever changed, this refuses rather than silently massacring the legs
+    // notetracks, and the fixer additionally asserts the `m_iPartSlot[torso] = 2;` line still exists.
+    if (m_iPartSlot[torso] < 2) {
+        return qfalse;
+    }
+    iTorsoSlots = (1 << m_iPartSlot[torso]) | (1 << (m_iPartSlot[torso] ^ 1));
+    CancelFlaggedEvents(iTorsoSlots);
+
+    // (2) the engine's own interrupt cleanup
+    EventCorrectWeaponAttachments(NULL);
+
+    // (3) put the hand tag back where the finished animation would have put it
+    evHand = new Event(EV_Weapon_AttachToHand);
+    evHand->AddString("mainhand");
+    pPrimary->ProcessEvent(evHand);
+
+    // (4a) DoneReloading clears m_bShouldReload and idles the gun (weapon.cpp:4344-4352), which also
+    // deletes the pending EV_Weapon_DoneReloading done-event through SetWeaponAnim -> StopAnimating
+    // (:4128). Re-assert the debt on the very next line: "you still have to switch back and reload
+    // your primary" is the price the entire feature is costed against. (Weapon::ShouldReload's else
+    // branch re-derives it from clip==0 && reserve>0 at :4392 - but only while the clip is EMPTY,
+    // and a partial reload has ammo in it, so the explicit re-assert is the load-bearing one.)
+    pPrimary->ProcessEvent(EV_Weapon_DoneReloading);
+    pPrimary->SetShouldReload(qtrue);
+
+    // (4b) FORCE THE TORSO OUT. RELOAD_RIFLE releases only on KILLED / ANIMDONE_TORSO / NEW_WEAPON /
+    // vehicle / turret (player_Torso.st:2598-2606): there is no row that lets go because the weapon
+    // changed hands, so without this the player fires a pistol while playing a rifle reload. Same
+    // mechanism Player::Respawn already uses (player.cpp:11045). STAND's entrycommands are
+    // `viewmodelanim idle` and its action is `none`, so this must run BEFORE
+    // ViewModelAnim("pullout") in CoopQDrawEnter - which it does, the whole cancel runs before the
+    // swap - or the idle would eat the 1P draw animation.
+    EvaluateState(pStand, NULL);
+    return qtrue;
+}
+
+void Player::CoopQDrawUp()
+{
+    // Records the key state ONLY - it never exits directly. Same shape as CoopNadeUp, and for the
+    // same reason: a tap released before the 0.25 s draw has finished must still give you the
+    // magazine rather than being swallowed. The release-exit arms in the tick, after
+    // coop_qdrawMinHold, which is also what stops a fumbled tap chattering across two frames.
+    m_bCoopQDrawHeld = false;
+}
+
+void Player::CoopQDrawDown()
+{
+    m_bCoopQDrawHeld = true;
+
+    if (!m_bCoopQDrawActive) {
+        CoopQDrawEnter();
+    }
+}
+
+// The carry pose. Called AFTER both ActivateWeapon calls, so UpdateCoopHolsteredWeapons (which
+// ActivateWeapon runs at its tail) has already seen the parked gun as ACTIVE and left it alone.
+//
+// HONEST WARNING: tag_weapon_left is the ANIMATED SUPPORT-HAND bone - tag_weapon_left pos/rot are
+// authored per-frame channels - so a parked rifle tracks the support hand through idle sway and
+// the 6-frame recoil, on a lever arm the length of a Garand. Expect the first playtest to be a
+// tuning pass on coop_qdrawParkOfs / coop_qdrawParkAng, not a verdict.
+// coop_qdrawShowPrimary 0 is the one-cvar escape and needs no rebuild.
+void Player::CoopQDrawPose(Weapon *pPrimary)
+{
+    if (!pPrimary) {
+        return;
+    }
+
+    CoopQDrawRegisterCvars();
+
+    if (!s_coop_qdrawShowPrimary->integer) {
+        pPrimary->hideModel();
+        return;
+    }
+
+    pPrimary->CoopQDrawPark(entnum, Vector(s_coop_qdrawParkOfs->string), Vector(s_coop_qdrawParkAng->string));
+}
+
+qboolean Player::CoopQDrawEnter()
+{
+    Weapon  *pMain;
+    Weapon  *pPistol = NULL;
+    float    fDelay;
+    int      i;
+    qboolean bReloading;
+    qboolean bPistolDebt = qfalse;
+
+    CoopQDrawRegisterCvars();
+
+    if (!s_coop_qdraw->integer) {
+        return qfalse;   // master switch off - stay completely silent, including in the trace
+    }
+    if (m_bCoopQDrawActive) {
+        QDRAW_REFUSE("already-active");
+    }
+    if (deadflag) {
+        QDRAW_REFUSE("dead");
+    }
+    if (m_pVehicle || m_pTurret || m_pLadder) {
+        QDRAW_REFUSE("vehicle-turret-ladder");
+    }
+    // FL_IMMOBILE IS NOT PMF_FROZEN, AND THE LOBBY USES THE FORMER. Player::CoopLobbyPose
+    // (player.cpp:9749) slings the main weapon with AttachToHolster, deliberately LEAVES it in
+    // activeWeaponList[WEAPON_MAIN], and then sets FL_IMMOBILE so Player::EvaluateState early-returns
+    // (player.cpp:6783) and no statemap edge can twitch the mannequin. Without this guard a lobby
+    // player pressing H rips the slung rifle off the back tag onto tag_weapon_left, and 0.6 s later
+    // the exit puts it back in the mannequin's HANDS - where it stays for the rest of the lobby,
+    // for every viewer, because EvaluateState is switched off and nothing can re-sling it.
+    // Same predicate the engine's own CondWeaponReadyToFire uses (player_conditionals.cpp:306).
+    if ((flags & FL_IMMOBILE) || level.playerfrozen || m_bFrozen) {
+        QDRAW_REFUSE("immobile-or-frozen");
+    }
+    if (IsCoopDbno()) {
+        QDRAW_REFUSE("dbno");
+    }
+    if (m_iCoopNadeState) {
+        QDRAW_REFUSE("quick-grenade-busy");
+    }
+    if (charge_start_time != 0.0f) {
+        QDRAW_REFUSE("charging");
+    }
+    if (!client || (client->ps.pm_flags & (PMF_SPECTATING | PMF_INTERMISSION | PMF_FROZEN))) {
+        QDRAW_REFUSE("spectating-frozen-intermission");
+    }
+    if (level.time < m_fCoopQDrawCool) {
+        QDRAW_REFUSE("cooldown");   // coop_qdrawCooldown, default 0 = never fires
+    }
+    if (activeWeaponList[WEAPON_OFFHAND]) {
+        QDRAW_REFUSE("offhand-occupied");   // something is already parked - never stack two
+    }
+
+    pMain = GetActiveWeapon(WEAPON_MAIN);
+    if (!pMain) {
+        QDRAW_REFUSE("no-mainhand-weapon");
+    }
+
+    // LONG GUNS ONLY, decided from the weapon's OWN class bits (bg_public.h:385-397) - never by
+    // name, and never via WEAPON_CLASS_PRIMARY, which is (!(PISTOL|GRENADE)) == !17 == 0
+    // (bg_public.h:401) and would therefore match nothing at all.
+    // Default mask 14 = RIFLE|SMG|MG. coop_qdrawClasses 46 adds HEAVY without a rebuild.
+    if (!(pMain->GetWeaponClass() & s_coop_qdrawClasses->integer)) {
+        QDRAW_REFUSE("not-a-long-gun");
+    }
+    if (pMain->GetWeaponClass() & WEAPON_CLASS_ANY_ITEM) {
+        QDRAW_REFUSE("holding-an-item");   // papers, mine detector, binoculars
+    }
+    // SYMMETRIC WITH E5's pOff->GetPutaway() TEST, and with the pistol's SetPutAway(qfalse) below.
+    // Sentient::useWeapon (sentient_combat.cpp:1250) PutAway()s the outgoing main weapon at
+    // `activeWeaponList[WEAPON_MAIN]->PutAway();` (:1277), Weapon::PutAway is nothing but
+    // `putaway = true;` (weapon.cpp:3174-3178), and NOTHING clears the flag until
+    // DeactivateWeapon runs at the END of the putaway animation (sentient_combat.cpp:754/:795), so a
+    // long gun sits in WEAPON_MAIN with putaway == true for the whole lower_rifle_stand - 0.300 to
+    // 0.600 s of every manual weapon switch. Without this screen, entry accepts the draw (the rifle
+    // is still WEAPON_MAIN, its class still matches, nothing is reloading, the Colt is loaded), parks
+    // it, charges coop_qdrawDelay, publishes coop_qdrawOn 1 and fires the DRAW foley pair - and then
+    // E5 sees the same GetPutaway() on the very next tick and exits with E5-slots-moved-by-someone-
+    // else, having cancelled the switch the player actually asked for and charged coop_qdrawReturn
+    // for a pistol that existed for one frame. Refusing is the honest answer: do NOT clear the
+    // primary's putaway flag here instead, which would eat the player's own weapon switch.
+    if (pMain->GetPutaway()) {
+        QDRAW_REFUSE("primary-is-putting-away");
+    }
+    // MID-RELOAD: INTERRUPT IT. [user 2026-09-04, "let's go with 2"]
+    //
+    // The original guard here REFUSED while the primary was mid-reload, and that refused the exact
+    // moment the user described the feature for. MOHAA auto-reloads unconditionally - Weapon::UseAmmo
+    // latches SetShouldReload the instant the clip empties (weapon.cpp:1494-1496), Player::CondReload
+    // has no button test (player_conditionals.cpp:836), and there is no autoreload cvar in the tree -
+    // so the reload begins 0.158 s (BAR/StG44) to 0.425 s (Thompson/MP40) after the last round, which
+    // is inside a human choice reaction plus one client packet. The guard did not lose the race
+    // sometimes; on a Garand, a BAR and an StG44 it lost it essentially always.
+    //
+    // Cancelling deletes the race rather than winning it: the window stops being 200 ms and becomes
+    // the whole reload animation, 2.0 s on a Garand and 3.3 s on a Kar98, at any sv_fps.
+    //
+    // ASK THE TORSO STATE FIRST AND THE WEAPON SECOND. The notetracks that have to be cancelled
+    // belong to the TORSO ANIMATION, and weaponstate is WEAPON_RELOADING for only part of the window
+    // that animation owns: it starts one notetrack late (`first reloadweapon`) and ends when the
+    // WEAPON MODEL's own "reload" clip finishes and fires DoneReloading (weapon.cpp:4347) - a clip
+    // whose length has nothing to do with the torso clip's. On a Kar98 that is reload_KAR98.skc
+    // 2.900 s against tps_kar98_reload's 3.3333 s, so weaponstate alone reported "not reloading" for
+    // the last 0.433 s of the reload (0.033 s on a Garand) and skipped the cancel entirely; and on
+    // any weapon tiki with no "reload" anim it reports it for the WHOLE reload. See
+    // CoopQDrawTorsoReloading.
+    bReloading = (CoopQDrawTorsoReloading() || pMain->GetState() == WEAPON_RELOADING) ? qtrue : qfalse;
+    if (bReloading) {
+        if (!s_coop_qdrawInterrupt->integer) {
+            QDRAW_REFUSE("primary-mid-reload");   // coop_qdrawInterrupt 0 = the pre-decision behaviour
+        }
+        // The interrupt's last step forces the torso back to STAND, and it CANNOT be skipped:
+        // EvaluateState(NULL, NULL) is an ordinary evaluation and RELOAD_* has no row that releases
+        // on a weapon change, so a missing STAND state would leave the player firing a pistol inside
+        // a rifle reload animation. Test it HERE, where refusing is still free - CoopQDrawCancelReload
+        // makes the same test before it touches anything and returns qfalse, but by then we are past
+        // the point where a REFUSE line can be printed honestly.
+        if (!statemap_Torso || !statemap_Torso->FindState("STAND")) {
+            QDRAW_REFUSE("no-stand-torso-state");
+        }
+        // THE BALANCE GUARD, and it is the only reason this is not simply "always interrupt".
+        // A MAGAZINE-FED reload is ONE `clip_fill` notetrack: on a Kar98 it lands at frame 50 of a
+        // 101-frame, 3.333 s animation. Without this, a player taps the draw at 1.7 s, keeps the full
+        // magazine, and skips the remaining 1.67 s - a flat 50% reload-speed buff on every bolt gun,
+        // bought with a keypress. Refusing while the clip already has ammo is the engine spelling of
+        // the statemap's `!HAS_AMMO_IN_CLIP "mainhand"`, put on the magazine-fed rows only.
+        // PER-ROUND reloads are deliberately left unguarded: cutting one forfeits the rounds not yet
+        // loaded, which is the trade retail already ships at player_Torso.st:3018 (inside state
+        // RELOAD_SPRINGFIELD_SINGLE).
+        // KNOWN AND ACCEPTED CONSEQUENCE: a PARTIAL magazine reload (press R at 3/8) has ammo in the
+        // clip from the first frame, so it cannot be interrupted at all. That errs on the side of
+        // refusing rather than of handing out free ammunition, which is the correct direction to be
+        // wrong in, and the refusal now prints on the default coop_qdraw 1.
+        if (!CoopQDrawPerRoundReload() && pMain->ClipAmmo(FIRE_PRIMARY) > 0) {
+            QDRAW_REFUSE("reload-past-clip-fill");
+        }
+    }
+
+    // THE ONE-MAGAZINE BUDGET IS THE PISTOL'S OWN CLIP. No second source of truth, no counter to
+    // keep in sync: "empty" is ClipAmmo(FIRE_PRIMARY) <= 0 and never clip+reserve, so the reserve
+    // survives untouched for the normal reload you owe afterwards.
+    //
+    // AND THE PISTOL MUST NOT ALREADY OWE A RELOAD, which entry never used to check and which made
+    // the draw a silent no-op that still charged the return delay. Weapon::m_bShouldReload is a
+    // LATCHED bool: Weapon::UseAmmo sets it the instant a clip empties (weapon.cpp:1495) and the
+    // manual +reload bind sets it directly (player_combat.cpp:159-160), while only DoneReloading /
+    // FillAmmoClip / AddToAmmoClip clear it. So a pistol can sit in the inventory with a PARTIAL
+    // clip and the flag still true - fire the Colt to 3/7, press R, then switch to the rifle before
+    // clip_fill: NEW_WEAPON releases RELOAD_PISTOL, DoneReloading never runs, and the flag stays.
+    // Entry saw ClipAmmo 3 > 0 and accepted it; TickCoopSidearm's E2 then reads ShouldReload() on the
+    // very next tick and exits with "E2-reload-requested". Net result: nothing visibly happened, the
+    // primary was charged coop_qdrawReturn anyway, and at the default coop_qdraw 1 the only trace was
+    // an EXIT line that needs 2 to print. Screen it here, with its own reason, so the refusal is
+    // honest and visible. ShouldReload() rather than the raw flag: for a candidate with clip > 0 the
+    // else branch (clip == 0 && reserve > 0) cannot fire, so the accessor IS the flag here, and it is
+    // the same predicate CondReload and E2 read - one question, one answer, three call sites.
+    for (i = 1; i <= inventory.NumObjects(); i++) {
+        Item *item = (Item *)G_GetEntity(inventory.ObjectAt(i));
+
+        // bug-919/925: a recycled inventory slot can hold a different class, so non-NULL is not
+        // enough - test the class before casting.
+        if (!item || !item->IsSubclassOfWeapon()) {
+            continue;
+        }
+
+        Weapon *w = (Weapon *)item;
+        if (!(w->GetWeaponClass() & WEAPON_CLASS_PISTOL) || w->ClipAmmo(FIRE_PRIMARY) <= 0) {
+            continue;
+        }
+        if (w->ShouldReload()) {
+            bPistolDebt = qtrue;   // keep looking - a second pistol may be clean
+            continue;
+        }
+        pPistol = w;
+        break;
+    }
+    if (!pPistol) {
+        if (bPistolDebt) {
+            QDRAW_REFUSE("pistol-owes-a-reload");
+        }
+        QDRAW_REFUSE("no-pistol-with-a-loaded-clip");
+    }
+
+    // EVERY GUARD HAS PASSED. Only now is it safe to touch anything: the cancel below is not
+    // reversible, so no refusal may follow it. It cannot fail at this point - the STAND state was
+    // tested by its own guard above and the torso slot invariant holds by construction - but the
+    // return value is honoured rather than discarded, because "a call whose failure nobody reads"
+    // is how the unchecked FindState became a defect in the first place.
+    if (bReloading && !CoopQDrawCancelReload(pMain)) {
+        QDRAW_REFUSE("reload-cancel-refused");
+    }
+
+    // THE SWAP.
+    // NOT DeactivateWeapon() - that plays the putaway animation, rewrites lastActiveWeapon and
+    //   re-holsters (sentient_combat.cpp:738-780). The gun is not being put away, it is changing
+    //   hands, and paying for a putaway is exactly what this feature exists to avoid.
+    // NOT useWeapon() either - sentient_combat.cpp:1268 unconditionally PutAway()s the offhand,
+    //   and no statemap state consumes PUTAWAYOFFHAND, so that flag would never clear.
+    // ActivateWeapon reads GetHolsterTag() only for WEAPON_MAIN (sentient_combat.cpp), so the
+    // OFFHAND call skips the inventory detach loop entirely and simply moves the gun to
+    // attachToTag_offhand == "tag_weapon_left" (weapon.cpp:1140).
+    activeWeaponList[WEAPON_MAIN] = NULL;
+    ActivateWeapon(pMain,   WEAPON_OFFHAND);
+    ActivateWeapon(pPistol, WEAPON_MAIN);
+    // CLEAR THE PISTOL'S STALE PUTAWAY FLAG. Sentient::Holster (sentient_combat.cpp:623, the
+    // `rightWeap->SetPutAway(true);` at :632) sets putaway on whatever is in WEAPON_MAIN and it is
+    // cleared only in DeactivateWeapon (:754/:795),
+    // so a script holster or the coop reward-item path can leave the pistol flagged. STAND's
+    // `PUTAWAY_MAIN : PUTAWAYMAIN` row (player_Torso.st:76) sits ABOVE every attack row and reads
+    // CondPutAwayMain = GetActiveWeapon(WEAPON_MAIN)->GetPutaway() (player_conditionals.cpp:631), so
+    // the player would watch pistol_stand_lower (0.567 s) instead of shooting. The E5 tick guard
+    // cannot catch it - that tests the PRIMARY's flag. The exit path already does exactly this for
+    // the primary, so this is symmetry, not a new idea.
+    pPistol->SetPutAway(qfalse);
+
+    CoopQDrawPose(pMain);
+
+    // THE DRAW COST. Without this the draw is one server frame, because the torso never leaves
+    // STAND and STAND's attack rows are already live.
+    fDelay = CoopQDrawClamp(s_coop_qdrawDelay, 0.0f, 1.0f);
+    pPistol->CoopSetDrawDelay(fDelay);
+
+    // THE ACCEPTANCE-TEST LINE. readyAt - t IS the draw, measured rather than asserted; compare it
+    // against the ^~^~^ FIREDBG lines coop_fireDebug 1 prints for a manual swap and a reload.
+    if (s_coop_qdraw->integer >= 2) {
+        gi.Printf("^~^~^ QDRAW ENTER  ent=%d primary='%s' pistol='%s' clip=%d delay=%.3f t=%.2f readyAt=%.2f\n",
+                  entnum, pMain->item_name.c_str(), pPistol->item_name.c_str(),
+                  pPistol->ClipAmmo(FIRE_PRIMARY), fDelay, level.time, level.time + fDelay);
+    }
+
+    m_pCoopQDrawPrimary = pMain;
+    m_pCoopQDrawPistol  = pPistol;
+    m_bCoopQDrawActive  = true;
+    m_fCoopQDrawT0      = level.time;
+    edict->s.eFlags &= ~EF_UNARMED;
+
+    // Three args - player.h declares ViewModelAnim(str, qboolean, qboolean) with NO defaults.
+    // "pullout" is a symbolic index (VM_ANIM_PULLOUT); the client resolves the per-gun prefix from
+    // activeItems[1], which is now the pistol, so this plays colt45_pullout / p38_pullout / etc.
+    // with no new alias and no TIKI edit.
+    ViewModelAnim("pullout", qtrue, qfalse);
+    return qtrue;
+}
+
+void Player::CoopQDrawExit(qboolean bDead, const char *szWhy)
+{
+    Weapon *pPrimary = m_pCoopQDrawPrimary;   // SafePtr: already NULL if the entity was removed
+    Weapon *pPistol  = m_pCoopQDrawPistol;
+    float   fReturn;
+
+    if (!m_bCoopQDrawActive) {
+        return;
+    }
+
+    CoopQDrawRegisterCvars();
+
+    if (s_coop_qdraw->integer >= 2) {
+        gi.Printf("^~^~^ QDRAW EXIT   ent=%d why=%s dead=%d held=%d for=%.2f clipLeft=%d t=%.2f\n",
+                  entnum, szWhy ? szWhy : "unknown", (int)bDead, (int)m_bCoopQDrawHeld,
+                  level.time - m_fCoopQDrawT0,
+                  pPistol ? pPistol->ClipAmmo(FIRE_PRIMARY) : -1, level.time);
+    }
+
+    m_bCoopQDrawActive  = false;
+    m_pCoopQDrawPrimary = NULL;
+    m_pCoopQDrawPistol  = NULL;
+    activeWeaponList[WEAPON_OFFHAND] = NULL;
+
+    if (!m_bCoopQDrawHeld) {
+        m_fCoopQDrawCool = level.time + CoopQDrawClamp(s_coop_qdrawCooldown, 0.0f, 10.0f);
+    }
+    // CLEAR THE KEY STATE ON EVERY EXIT, immediately AFTER the cooldown decision has read it.
+    // Only E3 exits because the key came up; E1/E2/E4/E5/E8/E9, the weapon-command exit, the
+    // correctweaponattachments exit and death all leave the player still physically holding H, and
+    // this flag used to survive all of them. That stale `true` is read in exactly two places and is
+    // wrong in both: the NEXT exit's cooldown branch would skip the friction it should have charged
+    // (the player has been holding since before the previous draw, so nothing ever "releases"), and
+    // E3 would be disarmed for a whole second draw. Clearing here cannot swallow a press - entry
+    // happens only from CoopQDrawDown, which sets the flag on the same line - and it makes the
+    // invariant a simple one: m_bCoopQDrawHeld is meaningful only while m_bCoopQDrawActive is true.
+    m_bCoopQDrawHeld = false;
+
+    // DEAD ONLY. bDead is now passed ONLY for a real death - a frozen, spectating or intermission
+    // player takes the ordinary live path, because this branch does not re-activate anything and a
+    // freeze is temporary: it would leave the rifle welded to tag_weapon_left, in no hand slot,
+    // invisible to the stranded-slot sweep (which tests WEAPON_OFFHAND, NULLed just above), until the
+    // next weapon switch ran correctweaponattachments and fused both guns onto tag_weapon_right.
+    //
+    // Two things this branch OWES, both of them because it took a weapon out of the list that
+    // Sentient::DetachAllActiveWeapons walks (sentient_combat.cpp:680-690):
+    //   the PISTOL is now in no slot at all, so it owes its own detach - FreeInventory deletes the
+    //     inventory but only DetachAllActiveWeapons detaches, and it walks activeWeaponList; and
+    //   the PRIMARY goes back into WEAPON_MAIN, because Player::EventDMDeathDrop drops
+    //     GetActiveWeapon(WEAPON_MAIN) (player.cpp:3642-3648). Without this the corpse drops the
+    //     COLT with a part-spent clip and a teammate never gets the rifle they were counting on.
+    // Still no re-activation and no re-attach: attaching a gun to a corpse is a defect in its own
+    // right, and DetachAllActiveWeapons - reached through FreeInventory from both EventDMDeathDrop
+    // (:3669) and Player::Respawn (:3122) - now finds a clean, complete list.
+    if (bDead) {
+        if (pPistol && GetActiveWeapon(WEAPON_MAIN) == pPistol) {
+            activeWeaponList[WEAPON_MAIN] = NULL;
+            pPistol->DetachFromOwner();
+        }
+        if (pPrimary && pPrimary->GetOwner() == this) {
+            pPrimary->showModel();
+            pPrimary->CoopQDrawUnpose();
+            activeWeaponList[WEAPON_MAIN] = pPrimary;
+        }
+        return;
+    }
+
+    if (pPistol && GetActiveWeapon(WEAPON_MAIN) == pPistol) {
+        activeWeaponList[WEAPON_MAIN] = NULL;
+        pPistol->DetachFromOwner();
+    }
+
+    // GetOwner() is the PUBLIC accessor (item.h:76). The raw `pPrimary->owner == this` would in
+    // fact compile - weapon.h:243 says `friend class Player;`, so the "illegal protected access"
+    // claim in the decision document does not reproduce - but the accessor is used anyway, because
+    // reaching into Item::owner works only for as long as that friendship survives, and a silent
+    // break there would land in the exact branch that decides whether a gun is returned or lost.
+    if (pPrimary && pPrimary->GetOwner() == this) {
+        pPrimary->showModel();
+        pPrimary->CoopQDrawUnpose();      // restores the EXACT angles it had, before the re-attach
+        ActivateWeapon(pPrimary, WEAPON_MAIN);
+        pPrimary->SetPutAway(qfalse);
+        // RE-ASSERT A HOLSTER THE MOUNT ALREADY ASKED FOR. Player::EnterVehicle (player.cpp:9619)
+        // and Player::EnterTurret (:9655) call SafeHolster(true) -> Sentient::Holster(qtrue), which
+        // reads `GetActiveWeapon(WEAPON_MAIN)` (sentient_combat.cpp:627) - during a quick draw that is the
+        // PISTOL. So the mount flagged the pistol putaway and set holsteredWeapon = pistol, and the
+        // two lines above then hand back the primary with its putaway flag CLEAR. CondPutAwayMain
+        // reads that flag, so PUTAWAY_MAIN is never entered and the rifle stays in the player's hands
+        // for the whole mount, visible to everyone; on dismount SafeHolster(qfalse) takes the
+        // WeaponsOut() branch with putaway false and does nothing, leaving weapons_holstered_by_code
+        // and a stale holsteredWeapon behind. Reachability is high: this feature exists for the moment
+        // you run dry, which is exactly when players jump on an MG42.
+        if (m_pVehicle || m_pTurret) {
+            SafeHolster(qtrue);
+        }
+        // THE RETURN COST, charged the same way. ActivateWeapon -> AttachToOwner -> ForceIdle sets
+        // WEAPON_READY and ReadyToFire has no weaponstate test, so WITHOUT this the primary is
+        // fire-ready on the very frame the key is released and the whole "you pay for it
+        // afterwards" trade is fiction.
+        fReturn = CoopQDrawClamp(s_coop_qdrawReturn, 0.0f, 2.0f);
+        pPrimary->CoopSetDrawDelay(fReturn);
+        edict->s.eFlags &= ~EF_UNARMED;
+        if (s_coop_qdraw->integer >= 2) {
+            gi.Printf("^~^~^ QDRAW RETURN ent=%d primary='%s' clip=%d return=%.3f readyAt=%.2f\n",
+                      entnum, pPrimary->item_name.c_str(), pPrimary->ClipAmmo(FIRE_PRIMARY),
+                      fReturn, level.time + fReturn);
+        }
+    } else if (pPistol && pPistol->GetOwner() == this) {
+        // The primary was destroyed or dropped while parked: keep the pistol rather than nothing.
+        ActivateWeapon(pPistol, WEAPON_MAIN);
+        edict->s.eFlags &= ~EF_UNARMED;
+    } else {
+        edict->s.eFlags |= EF_UNARMED;
+    }
+
+    UpdateCoopHolsteredWeapons();
+    ViewModelAnim("pullout", qtrue, qfalse);
+
+    // DELIBERATELY NOT auto-reloading the primary. "you have to switch back and reload your
+    // primary" is the cost this entire feature is priced against; taking it away would make the
+    // one-magazine trade free and turn a panic button into a damage increase.
+}
+
+void Player::TickCoopSidearm()
+{
+    Weapon *pOff;
+    Weapon *pMain;
+    int     iOn;
+
+    CoopQDrawRegisterCvars();
+
+    // PUBLISH THE DRAW STATE TO THIS PLAYER'S CLIENT, CHANGE-ONLY. This is what makes the cgame ADS
+    // guard and the handling foley possible AND what makes them INERT when the feature is not in
+    // use, which is the whole point: the client cannot see activeWeaponList, so without this the
+    // guard in cg_modelanim.c would have to key on the weapon TAG - and tag_weapon_left is NOT
+    // quick-draw-only. Retail parks the player's own rifle there for 1.5-3.3 s of every reload and
+    // every Kar98/Springfield bolt cycle, and the LEFT-TAG magazine props live there too (bug-2241;
+    // of the 22 names in entity.cpp CoopIsMagazineProp it is the pistol/SMG/MG clips - colt, p38,
+    // silencedpistol, thompson, mp40, mp44, bar and the rest - that go to tag_weapon_left, while
+    // the garand, kar98, springfield, bazooka and panzer clips attach to tag_weapon_RIGHT). So a
+    // tag-keyed guard would strip the per-gun ADS sight rotation (up to ~38.5 degrees of crouch yaw)
+    // off a player who has never pressed the key.
+    //
+    // Same wire, same shape and the same change-only latch as coop_braceMounted (player.cpp:15194)
+    // and coop_daylight (:15190). `set coop_*` is auto-allowed by CG_IsVariableAllowed
+    // (cgame/cg_servercmds_filter.cpp:169-172), so no whitelist change is needed. Cost is one
+    // reliable command per transition - two per draw - plus one at spawn from the -1 seed. It is
+    // published BEFORE the stranded-slot sweep's early return so a leaked draw cannot leave the
+    // client latched at 1.
+    // [user 2026-09-05] PUBLISH THE PARKED WEAPON'S ENTITY NUMBER + 1, not a bare 1. The cgame now
+    // re-places the parked primary in view space (cg_modelanim.c CG_CoopQDrawParkInView), because on
+    // the first-person rig tag_weapon_left is at the character's HIP while the pistol viewmodel clips
+    // are playing - measured 38 units below the eye, and behind the near plane outright when walking
+    // or crouched - so the parked rifle was being drawn off the bottom of the frustum every frame.
+    // That re-placement must not be able to grab anything ELSE riding the same tag, and the left tag
+    // is emphatically shared: the 14 left-tag reload magazine props listed above are attached to it,
+    // on this same parent. An entity number is the only unambiguous key the client can test.
+    //
+    // entnum >= 0, so entnum + 1 >= 1: every existing `coop_qdrawOn->integer` truth test - the ADS
+    // pose guard this cvar was introduced for included - behaves exactly as before. 1 is the fallback
+    // for the one frame a SafePtr'd primary can be gone while the draw is still flagged active:
+    // truthy, matches no entity, re-places nothing.
+    iOn = 0;
+    if (m_bCoopQDrawActive) {
+        Weapon *pPub = m_pCoopQDrawPrimary;
+
+        iOn = pPub ? (pPub->entnum + 1) : 1;
+    }
+    if (iOn != m_iCoopQDrawSent) {
+        m_iCoopQDrawSent = iOn;
+        gi.SendServerCommand(edict - g_entities, "stufftext \"set coop_qdrawOn %d\"", iOn);
+    }
+
+    // STRANDED-SLOT SWEEP, UNGATED ON PURPOSE. Nothing else on a PLAYER ever writes
+    // WEAPON_OFFHAND - the only engine readers are three dead "MAIN is null, fall back to OFFHAND"
+    // mine-detector branches plus CondPutAwayOffHand, which no statemap row uses, and no script in
+    // the mod tree issues `useweapon ... offhand` - so a non-NULL offhand with the flag clear is by
+    // construction a leaked quick draw. This lives here rather than in Player::Init (which runs
+    // BEFORE Sentient::Archive restores the slots) precisely so it cannot lose that ordering race.
+    if (!m_bCoopQDrawActive) {
+        pOff = GetActiveWeapon(WEAPON_OFFHAND);
+        if (pOff) {
+            activeWeaponList[WEAPON_OFFHAND] = NULL;
+            pOff->showModel();
+            pOff->CoopQDrawUnpose();   // a no-op unless WE posed it
+            if (!GetActiveWeapon(WEAPON_MAIN)) {
+                ActivateWeapon(pOff, WEAPON_MAIN);
+            } else {
+                pOff->DetachFromOwner();
+            }
+            UpdateCoopHolsteredWeapons();
+        }
+        return;
+    }
+
+    // E9 - REAL DEATH ONLY takes the dead path. That path deliberately does not re-activate
+    // anything, which is right for a corpse and catastrophic for a player who is merely FROZEN:
+    // player.cpp:4703/:5275/:5325 set PMF_FROZEN from `level.playerfrozen || m_bFrozen`, i.e. from
+    // the script command `freezeplayer`, which this mod calls from 38 sites in 20-odd files (16
+    // briefings, gags/t1l3_bridge.scr, gags/t2l4_start.scr, maps/e1l3/boating.scr, coop_mod/lobby.scr
+    // and more). A player holding H when the bridge gag freezes them would come out of it holding a
+    // pistol with the rifle glued to their left hand, in no slot, and the next weapon switch would
+    // fuse both guns onto tag_weapon_right via correctweaponattachments. FL_IMMOBILE (the lobby
+    // freeze - EvaluateState early-returns on it, player.cpp:6783) is in the same list so a freeze
+    // applied AFTER entry still unwinds through the live path.
+    if (deadflag) {
+        CoopQDrawExit(qtrue, "E9-dead");
+        return;
+    }
+    if (!client || (flags & FL_IMMOBILE) || level.playerfrozen || m_bFrozen
+        || (client->ps.pm_flags & (PMF_SPECTATING | PMF_INTERMISSION | PMF_FROZEN))) {
+        CoopQDrawExit(qfalse, "E9-spectating-frozen");
+        return;
+    }
+
+    // E8 - mounted, mounted on a turret, on a ladder, or downed.
+    if (m_pVehicle || m_pTurret || m_pLadder || IsCoopDbno()) {
+        CoopQDrawExit(qfalse, "E8-vehicle-turret-ladder-dbno");
+        return;
+    }
+
+    // E5 - somebody else moved the weapons (a script useweapon, a drop, a reward-item grant).
+    pOff  = GetActiveWeapon(WEAPON_OFFHAND);
+    pMain = GetActiveWeapon(WEAPON_MAIN);
+    if (!pOff || !pMain || pOff != m_pCoopQDrawPrimary || pMain != m_pCoopQDrawPistol
+        || pOff->GetPutaway()) {
+        CoopQDrawExit(qfalse, "E5-slots-moved-by-someone-else");
+        return;
+    }
+
+    // E1 - the magazine is spent. THIS is the rule the user asked for, and it enforces itself:
+    // re-entry needs a pistol with a non-empty clip, which you can only get by holding the pistol
+    // normally and reloading it. No cooldown is doing that work.
+    if (pMain->ClipAmmo(FIRE_PRIMARY) <= 0) {
+        CoopQDrawExit(qfalse, "E1-magazine-spent");
+        return;
+    }
+    // E2 - a reload was requested. Making the reload an EXIT is what enforces "you have to switch
+    // back and reload your primary", and it dissolves the tag collision at the same time: the
+    // pistol's own reload animation attaches colt_clip.tik to tag_weapon_left, where the long gun
+    // is parked.
+    if (pMain->GetState() == WEAPON_RELOADING || pMain->ShouldReload()) {
+        CoopQDrawExit(qfalse, "E2-reload-requested");
+        return;
+    }
+    // E4 - hard timeout.
+    if (level.time - m_fCoopQDrawT0 > CoopQDrawClamp(s_coop_qdrawMaxHold, 0.5f, 600.0f)) {
+        CoopQDrawExit(qfalse, "E4-max-hold-timeout");
+        return;
+    }
+    // E3 - key released. Armed only after coop_qdrawMinHold so a tap is never swallowed.
+    if (!s_coop_qdrawSticky->integer && !m_bCoopQDrawHeld
+        && level.time - m_fCoopQDrawT0 > CoopQDrawClamp(s_coop_qdrawMinHold, 0.0f, 5.0f)) {
+        CoopQDrawExit(qfalse, "E3-key-released");
+        return;
+    }
+}
+
+#undef QDRAW_REFUSE
+
 // HZM coop [user 2026-08-24] SPRINT-TO-SLIDE.
 //
 // Sprint, then hold crouch: you keep (and briefly exceed) your speed for coop_slideTime while
@@ -18180,11 +19126,56 @@ void Player::PlayLocalSound(Event *ev)
 #endif
 
     if (loop) {
+        // HZM coop [user 2026-09-05, bug-2432] THIS BRANCH HAS RENDERED AT GAIN 0.0 SINCE 2023.
+        //
+        // loopSoundMinDist was 0. S_OPENAL_AddLoopSounds reads it back at snd_openal_new.cpp:2706
+        // as `if (fMinDistance < 0) fMinDistance = 200;` - and 0 is not less than 0, so it stays 0.
+        // The volume law two lines down (:2780) is then
+        //     fTotalVolume = fMinDistance * fMinDistance * fVolume / (fDistance * fDistance)
+        // which is 0*0*v/d^2 == 0.0 for every d > 0, and the 0.0005 epsilon at :2799 stops the
+        // channel outright. fDistance is |entity origin - cg.SoundOrg|; cg.SoundOrg is the view
+        // origin AFTER vieworg[2] += viewheight (cg_view.c:6154), i.e. the head, while the entity
+        // origin is at the feet. It is never zero. So every `playlocalsound <alias> 1` in the mod
+        // was silent: the DBNO heartbeat and breathing, painbreath.scr's wounded breathing, and the
+        // Omaha drowning heartbeat (m3l1a/coopified.scr coop_uwHeartStart). bug-2454 fixed the
+        // ambient-duck kill on the same code path and its note says "distance culling is untouched
+        // ... because fTotalVolume keeps its distance term" - correct, and that sentence is exactly
+        // why the second kill went unnoticed. TRAPS.md's "flag 1 means no distance falloff" is about
+        // S_OPENAL_UpdateLoopSound's NO_PAN branch, which is real but runs AFTER this pre-cull.
+        //
+        // THE FIX IS Entity::LoopSound'S RECIPE (entity.cpp:3333-3348), which is the same operation
+        // done correctly: read the alias. Volume and pitch are `regular` netfields (msg.cpp:1400,
+        // :1403) and cg_modelanim.c:1808 hands them straight to S_AddLoopingSound, so honouring them
+        // makes a local loop tunable from ubersound.scr instead of only from the sample - and
+        // because S_OPENAL_UpdateLoopSound only tears a loop down when pSfx CHANGES while applying
+        // fNewPitchMult every frame, several aliases over ONE wav at different pitches re-rate a
+        // playing loop seamlessly. That is how the DBNO bed escalates without a second asset.
+        //
+        // MIN/MAX DIST STAY HARDCODED, AT USABLE VALUES. This branch is only ever reached for a
+        // Player, and CG_LoopSoundIsForeignLocal (cg_ents.c:163-172) drops a flag-1 loop on every
+        // client except the entity's own owner. Privacy is enforced at the render filter, so the
+        // distance term here cannot buy privacy and can only silence the OWNER - who, because the
+        // mod deliberately allows 3rd person while downed, may have cg.SoundOrg out on the orbit
+        // camera, far past the old 96. Taking them from the alias instead would silently re-break
+        // every existing local loop whose alias was authored for a 3D dist, so they are pinned.
+        //
+        // *** SHIPS WITH cgame.dll. *** Without CG_LoopSoundIsForeignLocal (added 2026-09-04) a
+        // client renders every OTHER player's private body loop, and these distances make that
+        // map-wide. exe + cgame + game deploy together, as they already must.
+        float fAliasVolume = alias->volume;
+        float fAliasPitch  = alias->pitch;
+        if (fAliasVolume <= 0.0f) {
+            fAliasVolume = 1.0f; // an alias with no soundparms must behave as it did before
+        }
+        if (fAliasPitch <= 0.0f) {
+            fAliasPitch = 1.0f; // pitch 0 would stall the source, never let it through
+        }
+
         edict->s.loopSound        = gi.soundindex(found, alias->streamed);
-        edict->s.loopSoundVolume  = 1.0f;
-        edict->s.loopSoundMinDist = 0;
-        edict->s.loopSoundMaxDist = 96;
-        edict->s.loopSoundPitch   = 1.0f;
+        edict->s.loopSoundVolume  = fAliasVolume;
+        edict->s.loopSoundMinDist = 16384;
+        edict->s.loopSoundMaxDist = 32768;
+        edict->s.loopSoundPitch   = fAliasPitch;
         edict->s.loopSoundFlags   = 1; // local sound
     } else {
         gi.Sound(&edict->s.origin, entnum, CHAN_LOCAL, found, 1.0f, 0, 1.0f, 96, alias->streamed);

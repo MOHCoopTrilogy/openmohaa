@@ -640,6 +640,60 @@ static void CG_AdsSwapShoulder_f(void)
     cgi.Cvar_Set("cg_adsShoulderRight", pRight->integer ? "0" : "1");
 }
 
+// HZM coop [2026-09-04, bug-2460] RELAY +coopnade / -coopnade TO THE SERVER.
+//
+// These two are registered ONLY in the game module (gamecmds.cpp:154-155), and Cmd_ExecuteString
+// (qcommon/cmd.c) tries cgame (CL_GameCommand) BEFORE the local-server shortcut (SV_GameCommand)
+// and before CL_ForwardCommandToServer. That ordering is the whole bug: a listen HOST has
+// com_sv_running set, so the shortcut caught the command and the bind worked - while a remote
+// client fell through to CL_ForwardCommandToServer, which drops any '-' command silently and
+// answers any '+' command with "Unknown command" (cl_main.cpp:1056-1074). Neither form is ever
+// forwarded. So the quick-grenade bind has been HOST-ONLY since it shipped.
+//
+// Forwarding explicitly from here fixes the joiner and makes the host take the same path, so the
+// two can no longer differ by accident. G_ProcessClientCommand matches G_ConsoleCmds by literal
+// name, so the leading '+'/'-' survives and lands on the existing entries - no new command names,
+// no protocol change, no game.dll change.
+//
+// NOTE FOR ANYONE ADDING ANOTHER HELD ACTION: docs/TRAPS.md T22 used to claim unmatched commands
+// forward to the server and cited +coopnade as its worked example. It does not, and they did not.
+// A +/- pair needs a relay like this one to work for anybody but the host.
+static void CG_CoopNadeDown_f(void)
+{
+    cgi.SendClientCommand("+coopnade");
+}
+
+static void CG_CoopNadeUp_f(void)
+{
+    cgi.SendClientCommand("-coopnade");
+}
+
+// HZM coop [user 2026-09-04] QUICK-DRAW SIDEARM input relay. THIS IS A COPY OF THE +coopnade RELAY
+// ONE SCREEN ABOVE, not a second mechanism for the same job.
+//
+// A '+name'/'-name' pair registered ONLY in fgame/gamecmds.cpp is listen-host-only: Cmd_ExecuteString
+// tries cgame, then SV_GameCommand (gated on com_sv_running, which is why the HOST works), then
+// CL_ForwardCommandToServer - which returns silently for a leading '-' and answers a leading '+'
+// with "Unknown command" (client/cl_main.cpp:1056-1074). That is bug-2460, it is written up as
+// docs/TRAPS.md T22, and it was FIXED for +coopnade in this file on 2026-09-04. Registering here and
+// forwarding with cgi.SendClientCommand (= CL_CG_AddReliableCommand, client/cl_cgame.cpp:671) is the
+// recipe T22 now requires. G_ProcessClientCommand matches G_ConsoleCmds by literal name, so the
+// leading '+'/'-' survives the relay and lands on the rows added in gamecmds.cpp - no new command
+// names, no argument parsing, no protocol change.
+//
+// The relay also fixes WHO the press belongs to: G_ConsoleCommand hardcodes ent = &g_entities[0]
+// (fgame/gamecmds.cpp:236), so a command that reached the server any other way would hand every
+// joiner's keypress to the host. The reliable-command path carries the real client.
+static void CG_CoopSidearmDown_f(void)
+{
+    cgi.SendClientCommand("+coopsidearm");
+}
+
+static void CG_CoopSidearmUp_f(void)
+{
+    cgi.SendClientCommand("-coopsidearm");
+}
+
 static consoleCommand_t commands[] = {
     {"shoulderswap",           &CG_AdsSwapShoulder_f       },
     {"useweaponclass",         &CG_UseWeaponClass_f        },
@@ -697,6 +751,8 @@ static consoleCommand_t commands[] = {
     {"pushcallvotesublist",    &CG_PushCallVoteSubList_f   },
     {"pushcallvotesubtext",    &CG_PushCallVoteSubText_f   },
     {"pushcallvotesubinteger", &CG_PushCallVoteSubInteger_f},
+    {"+coopnade",             &CG_CoopNadeDown_f          }, // HZM coop bug-2460 - see above
+    {"-coopnade",             &CG_CoopNadeUp_f            }, // HZM coop bug-2460
     {"pushcallvotesubfloat",   &CG_PushCallVoteSubFloat_f  },
     {"pushcallvotesubclient",  &CG_PushCallVoteSubClient_f },
     {"pushvote",               &CG_PushVote_f              },
@@ -718,6 +774,8 @@ static consoleCommand_t commands[] = {
     {"lcamn_left",             &CG_LcamLeft_f              },
     {"lcamn_right",            &CG_LcamRight_f             },
     {"lcamsave",               &CG_LcamSave_f              },
+    {"+coopsidearm",           &CG_CoopSidearmDown_f       }, // HZM coop - relay, see T22/bug-2460
+    {"-coopsidearm",           &CG_CoopSidearmUp_f         }, // HZM coop - both halves or host-only
 };
 
 /*

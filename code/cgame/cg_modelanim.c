@@ -1368,6 +1368,223 @@ static const char *const s_adsDonor[][2] = {
 
 static float s_fAdsPose = 0.0f; // eased ADS pose factor (0 = hip, 1 = full sight alignment)
 
+// HZM coop [user 2026-09-05] QUICK-DRAW: THE PARKED PRIMARY, PLACED IN VIEW SPACE.
+//
+// "with the quick swap to pistol, the thompson appears to be put away totally."
+//
+// It was never put away and it was never hidden. Player::CoopQDrawPose (player.cpp) calls
+// Weapon::CoopQDrawPark, which attaches - it does not hideModel unless coop_qdrawShowPrimary is 0;
+// the guard below only ZEROES s_fAdsPose; and the whitelist directly above admits tag_weapon_left
+// to the first-person attach. The gun was drawn every single frame. It was drawn UNDER THE FLOOR OF
+// THE FRUSTUM.
+//
+// In first person this branch resolves the tag on <skin>_fps.tik, not on the world model. EVERY
+// player fps tik in the mod uses one rig - models/player/US_Army/USarmyplyr.skd, 103 of 103 - and
+// on that rig tag_weapon_left is a child of "Bip01 L Hand", whose pose comes from whichever
+// VIEWMODEL clip is playing. During a quick draw that is always a PISTOL clip, because
+// CoopQDrawEnter ends in ViewModelAnim("pullout") and the client resolves the prefix from
+// activeItems[1] == the sidearm. Measured by forward kinematics over the retail skc set, offsets
+// from the "eyes bone" in game units (tik scale 0.52), and the screen fraction of the half-frame at
+// cg_fov 80 on 4:3 where |x|,|y| <= 1 means on screen:
+//
+//   viewmodel/pistol/coltpose          fwd  +0.63  left +14.99  up -38.19    x=-28.5  y=-96.7
+//   viewmodel/pistol/pullout_colt      fwd  +0.63  left +14.99  up -38.19    x=-28.5  y=-96.7
+//   viewmodel/pistol/fire_colt   f2    fwd  -2.11                            BEHIND THE EYE
+//   viewmodel/pistol/walk_colt         fwd  -0.25                            BEHIND THE EYE
+//   viewmodel/pistol/crouch_coltpose   fwd  -0.25                            BEHIND THE EYE
+//   viewmodel/pistol/crouch_colt_fire  fwd -35.60                            BEHIND THE EYE
+//   viewmodel/pistol/run_colt          fwd  +3.82  left +20.59  up -38.26    x= -6.4  y=-15.9
+//
+// - i.e. the parked rifle sat at the character's left hip, ~38 units below the eye and level with
+// or behind the near plane, in every stance the draw can be taken from. coop_qdrawParkOfs "-6 5 -4"
+// then pushed it a further 6 units BACKWARD along that tag's own forward axis.
+//
+// THE RETAIL REFERENCE DOES NOT TRANSFER. `weaponcommand mainhand attachtohand offhand` at frame 1
+// of every rifle reload really is visible in first person - but only because the RIFLE viewmodel
+// clips author tag_weapon_left ON TOP OF tag_weapon_right. Measured, same method:
+// viewmodel/rifle/idle_rifle and viewmodel/rifle/vm_riflereload have the two tags IDENTICAL to
+// 0.01 units at every keyframe. That is a coincident-tag trick inside the rifle clips, not a
+// general "the left tag is on screen" facility, and the quick draw does not play rifle clips.
+//
+// So the first-person placement is taken away from the skeleton entirely and expressed against the
+// VIEW, exactly the way CG_AttachEyeEntity (:1029) already does for the "eyes bone" - cg.refdef and
+// cg.refdefViewAngles are final by the time entities are added (CG_CalcViewValues runs to
+// completion, CG_CalcFov included, before CG_AddPacketEntities; cg_view.c:4051 relies on the same
+// ordering). coop_qdrawVOfs is (forward, left, up) in units FROM THE EYE; coop_qdrawVAng is
+// (pitch, yaw, roll) composed in the view's own frame, not Euler-added to the view angles.
+//
+// WHY 20 12 -9. Half-frame at cg_fov 80 / 4:3 is tan(40) = 0.839 horizontally and 0.629 vertically
+// per unit of depth, so at 20 units out the half-width is 16.78 and the half-height is 12.59:
+//     x = -12 / 16.78 = -0.72      y = -9 / 12.59 = -0.72
+// The grip lands ~14% across and ~86% down - the lower-left corner, comfortably inside the frame -
+// while the measured PISTOL grip sits at x=+0.44 y=-0.56. Two guns, opposite sides of the frame,
+// both on screen, which is the acceptance test. 20 rather than 18 so a butt-stock ~14 units behind
+// the grip still clears r_znear. On 16:9 the engine widens the horizontal fov, which only moves the
+// parked gun further INSIDE the frame; the vertical is unchanged.
+//
+// THIRD PERSON IS UNTOUCHED. This is the else arm of
+// `s1->parent != cg.snap->ps.clientNum || bThirdPerson` (:1999), so a teammate still sees the rifle
+// on the WORLD model's tag_weapon_left with the server-side coop_qdrawParkOfs/Ang pose, which is
+// correct there - the world skeleton's left hand is where the left hand actually is.
+//
+// IDENTIFIED BY ENTITY NUMBER, NOT BY TAG. coop_qdrawOn now carries the parked weapon's entnum + 1
+// (Player::TickCoopSidearm), because the left tag is shared: the 14 left-tag reload magazine props
+// (bug-2241) ride the same tag on the same parent, and re-placing one of those into the corner of
+// the frame would be a new bug of exactly the shape this one is.
+static qboolean CG_CoopQDrawIsParked(const entityState_t *s1)
+{
+    static cvar_t *pOn = NULL;
+
+    if (!pOn) {
+        pOn = cgi.Cvar_Get("coop_qdrawOn", "0", 0);
+    }
+    return (pOn->integer > 0 && s1->number == pOn->integer - 1) ? qtrue : qfalse;
+}
+
+// [user 2026-09-06] "off to the left but completely upside down ... it needs to practically look like the
+// gun is being moved over to the left, out of the way, with the left hand, and it needs to be smooth."
+//
+// TWO THINGS THE FIRST CUT GOT WRONG, both visible in the user's screenshot. (1) The weapon mesh is not
+// authored with its barrel on +X and its sights on +Z the way the pose assumed: parked at (10 -15 -25)
+// it drew with the sights underneath - a half-turn about its own X (v2 read it as Y and reversed the
+// muzzle; the second screenshot corrected that). The correction is a model-space half-turn whose axis
+// coop_qdrawHoldFlip selects (2 = about X: negate the posed Y and Z rows, a proper rotation),
+// so the pose cvars below say where the MUZZLE points and which way the SIGHTS face, in the view frame
+// (pitch, yaw, roll; negative pitch = muzzle up, positive yaw = left), and read the way a person writes
+// them. The defaults were derived from direction vectors and round-tripped through this same math by
+// the fixer that wrote them, not typed from feel. (2) It snapped into place. The pose now eases from a
+// FROM pose - low and centred, where the gun sat in both hands - to the HOLD pose over coop_qdrawHoldMs
+// with a smoothstep, keyed on the parked entity number appearing or changing: no server change and no
+// new state on the wire. On release the primary goes back into the hands as the viewmodel, drawn by
+// the pullout clip, so there is nothing to ease out.
+//
+// NOT ARCHIVED, AND RENAMED. The first cut's coop_qdrawVOfs/VAng were CVAR_ARCHIVE, so the user's config
+// now carries "10 -15 -25"; Cvar_Get keeps an existing value, and a changed code default under the old
+// name would never have run. New names, no archive flag: what is written here is what draws.
+static void CG_CoopQDrawParkInView(refEntity_t *ent, int iEntNum)
+{
+    static cvar_t *pOfs = NULL, *pAng = NULL, *pFromOfs = NULL, *pFromAng = NULL;
+    static cvar_t *pMs = NULL, *pFlip = NULL, *pDbg = NULL;
+    static int     iNext    = 0;
+    static int     iLastEnt = -1, iLastTime = -1, iStart = 0;
+    vec3_t         vOfs, vAng, vFromOfs, vFromAng, vO, vA;
+    vec3_t         vView[3], vPose[3], vLocal[3];
+    float          f, e;
+    int            i;
+
+    if (!pOfs) {
+        pOfs     = cgi.Cvar_Get("coop_qdrawHoldOfs",     "16 10 -7",  0);
+        pAng     = cgi.Cvar_Get("coop_qdrawHoldAng",     "-37 55 17",  0);
+        pFromOfs = cgi.Cvar_Get("coop_qdrawHoldFromOfs", "14 2 -13",  0);
+        pFromAng = cgi.Cvar_Get("coop_qdrawHoldFromAng", "18 3 0",  0);
+        pMs      = cgi.Cvar_Get("coop_qdrawHoldMs",      "320",       0);
+        pFlip    = cgi.Cvar_Get("coop_qdrawHoldFlip",    "2",         0);
+        pDbg     = cgi.Cvar_Get("coop_qdrawVDbg",        "0",         0);
+    }
+
+    // A malformed cvar must not silently park the gun at the eye - that is the same invisible
+    // failure this whole block exists to end. Fall back to the shipped pose instead.
+    if (sscanf(pOfs->string, "%f %f %f", &vOfs[0], &vOfs[1], &vOfs[2]) != 3) {
+        VectorSet(vOfs, 16.0f, 10.0f, -7.0f);
+    }
+    if (sscanf(pAng->string, "%f %f %f", &vAng[0], &vAng[1], &vAng[2]) != 3) {
+        VectorSet(vAng, -37.0f, 55.0f, 17.0f);
+    }
+    if (sscanf(pFromOfs->string, "%f %f %f", &vFromOfs[0], &vFromOfs[1], &vFromOfs[2]) != 3) {
+        VectorSet(vFromOfs, 14.0f, 2.0f, -13.0f);
+    }
+    if (sscanf(pFromAng->string, "%f %f %f", &vFromAng[0], &vFromAng[1], &vFromAng[2]) != 3) {
+        VectorSet(vFromAng, 18.0f, 3.0f, 0.0f);
+    }
+
+    // A fresh park: a different entity, or this one not drawn parked within the last quarter second
+    // (released and drawn again). Everything else is a continuing ease.
+    if (iEntNum != iLastEnt || cg.time - iLastTime > 250) {
+        iStart = cg.time;
+    }
+    iLastEnt  = iEntNum;
+    iLastTime = cg.time;
+    f = (pMs->value > 1.0f) ? (float)(cg.time - iStart) / pMs->value : 1.0f;
+    if (f < 0.0f) { f = 0.0f; }
+    if (f > 1.0f) { f = 1.0f; }
+    e = f * f * (3.0f - 2.0f * f);
+    for (i = 0; i < 3; i++) {
+        vO[i] = vFromOfs[i] + (vOfs[i] - vFromOfs[i]) * e;
+        vA[i] = LerpAngle(vFromAng[i], vAng[i], e);
+    }
+
+    AnglesToAxis(cg.refdefViewAngles, vView);
+
+    VectorCopy(cg.refdef.vieworg, ent->origin);
+    for (i = 0; i < 3; i++) {
+        VectorMA(ent->origin, vO[i], vView[i], ent->origin);
+    }
+    VectorCopy(ent->origin, ent->oldorigin);
+    VectorCopy(ent->origin, ent->lightingOrigin);
+
+    // Composed, not Euler-added: adding roll to a pitched view rolls about the world axis and the
+    // gun swings out of frame the moment you look up or down. The flip is the model-space half-turn
+    // described above, applied to the posed frame (negating two rows keeps the determinant +1).
+    AnglesToAxis(vA, vPose);
+    // [user 2026-09-06, second screenshot] The v2 half-turn about Y sent the MUZZLE the wrong way: it drew
+    // pointing down-right at the shooter with the stock up-left, i.e. the barrel had been on +X all along
+    // and only the sights were inverted. The correction is therefore about X (keep X, negate Y and Z),
+    // and the axis is now selectable so the next wrong guess costs an rcon line, not a build:
+    // coop_qdrawHoldFlip 0 none, 1 about Y, 2 about X, 3 about Z. Each negates two rows: still a rotation.
+    VectorCopy(vPose[0], vLocal[0]);
+    VectorCopy(vPose[1], vLocal[1]);
+    VectorCopy(vPose[2], vLocal[2]);
+    switch (pFlip->integer) {
+    case 1:
+        VectorNegate(vPose[0], vLocal[0]);
+        VectorNegate(vPose[2], vLocal[2]);
+        break;
+    case 2:
+        VectorNegate(vPose[1], vLocal[1]);
+        VectorNegate(vPose[2], vLocal[2]);
+        break;
+    case 3:
+        VectorNegate(vPose[0], vLocal[0]);
+        VectorNegate(vPose[1], vLocal[1]);
+        break;
+    default:
+        break;
+    }
+    MatrixMultiply(vLocal, vView, ent->axis);
+
+    // THE TUNING PROBE. coop_qdrawVDbg 1 prints the pose and the screen fraction the arithmetic above
+    // predicts for the grip point, twice a second, so a tuning pass is a number rather than a squint.
+    if (pDbg->integer && cg.time >= iNext) {
+        static cvar_t *pWFov = NULL;
+        float          fx = 9.99f, fy = 9.99f;
+        float          fFovX = cg.refdef.fov_x, fFovY = cg.refdef.fov_y;
+
+        iNext = cg.time + 500;
+        // The parked gun inherits RF_DEPTHHACK and is drawn with the WEAPON projection whenever ADS has
+        // zoomed the world fov (tr_main.c: r_weaponfovx), so the prediction has to use that fov or it
+        // reads OFF-SCREEN for a gun that is on screen while the pistol is aimed.
+        if (!pWFov) {
+            pWFov = cgi.Cvar_Get("r_weaponfovx", "0", 0);
+        }
+        if (pWFov->value > 1.0f && fabs(pWFov->value - fFovX) > 0.05f && cg.refdef.width > 0) {
+            fFovX = pWFov->value;
+            fFovY = 2.0f * RAD2DEG(atan(tan(DEG2RAD(fFovX * 0.5f)) * (float)cg.refdef.height / (float)cg.refdef.width));
+        }
+        if (vO[0] > 0.01f && fFovX > 1.0f && fFovY > 1.0f) {
+            fx = -vO[1] / (vO[0] * tan(DEG2RAD(fFovX * 0.5f)));
+            fy = vO[2] / (vO[0] * tan(DEG2RAD(fFovY * 0.5f)));
+        }
+        cgi.Printf(
+            "^~^~^ QDRAWVIS ent=%d ease=%.2f ofs=(%.1f %.1f %.1f) ang=(%.1f %.1f %.1f) flip=%d fov=(%.1f %.1f) screen=(%+.2f %+.2f) %s\n",
+            iEntNum, e,
+            vO[0], vO[1], vO[2], vA[0], vA[1], vA[2], pFlip->integer,
+            fFovX, fFovY,
+            fx, fy,
+            (fx > -1.0f && fx < 1.0f && fy > -1.0f && fy < 1.0f) ? "IN-FRAME" : "OFF-SCREEN"
+        );
+    }
+}
+
 static const adsGunTune_t *CG_AdsTuneExact(const char *wpn)
 {
     int i;
@@ -2051,7 +2268,113 @@ void CG_ModelAnim(centity_t *cent, qboolean bDoShaderTime)
                 // first-person weapon-tag branch - which does not run in third person, in cover, on
                 // a cutscene camera, or while dead - so the pose froze and was then re-applied at
                 // full strength on the first frame this branch ran again.
+                // HZM coop [user 2026-09-04] QUICK-DRAW SIDEARM. Everything from here to the close
+                // of this block sits inside the single `tag_weapon_right || tag_weapon_left` arm
+                // above with NO per-tag check, and takes its tune from activeItems[1] - the block's
+                // own comment says "model.origin was set from tag_weapon_right". It was written when
+                // exactly one weapon could ever reach it. With a long gun parked on tag_weapon_left,
+                // aiming the PISTOL would swing the parked rifle by the PISTOL's sight rotation (the
+                // pistol rows of s_adsGunTune[] carry -8.0 to -10.0 degrees of crouch yaw: Colt 45
+                // -8.5, Walther P38 -9.5, Webley -10.0, Nagant -10.0, Beretta -8.5, Hi-Standard
+                // -8.0) on a lever arm the length of a Garand. The -34.5/-38.5/-43.0 figures are the
+                // RIFLE and shotgun rows, and they belong to the other half of this argument below -
+                // do not attribute them to the pistol.
+                //
+                // GATED ON THE FEATURE BEING ACTIVE, NOT ON THE TAG - AND THAT IS THE WHOLE POINT.
+                // "the tag is not tag_weapon_right" is NOT a quick-draw signal and never was:
+                //   retail runs `weaponcommand mainhand attachtohand offhand` at frame 1 of
+                //     rifle_reload, kar98_reload, springfield_reload_start and all four
+                //     kar98/springfield *_rechamber clips, which puts THE PLAYER'S OWN RIFLE on
+                //     tag_weapon_left for 1.5-3.3 s of every reload and every bolt cycle; and
+                //   the reload MAGAZINE is a separate networked Animate attached by a frame command
+                //     (bug-2241; 22 such props, entity.cpp CoopIsMagazineProp), drawn in first
+                //     person by this very branch. THE COUNT IS 22, THE PLACEMENT IS NOT UNIFORM -
+                //     measured across every models/player/base/anims_*.txt and human_*.tik in the
+                //     retail paks: FOURTEEN attach to tag_weapon_left (bar, colt, g43,
+                //     it_w_beretta, it_w_moschetto, mp40, mp44, p38, ppsh, silencedpistol, sten,
+                //     svt, thompson, uk_w_l42a1), SEVEN to tag_weapon_RIGHT (enfield_clip1,
+                //     it_w_breda, it_w_carcano, kar98_clip_reload, nagant_pistol_shell,
+                //     springfield_clip_reload, uk_w_vickers) and ONE - enfield_clip2 - to the bone
+                //     "Bip01 R Hand" rather than to a weapon tag at all. So a tag-keyed guard would
+                //     miss the seven right-tag clips entirely while still stripping the fourteen.
+                // CG_AimingDownSights (cg_view.c) keys purely on the ADS button plus the brace mount,
+                // with no reload or rechamber test, so "during ADS" is not a narrow window. A
+                // tag-keyed guard would therefore delete up to ~38.5 degrees of authored per-gun
+                // sight rotation from the player's own rifle through every reload and every bolt
+                // cycle taken with the aim button held or while braced, and from the fourteen
+                // left-tag magazine props - for a player who has never pressed the key. coop_qdrawOn
+                // makes it genuinely inert instead of merely small: at coop_qdraw 0 the server never
+                // publishes 1, the cvar stays 0, the guard never fires and no rotation is lost. The
+                // residue in this function is one cached Cvar_Get and one integer test - inert, not
+                // byte-identical; sidearm.md section 6 enumerates every coop_qdraw 0 delta honestly.
+                //
+                // coop_qdrawOn is published per player, change-only, by Player::TickCoopSidearm on
+                // the stufftext bus - the same wire and the same shape as coop_braceMounted
+                // (fgame/player.cpp:15194), read back the same way CG_AimingDownSights (cg_view.c:4659)
+                // reads that one - its `cgi.Cvar_Get("coop_braceMounted", "0", 0)` at :4692.
+                // `set coop_*` is auto-allowed by CG_IsVariableAllowed
+                // (cg_servercmds_filter.cpp:169-172), so it needs no whitelist entry. This branch is
+                // the LOCAL player's first-person attachment only - it is the `} else {` arm of
+                // `if (s1->parent != cg.snap->ps.clientNum || bThirdPerson)`, i.e. the inverse of the
+                // world-model path, reached through the tag whitelist. In cg_modelanim.c TODAY those
+                // are :1999 (the gate), :2020 (this arm) and :2033 (the whitelist) - grep the
+                // conditions rather than trusting the numbers, bug-2462 moved this file ~50 lines on
+                // 2026-09-04. Either way a per-player cvar is exactly the right scope.
+                //
+                // ZERO THE POSE FACTOR - NEVER `return`. A return here also skips the loop sound,
+                // CG_UpdateEntityEmitters, CG_ProcessEntityCommands and the cent->animLast*/
+                // usageIndexLast bookkeeping at the tail of this function, so the commands then fire
+                // out of step; and cg_adsHideOffHand deliberately SHOWS the left hand during a
+                // reload, so the player would watch a bare hand mime seating a magazine that is not
+                // there. THAT IS bug-315 EXACTLY, which is why bCoopHideDraw (:1712) exists in this
+                // file rather than an early return.
+                //
+                // THE DROOP (bug-2458), THE LAG (bug-2459) AND THE IDLE-INSPECT ROLL (bug-2462)
+                // BELOW ARE NOT AFFECTED, AND MUST NOT BE. THREE blocks sit outside the
+                // `if (s_fAdsPose > 0.001f)` gate today, not two - all three landed in this file on
+                // 2026-09-04 - and none of them can be reached by zeroing this file-static:
+                //   the droop reads CG_CoopDroopAngle(), which applies its own ADS cancel
+                //     (`fTgt *= (1.0f - CG_AdsPoseFactor());`, cg_view.c:4650);
+                //   the lag reads CG_CoopLagAngles(), which does the same (:4599); and
+                //   the inspect roll reads CG_CoopInspectRoll() (cg_view.c:4621), which reads
+                //     NEITHER s_fAdsPose NOR CG_AdsPoseFactor() - its body is `return s_inspPubRoll;`
+                //     and its own comment says "No cg.time cache and no ADS scale here". It is
+                //     untouched for a different reason from the other two: not because it cancels
+                //     the pose itself, but because it never consults it at all. The recorded
+                //     consequence, the same class as the droop/heft note below: the PARKED rifle
+                //     also picks up the idle-inspect roll about its own grip.
+                // So zeroing s_fAdsPose cannot reach any of the three: no double-application, and no
+                // silent disabling. What DOES change with a gun parked on the left tag is that each
+                // attached weapon entity runs this branch once, so the parked gun gets its OWN droop
+                // and lag rotation about its own grip. That is correct rather than doubled - the two
+                // guns are two entities - but note the magnitudes come from the shared once-per-frame
+                // integrators, which are keyed to the EQUIPPED weapon: during a draw CoopGunHeft()
+                // reads the PISTOL's published weight (coop_gunHeft, cg_view.c:7013), so the parked
+                // rifle droops by a pistol's heft, not a rifle's. It is a small visual understatement
+                // on a gun that is deliberately out of the way, and it is not worth a second
+                // per-entity heft channel; recorded here so nobody re-derives it in playtest.
+                //
+                // s_fAdsPose is re-assigned at the top of this block on every call and read only
+                // inside the `if (s_fAdsPose > 0.001f)` gate below (the `fAdsPitch *= s_fAdsPose;`
+                // trio and the `fCrouchMix` line, :2073-2126 before this insertion), so writing 0
+                // cannot leak to another entity or another frame.
+                //
+                // If hiding the parked gun specifically is ever wanted, gate it on a signal that
+                // identifies THE PARKED GUN - e.g. Player::TickCoopSidearm setting RF_DONTDRAW on
+                // m_pCoopQDrawPrimary server-side, which the existing `cgi.R_AddRefEntityToScene(&model,
+                // s1->parent);` guard (:2847) already honours - never on "the tag is not
+                // tag_weapon_right".
                 s_fAdsPose = CG_AdsPoseFactor();
+                {
+                    static cvar_t *pCoopQDrawOn = NULL;
+
+                    if (!pCoopQDrawOn) {
+                        pCoopQDrawOn = cgi.Cvar_Get("coop_qdrawOn", "0", 0);
+                    }
+                    if (pCoopQDrawOn->integer && Q_stricmp(szTagName, "tag_weapon_right")) {
+                        s_fAdsPose = 0.0f;
+                    }
+                }
                 if (s_fAdsPose > 0.001f) {
                     vec3_t      vAdsA, vAdsB;
                     const char *adsWpn   = "";
@@ -2108,21 +2431,6 @@ void CG_ModelAnim(centity_t *cent, qboolean bDoShaderTime)
                         VectorCopy(vAdsB, model.axis[2]);
                     }
 
-                    // [weight 6] MUZZLE DROOP - its own rotation, outside the ADS gate, about the
-                    // same left axis. The pivot here is the GRIP (model.origin was set from
-                    // tag_weapon_right), which is the whole reason it belongs at this site rather
-                    // than on the player entity, where it swung the entire rig on a 60-unit lever.
-                    {
-                        float fDroop = CG_CoopDroopAngle();
-                        if (fDroop > 0.01f) {
-                            vec3_t vDrA, vDrB;
-                            RotatePointAroundVector(vDrA, model.axis[1], model.axis[0], -fDroop);
-                            RotatePointAroundVector(vDrB, model.axis[1], model.axis[2], -fDroop);
-                            VectorCopy(vDrA, model.axis[0]);
-                            VectorCopy(vDrB, model.axis[2]);
-                        }
-                    }
-
                     // CROUCH-only EXTRA correction (added on top of the standing rotation): the crouch pose
                     // hunches the body and carries the gun off the standing sight line. Per-gun crouch values
                     // come from the table; tune mode / un-tabled guns fall back to the cg_adsCrouch* cvars.
@@ -2161,6 +2469,121 @@ void CG_ModelAnim(centity_t *cent, qboolean bDoShaderTime)
                             VectorCopy(vAdsB, model.axis[2]);
                         }
                     }
+                }
+
+                // [weight 6, user 2026-09-04, bug-2458] MUZZLE DROOP - NOW GENUINELY OUTSIDE THE ADS GATE.
+                //
+                // This block used to sit INSIDE `if (s_fAdsPose > 0.001f)` above, while the angle it reads
+                // is scaled by `(1.0f - CG_AdsPoseFactor())` in CG_CoopDroopAngle (cg_view.c:4382). Those
+                // are exact complements, so it could only ever be non-zero during the brief ADS transition -
+                // and was being multiplied toward zero even there. A Panzerschreck and a Luger drooped
+                // identically at hip carry because both drooped by nothing. The comment on the block already
+                // claimed it lived outside the gate; only the braces were never moved. TRAPS T23.
+                //
+                // STILL INSIDE THE tag_weapon_right BRANCH, DELIBERATELY. model.origin has been set from
+                // tag_weapon_right by CG_AttachEntity, so the pivot is the GRIP. Applying this to pREnt->axis
+                // instead is bug-2142: the first-person player entity's origin is at the FEET, so the rotation
+                // swings the whole rig on a ~60-unit lever and adds a parasitic forward shove about twice the
+                // intended drop - and never touches pREnt->origin, so the feel budget cannot see it.
+                {
+                    float fDroop = CG_CoopDroopAngle();
+                    if (fDroop > 0.01f) {
+                        vec3_t vDrA, vDrB;
+                        RotatePointAroundVector(vDrA, model.axis[1], model.axis[0], -fDroop);
+                        RotatePointAroundVector(vDrB, model.axis[1], model.axis[2], -fDroop);
+                        VectorCopy(vDrA, model.axis[0]);
+                        VectorCopy(vDrB, model.axis[2]);
+                    }
+                }
+
+                // [weight 7, user 2026-09-04, bug-2459] ROTATIONAL WEAPON LAG - the swing the spring never had.
+                //
+                // The lag spring's output was spent entirely on translation, which reads as DRAG. This adds the
+                // rotation about the GRIP that reads as MASS ON A LEVER - the muzzle swinging off the view axis
+                // on a fast turn and settling back, which is the whole difference between a Panzerschreck and a
+                // Luger rather than merely a slower one.
+                //
+                // SAME PIVOT AS THE DROOP ABOVE, and for the same reason: model.origin came from
+                // tag_weapon_right, so this turns the gun about the hand. On pREnt->axis it would instead swing
+                // the whole rig about the player's FEET (bug-2142). CG_CoopLagAngles already applies the ADS
+                // cancel and the degree clamp, so there is nothing to bound here.
+                //
+                // Yaw turns forward+left about UP; pitch turns forward+up about LEFT - the same axis the droop
+                // uses, so the two compose rather than fight.
+                {
+                    float fLagYaw = 0.0f, fLagPitch = 0.0f;
+                    CG_CoopLagAngles(&fLagYaw, &fLagPitch);
+                    if (fLagYaw > 0.01f || fLagYaw < -0.01f) {
+                        vec3_t vLgA, vLgB;
+                        RotatePointAroundVector(vLgA, model.axis[2], model.axis[0], fLagYaw);
+                        RotatePointAroundVector(vLgB, model.axis[2], model.axis[1], fLagYaw);
+                        VectorCopy(vLgA, model.axis[0]);
+                        VectorCopy(vLgB, model.axis[1]);
+                    }
+                    if (fLagPitch > 0.01f || fLagPitch < -0.01f) {
+                        vec3_t vLgA, vLgB;
+                        RotatePointAroundVector(vLgA, model.axis[1], model.axis[0], fLagPitch);
+                        RotatePointAroundVector(vLgB, model.axis[1], model.axis[2], fLagPitch);
+                        VectorCopy(vLgA, model.axis[0]);
+                        VectorCopy(vLgB, model.axis[2]);
+                    }
+                }
+
+                // [weight 8, user 2026-09-04, bug-2462] IDLE INSPECT - THE FLANK ROLL, AT THE GRIP.
+                //
+                //   "the idle inspect weapon animation is still bad, when the gun gets turned to
+                //    the left to observe the right side of the gun, you're shoulder clips right
+                //    through the camera. happens slightly on the other side too."
+                //
+                // The inspect used to express the whole flank turn as a roll of pREnt->axis - the
+                // FIRST-PERSON PLAYER ENTITY, whose tiki is the <skin>_fps.tik body swapped in at
+                // :2478. So up to 52 degrees of roll was applied to the arms and shoulder caps,
+                // and cg_view.c's tag-pivot compensation only ever put the GUN back; the body had
+                // nothing putting it back. The trigger hand sits ~1.5 units in front of the eye at
+                // rest against r_znear 4, so it does not have far to travel.
+                //
+                // cg_view.c now keeps only ~12 degrees on the body (coop_inspectBodyTurn, soft
+                // knee) and publishes the remainder here. THIS is the rotation that actually shows
+                // the flank: model.origin came from tag_weapon_right, and model.axis[0] is the
+                // weapon's own forward - measured at dot +0.99 with the view forward - so this
+                // spins the receiver about the barrel with the muzzle staying put, turning the
+                // flank normal 1:1 instead of the ~0.3:1 a body roll about the view axis manages.
+                // It also moves nothing toward the lens: a roll about an axis within 8 degrees of
+                // the view axis is depth-neutral to second order.
+                //
+                // Roll only - no yaw. A yaw applied here would have to use the already-rolled up
+                // axis and would leak roll*yaw into muzzle pitch, with the sign of the flank. The
+                // gesture's small yaw stays on the body, scaled down with the body roll.
+                //
+                // SAME PIVOT AND SAME BRANCH as the droop and the lag above, which means the same
+                // guarantees: this is inside `s1->parent == cg.snap->ps.clientNum && !bThirdPerson`
+                // (:1999), so it can never touch a teammate's weapon, and it writes only
+                // model.axis - no camera, no aim ray, no feel budget.
+                {
+                    float fInspRoll = CG_CoopInspectRoll();
+                    if (fInspRoll > 0.01f || fInspRoll < -0.01f) {
+                        vec3_t vInA, vInB;
+                        RotatePointAroundVector(vInA, model.axis[0], model.axis[1], fInspRoll);
+                        RotatePointAroundVector(vInB, model.axis[0], model.axis[2], fInspRoll);
+                        VectorCopy(vInA, model.axis[1]);
+                        VectorCopy(vInB, model.axis[2]);
+                    }
+                }
+
+                // HZM coop [user 2026-09-05] THE PARKED PRIMARY. Last statement in the branch on
+                // purpose: the ADS, droop, lag and inspect blocks above all rotate model.axis about
+                // model.origin, and the parked gun is not being aimed, drooped, lagged or inspected -
+                // it is being carried. Overriding here means its pose is exactly the two cvars and
+                // nothing else, which is what makes it tunable in one pass instead of six.
+                // CG_CoopQDrawIsParked keys on the ENTITY NUMBER, so a reload magazine prop riding the
+                // same tag on the same parent is never touched.
+                // AND the tag: the parked primary is on tag_weapon_left by construction
+                // (weapon.cpp attachToTag_offhand), while coop_qdrawOn is never cleared client-side
+                // on a map change - so a stale entnum from a draw that was active when the last
+                // map ended could otherwise match the HELD rifle on tag_weapon_right for the frames
+                // before the server's first publish from the -1 seed.
+                if (CG_CoopQDrawIsParked(s1) && !Q_stricmp(szTagName, "tag_weapon_left")) {
+                    CG_CoopQDrawParkInView(&model, s1->number);
                 }
             } else {
                 // Don't show the model at all

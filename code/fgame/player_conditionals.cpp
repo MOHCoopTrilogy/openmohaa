@@ -827,6 +827,22 @@ qboolean Player::CondReload(Conditional& condition)
         }
     }
 
+    // HZM coop [user 2026-09-04] QUICK-DRAW SIDEARM: NO AUTO-RELOAD WHILE THE SIDEARM IS DRAWN.
+    // "you get exactly one clip" is the entire price of the feature, and the pistol's own auto-reload
+    // would refund it: RELOAD_PISTOL (player_Torso.st:2670) locks the torso for the full 2.400 s of
+    // reload_colt, its frame-0 notetrack drops models/ammo/colt_clip.tik onto tag_weapon_left - the
+    // tag the parked long gun is attached to - and its frame-25 `weaponcommand mainhand clip_fill`
+    // resolves the hand AT FIRE TIME (Sentient::WeaponCommand, sentient_combat.cpp:1404), so it can
+    // land on the PRIMARY and hand back the reload this feature is costed against.
+    //
+    // This is the one shared conditional the feature touches, and it is one bool: false for every
+    // player who is not mid-draw, and false for everyone at coop_qdraw 0 because entry is impossible.
+    // Nothing else here changes - ShouldReload, CheckReload, FillAmmoClip and StartReloading are all
+    // untouched, so an ordinary reload is byte-identical.
+    if (m_bCoopQDrawActive) {
+        return qfalse;
+    }
+
     weapon = GetActiveWeapon(WEAPON_MAIN);
 
     if (!weapon) {

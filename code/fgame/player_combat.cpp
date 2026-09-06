@@ -163,6 +163,24 @@ void Player::PlayerReload(Event *ev)
 
 void Player::EventCorrectWeaponAttachments(Event *ev)
 {
+    // HZM coop [user 2026-09-04] QUICK-DRAW SIDEARM. The loop below relocates ANY weapon child from
+    // tag_weapon_left onto tag_weapon_right - carrying attach_offset with it - and the parked long
+    // gun legitimately lives on tag_weapon_left, so left alone this is how both guns end up fused
+    // in one hand.
+    //
+    // EXIT FIRST, THEN LET THE CLEANUP RUN. This is deliberately NOT an early return: suppressing
+    // the cleanup is exactly how a genuinely stranded gun stays stranded. By the time the loop
+    // executes, CoopQDrawExit has already put the primary back on tag_weapon_right properly, so
+    // the cleanup finds nothing of ours to move and does its normal job for everything else.
+    //
+    // Reachable from RAISE_WEAPON's entrycommands (five statemap sites), from
+    // Player::DropCurrentWeapon, and from script at coop_mod/itemhandler.scr (the coop reward-item
+    // path - note its preceding `deactivateweapon "dual"` resolves to WEAPON_MAIN, because
+    // WeaponHandNameToNum falls through to atoi("dual") == 0).
+    if (m_bCoopQDrawActive) {
+        CoopQDrawExit(qfalse, "correctweaponattachments");
+    }
+
     int      iChild;
     int      iNumChildren;
     int      iTagRight;

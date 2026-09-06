@@ -1521,7 +1521,11 @@ void TurretGun::AI_DoFiring()
             // intended. Restoring the fire state here closes that desync at the source.
             if (m_bFiringBeforeOverheat) {
                 m_bFiringBeforeOverheat = false;
-                if (owner && owner->IsSubclassOfActor()) {
+                // [2026-09-05, bug-2473] ...and only for a LIVE owner. A machinegunner's death is a
+                // SuspendState, not an EndState, so the corpse keeps the gun until it is removed
+                // (up to 5s on the coop flank crews), and a resume here re-armed it from under the
+                // body - a stopfiring from script cannot hold against this write.
+                if (owner && owner->IsSubclassOfActor() && !owner->IsDead()) {
                     m_iFiring = TURRETFIRESTATE_BEGIN_FIRE;
                 }
             }

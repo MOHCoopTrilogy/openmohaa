@@ -135,6 +135,32 @@ static qboolean G_CoopNadeUpCmd(gentity_t *ent)
     return qtrue;
 }
 
+// HZM coop [user 2026-09-04] QUICK-DRAW SIDEARM. A '+'/'-' PAIR, exactly like G_CoopNadeDownCmd /
+// G_CoopNadeUpCmd above - the trailing key/time arguments the engine appends to a '+' command are
+// simply ignored, which is why these are plain function pointers and not Events.
+//
+// REGISTERING HERE IS ONLY HALF THE WIRE. Both names are ALSO registered in cgame's commands[]
+// (cgame/cg_consolecmds.c), which forwards each half with cgi.SendClientCommand. Without that half
+// the bind is listen-host-only: CL_ForwardCommandToServer drops '-' silently and answers '+' with
+// "Unknown command" (client/cl_main.cpp:1056-1074), and the host only appears to work because
+// Cmd_ExecuteString reaches SV_GameCommand first when com_sv_running is set. That is bug-2460 and
+// docs/TRAPS.md T22; +coopnade was the scar and has been fixed the same way.
+static qboolean G_CoopSidearmDownCmd(gentity_t *ent)
+{
+    if (ent && ent->entity && ent->entity->isSubclassOf(Player)) {
+        ((Player *)ent->entity)->CoopQDrawDown();
+    }
+    return qtrue;
+}
+
+static qboolean G_CoopSidearmUpCmd(gentity_t *ent)
+{
+    if (ent && ent->entity && ent->entity->isSubclassOf(Player)) {
+        ((Player *)ent->entity)->CoopQDrawUp();
+    }
+    return qtrue;
+}
+
 // HZM coop [user 2026-08-24] engagement-distance histogram - see weaputils.cpp CoopShotDistRecord.
 extern void CoopShotDistDump(void);
 extern void CoopShotDistReset(void);
@@ -153,6 +179,10 @@ consolecmd_t G_ConsoleCmds[] = {
     {"coop_shotdump",   G_CoopShotDistCmd,    qtrue },
     {"+coopnade",      G_CoopNadeDownCmd,    qtrue },
     {"-coopnade",      G_CoopNadeUpCmd,      qtrue },
+    // allclients MUST be qtrue on BOTH rows or G_ProcessClientCommand skips them entirely once
+    // game.maxclients > 1 (gamecmds.cpp), i.e. on every server that is not solo.
+    {"+coopsidearm",   G_CoopSidearmDownCmd, qtrue },
+    {"-coopsidearm",   G_CoopSidearmUpCmd,   qtrue },
     {"coop_surfscan",   G_SurfScanCmd,        qtrue },
     //   command name       function             available in multiplayer?
     {"say",             G_SayCmd,             qtrue },

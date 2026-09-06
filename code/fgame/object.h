@@ -109,3 +109,37 @@ public:
     int    m_iCoopStuckFrames;
     void   CoopHeadSettle(Event *ev);
 };
+
+// HZM coop [user 2026-09-04] MAGAZINE EJECT. "on reload, magazines drop to the floor and bounce
+// realistically ... enemies and allies do it too ... lets make sure people dont be getting stuck on
+// them." Same family as HelmetObject / HeadGibObject above, with three deliberate differences:
+//
+//  - MOVETYPE_BOUNCE, not MOVETYPE_TOSS. G_Physics_Toss gives TOSS backoff 1.0 (g_phys.cpp:1184) -
+//    "clip the velocity and stop", no rebound at all; the helmet only LOOKS lively because of its
+//    avelocity. BOUNCE gets backoff 1.4 (:1180) plus horizontal damping (:1191) and settles into
+//    EV_Stop below speed 40 (:1204). It is the movetype the shipping gore chunks already use
+//    (Sentient::CoopGoreThrowChunks, sentient.cpp).
+//
+//  - NOBODY GETS STUCK, and SOLID_NOT is the whole guarantee. setSolidType(SOLID_NOT) zeroes the
+//    entity's CONTENTS, and SV_ClipMoveToEntities skips solid == SOLID_NOT unconditionally BEFORE
+//    any contentmask test (server/sv_world.c:555, and again in the sight-trace path at :662). No
+//    player move, no AI move, no bullet and no line-of-sight trace can reach one; AI pathing is
+//    unaffected for a second reason, it runs on precomputed pathnodes and not on world entities.
+//    It still LANDS because G_PushEntity traces with the MOVER'S OWN clipmask (g_phys.cpp:486) -
+//    the mover's solidity is irrelevant to its own trace.
+//
+//  - The clipmask is MASK_SOLID minus the two body bits, and nothing is ADDED to it. Not
+//    MASK_VIEWSOLID, which carries CONTENTS_TRIGGER and would strand magazines on the trigger
+//    volumes maps are carpeted in - that is exactly what froze severed heads in mid-air
+//    (HeadGibObject, 2026-08-18). And not `| CONTENTS_PLAYERCLIP` either: MASK_SOLID does not
+//    contain it (bg_public.h:643), so adding it would strand them on invisible playerclip brushes.
+//    The two body bits come out so a magazine never comes to rest on a walking soldier's bbox,
+//    which is two feet away a second later.
+class CoopMagObject : public Entity
+{
+public:
+    CLASS_PROTOTYPE(CoopMagObject);
+
+    CoopMagObject();
+    void CoopMagStop(Event *ev);
+};

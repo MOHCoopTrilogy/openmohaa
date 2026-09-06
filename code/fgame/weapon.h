@@ -103,6 +103,14 @@ protected:
     float      nextweaponsoundtime; // The next time this weapon should sound off
     float      m_fLastFireTime;
     firemode_t m_eLastFireMode;
+    // HZM coop [user 2026-09-04] QUICK-DRAW SIDEARM park pose. NOT the holster mechanism:
+    // lastAngles/lastValid below are holster-only and bug-623 is specifically about a second
+    // writer poisoning them ("out of nowhere im holding my guns backwards"). A parked gun needs
+    // its own save slot, and it needs the flag so CoopQDrawUnpose() on a weapon this feature
+    // never posed is a no-op - the stranded-slot sweep calls it on exactly such weapons, and an
+    // unconditional setAngles(0,0,0) there would clobber a legitimately restored in-hand angle.
+    Vector     m_vCoopQDrawAng;
+    bool       m_bCoopQDrawPosed;
     str        current_attachToTag; // The current name of the tag to attach itself to on the owner
     str        attachToTag_main;    // Tag to use when weapon is wielded in the main hand
     str        attachToTag_offhand; // ...offhand hand
@@ -410,6 +418,11 @@ public:
     );
     qboolean      AutoChange(void);
     int           ClipAmmo(firemode_t mode);
+    // HZM coop [user 2026-09-04] QUICK-DRAW SIDEARM - see weapon.cpp for why these three and not
+    // a statemap state. CoopSetDrawDelay is the whole feature's timing mechanism.
+    void          CoopSetDrawDelay(float fSeconds);
+    void          CoopQDrawPark(int iParentNum, const Vector& vOfs, const Vector& vAng);
+    void          CoopQDrawUnpose(void);
     qboolean      IsDroppable(void);
     virtual float FireDelay(firemode_t mode);
     virtual void  SetFireDelay(Event *ev);

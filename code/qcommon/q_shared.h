@@ -1566,7 +1566,18 @@ typedef enum {
 	CHAN_MAX
 } soundChannel_t;
 
-#define S_FLAG_DO_CALLBACK 0x400
+// HZM coop [user 2026-09-04, bug-2449] 0x400 -> 0x1000. THIS FLAG IS OR'd INTO AN ENTITY NUMBER
+// (fgame/entity.cpp:3747 `num |= S_FLAG_DO_CALLBACK`) and stripped UNCONDITIONALLY on the client
+// (client/snd_openal_new.cpp:1842, :2026), so it MUST live above the entity-number space or it IS
+// an entity number. At 0x400 it was bit 10, which stopped being free the moment GENTITYNUM_BITS
+// went past 10: every sound from an entity numbered 1024-2047 or 3072-4095 was BOUND to, POSITIONED
+// at and STOPPED on entity (n - 1024). Silent, no error, no print. Measured on m3l1a 2026-09-04:
+// shingle_ranger1 = 1694 -> channel bound to 670, a coop_beachDead corpse ~1800 units away against
+// the alias's maxDist 2500, so S_OPENAL_Respatialize held it at gain 0 while the player stood in
+// front of the captain. The cgame client-command path (cg_commands.cpp PlaySound, which is how a
+// say-anim's `first sound` plays) never sets this flag at all and was mis-masked just the same.
+// See SOUND_ENTNUM_BITS below - that is the wire width this requires.
+#define S_FLAG_DO_CALLBACK 0x1000
 
 #define DEFAULT_MIN_DIST  -1.0
 #define DEFAULT_VOL  -1.0
@@ -1810,6 +1821,21 @@ typedef enum
 #define	SOUND_INDEX_BITS	11
 #if MAX_SOUNDS > (1 << SOUND_INDEX_BITS)
 	#error "MAX_SOUNDS exceeds what sound_index can carry in MSG_WriteSounds/MSG_ReadSounds - widen SOUND_INDEX_BITS (protocol change: exe + cgame.dll + game.dll together)"
+#endif
+
+// HZM coop [user 2026-09-04, bug-2449] THE SAME AUDIT, FOR THE OTHER FIELD IN THE SAME RECORD.
+// The audit above named sound_index and left entity_number a bare literal 11 - and 11 was never
+// revisited when GENTITYNUM_BITS went 10 -> 11 -> 12. A play record must carry a full entity
+// number PLUS S_FLAG_DO_CALLBACK, which now sits at bit GENTITYNUM_BITS. A stop record carries a
+// bare entnum (fgame/entity.cpp gi.StopSound(entnum, channel)), so it needs GENTITYNUM_BITS
+// exactly. Raising either is a PROTOCOL change: openmohaa.exe + omohaaded.exe + game.dll must be
+// built and shipped together (omohaaded links qcommon, so it compiles both sides of this field).
+#define	SOUND_ENTNUM_BITS	(GENTITYNUM_BITS + 1)
+#if S_FLAG_DO_CALLBACK != MAX_GENTITIES
+	#error "S_FLAG_DO_CALLBACK must be the first bit ABOVE the entity-number space (== MAX_GENTITIES) or it collides with real entity numbers - see bug-2449"
+#endif
+#if ((MAX_GENTITIES - 1) | S_FLAG_DO_CALLBACK) >= (1 << SOUND_ENTNUM_BITS)
+	#error "SOUND_ENTNUM_BITS cannot carry entnum|S_FLAG_DO_CALLBACK - widen it here AND in MSG_WriteSounds/MSG_ReadSounds (qcommon/msg.cpp)"
 #endif
 #define MAX_OBJECTIVES		20
 #define MAX_LIGHTSTYLES		32
