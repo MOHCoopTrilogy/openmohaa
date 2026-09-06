@@ -5853,6 +5853,7 @@ static int CG_CalcFov(void)
     {
         static int   s_lastWetUwTime = 0;
         static float s_underwater    = 0.0f;
+        static cvar_t *s_uwOutRate   = NULL;   // [bug-2507] leaving-water ease rate, units/s
         float        dtu, targetUw = inwater ? 1.0f : 0.0f, ku;
 
         if (s_lastWetUwTime == 0) { s_lastWetUwTime = cg.time; }
@@ -5860,13 +5861,64 @@ static int CG_CalcFov(void)
         s_lastWetUwTime = cg.time;
         if (dtu < 0.0f) { dtu = 0.0f; } else if (dtu > 0.5f) { dtu = 0.5f; }
 
-        // fast in (~0.3s, the moment you break the surface), slower out (~1s, matches the FOV-warp
-        // easing character rather than snapping the instant you resurface)
-        ku = (targetUw > s_underwater) ? 3.3f : 1.0f;
+        // fast in (~0.3s, the moment you break the surface). Out used to be 1.0/s (~1 s of green
+        // after the head is up) - [user 2026-09-06, bug-2507] the drowning beat's gasp needs the
+        // water to SNAP off, so leaving runs at coop_uwOutRate (default 3.3, same as entering).
+        // Entering is unchanged.
+        if (!s_uwOutRate) { s_uwOutRate = cgi.Cvar_Get("coop_uwOutRate", "3.3", 0); }
+        ku = (targetUw > s_underwater) ? 3.3f : ((s_uwOutRate->value > 0.05f) ? s_uwOutRate->value : 3.3f);
         s_underwater += (targetUw - s_underwater) * (1.0f - exp(-ku * dtu));
         if (s_underwater < 0.0f) { s_underwater = 0.0f; }
         if (s_underwater > 1.0f) { s_underwater = 1.0f; }
         cgi.Cvar_Set("r_ppUnderwater", va("%g", s_underwater));
+    }
+
+    // HZM coop [user 2026-09-06, bug-2507] AIR RAMP for the Omaha drowning beat.
+    //
+    // The SERVER stuffs `set coop_uwAir <0..1>` per beat step (coop_* passes the stufftext
+    // filter, cg_servercmds_filter.cpp). This eases the DISPLAYED value toward it at
+    // coop_uwAirRate units/s (0.6: 1.0 -> 0.05 takes ~1.6 s, the same order as one beat step)
+    // and publishes r_ppUnderwaterAir, which renderergl2's water pass hands to the shader in
+    // u_Color.w. The shader derives lack = 1 - air, so 1.0 = full air = the v3 look unchanged;
+    // it only shows while the view is submerged (the shader gates on r_ppUnderwater).
+    //
+    // Reset: cg_main.c's hzmClearFx block writes BOTH cvars to 1 on connect / map change, and
+    // this block treats an externally written 1 as authoritative for its own static (the same
+    // idiom r_ppBlood uses below, for the same reason - a DLL static survives a map change).
+    // `coop_uwAir 1` at the console is the manual kill switch; `r_ppUnderwaterAir 1` only snaps the
+    // eased static for one frame (the ease resumes toward coop_uwAir next frame).
+    {
+        static cvar_t *s_uwAir      = NULL;
+        static cvar_t *s_ppUwAir    = NULL;
+        static cvar_t *s_uwAirRate  = NULL;
+        static float   s_uwAirShown = 1.0f;
+        static int     s_lastAir    = 0;
+        float          dta, target, step, rate;
+
+        if (!s_uwAir)     { s_uwAir     = cgi.Cvar_Get("coop_uwAir", "1", 0); }
+        if (!s_ppUwAir)   { s_ppUwAir   = cgi.Cvar_Get("r_ppUnderwaterAir", "1", 0); }
+        if (!s_uwAirRate) { s_uwAirRate = cgi.Cvar_Get("coop_uwAirRate", "0.6", 0); }
+
+        if (s_ppUwAir->value >= 1.0f) { s_uwAirShown = 1.0f; }
+
+        target = s_uwAir->value;
+        if (target < 0.0f) { target = 0.0f; } else if (target > 1.0f) { target = 1.0f; }
+
+        if (s_lastAir == 0) { s_lastAir = cg.time; }
+        dta = (cg.time - s_lastAir) / 1000.0f;
+        s_lastAir = cg.time;
+        if (dta < 0.0f) { dta = 0.0f; } else if (dta > 0.5f) { dta = 0.5f; }
+
+        rate = (s_uwAirRate->value > 0.01f) ? s_uwAirRate->value : 0.6f;
+        step = rate * dta;
+        if (target > s_uwAirShown) {
+            s_uwAirShown += step;
+            if (s_uwAirShown > target) { s_uwAirShown = target; }
+        } else {
+            s_uwAirShown -= step;
+            if (s_uwAirShown < target) { s_uwAirShown = target; }
+        }
+        cgi.Cvar_Set("r_ppUnderwaterAir", va("%g", s_uwAirShown));
     }
 
     // HZM coop [user 2026-09-02, bug-2360] BLOOD ON THE LENS.

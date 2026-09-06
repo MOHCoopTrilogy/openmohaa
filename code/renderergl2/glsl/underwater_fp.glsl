@@ -50,8 +50,18 @@
 //
 // UNIFORMS - all of them already exist in uniformsInfo[] (tr_glsl.c:92/144/147/157/165). No new
 // uniform slot, so nothing downstream of UNIFORM_ALPHAGENPARAMS shifts.
-//   u_Color        (amount 0..1 eased by the cgame, time in seconds, r_ppUnderwaterAmt, unused)
-//   u_ViewInfo     (projMat[10], projMat[14], depthValid, debugMode)
+//   u_Color        (amount 0..1 eased by the cgame, time in seconds, r_ppUnderwaterAmt,
+//                   AIR 0..1 - r_ppUnderwaterAir, 1.0 = full air = the look below unchanged)
+//   u_ViewInfo     (projMat[10], projMat[14], depthValid, debugMode + heartPhase*0.499 in the
+//                   fraction - integer part is the mode, fract() is the phase in cycles)
+//
+// [user 2026-09-06, bug-2507] AIR RAMP - the drowning beat. lack = 1 - u_Color.w drives, all
+// scaled by a so they leave with the water: the edge darkening from 0.14 up to 0.75 and
+// tightening toward the centre (a closing tunnel), a luminance mix up to 0.6 (the colour goes
+// out of the world), the scatter blur radius x(1 + 1.5*lack), a mild darkening of the silt,
+// and a heartbeat pulse of 8% on the vignette at bpm = 55 + 75*lack. The phase comes from the
+// C caller, integrated there - see tr_postprocess.c - because sin(t*bpm) with a moving bpm
+// and an absolute t jumps phase every frame.
 //   u_FogDistance  (sigmaR, sigmaG, sigmaB, far clamp in units)
 //   u_FogColorMask (siltColour.rgb, siltBoost)
 //   u_HzmParams    (blur radius in texels, particle scale, shaft scale, ripple scale)
@@ -121,6 +131,12 @@ void main()
 	float t   = u_Color.y;
 	float k   = max(u_Color.z, 0.0);
 	float a   = clamp(amt * k, 0.0, 1.0);
+
+	// [bug-2507] lack of air, 0 at full air. lackA is the version every visual term uses, so
+	// surfacing (a -> 0) takes the drowning look out with the water.
+	float lack  = clamp(1.0 - u_Color.w, 0.0, 1.0);
+	float lackA = lack * a;
+	float hphase = fract(u_ViewInfo.w) * 2.004;   // 0.499 packing -> cycles 0..1
 
 	// aspect-corrected space, so every noise cell is SQUARE on screen and the motes are round.
 	// u_InvTexRes is (1/w, 1/h), so its ratio is the aspect (tr_fbo.c:601-602, srcTexScale NULL).
@@ -194,7 +210,8 @@ void main()
 
 	if (u_HzmParams.x > 0.0)
 	{
-		vec2  r   = (u_HzmParams.x * murk) * u_InvTexRes;
+		// [bug-2507] the scatter radius climbs with lack of air: x1 at full air, x2.5 at none
+		vec2  r   = (u_HzmParams.x * murk * (1.0 + 1.5 * lackA)) * u_InvTexRes;
 		float ang = uwHash(gl_FragCoord.xy) * 6.2831853;
 		float cs  = cos(ang);
 		float sn  = sin(ang);
@@ -228,7 +245,8 @@ void main()
 	// 2.0 - and mix(2.0, silt, 0.5) is still above 1.0, i.e. the water would visibly SKIP every
 	// bright pixel. That is bug-1299, found in globalfog_fp.glsl and in tonemap_hzm_fp.glsl
 	// before it. Same operand, same remedy.
-	vec3 silt = u_FogColorMask.rgb * u_FogColorMask.w;
+	// [bug-2507] mild silt darkening with lack of air - the water itself goes darker, 25% at none
+	vec3 silt = u_FogColorMask.rgb * u_FogColorMask.w * (1.0 - 0.25 * lackA);
 
 	c = clamp(c, 0.0, 1.0);
 	c = c * T + silt * (1.0 - T);
@@ -276,10 +294,18 @@ void main()
 
 	// ---- 9. a small edge darkening. Deliberately small: the murk cue is DISTANCE now, and a
 	// heavy vignette is the single clearest tell that a water effect is a screen filter.
-	vec2  d   = var_TexCoords - vec2(0.5);
-	float vig = clamp(dot(d, d) * 1.6, 0.0, 1.0);
+	// [bug-2507] ... unless the air is going. Then it IS a tunnel, and that is the point: the
+	// weight climbs 0.14 -> 0.75, the radius tightens (1.6 -> 3.2 on r^2, so the dark reaches
+	// the centre third), and it throbs at the heart rate - 1 + 0.08*lack*sin(2*pi*phase).
+	// A luminance mix up to 0.6 goes first, so the colour leaves before the light does.
+	vec2  d     = var_TexCoords - vec2(0.5);
+	float vig   = clamp(dot(d, d) * (1.6 + 1.6 * lackA), 0.0, 1.0);
+	float lum   = dot(c, vec3(0.299, 0.587, 0.114));
+	float pulse = 1.0 + 0.08 * lackA * sin(hphase * 6.2831853);
+	float vigW  = mix(0.14, 0.75, lackA) * pulse;
 
-	c *= (1.0 - a * (0.06 + 0.14 * vig));
+	c = mix(c, vec3(lum), 0.6 * lackA);
+	c *= (1.0 - a * (0.06 + vigW * vig));
 
 	// ---- r_ppUnderwaterDebug. 1 = absorbed fraction per channel (red should dominate and grow
 	// with distance), 2 = murk as greyscale, 3 = reconstructed distance, one ramp per 1024 units,

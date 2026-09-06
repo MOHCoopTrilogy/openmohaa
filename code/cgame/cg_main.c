@@ -854,6 +854,12 @@ void CG_Init(clientGameImport_t *imported, int serverMessageNum, int serverComma
         }
         // health fraction is inverted: 1.0 = full health = no effect
         cgi.Cvar_Set("r_ppHealthFrac", "1");
+        // [user 2026-09-06, bug-2507] the drowning air ramp is inverted the same way: 1.0 = full
+        // air = no effect. coop_uwAir is the server-stuffed input, r_ppUnderwaterAir the
+        // cgame-eased publish (cg_view.c CG_CalcFov) - a server dying mid-ramp must not leave
+        // the next map's water throbbing at 5% air.
+        cgi.Cvar_Set("coop_uwAir", "1");
+        cgi.Cvar_Set("r_ppUnderwaterAir", "1");
     }
 
     CG_RegisterCvars();

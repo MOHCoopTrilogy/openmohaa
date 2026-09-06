@@ -1421,6 +1421,15 @@ void RB_HZMExtraFx(FBO_t *srcFbo, ivec4_t srcBox)
 	static cvar_t *r_ppUnderwaterParticles = NULL, *r_ppUnderwaterShafts = NULL;
 	static cvar_t *r_ppUnderwaterRipple = NULL, *r_ppUnderwaterSilt = NULL;
 	static cvar_t *r_ppUnderwaterSiltBoost = NULL, *r_ppUnderwaterDebug = NULL;
+	// [user 2026-09-06, bug-2507] AIR RAMP: cgame-published 0..1 (1 = full air), goes to the
+	// shader in u_Color.w. The heart pulse phase is integrated HERE, not computed as t*bpm in
+	// the shader: bpm moves with air, and sin(t*bpm) with an absolute t of hundreds of seconds
+	// slews the phase by radians per bpm (TRAPS, procedural motion: integrate phase, never
+	// time*frequency). It rides the fractional part of u_ViewInfo.w, whose integer part is the
+	// debug mode - tested with > N.5 in the shader, so a fraction below 0.5 never changes it.
+	static cvar_t *r_ppUnderwaterAir = NULL;
+	static float   s_uwHeartPhase = 0.0f;
+	static int     s_uwHeartMs = 0;
 	static int     s_uwLastActive = -100000, s_uwNextLog = 0;
 	static cvar_t *r_ppBloodFx = NULL, *r_ppBlood = NULL, *r_ppBloodAmt = NULL;
 	// [2026-09-03 bug-2360 rebuild] the blood pass now needs an AGE rather than absolute level
@@ -1441,6 +1450,7 @@ void RB_HZMExtraFx(FBO_t *srcFbo, ivec4_t srcBox)
 	if (!r_ppUnderwaterFx) {
 		r_ppUnderwaterFx              = ri.Cvar_Get("r_ppUnderwaterFx",              "1",   CVAR_ARCHIVE);
 		r_ppUnderwater                = ri.Cvar_Get("r_ppUnderwater",                "0",   0);   // cgame-published
+		r_ppUnderwaterAir             = ri.Cvar_Get("r_ppUnderwaterAir",             "1", 0);   // cgame-published [bug-2507]
 		// [user 2026-09-02, bug-2355] artist scalar for the murk, so the underwater look can be tuned
 		// live instead of through a renderer rebuild. 1.0 = as authored in underwater_fp.glsl; the
 		// shader clamps the PRODUCT, not this, so values above 1 legitimately deepen the water.
@@ -1527,11 +1537,25 @@ void RB_HZMExtraFx(FBO_t *srcFbo, ivec4_t srcBox)
 		float    vis, farClamp, blurPx;
 		float    s0 = 0.075f, s1 = 0.155f, s2 = 0.135f;
 		float    centerZw = -1.0f, centerDist = -1.0f;
+		float    air, bpm, dtHeart;
 		qboolean depthOk, announce;
 		int      smpUnit, now;
 
 		now      = ri.Milliseconds();
 		announce = (now - s_uwLastActive > 5000) ? qtrue : qfalse;
+
+		// [bug-2507] air 0..1, and the heart phase in cycles, integrated at bpm(air) =
+		// 55 + 75*(1 - air) - the same formula the script's one-shot heartbeat uses, so picture
+		// and audio agree without a per-beat message. Phase restarts on each submersion.
+		air = r_ppUnderwaterAir->value;
+		if (air < 0.0f) { air = 0.0f; } else if (air > 1.0f) { air = 1.0f; }
+		bpm = 55.0f + 75.0f * (1.0f - air);
+		if (announce || s_uwHeartMs == 0) { s_uwHeartMs = now; s_uwHeartPhase = 0.0f; }
+		dtHeart = (now - s_uwHeartMs) * 0.001f;
+		s_uwHeartMs = now;
+		if (dtHeart < 0.0f) { dtHeart = 0.0f; } else if (dtHeart > 0.1f) { dtHeart = 0.1f; }
+		s_uwHeartPhase += dtHeart * bpm / 60.0f;
+		s_uwHeartPhase -= (float)(int)s_uwHeartPhase;   // keep in [0,1) so the fraction packs cleanly
 
 		// Destination: the colour-only alias when we have it. If it is somehow absent we fall
 		// back to screenScratchFbo, and that fallback is SAFE only because of the two steps
@@ -1610,7 +1634,7 @@ void RB_HZMExtraFx(FBO_t *srcFbo, ivec4_t srcBox)
 		GLSL_SetUniformInt(&tr.underwaterShader, UNIFORM_LEVELSMAP, TB_LEVELSMAP);
 
 		VectorSet4(viewInfo, rb_viewProj.projMat10, rb_viewProj.projMat14,
-			depthOk ? 1.0f : 0.0f, (float)r_ppUnderwaterDebug->integer);
+			depthOk ? 1.0f : 0.0f, (float)r_ppUnderwaterDebug->integer + s_uwHeartPhase * 0.499f);
 
 		// per-channel extinction, 1/units. The RATIOS are fixed so the hue stays put while
 		// r_ppUnderwaterVis moves the visibility: red 3.1x green (absorbed first and hardest),
@@ -1620,7 +1644,9 @@ void RB_HZMExtraFx(FBO_t *srcFbo, ivec4_t srcBox)
 		VectorSet4(params, blurPx, r_ppUnderwaterParticles->value,
 			r_ppUnderwaterShafts->value, r_ppUnderwaterRipple->value);
 
-		VectorSet4(color, r_ppUnderwater->value, backEnd.refdef.floatTime, r_ppUnderwaterAmt->value, 1.0f);
+		// u_Color.w was a literal 1.0f (documented unused) - [bug-2507] it now carries AIR, and
+		// the shader derives lack = 1 - w, so the default 1.0 changes nothing.
+		VectorSet4(color, r_ppUnderwater->value, backEnd.refdef.floatTime, r_ppUnderwaterAmt->value, air);
 
 		// FBO_Blit binds the colour on TB_COLORMAP itself and pushes only MVP / COLOR / INVTEXRES /
 		// HZMPARAMS / AUTOEXPOSUREMINMAX / TONEMINAVGMAXLINEAR (tr_fbo.c:592-611). TMU1 and
@@ -1657,11 +1683,11 @@ void RB_HZMExtraFx(FBO_t *srcFbo, ivec4_t srcBox)
 		{
 			ri.Printf(PRINT_ALL,
 				"^~^~^ UWFX v3 enter amt=%.3f depth=%d smp=%d vis=%.0f blurpx=%.2f part=%.2f "
-				"shaft=%.2f silt=%.3f %.3f %.3f P10=%.4f P14=%.1f centerZw=%.7f centerDist=%.1f\n",
+				"shaft=%.2f silt=%.3f %.3f %.3f P10=%.4f P14=%.1f centerZw=%.7f centerDist=%.1f air=%.2f\n",
 				r_ppUnderwater->value, depthOk ? 1 : 0, smpUnit, vis, blurPx,
 				r_ppUnderwaterParticles->value, r_ppUnderwaterShafts->value,
 				s0, s1, s2, rb_viewProj.projMat10, rb_viewProj.projMat14,
-				centerZw, centerDist);
+				centerZw, centerDist, air);
 		}
 
 		s_uwLastActive = now;
@@ -1672,12 +1698,12 @@ void RB_HZMExtraFx(FBO_t *srcFbo, ivec4_t srcBox)
 		if (r_ppUnderwaterDebug->integer && now >= s_uwNextLog)
 		{
 			ri.Printf(PRINT_ALL,
-				"^~^~^ UWFX debug centerZw=%.7f centerDist=%.1f T=%.3f %.3f %.3f murk=%.3f\n",
+				"^~^~^ UWFX debug centerZw=%.7f centerDist=%.1f T=%.3f %.3f %.3f murk=%.3f air=%.2f bpm=%.0f\n",
 				centerZw, centerDist,
 				exp(-(3.10f / vis) * centerDist),
 				exp(-(1.00f / vis) * centerDist),
 				exp(-(1.90f / vis) * centerDist),
-				1.0 - exp(-(1.00f / vis) * centerDist));
+				1.0 - exp(-(1.00f / vis) * centerDist), air, bpm);
 
 			s_uwNextLog = now + 1000;
 		}
