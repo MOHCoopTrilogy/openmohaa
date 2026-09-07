@@ -197,6 +197,9 @@ static uniformInfo_t uniformsInfo[] =
 	// HZM gl2 FORWARD GLOBAL FOG (r_globalFogForward, bug-1306)
 	{ "u_GlobalFogColor",  GLSL_VEC4 },
 	{ "u_GlobalFogParams", GLSL_VEC4 },
+
+	// HZM coop (bug-2508): alphaGen lightingSpecular light, u_LightOrigin convention (w 0 = dir)
+	{ "u_HzmSpecLight",    GLSL_VEC4 },
 };
 
 typedef enum
@@ -420,11 +423,15 @@ static void GLSL_GetShaderHeader( GLenum shaderType, const GLchar *extra, char *
 								"#define AGEN_PORTAL %i\n"
 								"#define AGEN_SCOORD %i\n"
 								"#define AGEN_TCOORD %i\n"
+								"#define AGEN_DOT %i\n"
+								"#define AGEN_ONE_MINUS_DOT %i\n"
 								"#endif\n",
 								AGEN_LIGHTING_SPECULAR,
 								AGEN_PORTAL,
 								AGEN_SCOORD,
-								AGEN_TCOORD));
+								AGEN_TCOORD,
+								AGEN_DOT,
+								AGEN_ONE_MINUS_DOT));
 
 	fbufWidthScale = 1.0f / ((float)glConfig.vidWidth);
 	fbufHeightScale = 1.0f / ((float)glConfig.vidHeight);
@@ -1999,6 +2006,21 @@ void GLSL_BindProgram(shaderProgram_t * program)
 }
 
 
+// HZM coop (bug-2508): kill switch for the gl2 alphaGen dot / oneMinusDot port. Default ON.
+// r_hzmAlphaGenDot 0 restores the pre-port behaviour exactly: the permutation select below
+// stops asking for USE_RGBAGEN and tr_shade.c uploads AGEN_IDENTITY in place of the dot mode,
+// so a CalcColor compiled in for some other reason cannot run the new branch either.
+// Fetched lazily (same pattern as r_skeldiag in tr_shade.c) so tr_init.c is not touched.
+qboolean GLSL_HzmAlphaGenDotEnabled(void)
+{
+	static cvar_t *r_hzmAlphaGenDot = NULL;
+
+	if (!r_hzmAlphaGenDot) {
+		r_hzmAlphaGenDot = ri.Cvar_Get("r_hzmAlphaGenDot", "1", CVAR_ARCHIVE);
+	}
+	return (qboolean)(r_hzmAlphaGenDot->integer != 0);
+}
+
 shaderProgram_t *GLSL_GetGenericShaderProgram(int stage)
 {
 	shaderStage_t *pStage = tess.xstages[stage];
@@ -2037,6 +2059,17 @@ shaderProgram_t *GLSL_GetGenericShaderProgram(int stage)
 		case AGEN_SCOORD:
 		case AGEN_TCOORD:
 			if (r_hzmAlphaGenCoord && r_hzmAlphaGenCoord->integer) {
+				shaderAttribs |= GENERICDEF_USE_RGBAGEN;
+			}
+			break;
+
+		// HZM coop (bug-2508): alphaGen dot / oneMinusDot - same story as sCoord above, the
+		// branch lives in CalcColor so this select is what makes it exist. Only reachable on
+		// the generic path: a deform-free shader still collapses into lightall (tr_shader.c
+		// CollapseStagesToGLSL skips only LIGHTING_SPECULAR/PORTAL), the bug-2486 gap.
+		case AGEN_DOT:
+		case AGEN_ONE_MINUS_DOT:
+			if (GLSL_HzmAlphaGenDotEnabled()) {
 				shaderAttribs |= GENERICDEF_USE_RGBAGEN;
 			}
 			break;

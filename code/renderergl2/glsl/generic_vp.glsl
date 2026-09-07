@@ -75,6 +75,9 @@ uniform vec3   u_AmbientLight;
 uniform vec3   u_DirectedLight;
 uniform vec3   u_ModelLightDir;
 uniform float  u_PortalRange;
+// HZM coop (bug-2508): light for alphaGen lightingSpecular, u_LightOrigin convention
+// (w == 0: xyz is a direction toward the light; w == 1: xyz is a point). Model space.
+uniform vec4   u_HzmSpecLight;
 #endif
 
 #if defined(USE_VERTEX_ANIMATION)
@@ -215,7 +218,15 @@ vec4 CalcColor(vec3 position, vec3 normal)
 
 	if (u_AlphaGen == AGEN_LIGHTING_SPECULAR)
 	{
-		vec3 lightDir = normalize(vec3(-960.0, 1980.0, 96.0) - position);
+		// HZM coop (bug-2508): this used to be the ioquake3 placeholder point
+		// vec3(-960.0, 1980.0, 96.0) in model space - on a world sheet that is a lamp 2,700u
+		// inland, up the bluff. tr_shade.c now uploads u_HzmSpecLight:
+		//   w == 0 : xyz is a DIRECTION toward the light - the worldspawn sun bridged by
+		//            tr_bsp.c, rotated into model space - used when the stage authored no origin
+		//   w == 1 : xyz is the POINT the stage authored (alphaGen lightingSpecular a x y z),
+		//            model space, exactly what gl1 RB_CalcSpecularAlpha subtracts
+		// The pow-4 falloff is unchanged and alphaMax stays ignored (gl1 ignores it too).
+		vec3 lightDir = normalize(u_HzmSpecLight.xyz - position * u_HzmSpecLight.w);
 		vec3 reflected = -reflect(lightDir, normal);
 		
 		color.a = clamp(dot(reflected, normalize(viewer)), 0.0, 1.0);
@@ -235,6 +246,26 @@ vec4 CalcColor(vec3 position, vec3 normal)
 		float coord = (u_AlphaGen == AGEN_SCOORD) ? attr_TexCoord0.s : attr_TexCoord0.t;
 		float f = (u_AlphaGenParams.y - u_AlphaGenParams.x) * coord + u_AlphaGenParams.x;
 		color.a = clamp(f, u_AlphaGenParams.z, u_AlphaGenParams.w);
+	}
+	else if (u_AlphaGen == AGEN_DOT || u_AlphaGen == AGEN_ONE_MINUS_DOT)
+	{
+		// HZM coop (bug-2508): MOHAA's Fresnel-style 'alphaGen dot min max' and
+		// 'alphaGen oneMinusDot min max'. Port of RB_CalcAlphaFromDot / RB_CalcAlphaFromOneMinusDot
+		// (renderergl1 tr_shade_calc.c:1075,1115):
+		//   f = (N . V)^2     (oneMinusDot: 1 - that)
+		//   a = (max - min) * f + min, clamped to [0,1]
+		// u_AlphaGenParams.xy carries (alphaMin, alphaMax); .zw is NOT used here - it holds the
+		// sCoord clamp pair, which collapses to (0,0) when the stage has no 4th parameter.
+		// PARITY NOTE: gl1 writes this value into RGB (colors[0..2]) and leaves alpha alone;
+		// gl2 writes ALPHA, which is what the directive name and every retail author expected.
+		// gl1 is deliberately untouched - A/B the same shader on cl_renderer opengl1 vs opengl2.
+		float d = dot(normalize(normal), normalize(viewer));
+		float f = d * d;
+		if (u_AlphaGen == AGEN_ONE_MINUS_DOT)
+		{
+			f = 1.0 - f;
+		}
+		color.a = clamp((u_AlphaGenParams.y - u_AlphaGenParams.x) * f + u_AlphaGenParams.x, 0.0, 1.0);
 	}
 	
 	return color;

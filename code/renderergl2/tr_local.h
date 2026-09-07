@@ -948,6 +948,10 @@ typedef enum
 	UNIFORM_GLOBALFOGCOLOR,
 	UNIFORM_GLOBALFOGPARAMS,
 
+	// HZM coop (bug-2508): alphaGen lightingSpecular light for generic_vp. Appended last, per the
+	// rule above. u_LightOrigin convention: w == 0 direction toward the light, w == 1 point.
+	UNIFORM_HZMSPECLIGHT,
+
 	UNIFORM_COUNT
 } uniform_t;
 
@@ -3363,6 +3367,7 @@ void GLSL_SetUniformMat4(shaderProgram_t *program, int uniformNum, const mat4_t 
 void GLSL_SetUniformMat4BoneMatrix(shaderProgram_t *program, int uniformNum, /*const*/ mat4_t *matrix, int numMatricies);
 
 shaderProgram_t *GLSL_GetGenericShaderProgram(int stage);
+qboolean GLSL_HzmAlphaGenDotEnabled(void);   // HZM coop (bug-2508): r_hzmAlphaGenDot, default 1
 
 /*
 ============================================================

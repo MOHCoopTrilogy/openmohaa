@@ -798,10 +798,23 @@ static void ComputeShaderColors( shaderStage_t *pStage, vec4_t baseColor, vec4_t
 		// CGEN_FOG / CGEN_ENTITY / CGEN_ONE_MINUS_ENTITY a constant. Forcing opaque would
 		// change 9 shipped stages - alphaGen dot + rgbGen lightingSpherical (trees.shader)
 		// and + lightingGrid (coop_1936_imports.shader, alphaFunc GE128 foliage).
-		// Still unimplemented in gl2: AGEN_NOISE, AGEN_DOT, AGEN_ONE_MINUS_DOT,
-		// AGEN_SKYALPHA, AGEN_ONE_MINUS_SKYALPHA, AGEN_HEIGHT_FADE.
+		// Still unimplemented in gl2: AGEN_NOISE, AGEN_SKYALPHA, AGEN_ONE_MINUS_SKYALPHA,
+		// AGEN_HEIGHT_FADE. (AGEN_DOT / AGEN_ONE_MINUS_DOT: ported, bug-2508, case above default.)
 		// Cost of adding a default at all: -Wswitch no longer flags a newly added
 		// alphaGen_t value as unhandled; this runtime warning replaces that net.
+
+		// HZM coop (bug-2508): alphaGen dot / oneMinusDot - computed per-vertex in generic_vp
+		// CalcColor from the vertex normal and the local view origin, so like SCOORD/TCOORD the
+		// CPU side only hands the GPU a neutral base. With r_hzmAlphaGenDot 0 this falls through
+		// into the legacy warn-and-leave default below, unchanged from before the port.
+		case AGEN_DOT:
+		case AGEN_ONE_MINUS_DOT:
+			if ( GLSL_HzmAlphaGenDotEnabled() ) {
+				baseColor[3] = 1.0f;
+				vertColor[3] = 0.0f;
+				break;
+			}
+			// fall through
 		default:
 			if ( !tess.shader->alphaGenWarned ) {
 				tess.shader->alphaGenWarned = qtrue;
@@ -1788,7 +1801,45 @@ static void RB_IterateStagesGeneric( shaderCommands_t *input )
 		}
 
 		GLSL_SetUniformInt(sp, UNIFORM_COLORGEN, pStage->rgbGen);
-		GLSL_SetUniformInt(sp, UNIFORM_ALPHAGEN, pStage->alphaGen);
+
+		// HZM coop (bug-2508): with r_hzmAlphaGenDot 0 the GPU must see exactly what it saw
+		// before the port. CalcColor can still be compiled in by rgbGen lightingDiffuse, so the
+		// dot family is uploaded as AGEN_IDENTITY (inert in CalcColor) while the switch is off.
+		{
+			int agen = pStage->alphaGen;
+
+			if ( ( agen == AGEN_DOT || agen == AGEN_ONE_MINUS_DOT ) && !GLSL_HzmAlphaGenDotEnabled() ) {
+				agen = AGEN_IDENTITY;
+			}
+			GLSL_SetUniformInt(sp, UNIFORM_ALPHAGEN, agen);
+		}
+
+		// HZM coop (bug-2508): the light for alphaGen lightingSpecular. generic_vp used the
+		// ioquake3 placeholder POINT (-960,1980,96) and ignored the origin MOHAA lets a stage
+		// author ('alphaGen lightingSpecular a x y z', parsed into specOrigin on both renderers).
+		// The parser writes that same triple as its default, so "not authored" is "still the
+		// default triple": then use the worldspawn sun bridged in tr_bsp.c (a direction TOWARD
+		// the sun, world space) rotated into model space the way tr_light.c builds modelLightDir.
+		// An authored origin is passed verbatim as a model-space point, which is what gl1's
+		// RB_CalcSpecularAlpha subtracts. Resolves to -1 (no-op) on every non-generic program.
+		if (pStage->alphaGen == AGEN_LIGHTING_SPECULAR)
+		{
+			vec4_t   spec;
+			qboolean authored = (qboolean)( pStage->specOrigin[0] != -960.0f
+			                             || pStage->specOrigin[1] != 1980.0f
+			                             || pStage->specOrigin[2] != 96.0f );
+
+			if ( !authored && VectorLengthSquared( tr.sunDirection ) > 0.25f ) {
+				spec[0] = DotProduct( tr.sunDirection, backEnd.or.axis[0] );
+				spec[1] = DotProduct( tr.sunDirection, backEnd.or.axis[1] );
+				spec[2] = DotProduct( tr.sunDirection, backEnd.or.axis[2] );
+				spec[3] = 0.0f;   // direction
+			} else {
+				VectorCopy( pStage->specOrigin, spec );
+				spec[3] = 1.0f;   // point
+			}
+			GLSL_SetUniformVec4(sp, UNIFORM_HZMSPECLIGHT, spec);
+		}
 
 		// HZM gl2 parity (bug-1249): the sCoord/tCoord ramp constants. gl1 computes
 		//   f = (alphaMax - alphaMin) * coord + alphaMin,  clamped to [alphaConstMin, alphaConst]
