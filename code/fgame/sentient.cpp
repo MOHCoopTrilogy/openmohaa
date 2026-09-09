@@ -882,6 +882,7 @@ Sentient::Sentient()
     attack_blocked_time     = 0;
     m_fHelmetSpeed          = 0;
     m_fNextBloodTrailTime   = 0;            // HZM coop - blood trail
+    m_fCoopWeapAuditTime    = 0;            // HZM coop - bug-2546 held-weapon audit
     m_fCoopBloodSeverity    = 0;            // HZM coop [user 07-29] - blood-trail severity scale
     m_vLastBloodTrailOrigin = vec_zero;     // HZM coop - blood trail
     m_fCoopGoreDamage       = 0;            // HZM coop - gore tier 2 (drips + growing pool)
@@ -4174,6 +4175,82 @@ void Sentient::EventCoopGoreDecapMark(Event *ev)
     }
     m_bCoopGoreDecapForce     = qtrue;
     m_fCoopGoreDecapForceTime = level.time + window;
+}
+
+/*
+=============
+Sentient::CoopAuditHeldWeapon
+
+HZM coop [user 2026-09-09, bug-2546] "many guards running around with no weapons in their hands but
+pose like they are holding them" (m4l3, live). This is the FOURTH report of that exact shape -
+bug-1957, bug-1971 and bug-2009 each found and fixed a different PRODUCER, and none of the three
+installed an invariant, which is why it keeps coming back wearing a new cause.
+
+THE INVARIANT: A WEAPON IN activeWeaponList IS A WEAPON IN A HAND. Everything downstream already
+believes it - Actor::EventGetWeapon reads the active slot, every retail anim script switches on the
+weapongroup that slot produces, and the engine's "is he armed" test is an INVENTORY test - so an
+active weapon that is parented to nothing poses the actor armed while his hands are empty and he
+keeps running the armed think. Measured in the 2026-09-09 log: wp=mp40 wg=mp40 on the very guards
+the user was looking at, i.e. the slot is populated and only the attachment is missing.
+
+Weapon::AttachGun has three paths that leave precisely that state, all of them silent and all of
+them ending with the model still hidden by the DetachGun at the top of the function: no owner, an
+empty attachToTag, and the reachable one for spawner-built AI - owner->edict->tiki still NULL when
+the give lands, which skips the whole attach block without even a warning. Entity::setModel is a
+fourth: it clears frame infos and surface bits on a model swap but never re-attaches children, so
+the gun keeps a tag INDEX that belonged to the previous TIKI.
+
+So stop chasing producers and re-assert the invariant. One float compare per sentient per frame in
+the healthy case, a real check twice a second, and a line in the log naming the weapon and the tag
+when it fires - so the next playtest tells us which producer it was instead of us inferring it.
+
+DELIBERATELY NOT APPLIED TO PLAYERS. Sentient::Holster(qtrue) does NOT clear the active slot for a
+player - it sets PutAway and lets the state machine park the gun - and a gun whose TIK carries no
+holster tag is MEANT to disappear while holstered (AttachGun returns early with the model hidden,
+parent ENTITYNUM_NONE). Healing that would shove a deliberately-stowed weapon back into the hands.
+Actor::Holster deactivates the slot outright, so an actor never has that ambiguity.
+
+DELIBERATELY NOT A REATTACH WHEN THE GUN IS PARENTED TO SOMETHING ELSE. A turret or vehicle mount
+is a legitimate owner; only "attached to nothing at all" is the defect.
+=============
+*/
+void Sentient::CoopAuditHeldWeapon(void)
+{
+    Weapon *weap;
+
+    if (IsSubclassOfPlayer() || deadflag || !edict->tiki) {
+        return;
+    }
+
+    if (level.time < m_fCoopWeapAuditTime) {
+        return;
+    }
+    m_fCoopWeapAuditTime = level.time + 2.0f;
+
+    weap = GetActiveWeapon(WEAPON_MAIN);
+    if (!weap) {
+        return;
+    }
+
+    if (weap->GetState() == WEAPON_HOLSTERED || weap->GetState() == WEAPON_LOWERING) {
+        return;
+    }
+
+    if (weap->edict->s.parent != ENTITYNUM_NONE) {
+        return;
+    }
+
+    gi.Printf(
+        "^~^~^ WEAPHEAL actor=%d '%s' held '%s' attached to nothing (tag '%s', state %d) - re-attaching t=%.1f\n",
+        entnum,
+        TargetName().c_str(),
+        weap->model.c_str(),
+        weap->GetCurrentAttachToTag().c_str(),
+        (int)weap->GetState(),
+        level.time
+    );
+
+    weap->AttachToOwner(WEAPON_MAIN);
 }
 
 // HZM coop - BLOOD TRAIL. A wounded (health below a fraction of max) AI that is MOVING drips ground

@@ -14243,41 +14243,117 @@ void Player::TickCoopProne()
                     { 1.0f,  0.0f}, {-1.0f,  0.0f}, { 0.0f,  1.0f}, { 0.0f, -1.0f},
                     { 0.707f, 0.707f}, {-0.707f, 0.707f}, { 0.707f, -0.707f}, {-0.707f, -0.707f}
                 };
-                static const float kRad[2] = {20.0f, 40.0f};
+                // [user 2026-09-09, bug-2547] radius 0 FIRST - rising in place is the outcome that
+                // does not move the player at all, and on a slope it is usually available.
+                static const float kRad[3] = {0.0f, 20.0f, 40.0f};
+                // ...paired with a step ladder, because on sloped ground the blocker is UNDERNEATH
+                // you, not beside you. 18 is the engine step height: what a man climbs without
+                // jumping, so it cannot lift anyone somewhere they could not have walked.
+                static const float kLift[3] = {0.0f, 9.0f, 18.0f};
                 qboolean bMoved = qfalse;
-                int      iRad, iDir;
+                int      iRad, iDir, iLift, iDirs;
+                Vector   vFound = origin;
 
-                for (iRad = 0; iRad < 2 && !bMoved; iRad++) {
-                    for (iDir = 0; iDir < 8 && !bMoved; iDir++) {
-                        Vector  vTry = origin;
-                        trace_t trMove, trFit;
-                        Vector  vFitMaxs = maxs;
+                // [user 2026-09-09, bug-2547] "make sure you cant get stuck in prone still,
+                // especially when near hills or areas that slope up or down."
+                //
+                // ARE WE ALREADY INSIDE SOMETHING? A prone hull is a 20-tall BOX and terrain is a
+                // RAMP, so a man lying on any slope routinely has a corner of that box buried in the
+                // hillside. bug-2247's shuffle then rejected every candidate on its FIRST test,
+                // `trMove.startsolid` - a guard written to stop the shuffle CLIPPING THROUGH a wall,
+                // which is a statement about where you are GOING but fires on where you ARE. All
+                // sixteen options were discarded before any of them was examined, and the trace is
+                // deterministic, so no number of presses could ever return a different answer.
+                // Embedded meant pinned, and lying on a hill is the ordinary way to become embedded.
+                //
+                // You cannot slide out of solid, so while embedded that trace has nothing true to
+                // say and is skipped. What still holds the line is the DESTINATION test: the crouch
+                // box at the candidate must be genuinely clear, and the candidate is still capped at
+                // 40 units out and 18 up - a shove and a step, not a teleport.
+                trace_t trHere = G_Trace(origin, mins, maxs, origin, this, MASK_PLAYERSOLID, false,
+                                         "Player::TickCoopProne embedded");
+                qboolean bEmbedded = (qboolean)(trHere.startsolid || trHere.allsolid);
 
-                        vTry[0] += kDir[iDir][0] * kRad[iRad];
-                        vTry[1] += kDir[iDir][1] * kRad[iRad];
-
-                        // can the body actually slide there, lying down?
-                        trMove = G_Trace(origin, mins, maxs, vTry, this, MASK_PLAYERSOLID, false,
-                                         "Player::TickCoopProne shuffle");
-                        if (trMove.startsolid || trMove.allsolid || trMove.fraction < 0.99f) {
+                for (iRad = 0; iRad < 3 && !bMoved; iRad++) {
+                    // the eight compass points are all the same place at radius 0
+                    iDirs = (kRad[iRad] == 0.0f) ? 1 : 8;
+                    for (iLift = 0; iLift < 3 && !bMoved; iLift++) {
+                        // radius 0 with no lift is the trace that just failed above
+                        if (kRad[iRad] == 0.0f && kLift[iLift] == 0.0f) {
                             continue;
                         }
+                        for (iDir = 0; iDir < iDirs && !bMoved; iDir++) {
+                            Vector  vTry = origin;
+                            trace_t trMove, trFit;
+                            Vector  vFitMaxs = maxs;
 
-                        // and is there room to come up to crouch once it is there?
-                        vFitMaxs[2] = 60.0f;
-                        trFit = G_Trace(vTry, mins, vFitMaxs, vTry, this, MASK_PLAYERSOLID, false,
-                                        "Player::TickCoopProne shuffle fit");
-                        if (trFit.startsolid || trFit.allsolid) {
-                            continue;
+                            vTry[0] += kDir[iDir][0] * kRad[iRad];
+                            vTry[1] += kDir[iDir][1] * kRad[iRad];
+                            vTry[2] += kLift[iLift];
+
+                            // can the body actually get there, lying down? Only a meaningful
+                            // question when we are not already inside something.
+                            if (!bEmbedded) {
+                                trMove = G_Trace(origin, mins, maxs, vTry, this, MASK_PLAYERSOLID,
+                                                 false, "Player::TickCoopProne shuffle");
+                                if (trMove.startsolid || trMove.allsolid || trMove.fraction < 0.99f) {
+                                    continue;
+                                }
+                            }
+
+                            // and is there room to come up to crouch once it is there?
+                            vFitMaxs[2] = 60.0f;
+                            trFit = G_Trace(vTry, mins, vFitMaxs, vTry, this, MASK_PLAYERSOLID,
+                                            false, "Player::TickCoopProne shuffle fit");
+                            if (trFit.startsolid || trFit.allsolid) {
+                                continue;
+                            }
+
+                            vFound = vTry;
+                            setOrigin(vTry);
+                            bMoved = qtrue;
                         }
+                    }
+                }
 
-                        setOrigin(vTry);
+                // [user 2026-09-09, bug-2547] LAST RESORT, and only for a player who is genuinely
+                // buried: put him on the floor directly beneath him and let him stand there. Being
+                // embedded is not a state he can press his way out of, so refusing here is refusing
+                // to ever let him up again. A player merely under a low ceiling is NOT embedded and
+                // still gets the honest refusal, which is the behaviour bug-2247 wanted to keep.
+                if (!bMoved && bEmbedded) {
+                    trace_t trFloor;
+                    Vector  vTop = origin, vBot = origin, vFitMaxs = maxs;
+
+                    vTop[2] += 18.0f;
+                    vBot[2] -= 64.0f;
+                    vFitMaxs[2] = 60.0f;
+                    trFloor = G_Trace(vTop, mins, vFitMaxs, vBot, this, MASK_PLAYERSOLID, false,
+                                      "Player::TickCoopProne unbury");
+                    if (!trFloor.allsolid && trFloor.fraction > 0.0f) {
+                        gi.Printf(
+                            "^~^~^ PRONEUNBURY %d %.0f/%.0f/%.0f -> %.0f/%.0f/%.0f t=%.1f\n",
+                            entnum, origin[0], origin[1], origin[2],
+                            trFloor.endpos[0], trFloor.endpos[1], trFloor.endpos[2], level.time
+                        );
+                        vFound = Vector(trFloor.endpos);
+                        setOrigin(vFound);
                         bMoved = qtrue;
                     }
                 }
 
                 if (!bMoved) {
                     return;
+                }
+
+                {
+                    static cvar_t *pEDbg = NULL;
+                    if (!pEDbg) { pEDbg = gi.Cvar_Get("coop_proneDebug", "0", 0); }
+                    if (pEDbg->integer) {
+                        gi.Printf("^~^~^ PRONEESCAPE %d embedded=%d -> %.0f/%.0f/%.0f t=%.1f\n",
+                                  entnum, (int)bEmbedded, vFound[0], vFound[1], vFound[2],
+                                  level.time);
+                    }
                 }
             }
         }

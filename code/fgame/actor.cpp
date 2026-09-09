@@ -8152,6 +8152,7 @@ void Actor::Think(void)
     m_bAnimating = false;
 
     TryDropBloodTrail(); // HZM coop - wounded AI leave ground blood trails as they move
+    CoopAuditHeldWeapon(); // HZM coop - bug-2546: an active weapon must actually be in his hand
 
     // HZM coop bug-949: inside a coop_clipStripZones box, actors ignore MONSTERCLIP so
     // AI (paratroopers, reinforcements) stop grinding on the same invisible SP-boundary

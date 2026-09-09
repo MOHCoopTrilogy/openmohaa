@@ -147,6 +147,7 @@ protected:
     virtual qboolean CanBlock(int meansofdeath, qboolean full_block);
     void             AddBloodSpurt(Vector direction);
     void             TryDropBloodTrail(void); // HZM coop - wounded+moving AI drip ground blood splats
+    void             CoopAuditHeldWeapon(void); // HZM coop - bug-2546: an active weapon must be in a hand
     void             DropBloodPool(void);     // HZM coop - persistent blood pool under a killed sentient
     void             CoopGoreTryDripAttach(qboolean corpse); // HZM coop - gore tier 2: attach looping drip FX
     void             EventCoopGorePoolGrow(Event *ev);       // HZM coop - gore tier 2: growing corpse pool step
@@ -236,6 +237,7 @@ public:
     float             next_bleed_time;
     float             m_fCoopBloodSeverity;    // HZM coop [user 07-29] 0..1 wound severity, scales the blood-trail gates
     float             m_fNextBloodTrailTime;   // HZM coop - blood-trail throttle (time gate)
+    float             m_fCoopWeapAuditTime;    // HZM coop - bug-2546: held-weapon audit throttle
     Vector            m_vLastBloodTrailOrigin; // HZM coop - blood-trail throttle (distance gate)
     float             m_fCoopGoreDamage;       // HZM coop - gore tier 2: ACCUMULATED applied damage (aihandler
                                                // fakes AI health at 5000, so gore tiers key on damage taken,
