@@ -520,6 +520,114 @@ int R_CubemapForPoint( vec3_t point )
 
 /*
 ===============
+R_CoopSmoothEntityLight / R_CoopResetEntityLightSmoothing
+
+HZM gl2 [user 2026-09-09, bug-2554] "when I am in the truck or walking and go under a light, it just
+kinda flashes bright and then when I leave it gets dark, it all seems instant".
+
+It IS instant. Neither renderer damps entity lighting between frames: tr_scene.c:254-255 clears both
+bLightGridCalculated and sphereCalculated as every entity is added to the scene, and the light sphere
+is rebuilt per draw-surf list. So the frame the sphere stops selecting a light - a spot cone losing
+the entity, a light falling past the r_entlight_maxcalc cap, a classification flip - the new colour
+is simply the colour. This eases it instead.
+
+KEYED ON THE GAME ENTITY NUMBER (refEntity_t::entityNumber, tr_types.h:141), never on the refdef
+slot: backEndData->entities[] is refilled every frame, so a slot key would blend one object's light
+into an unrelated one's.
+
+ADVANCES AT MOST ONCE PER ENTITY PER FRAME. RB_SetupCharLighting runs per DRAW BATCH, so without the
+timestamp test the blend would advance once per batch and the time constant would depend on how many
+surfaces a model happens to have.
+
+SNAPS ACROSS A DISCONTINUITY. Unseen for more than half a second - spawned, teleported, respawned, or
+the entity number recycled onto a different object - and there is nothing meaningful to blend from;
+so restart at the new value rather than drag a stale colour across the gap. Time running backwards
+means a new map, same treatment, and RE_LoadWorldMap clears the table outright for the case where a
+reload lands inside the 500 ms window.
+===============
+*/
+typedef struct {
+	vec3_t   rgb;
+	vec3_t   dir;
+	int      lastTime;
+	qboolean valid;
+} coopEntLightSmooth_t;
+
+// entity numbers are ENTBITS-wide game slots (12 bits on this build); anything outside is rejected
+#define COOP_ENTLIGHT_MAX 4096
+static coopEntLightSmooth_t s_coopEntLight[COOP_ENTLIGHT_MAX];
+
+void R_CoopResetEntityLightSmoothing( void )
+{
+	Com_Memset( s_coopEntLight, 0, sizeof( s_coopEntLight ) );
+}
+
+void R_CoopSmoothEntityLight( int entityNumber, vec3_t rgb, vec3_t dir )
+{
+	coopEntLightSmooth_t *st;
+	int                   dtms;
+	float                 tau, a, len;
+	int                   i;
+
+	if ( !r_entLightSmooth || r_entLightSmooth->value <= 0.0f ) {
+		return;
+	}
+	if ( entityNumber < 0 || entityNumber >= COOP_ENTLIGHT_MAX ) {
+		return;
+	}
+
+	st  = &s_coopEntLight[entityNumber];
+	tau = r_entLightSmooth->value;
+
+	if ( st->valid ) {
+		dtms = backEnd.refdef.time - st->lastTime;
+
+		if ( dtms == 0 ) {
+			// already advanced this frame (char lighting runs once per draw batch) - hand back the
+			// value we settled on, so every batch of one model agrees
+			VectorCopy( st->rgb, rgb );
+			if ( dir ) {
+				VectorCopy( st->dir, dir );
+			}
+			return;
+		}
+
+		if ( dtms > 0 && dtms <= 500 ) {
+			a = 1.0f - exp( -( (float)dtms * 0.001f ) / tau );
+			if ( a < 0.0f ) { a = 0.0f; } else if ( a > 1.0f ) { a = 1.0f; }
+
+			for ( i = 0; i < 3; i++ ) {
+				rgb[i] = st->rgb[i] + ( rgb[i] - st->rgb[i] ) * a;
+			}
+			if ( dir ) {
+				for ( i = 0; i < 3; i++ ) {
+					dir[i] = st->dir[i] + ( dir[i] - st->dir[i] ) * a;
+				}
+				// lerping two unit vectors shortens the result; lightall_fp normalises L anyway,
+				// but the CPU consumers do not, so restore it here
+				len = VectorLength( dir );
+				if ( len > 0.0001f ) {
+					VectorScale( dir, 1.0f / len, dir );
+				} else {
+					VectorCopy( st->dir, dir );
+				}
+			}
+		}
+		// dtms < 0 (new map) or > 500 (gone and back) falls through and snaps
+	}
+
+	VectorCopy( rgb, st->rgb );
+	if ( dir ) {
+		VectorCopy( dir, st->dir );
+	} else {
+		VectorClear( st->dir );
+	}
+	st->lastTime = backEnd.refdef.time;
+	st->valid    = qtrue;
+}
+
+/*
+===============
 RB_GetEntityGridLighting
 
 HZM gl2 re-port (bug-gl2-modellight): gl1 tr_light.c RB_GetEntityGridLighting -
@@ -627,6 +735,22 @@ void RB_SetupEntityGridLighting()
     if (iColor == -1) {
         // no valid pre-computed ancestor color -> compute from this entity (gl1-equivalent)
         iColor = RB_GetEntityGridLighting();
+
+        // HZM gl2 [user 2026-09-09, bug-2554] ease it toward the previous frame's value instead of
+        // replacing it. ONLY in this branch: an entity that took its colour from an ancestor above
+        // has taken an ALREADY-smoothed value, and smoothing it again would apply the filter twice
+        // down a parent chain.
+        if (r_entLightSmooth && r_entLightSmooth->value > 0.0f) {
+            vec3_t vSm;
+            vSm[0] = (float)((byte *)&iColor)[0];
+            vSm[1] = (float)((byte *)&iColor)[1];
+            vSm[2] = (float)((byte *)&iColor)[2];
+            R_CoopSmoothEntityLight(backEnd.currentEntity->e.entityNumber, vSm, NULL);
+            ((byte *)&iColor)[0] = (byte)(int)(vSm[0] < 0.0f ? 0.0f : (vSm[0] > 255.0f ? 255.0f : vSm[0]));
+            ((byte *)&iColor)[1] = (byte)(int)(vSm[1] < 0.0f ? 0.0f : (vSm[1] > 255.0f ? 255.0f : vSm[1]));
+            ((byte *)&iColor)[2] = (byte)(int)(vSm[2] < 0.0f ? 0.0f : (vSm[2] > 255.0f ? 255.0f : vSm[2]));
+            ((byte *)&iColor)[3] = 0xff;
+        }
     }
 
     ent = backEnd.currentEntity;

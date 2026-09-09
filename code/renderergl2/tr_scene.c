@@ -295,7 +295,19 @@ RE_AddDynamicLightToScene
 
 =====================
 */
-void RE_AddDynamicLightToScene( const vec3_t org, float intensity, float r, float g, float b, int additive ) {
+/*
+=====================
+R_AddDynamicLightTyped
+
+HZM coop [user 2026-09-09, bug-2553] The real body, taking the FULL dlighttype_t bitmask
+(tr_types_new.h:82-86 - lensflare 1, viewlensflare 2, additive 4) instead of a bare boolean.
+
+gl2 used to write only dl->additive, and never dl->type - so tr_sun_flare.cpp:592-593, which tests
+`type & lensflare` and `type & additive`, was reading a field nothing had ever written. Both are now
+set from one source, so they cannot disagree.
+=====================
+*/
+static void R_AddDynamicLightTyped( const vec3_t org, float intensity, float r, float g, float b, int type ) {
 	dlight_t	*dl;
 
 	if ( !tr.registered ) {
@@ -317,7 +329,23 @@ void RE_AddDynamicLightToScene( const vec3_t org, float intensity, float r, floa
 	dl->color[0] = r;
 	dl->color[1] = g;
 	dl->color[2] = b;
-	dl->additive = additive;
+	// `additive` here is the ENUMERATOR (value 4), not a parameter - which is why this function's
+	// parameter is called `type` and the boolean wrapper's is called `bAdditive`.
+	dl->additive = ( type & additive ) ? qtrue : qfalse;
+	dl->type = (dlighttype_t)type;
+}
+
+/*
+=====================
+RE_AddDynamicLightToScene
+
+The BOOLEAN entry point, unchanged in meaning for its existing callers (qfalse/qtrue below and in
+RE_AddLightToScene2). Kept separate on purpose: passing a boolean 1 into the typed function would
+set the LENSFLARE bit, not the additive one.
+=====================
+*/
+void RE_AddDynamicLightToScene( const vec3_t org, float intensity, float r, float g, float b, int bAdditive ) {
+	R_AddDynamicLightTyped( org, intensity, r, g, b, bAdditive ? (int)additive : 0 );
 }
 
 /*
@@ -829,7 +857,12 @@ RE_AddLightToScene2
 =====================
 */
 void RE_AddLightToScene2(const vec3_t org, float intensity, float r, float g, float b, int type) {
-    RE_AddDynamicLightToScene(org, intensity, r, g, b, qfalse);
+    // HZM coop [user 2026-09-09, bug-2553] was `qfalse` - the caller's type bits were DISCARDED, so
+    // dl->additive was always 0 and renderergl2/tr_shade.c:434 always chose the DST_COLOR multiply.
+    // Against a night lightmap that multiplies by near-black, i.e. a dynamic light lit nothing.
+    // gl1 has always passed this through (renderergl1/tr_scene.c:361). The bits originate in
+    // cgame/cg_ents.c from RF_LENSFLARE / RF_VIEWLENSFLARE / RF_ADDITIVE_DLIGHT.
+    R_AddDynamicLightTyped(org, intensity, r, g, b, type);
 }
 
 

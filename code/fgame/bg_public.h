@@ -578,7 +578,17 @@ movement on the server game.
         STAT_INFOCLIENT_HEALTH,
         STAT_DAMAGEDIR,
         STAT_SECONDARY_AMMO, // added in 2.0
-        STAT_MGHEAT,         // HZM coop - mounted MG42 turret heat 0-100, drives the cgame heat meter (uses the last free MAX_STATS slot)
+        // HZM coop - DUAL USE, and the two uses are mutually exclusive BY CODE, not by convention.
+        //   PMF_TURRET set   -> mounted MG42: beltCount | (heat6 << 9), written by weapturret.cpp
+        //                       and vehicleturret.cpp, read only by CG_DrawMGHeat.
+        //   PMF_TURRET clear -> [user 2026-09-09, bug-2555] sprint stamina, 1..101 (0 = not yet
+        //                       written by the server), from Player::UpdateStats; read only by
+        //                       CG_DrawStaminaArc.
+        // Safe because sprinting requires !m_pVehicle && !m_pTurret, both of which set PMF_TURRET,
+        // and CG_DrawMGHeat returns early without it. This slot took the LAST free index -
+        // STAT_LAST_STAT is 32 and MAX_STATS is 32 - which is why two features share it.
+        // Ship game.dll and cgame.dll TOGETHER.
+        STAT_MGHEAT,
         STAT_LAST_STAT
     } playerstat_t;
 

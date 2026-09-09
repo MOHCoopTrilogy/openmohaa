@@ -655,6 +655,15 @@ static void RB_SetupCharLighting(void)
 	total[1] = (float)sph->ambient.level[1] + dirColor[1];
 	total[2] = (float)sph->ambient.level[2] + dirColor[2];
 
+	// HZM gl2 [user 2026-09-09, bug-2554] Ease the colour AND the light direction toward this
+	// entity's previous frame. Placed here on purpose - before the ambient/directed fractions are
+	// derived below - so the split always describes the colour it was derived from. The direction
+	// matters as much as the colour: when the dominant light changes, an un-eased direction swings
+	// the shading across the model in one frame, which reads as a flicker even when the brightness
+	// barely moves. R_CoopSmoothEntityLight itself advances at most once per entity per frame, which
+	// is what makes this safe to call from a per-DRAW-BATCH function.
+	R_CoopSmoothEntityLight(backEnd.currentEntity->e.entityNumber, total, backEnd.charLight.lightDirWorld);
+
 	wrap = r_charLightWrap ? r_charLightWrap->value : 0.0f;
 	if (wrap < 0.0f) {
 		wrap = 0.0f;

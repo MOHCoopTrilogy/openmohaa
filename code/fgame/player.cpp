@@ -9133,6 +9133,28 @@ void Player::UpdateStats(void)
     }
 
     //
+    // HZM coop [user 2026-09-09, bug-2555] SPRINT STAMINA rides STAT_MGHEAT while the player is NOT
+    // on a turret or in a vehicle. See the comment on STAT_MGHEAT in bg_public.h for why that is
+    // safe: sprint requires !m_pVehicle && !m_pTurret, both set PMF_TURRET, and the MG heat meter
+    // returns early without PMF_TURRET - so the two readings can never be on screen together.
+    // Sent as 1..101 so that 0 keeps meaning "no stamina data" (the frame before the first
+    // UpdateStats, or a server without this game.dll); the HUD needs to tell that apart from an
+    // exhausted pool, or it would draw an empty gauge and pin the HUD unfaded forever.
+    //
+    if (!(client->ps.pm_flags & PMF_TURRET)) {
+        static cvar_t *pStaminaMax = NULL;
+        float          fMax;
+        int            iStam;
+
+        if (!pStaminaMax) { pStaminaMax = gi.Cvar_Get("coop_sprintStamina", "5", CVAR_ARCHIVE); }
+        fMax  = (pStaminaMax->value > 0.01f) ? pStaminaMax->value : 5.0f;
+        iStam = (int)(m_fCoopStamina / fMax * 100.0f + 0.5f);
+        if (iStam < 0)   { iStam = 0; }
+        if (iStam > 100) { iStam = 100; }
+        client->ps.stats[STAT_MGHEAT] = iStam + 1;
+    }
+
+    //
     // set boss health
     //
     client->ps.stats[STAT_BOSSHEALTH] = bosshealth->value * 100.0f;

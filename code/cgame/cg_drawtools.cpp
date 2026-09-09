@@ -1746,6 +1746,99 @@ CG_Draw2D
 */
 /*
 =================
+CG_DrawStaminaArc
+
+HZM coop [user 2026-09-09, bug-2555] "Could we find a way to represent stamina using the white
+outline around the top of the health bar in the HUD?"
+
+The arc used to be a static URC Label (hud_health.urc "healthframe"); it is drawn here instead so it
+can be partially revealed. Two passes of the SAME shader over the SAME texture: dim grey across the
+whole arc, then white across the left `frac` of it, using R_DrawStretchPic's explicit s/t so the crop
+is a real UV clip - the curved stroke is cropped, never squashed. At full stamina the result is
+pixel-identical to the old Label.
+
+The value shares STAT_MGHEAT; see bg_public.h. 0 means the server has not written it, which is NOT
+the same as an empty pool - draw full and stay quiet rather than show a false empty gauge.
+
+Placement is cvar-driven because the URC-rect to screen-pixel transform was never derived, and
+rebuilding the client for each nudge is a bad loop. Defaults are the computed values.
+=================
+*/
+static void CG_DrawStaminaArc(void)
+{
+    static qhandle_t hFrame = 0;
+    static cvar_t   *pX = NULL, *pY = NULL, *pW = NULL, *pH = NULL, *pOn = NULL;
+    static float     fShown = 1.0f;
+    int              raw;
+    float            frac, x, y, w, h;
+    vec4_t           col;
+
+    if (!cg.snap) {
+        return;
+    }
+    if (!pOn) {
+        pOn = cgi.Cvar_Get("coop_staminaArc", "1", CVAR_ARCHIVE);
+        pX  = cgi.Cvar_Get("coop_staminaArcX", "32", CVAR_ARCHIVE);
+        pY  = cgi.Cvar_Get("coop_staminaArcY", "95", CVAR_ARCHIVE);
+        pW  = cgi.Cvar_Get("coop_staminaArcW", "256", CVAR_ARCHIVE);
+        pH  = cgi.Cvar_Get("coop_staminaArcH", "60", CVAR_ARCHIVE);
+    }
+    if (!pOn->integer) {
+        return;
+    }
+    // the same gates the URC menu had for free, now explicit: lobby (drawhud 0), intermission,
+    // and the coop cinematic HUD suppression
+    if (cg.snap->ps.pm_flags & (PMF_NO_HUD | PMF_INTERMISSION)) {
+        return;
+    }
+    if (CG_CoopCineHudActive()) {
+        return;
+    }
+    if (!hFrame) {
+        hFrame = cgi.R_RegisterShader("hud_health_frame");
+    }
+    if (!hFrame) {
+        return;
+    }
+
+    raw = cg.snap->ps.stats[STAT_MGHEAT];
+    if ((cg.snap->ps.pm_flags & PMF_TURRET) || raw <= 0) {
+        frac = 1.0f;   // mounted (the stat is MG heat) or no data yet - a full, ordinary frame
+    } else {
+        frac = (float)(raw - 1) / 100.0f;
+    }
+    if (frac < 0.0f) { frac = 0.0f; } else if (frac > 1.0f) { frac = 1.0f; }
+
+    // the stat arrives at snapshot rate (~20 Hz) as an integer, so ease it or it visibly ticks
+    fShown += (frac - fShown) * 0.25f;
+    if (fShown < 0.0f) { fShown = 0.0f; } else if (fShown > 1.0f) { fShown = 1.0f; }
+
+    x = pX->value * cgs.uiHiResScale[0];
+    y = cg.refdef.height - pY->value * cgs.uiHiResScale[1];
+    w = pW->value * cgs.uiHiResScale[0];
+    h = pH->value * cgs.uiHiResScale[1];
+
+    // the spent portion: dim, so the arc still frames the health bar instead of vanishing
+    col[0] = col[1] = col[2] = 0.40f;
+    col[3] = s_hudFadeAlpha;
+    cgi.R_SetColor(col);
+    cgi.R_DrawStretchPic(x, y, w, h, 0.0f, 0.0f, 1.0f, 1.0f, hFrame);
+
+    // the remaining portion: full white, and amber under 15% - the only moment the number actually
+    // changes what the player does, because sprint is about to cut out
+    if (fShown > 0.001f) {
+        col[0] = 1.00f;
+        col[1] = (fShown < 0.15f) ? 0.72f : 1.00f;
+        col[2] = (fShown < 0.15f) ? 0.35f : 1.00f;
+        col[3] = s_hudFadeAlpha;
+        cgi.R_SetColor(col);
+        cgi.R_DrawStretchPic(x, y, w * fShown, h, 0.0f, 0.0f, fShown, 1.0f, hFrame);
+    }
+    cgi.R_SetColor(NULL);
+}
+
+/*
+=================
 CG_DrawMGHeat  (HZM coop)
 
 Small RED heat meter for the mounted MG42 turret. Driven by STAT_MGHEAT (0..100), which the turret
@@ -2212,6 +2305,19 @@ static void CG_UpdateHudFade(void)
         && cgi.stopWatch->iEndTime > cg.time) {
         s_hudTouchTime = cg.time;
         CG_HudFadeDebug("stopwatch running (bomb timer)");
+    }
+
+    // [user 2026-09-09, bug-2555] SPRINTING OR RECOVERING. None of the wakes above fire for it -
+    // not the fire/ADS buttons, not a health or ammo delta, not cover, not DBNO - so a player who
+    // had been quiet for coop_hudFadeTime would sprint and watch a FADED stamina arc, and the whole
+    // ~9.5 s refill would always complete behind the fade, because recovering is by definition
+    // quiet. Any value that is neither 0 (no data) nor 101 (full) means the pool is in motion.
+    // Gated on PMF_TURRET because the stat carries MG heat while mounted (see bg_public.h).
+    if (!(cg.snap->ps.pm_flags & PMF_TURRET)) {
+        int stamRaw = cg.snap->ps.stats[STAT_MGHEAT];
+        if (stamRaw > 0 && stamRaw < 101) {
+            s_hudTouchTime = cg.time;
+        }
     }
 
     // [user 07-12] OBJECTIVES MENU OPEN (the O toggle): unfade instantly and stay up for as long as the
@@ -2741,6 +2847,7 @@ void CG_Draw2D(void)
     CG_DrawDamageIndicator();
     CG_DrawCoopIcons();
     CG_DrawMGHeat();
+    CG_DrawStaminaArc();
     CG_DrawMagazines();
     CG_SeedAdsTuneFromBaked(); // seed live cvars from the baked table so tune mode doesn't snap the gun
     CG_DrawAdsTune();

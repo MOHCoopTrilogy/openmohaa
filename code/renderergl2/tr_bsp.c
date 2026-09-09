@@ -3497,6 +3497,11 @@ void RE_LoadWorldMap( const char *name ) {
 		ri.Error( ERR_DROP, "ERROR: attempted to redundantly load world map" );
 	}
 
+	// HZM gl2 [user 2026-09-09, bug-2554] drop every entity's remembered light. The per-entity
+	// staleness test snaps after 500 ms, but a map load recycles entity numbers onto entirely
+	// different objects and can land inside that window, so clear outright rather than rely on it.
+	R_CoopResetEntityLightSmoothing();
+
 	// set default map light scale
 	tr.sunShadowScale = 0.5f;
 

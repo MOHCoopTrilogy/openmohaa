@@ -206,6 +206,9 @@ cvar_t  *r_charLightWrap;
 cvar_t  *r_charLightShadow;
 cvar_t  *r_charLightDebug;
 
+// HZM gl2 [user 2026-09-09, bug-2554] entity light smoothing (see tr_local.h)
+cvar_t  *r_entLightSmooth;
+
 // HZM gl2 dynamic-light cast shadows (see tr_local.h). r_hzmDlightShadows is the master, default 0.
 cvar_t  *r_hzmDlightShadows;
 cvar_t  *r_hzmDlightShadowLights;
@@ -1805,6 +1808,13 @@ void R_Register( void )
 	// blow out. 0 = textbook Lambert (hard, sometimes silhouette-black faces on a bright
 	// map); 1 = no directionality at all, i.e. today's flat look.
 	r_charLightWrap = ri.Cvar_Get( "r_charLightWrap", "0.35", CVAR_ARCHIVE );
+
+	// HZM gl2 [user 2026-09-09, bug-2554] Time constant, in SECONDS, for easing a moving entity's
+	// light toward its newly sampled value. Nothing in either renderer damped this before, so
+	// walking or driving under a lamp switched the model's light in one frame. 0.10 is roughly two
+	// frames at 20 Hz and six at 60: fast enough that it still reads as "I stepped into the light",
+	// slow enough that the step is a fade. 0 restores the old behaviour exactly.
+	r_entLightSmooth = ri.Cvar_Get( "r_entLightSmooth", "0.10", CVAR_ARCHIVE );
 
 	// Let characters SAMPLE the sun shadowmask. Default 0, and deliberately so: the mask in
 	// tr.screenShadowImage is resolved from tr.renderDepthImage, which is filled by the

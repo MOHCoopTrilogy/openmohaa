@@ -2622,6 +2622,17 @@ extern  cvar_t  *r_charLightWrap;
 extern  cvar_t  *r_charLightShadow;
 extern  cvar_t  *r_charLightDebug;
 
+// HZM gl2 [user 2026-09-09, bug-2554] ENTITY LIGHT SMOOTHING. Seconds; 0 disables and restores the
+// previous frame-independent behaviour exactly. Neither renderer had any temporal damping, so a
+// change in which lights the sphere selected landed in a single frame - "it seems like an on/off
+// switch". See R_CoopSmoothEntityLight in tr_light.c.
+extern  cvar_t  *r_entLightSmooth;
+
+// Ease one entity's light toward a new value. rgb is required; dir may be NULL. Keyed on the GAME
+// entity number, advances at most once per entity per frame, and SNAPS across a discontinuity.
+void R_CoopSmoothEntityLight( int entityNumber, vec3_t rgb, vec3_t dir );
+void R_CoopResetEntityLightSmoothing( void );
+
 // HZM gl2 DYNAMIC-LIGHT CAST SHADOWS. r_hzmDlightShadows is the MASTER and defaults to
 // 0: with it off R_DlightShadowsActive() returns qfalse on its first line, no dlight
 // pshadow is ever built, tr.refdef.num_pshadows stays 0 exactly as it is today, and
