@@ -859,6 +859,50 @@ static bool RB_Sphere_ResetPointColors()
     return true;
 }
 
+/*
+===============
+RB_Sphere_LampFade
+
+HZM gl2 [user 2026-09-09, bug-2556] THE POP, and it is not what it looks like.
+
+The user: "go under a light, it just kinda flashes bright and then when I leave it gets dark, it all
+seems instant". The lamps are NOT unlit - the pool is baked into the lightmap and the player model is
+already lit by the same 313 static lights every frame. What is instant is ADMISSION: `falloff >= 5.0`
+takes a lamp at FULL weight the frame it crosses the threshold and drops it whole the next. One step,
+no taper.
+
+So taper it. t is 0 at the admission boundary and 1 by r_entLightFade, smoothstepped, and the light's
+colour and intensity are scaled by it. Consequences worth stating because they are what make this
+safe:
+  * total emitted light is unchanged or LOWER - a lamp can only ever contribute LESS than it does
+    today, so this cannot double-light the bake the way an added dlight would;
+  * the light still ENTERS at the same distance, so slot pressure against MAX_REAL_LIGHTS is
+    byte-identical and nothing that fits today can be crowded out;
+  * r_entLightFade 5 or below disables it (t == 1 always), restoring current behaviour exactly.
+
+Default 15 puts full strength at 0.577 x reach - deliberately the same saturation point gl2's own
+world dlight attenuation uses (lightall_fp.glsl:262-274), so the entity and world falloffs agree.
+===============
+*/
+static float RB_Sphere_LampFade(float falloff)
+{
+	float t, hi;
+
+	hi = r_entLightFade ? r_entLightFade->value : 0.0f;
+	if (hi <= 5.0f) {
+		return 1.0f;   // disabled - today's hard gate, unchanged
+	}
+
+	t = (falloff - 5.0f) / (hi - 5.0f);
+	if (t <= 0.0f) {
+		return 0.0f;
+	}
+	if (t >= 1.0f) {
+		return 1.0f;
+	}
+	return t * t * (3.0f - 2.0f * t);
+}
+
 static void RB_Sphere_DrawDebugLine(const spherel_t *thislight, float falloff, const vec3_t origin)
 {
     int    i;
@@ -997,6 +1041,14 @@ static void RB_Sphere_AddSpotLight(const spherel_t *thislight)
                     pLight->fIntensity /= (sampleRadius * sampleRadius);
                 }
 
+                // HZM gl2 [bug-2556] fade the lamp in over the outer band of its reach instead of
+                // admitting it whole at the threshold. See RB_Sphere_LampFade.
+                {
+                    float fLampT = RB_Sphere_LampFade(falloff);
+                    VectorScale(pLight->color, fLampT, pLight->color);
+                    pLight->fIntensity *= fLampT;
+                }
+
                 VectorCopy(lightline, pLight->vOrigin);
                 VectorNegate(newdir, pLight->vDirection);
                 fRadByDistSquared  = radiusByDistance * radiusByDistance;
@@ -1076,6 +1128,14 @@ static void RB_Sphere_AddLight(const spherel_t *thislight)
                 fRadius = fDist - backEnd.currentSphere->radius;
                 if (fRadius > 0) {
                     pLight->fIntensity /= fRadius;
+                }
+
+                // HZM gl2 [bug-2556] the same distance taper as the spot branch above. Both gates
+                // are hard in stock gl2; only the spot's LATERAL edge was ever soft.
+                {
+                    float fLampT = RB_Sphere_LampFade(falloff);
+                    VectorScale(pLight->color, fLampT, pLight->color);
+                    pLight->fIntensity *= fLampT;
                 }
 
                 backEnd.currentSphere->numRealLights++;

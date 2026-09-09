@@ -208,6 +208,8 @@ cvar_t  *r_charLightDebug;
 
 // HZM gl2 [user 2026-09-09, bug-2554] entity light smoothing (see tr_local.h)
 cvar_t  *r_entLightSmooth;
+// HZM gl2 [user 2026-09-09, bug-2556] static-lamp admission fade (see tr_local.h)
+cvar_t  *r_entLightFade;
 
 // HZM gl2 dynamic-light cast shadows (see tr_local.h). r_hzmDlightShadows is the master, default 0.
 cvar_t  *r_hzmDlightShadows;
@@ -1815,6 +1817,13 @@ void R_Register( void )
 	// frames at 20 Hz and six at 60: fast enough that it still reads as "I stepped into the light",
 	// slow enough that the step is a fade. 0 restores the old behaviour exactly.
 	r_entLightSmooth = ri.Cvar_Get( "r_entLightSmooth", "0.10", CVAR_ARCHIVE );
+
+	// HZM gl2 [user 2026-09-09, bug-2556] A static lamp used to be admitted at FULL weight the frame
+	// its falloff crossed the hard `>= 5.0` gate, and dropped whole the next - one step, no taper,
+	// which is the "flashes bright" the user reported. This is the upper end of a smoothstep over
+	// that admission, in the same falloff units. 15 -> full strength at 0.577 x reach, the ramp over
+	// the outer 42%, matching gl2's own world dlight attenuation curve. <= 5 restores the hard gate.
+	r_entLightFade = ri.Cvar_Get( "r_entLightFade", "15", CVAR_ARCHIVE );
 
 	// Let characters SAMPLE the sun shadowmask. Default 0, and deliberately so: the mask in
 	// tr.screenShadowImage is resolved from tr.renderDepthImage, which is filled by the

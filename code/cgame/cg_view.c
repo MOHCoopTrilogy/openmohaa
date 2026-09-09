@@ -1689,7 +1689,11 @@ void CG_AddCoopDynamicLights(void)
             continue;
         }
         f = 1.0f - ((float)age / (float)dl->life); // linear fade out
-        cgi.R_AddLightToScene(dl->org, dl->radius * f, dl->r * f, dl->g * f, dl->b * f, 0);
+        // HZM coop [user 2026-09-09, bug-2556] was 0 - i.e. NO type bits, so even after bug-2553
+        // taught RE_AddLightToScene2 to forward them, coop's muzzle and blast lights still landed
+        // non-additive and took the DST_COLOR multiply at r_dlightMode 0, which lights nothing
+        // against a night bake. 4 == dlighttype_t::additive (tr_types_new.h:85).
+        cgi.R_AddLightToScene(dl->org, dl->radius * f, dl->r * f, dl->g * f, dl->b * f, 4);
     }
 }
 
@@ -6471,7 +6475,9 @@ void CG_AddLightShow()
         g /= fMax;
         b /= fMax;
 
-        cgi.R_AddLightToScene(vOrg, (rand() & 0x1FF) + 0x80, r, g, b, 0);
+        // HZM coop [bug-2556] additive, for the same reason as the coop_dynLights caller above -
+        // fix BOTH sites or the mode-0 fallback stays half-broken (TRAPS T3).
+        cgi.R_AddLightToScene(vOrg, (rand() & 0x1FF) + 0x80, r, g, b, 4);
     }
 }
 

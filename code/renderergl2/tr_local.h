@@ -2628,6 +2628,11 @@ extern  cvar_t  *r_charLightDebug;
 // switch". See R_CoopSmoothEntityLight in tr_light.c.
 extern  cvar_t  *r_entLightSmooth;
 
+// HZM gl2 [user 2026-09-09, bug-2556] Upper end of the static-lamp admission fade, in the same
+// `falloff` units as the hard `>= 5.0` gate in tr_sphere_shade.cpp. 15 puts full strength at 0.577 x
+// a lamp's reach; 5 or below disables the taper and restores the hard gate exactly.
+extern  cvar_t  *r_entLightFade;
+
 // Ease one entity's light toward a new value. rgb is required; dir may be NULL. Keyed on the GAME
 // entity number, advances at most once per entity per frame, and SNAPS across a discontinuity.
 void R_CoopSmoothEntityLight( int entityNumber, vec3_t rgb, vec3_t dir );
