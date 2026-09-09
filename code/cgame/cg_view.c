@@ -6543,6 +6543,76 @@ ambient duck minutes later at the ramp-drop, so a single shared "one duck active
 the second trigger's capture silently no-op against a re-entrancy guard armed by the first.
 ==============
 */
+/*
+==============
+CG_CoopRestoreLatchedAudioDuck
+
+HZM coop [user 2026-09-09, bug-2551] "not hearing the alarm, is my audio still ducked maybe from
+omaha beach last time I ran the game?" Yes. Measured live over rcon on m4l3: s_ambientvolume "0"
+with coop_duckAmbientTrigger "0" - no duck running, so the zero was a leftover from a previous
+session - while the server-side diagnostic showed the bell being requested at full volume
+(^~^~^ ALARMBELL range=62.010 vol=1.456). snd_openal_new.cpp:2736 multiplies every LOOPING sound by
+s_fAmbientVolume, so the alarm, and every other loop in the game, was multiplied by zero.
+
+THE LATCH: s_ambientvolume and s_musicvolume are CVAR_ARCHIVE (snd_dma_new.cpp:106-107), and
+CG_UpdateScriptedAudioDucks below restores them from a STATIC FLOAT that lives only in this module.
+Omaha's ramp beat ducks Ambient to EXACTLY 0 for ~95 s. Quit, disconnect or change map inside that
+window - or inside the 12 s restore lerp - and the process dies holding the only copy of the
+original value, while the config keeps the ducked one. Permanently, on every later map.
+
+So persist the base somewhere that outlives the process. coop_duckSave* is archived, carries the
+captured base WHILE a duck is in flight, and is set to -1 the instant the restore completes - so a
+value >= 0 found here at startup means exactly one thing, and it is not ambiguous with a player who
+turned the slider down.
+
+Fifth instance of the family (bugs 2298, 2324, 2388, 2446), which is why this heals rather than
+merely avoiding the latch: existing poisoned configs have to fix themselves, with no player action.
+==============
+*/
+static void CG_CoopRestoreLatchedAudioDuck(void)
+{
+    static qboolean s_bChecked = qfalse;
+    cvar_t         *pSave, *pMig;
+
+    if (s_bChecked) {
+        return;
+    }
+    s_bChecked = qtrue;
+
+    pSave = cgi.Cvar_Get("coop_duckSaveAmbient", "-1", CVAR_ARCHIVE);
+    if (pSave->value >= 0.0f) {
+        cgi.Printf("^~^~^ AUDIODUCK s_ambientvolume was left at %g by a session that ended mid-duck - restoring %g\n",
+                   cgi.Cvar_Get("s_ambientvolume", "0.6", 0)->value, pSave->value);
+        cgi.Cvar_Set("s_ambientvolume", va("%g", pSave->value));
+        cgi.Cvar_Set("coop_duckSaveAmbient", "-1");
+    }
+
+    pSave = cgi.Cvar_Get("coop_duckSaveMusic", "-1", CVAR_ARCHIVE);
+    if (pSave->value >= 0.0f) {
+        cgi.Printf("^~^~^ AUDIODUCK s_musicvolume was left at %g by a session that ended mid-duck - restoring %g\n",
+                   cgi.Cvar_Get("s_musicvolume", "0.9", 0)->value, pSave->value);
+        cgi.Cvar_Set("s_musicvolume", va("%g", pSave->value));
+        cgi.Cvar_Set("coop_duckSaveMusic", "-1");
+    }
+
+    // ONE-TIME MIGRATION for configs poisoned before the save cvar existed, where there is no base
+    // to restore from. Deliberately bounded by its own archived flag: a player who genuinely wants
+    // silence sets the slider again and it sticks, because this can never run twice. Without it,
+    // anyone already latched at zero stays silent forever and has no way to know why.
+    pMig = cgi.Cvar_Get("coop_duckUnlatchDone", "0", CVAR_ARCHIVE);
+    if (!pMig->integer) {
+        cgi.Cvar_Set("coop_duckUnlatchDone", "1");
+        if (cgi.Cvar_Get("s_ambientvolume", "0.6", 0)->value < 0.01f) {
+            cgi.Printf("^~^~^ AUDIODUCK one-time unlatch: s_ambientvolume was 0 with no saved base - restoring the 0.6 default\n");
+            cgi.Cvar_Set("s_ambientvolume", "0.6");
+        }
+        if (cgi.Cvar_Get("s_musicvolume", "0.9", 0)->value < 0.01f) {
+            cgi.Printf("^~^~^ AUDIODUCK one-time unlatch: s_musicvolume was 0 with no saved base - restoring the 0.9 default\n");
+            cgi.Cvar_Set("s_musicvolume", "0.9");
+        }
+    }
+}
+
 static void CG_UpdateScriptedAudioDucks(void)
 {
     static qboolean s_musicDuckActive = qfalse, s_musicDuckLastTrig = qfalse;
@@ -6556,6 +6626,9 @@ static void CG_UpdateScriptedAudioDucks(void)
     float    fDur, fStep, fCur, fTarget, fNext;
     qboolean bDone;
 
+    // [bug-2551] before anything can duck this session, undo a duck the LAST session died inside
+    CG_CoopRestoreLatchedAudioDuck();
+
     // ---- music channel (s_musicvolume) ----
     pMusicTrig = cgi.Cvar_Get("coop_duckMusicTrigger", "0", 0);
     bMusicTrig = pMusicTrig->integer != 0;
@@ -6563,6 +6636,8 @@ static void CG_UpdateScriptedAudioDucks(void)
     if (bMusicTrig && !s_musicDuckLastTrig && !s_musicDuckActive) {
         s_musicDuckBase   = cgi.Cvar_Get("s_musicvolume", "0.9", 0)->value;
         s_musicDuckActive = qtrue;
+        // [bug-2551] a static float dies with the process; this does not
+        cgi.Cvar_Set("coop_duckSaveMusic", va("%g", s_musicDuckBase));
     }
     s_musicDuckLastTrig = bMusicTrig;
 
@@ -6587,6 +6662,7 @@ static void CG_UpdateScriptedAudioDucks(void)
         if (!bMusicTrig && bDone) {
             s_musicDuckActive = qfalse;
             s_musicDuckBase   = -1.0f;
+            cgi.Cvar_Set("coop_duckSaveMusic", "-1"); // [bug-2551] restored - nothing to recover
         }
     }
 
@@ -6597,6 +6673,8 @@ static void CG_UpdateScriptedAudioDucks(void)
     if (bAmbTrig && !s_ambDuckLastTrig && !s_ambDuckActive) {
         s_ambDuckBase   = cgi.Cvar_Get("s_ambientvolume", "0.6", 0)->value;
         s_ambDuckActive = qtrue;
+        // [bug-2551] Omaha ducks this to EXACTLY 0 for ~95 s, and it is CVAR_ARCHIVE
+        cgi.Cvar_Set("coop_duckSaveAmbient", va("%g", s_ambDuckBase));
     }
     s_ambDuckLastTrig = bAmbTrig;
 
@@ -6621,6 +6699,7 @@ static void CG_UpdateScriptedAudioDucks(void)
         if (!bAmbTrig && bDone) {
             s_ambDuckActive = qfalse;
             s_ambDuckBase   = -1.0f;
+            cgi.Cvar_Set("coop_duckSaveAmbient", "-1"); // [bug-2551] restored - nothing to recover
         }
     }
 }
