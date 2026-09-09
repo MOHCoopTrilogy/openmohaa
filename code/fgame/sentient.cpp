@@ -4193,16 +4193,20 @@ active weapon that is parented to nothing poses the actor armed while his hands 
 keeps running the armed think. Measured in the 2026-09-09 log: wp=mp40 wg=mp40 on the very guards
 the user was looking at, i.e. the slot is populated and only the attachment is missing.
 
-Weapon::AttachGun has three paths that leave precisely that state, all of them silent and all of
-them ending with the model still hidden by the DetachGun at the top of the function: no owner, an
-empty attachToTag, and the reachable one for spawner-built AI - owner->edict->tiki still NULL when
-the give lands, which skips the whole attach block without even a warning. Entity::setModel is a
-fourth: it clears frame infos and surface bits on a model swap but never re-attaches children, so
-the gun keeps a tag INDEX that belonged to the previous TIKI.
+Weapon::AttachGun leaves precisely that state, silently, with the model still hidden by the DetachGun
+at the top of the function, when owner->edict->tiki is NULL as the give lands - which spawner-built AI
+can hit - or when Tag_NumForName misses (that one at least warns, though only under `developer`).
 
 So stop chasing producers and re-assert the invariant. One float compare per sentient per frame in
-the healthy case, a real check twice a second, and a line in the log naming the weapon and the tag
-when it fires - so the next playtest tells us which producer it was instead of us inferring it.
+the healthy case, a real check ONCE PER TWO SECONDS, and a line in the log naming the weapon and the
+tag when it fires - so the next playtest tells us which producer it was instead of us inferring it.
+
+WHY THE HEAL SUCCEEDS RATHER THAN LOOPING, which is not obvious and is load-bearing: Actor::Think
+returns at `if (!edict->tiki)` (actor.cpp:8148) eleven lines above the call site, so the tiki-NULL
+producer has ALREADY healed by the time any audit tick can run - the actor now has a model and the
+tag resolves. And AttachGun reassigns current_attachToTag = attachToTag_main unconditionally
+(weapon.cpp:3689), seeded "tag_weapon_right" in the Weapon constructor with no shipped .tik
+overriding it, so the empty-tag branch is the HOLSTER-tag case and this call never takes it.
 
 DELIBERATELY NOT APPLIED TO PLAYERS. Sentient::Holster(qtrue) does NOT clear the active slot for a
 player - it sets PutAway and lets the state machine park the gun - and a gun whose TIK carries no
@@ -4211,7 +4215,20 @@ parent ENTITYNUM_NONE). Healing that would shove a deliberately-stowed weapon ba
 Actor::Holster deactivates the slot outright, so an actor never has that ambiguity.
 
 DELIBERATELY NOT A REATTACH WHEN THE GUN IS PARENTED TO SOMETHING ELSE. A turret or vehicle mount
-is a legitimate owner; only "attached to nothing at all" is the defect.
+is a legitimate owner; only "attached to nothing at all" is the defect. NOTE THE GAP THIS LEAVES: a
+gun parked on the actor's OWN holster tag while still in activeWeaponList passes this test, and that
+is bug-1971's reported symptom ("gun on their back, posed as if holding it"). This invariant covers
+the fourth recurrence of the family, not the third.
+
+WHAT IT CANNOT DISTURB, swept 2026-09-09 across surrender, disarm, turrets, death and scene actors:
+every path that makes a LIVE actor non-combatant either NULLS the slot or LEAVES THE GUN ATTACHED,
+and there is no third outcome. Surrender is `local.actor holster` (officer.scr:5377) -> Actor::Holster
+-> DeactivateWeapon -> activeWeaponList[hand] = NULL (sentient_combat.cpp:776), so the audit returns
+at !weap before it reads anything else. The shot-out-of-hands sidearm swap (bug-2170) is
+Holster/RemoveWeapons/giveItem/Unholster in straight-line C++ with no yield, so Think cannot be
+entered inside the window. `gun "none"` (36 sites), takeall/FreeInventory, dropitems, the MG42 mount
+(Actor::Begin_MachineGunner -> Holster(), actor_machinegunner.cpp:98), POW scripts, the disguise
+think states and wounded.scr all null the slot the same way.
 =============
 */
 void Sentient::CoopAuditHeldWeapon(void)
@@ -4232,11 +4249,33 @@ void Sentient::CoopAuditHeldWeapon(void)
         return;
     }
 
-    if (weap->GetState() == WEAPON_HOLSTERED || weap->GetState() == WEAPON_LOWERING) {
+    // [vet 2026-09-09] WEAPON_LOWERING was dead when this was written - the enum exists at
+    // weapon.h:71 and nothing in the tree assigns it - so HOLSTERED was carrying the whole test.
+    // WEAPON_RELOADING is the state that is real (weapon.cpp:4416) and was missing: AttachToOwner
+    // ends in ForceIdle -> SetWeaponIdleAnim -> StopAnimating, which drops the pending
+    // EV_Weapon_DoneReloading, the only caller of SetShouldReload(qfalse). Only reachable on an
+    // actor whose gun is already unattached, but it costs one comparison to exclude.
+    if (weap->GetState() == WEAPON_HOLSTERED || weap->GetState() == WEAPON_RELOADING) {
         return;
     }
 
     if (weap->edict->s.parent != ENTITYNUM_NONE) {
+        return;
+    }
+
+    // [vet 2026-09-09] DO NOT ATTEMPT A HEAL WE KNOW WILL FAIL VISIBLY. Entity::attach returns
+    // false silently once the parent holds MAX_MODEL_CHILDREN (entity.cpp:3877/3898), but
+    // AttachGun has already set attached = true and calls showModel() + setOrigin() regardless
+    // (weapon.cpp:3728-3736) - so on that branch the heal turns a HIDDEN gun into a VISIBLE
+    // UNPARENTED one at a stale origin, and then flickers it, which is strictly worse than the
+    // defect being fixed. Shipped per-actor budget lands near 12 of the 16 (8 gore wound props +
+    // drip + held + holstered + a cooked grenade), so this is insurance rather than a known path.
+    if (numchildren >= MAX_MODEL_CHILDREN) {
+        gi.Printf(
+            "^~^~^ WEAPHEAL actor=%d '%s' held '%s' unattached but at the %d-child cap - not attempted t=%.1f\n",
+            entnum, TargetName().c_str(), weap->model.c_str(), MAX_MODEL_CHILDREN, level.time
+        );
+        m_fCoopWeapAuditTime = level.time + 3600.0f;
         return;
     }
 
@@ -4251,6 +4290,21 @@ void Sentient::CoopAuditHeldWeapon(void)
     );
 
     weap->AttachToOwner(WEAPON_MAIN);
+
+    // [vet 2026-09-09] THE POSTCONDITION, and the one guard the safety audit said it would actually
+    // ship. AttachToOwner ends in ForceIdle, which stamps weaponstate = WEAPON_READY (weapon.cpp:4147)
+    // whether or not AttachGun attached anything - so a weapon that CANNOT be healed comes back
+    // through every test above and re-detects forever, logging an ungated Com_Printf line every two
+    // seconds for the life of the map (and on a listen server, into the host's own console, one
+    // unbuffered write each under logfile 2). Re-reading the field the audit already keys on turns
+    // an unbounded stream into ONE line per producer, which is all the diagnosis needs.
+    if (weap->edict->s.parent == ENTITYNUM_NONE) {
+        gi.Printf(
+            "^~^~^ WEAPHEAL actor=%d '%s' re-attach FAILED (tag '%s' did not resolve) - not retried\n",
+            entnum, TargetName().c_str(), weap->GetCurrentAttachToTag().c_str()
+        );
+        m_fCoopWeapAuditTime = level.time + 3600.0f;
+    }
 }
 
 // HZM coop - BLOOD TRAIL. A wounded (health below a fraction of max) AI that is MOVING drips ground
