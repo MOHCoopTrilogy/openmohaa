@@ -22,11 +22,8 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 
 #include "../snd_local.h"
 #include "../client.h"
-#include <time.h> // HZM coop [bug-2570] wall-clock seed for the per-launch menu theme
 
 #if defined(NO_MODERN_DMA) && NO_MODERN_DMA
-
-void S_MenuMusic_Play_f(void); // HZM coop [bug-2570] defined with S_TriggeredMusic_PlayIntroMusic
 
 qboolean s_bSoundPaused = qfalse;
 
@@ -42,8 +39,6 @@ void S_Init2()
     Cmd_AddCommand("tmstart", S_TriggeredMusic_Start);
     Cmd_AddCommand("tmstartloop", S_TriggeredMusic_StartLoop);
     Cmd_AddCommand("tmstop", S_TriggeredMusic_Stop);
-    // HZM coop [user 2026-09-13, bug-2570] the main-menu theme picker's play command (see S_MenuMusic_Play)
-    Cmd_AddCommand("menumusic_play", S_MenuMusic_Play_f);
 }
 
 /*
@@ -654,89 +649,8 @@ void S_TriggeredMusic_Stop()
 S_TriggeredMusic_PlayIntroMusic
 ==============
 */
-/*
-==============
-HZM coop [user 2026-09-13, bug-2570] MAIN MENU THEME PICKER
-
-"Players should be able to switch which main menu theme plays" and "randomize which one it plays when you launch
-every time". The playlist is mod data - ui/coop_menumusic/t<n>.cfg, one file per theme - so a theme is added
-without touching the engine. Each cfg sets ui_menuMusic / ui_menuMusicTitle / ui_menuMusicGame /
-ui_menuMusicPrev / ui_menuMusicNext for the session, records `seta ui_menuMusicLast <n>`, then runs menumusic_play.
-==============
-*/
-#define MENUMUSIC_DEFAULT "sound/music/mus_MainTheme.mp3"
-#define MENUMUSIC_MAX_TRACKS 32
-
-static qboolean s_menuMusicRolled = qfalse; // the per-launch random pick has been made
-
-// Play ui_menuMusic, looping, if it is a real music file; otherwise the original default. No state check here.
-static void S_MenuMusic_Start(void)
-{
-    const char *szTrack = Cvar_VariableString("ui_menuMusic");
-    size_t      len     = szTrack ? strlen(szTrack) : 0;
-
-    if (len < 17 || Q_stricmpn(szTrack, "sound/music/", 12) || Q_stricmp(szTrack + len - 4, ".mp3")
-        || FS_ReadFile(szTrack, NULL) <= 0) {
-        szTrack = MENUMUSIC_DEFAULT;
-    }
-    // intro == loop: loops for as long as the menu is up, exactly as tmstartloop does. The old one-shot
-    // (loop "") left the menu silent once the theme ended.
-    S_StartBackgroundTrack(szTrack, szTrack);
-}
-
-/*
-==============
-S_MenuMusic_Play_f - `menumusic_play`, run by the theme cfgs.
-
-ONLY while disconnected, i.e. sitting in the menu. The same Next/Back buttons exist on the in-game main menu, and
-there they must change the choice without replacing the map's own score; the new theme plays the next time the
-player is back at the menu.
-==============
-*/
-void S_MenuMusic_Play_f(void)
-{
-    if (clc.state != CA_DISCONNECTED) {
-        return;
-    }
-    S_MenuMusic_Start();
-}
-
 void S_TriggeredMusic_PlayIntroMusic() {
-    if (!s_menuMusicRolled) {
-        char szCfg[MAX_QPATH];
-        int  n, idx, last;
-
-        s_menuMusicRolled = qtrue;
-
-        // how many themes the mod ships: t0, t1, ... up to the first missing file
-        for (n = 0; n < MENUMUSIC_MAX_TRACKS; n++) {
-            Com_sprintf(szCfg, sizeof(szCfg), "ui/coop_menumusic/t%d.cfg", n);
-            if (FS_ReadFile(szCfg, NULL) <= 0) {
-                break;
-            }
-        }
-
-        if (n > 0) {
-            // RANDOM PER LAUNCH, and never the one that played last launch. Wall clock mixed with the millisecond
-            // timer: at this point Sys_Milliseconds is just the boot time, nearly identical every launch.
-            srand((unsigned int)time(NULL) ^ (unsigned int)Sys_Milliseconds());
-            idx  = rand() % n;
-            last = Cvar_VariableIntegerValue("ui_menuMusicLast");
-            if (n > 1 && idx == last) {
-                idx = (idx + 1 + rand() % (n - 1)) % n;
-            }
-            // The cfg sets the cvars and ends with menumusic_play, which starts the track once the buffer runs it
-            // (this call site is disconnected, so the state check passes). Appended, not executed inline: exec
-            // inserts the file's text into the command buffer, so the cvars would not be set yet on return.
-            Com_sprintf(szCfg, sizeof(szCfg), "ui/coop_menumusic/t%d.cfg", idx);
-            // path built first, then run through "exec %s": ui_wiring_audit resolves every exec-plus-path literal
-            // in engine source against real files, and a printf template cannot resolve (it blocked the deploy)
-            Cbuf_AddText(va("exec %s\n", szCfg));
-            return;
-        }
-        // no playlist shipped - fall through to the default
-    }
-    S_MenuMusic_Start();
+    S_StartBackgroundTrack("sound/music/mus_MainTheme.mp3", "");
 }
 
 /*
