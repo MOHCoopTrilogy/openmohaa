@@ -2633,6 +2633,12 @@ extern  cvar_t  *r_entLightSmooth;
 // a lamp's reach; 5 or below disables the taper and restores the hard gate exactly.
 extern  cvar_t  *r_entLightFade;
 
+// HZM gl2 [user 2026-09-09, bug-2559] r_mapOverBrightBits is a BIT SHIFT, so it can only ever be 1
+// (2x) or 2 (4x) - there is no value between. This float trims the same lightmap scale so a half
+// step is reachable: 4x * 0.71 = 2.83x = 2^1.5. CVAR_LATCH like its parent, because the scale is
+// baked into the lightmap texture at map load.
+extern  cvar_t  *r_mapOverBrightScale;
+
 // Ease one entity's light toward a new value. rgb is required; dir may be NULL. Keyed on the GAME
 // entity number, advances at most once per entity per frame, and SNAPS across a discontinuity.
 void R_CoopSmoothEntityLight( int entityNumber, vec3_t rgb, vec3_t dir );

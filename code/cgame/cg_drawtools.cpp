@@ -1770,7 +1770,7 @@ static void CG_DrawStaminaArc(void)
     static cvar_t   *pX = NULL, *pY = NULL, *pW = NULL, *pH = NULL, *pOn = NULL;
     static float     fShown = 1.0f;
     int              raw;
-    float            frac, x, y, w, h;
+    float            frac, x, y, w, h, fA;
     vec4_t           col;
 
     if (!cg.snap) {
@@ -1818,9 +1818,20 @@ static void CG_DrawStaminaArc(void)
     w = pW->value * cgs.uiHiResScale[0];
     h = pH->value * cgs.uiHiResScale[1];
 
-    // the spent portion: dim, so the arc still frames the health bar instead of vanishing
-    col[0] = col[1] = col[2] = 0.40f;
-    col[3] = s_hudFadeAlpha;
+    // [user 2026-09-09] "It also appears to get stuck on the screen after all other icons fade."
+    // Not an alpha bug - ui_hudAlpha IS s_hudFadeAlpha (published at the end of CG_UpdateHudFade),
+    // so this already fades on exactly the same clock as the URC panels. It is PERCEPTUAL: a thin
+    // bright line on a dark background stays legible at an alpha where a dark HUD panel has already
+    // gone. Squaring keeps 1.0 at 1.0 and collapses the tail - 0.3 becomes 0.09 - so the two vanish
+    // together without desynchronising them.
+    fA = s_hudFadeAlpha * s_hudFadeAlpha;
+
+    // [user 2026-09-09] "the gauge itself for stamina you can barely see, i thought you were going
+    // to make the white outline itself the stamina bar." It IS the outline - the failure was
+    // CONTRAST. At 0.40 grey against a 1.00 white remainder, a thin stroke over a dark scene reads
+    // as one continuous line. At 0.13 the arc visibly SHORTENS instead of subtly greying.
+    col[0] = col[1] = col[2] = 0.13f;
+    col[3] = fA;
     cgi.R_SetColor(col);
     cgi.R_DrawStretchPic(x, y, w, h, 0.0f, 0.0f, 1.0f, 1.0f, hFrame);
 
@@ -1830,7 +1841,7 @@ static void CG_DrawStaminaArc(void)
         col[0] = 1.00f;
         col[1] = (fShown < 0.15f) ? 0.72f : 1.00f;
         col[2] = (fShown < 0.15f) ? 0.35f : 1.00f;
-        col[3] = s_hudFadeAlpha;
+        col[3] = fA;
         cgi.R_SetColor(col);
         cgi.R_DrawStretchPic(x, y, w * fShown, h, 0.0f, 0.0f, fShown, 1.0f, hFrame);
     }
@@ -2314,10 +2325,17 @@ static void CG_UpdateHudFade(void)
     // quiet. Any value that is neither 0 (no data) nor 101 (full) means the pool is in motion.
     // Gated on PMF_TURRET because the stat carries MG heat while mounted (see bg_public.h).
     if (!(cg.snap->ps.pm_flags & PMF_TURRET)) {
-        int stamRaw = cg.snap->ps.stats[STAT_MGHEAT];
-        if (stamRaw > 0 && stamRaw < 101) {
+        static int lastStamRaw = -1;
+        int        stamRaw     = cg.snap->ps.stats[STAT_MGHEAT];
+
+        // [vet 2026-09-09] Wake on a CHANGE, not on "the value is not full". The original test
+        // pinned the entire HUD awake for as long as the pool sat at anything other than exactly
+        // full, so any resting value short of the top would have held every panel on screen for
+        // ever. A change is what "the player is exerting himself" actually means.
+        if (stamRaw > 0 && stamRaw != lastStamRaw) {
             s_hudTouchTime = cg.time;
         }
+        lastStamRaw = stamRaw;
     }
 
     // [user 07-12] OBJECTIVES MENU OPEN (the O toggle): unfade instantly and stay up for as long as the

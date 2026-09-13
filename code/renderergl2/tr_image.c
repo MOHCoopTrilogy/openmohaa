@@ -3708,7 +3708,12 @@ void R_SetColorMappings( void ) {
 	// OPENMOHAA-specific stuff
 	//=========================
     tr.overbrightShift = r_mapOverBrightBits->integer - tr.overbrightBits;
+    // HZM gl2 [bug-2559] the ENTITY light paths (tr_light.c, tr_sphere_shade.cpp) read this, so the
+    // trim has to land here too or models would not match the world they stand in.
     tr.overbrightMult = (float)(1 << tr.overbrightShift);
+    if (r_mapOverBrightScale && r_mapOverBrightScale->value > 0.0f) {
+        tr.overbrightMult *= r_mapOverBrightScale->value;
+    }
     //=========================
 }
 

@@ -273,6 +273,7 @@ cvar_t	*r_customPixelAspect;
 
 cvar_t	*r_overBrightBits;
 cvar_t	*r_mapOverBrightBits;
+cvar_t	*r_mapOverBrightScale;   // HZM gl2 [bug-2559] float trim on the above
 
 cvar_t	*r_debugSurface;
 cvar_t	*r_simpleMipMaps;
@@ -1923,6 +1924,10 @@ void R_Register( void )
 	ri.Cvar_CheckRange( r_displayRefresh, 0, 200, qtrue );
 	r_fullbright = ri.Cvar_Get ("r_fullbright", "0", CVAR_LATCH|CVAR_CHEAT );
 	r_mapOverBrightBits = ri.Cvar_Get ("r_mapOverBrightBits", "2", CVAR_LATCH );
+	// HZM gl2 [user 2026-09-09, bug-2559] "a smidge too bright... maybe drop it to 1.5 if possible".
+	// The bits above are a SHIFT, so 1.5 is not expressible; this trims the resulting scale instead.
+	// 1.0 = exactly the bits value; 0.71 with bits 2 gives 2.83x, i.e. 2^1.5. Latched with its parent.
+	r_mapOverBrightScale = ri.Cvar_Get ("r_mapOverBrightScale", "1", CVAR_ARCHIVE | CVAR_LATCH );
 	r_intensity = ri.Cvar_Get ("r_intensity", "1", CVAR_LATCH );
 	r_singleShader = ri.Cvar_Get ("r_singleShader", "0", CVAR_CHEAT | CVAR_LATCH );
 

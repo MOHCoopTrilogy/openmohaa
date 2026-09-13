@@ -141,14 +141,20 @@ R_ColorShiftLightingBytes
 */
 static	void R_ColorShiftLightingBytes( byte in[4], byte out[4] ) {
 	int		shift, r, g, b;
+	float	trim;
 
 	// shift the color data based on overbright range
 	shift = r_mapOverBrightBits->integer - tr.overbrightBits;
 
+	// HZM gl2 [user 2026-09-09, bug-2559] the shift alone can only double or quadruple; this float
+	// trims it so a half step is reachable. 1.0 leaves the shift exactly as it was.
+	trim = r_mapOverBrightScale ? r_mapOverBrightScale->value : 1.0f;
+	if (trim <= 0.0f) { trim = 1.0f; }
+
 	// shift the data based on overbright range
-	r = in[0] << shift;
-	g = in[1] << shift;
-	b = in[2] << shift;
+	r = (int)((in[0] << shift) * trim);
+	g = (int)((in[1] << shift) * trim);
+	b = (int)((in[2] << shift) * trim);
 	
 	// normalize by color instead of saturating to white
 	if ( ( r | g | b ) > 255 ) {
@@ -177,7 +183,11 @@ R_ColorShiftLightingFloats
 static void R_ColorShiftLightingFloats(float in[4], float out[4])
 {
 	float	r, g, b;
-	float   scale = (1 << (r_mapOverBrightBits->integer - tr.overbrightBits)) / 255.0f;
+	// HZM gl2 [bug-2559] same float trim as R_ColorShiftLightingBytes above - both sites must agree
+	// or the byte and float lightmap paths would disagree about how bright the map is.
+	float   trim  = (r_mapOverBrightScale && r_mapOverBrightScale->value > 0.0f)
+	              ? r_mapOverBrightScale->value : 1.0f;
+	float   scale = (1 << (r_mapOverBrightBits->integer - tr.overbrightBits)) * trim / 255.0f;
 
 	r = in[0] * scale;
 	g = in[1] * scale;
