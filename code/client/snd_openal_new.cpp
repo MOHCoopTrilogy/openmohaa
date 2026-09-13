@@ -56,6 +56,10 @@ static constexpr float s_fVolumeGain = 1.f; // = 84.f;
 // HZM coop [bug-2572] the main-menu theme picker's play command - registered in S_OPENAL_Init, defined with
 // S_TriggeredMusic_PlayIntroMusic
 void S_MenuMusic_Play_f(void);
+// HZM coop [bug-2576] main-menu theme auto-advance (see S_MenuMusic_Frame)
+static void     S_MenuMusic_Frame(void);
+static qboolean s_menuMusicAuto    = qfalse; // a menu theme started by S_MenuMusic_Start owns chan_trig_music
+static int      s_menuMusicStartMs = 0;
 
 cvar_t *s_milesdriver;
 cvar_t *s_openaldevice;
@@ -3641,6 +3645,8 @@ void S_OPENAL_Update()
     for (i = 0; i < MAX_SOUNDSYSTEM_CHANNELS; i++) {
         openal.channel[i]->update();
     }
+
+    S_MenuMusic_Frame(); // HZM coop [bug-2576] move to the next main-menu theme when one ends
 }
 
 /*
@@ -5630,6 +5636,7 @@ void S_TriggeredMusic_SetupHandle(const char *pszName, int iLoopCount, int iOffs
         return;
     }
 
+    s_menuMusicAuto = qfalse; // HZM coop [bug-2576] a new triggered track owns the channel; S_MenuMusic_Start re-arms it
     openal.chan_trig_music.stop();
     // Fixed in OPM
     //  Use strncpy instead
@@ -5709,6 +5716,7 @@ S_TriggeredMusic_Stop
 */
 void S_TriggeredMusic_Stop()
 {
+    s_menuMusicAuto = qfalse; // HZM coop [bug-2576] a forced stop is not the end of a menu theme
     if (!s_bSoundStarted) {
         return;
     }
@@ -5814,8 +5822,13 @@ static void S_MenuMusic_Start(void)
     // some was already playing"), and that is exactly the state a Next/Back press happens in. Both paths here are
     // disconnected-only, so there is never a map's score on this channel to cut.
     S_TriggeredMusic_Stop();
-    // loop count 0 = forever, as tmstartloop
-    S_TriggeredMusic_SetupHandle(szTrack, 0, 0, true);
+    // [bug-2576] loop count 1 = play ONCE; S_MenuMusic_Frame moves on to the next theme when it ends. Armed only if
+    // the track really started - a missing file leaves the channel idle and must not read as "finished".
+    S_TriggeredMusic_SetupHandle(szTrack, 1, 0, true);
+    if (openal.chan_trig_music.is_playing()) {
+        s_menuMusicAuto    = qtrue;
+        s_menuMusicStartMs = Sys_Milliseconds();
+    }
 }
 
 /*
@@ -5833,6 +5846,46 @@ void S_MenuMusic_Play_f(void)
         return;
     }
     S_MenuMusic_Start();
+}
+
+/*
+==============
+S_MenuMusic_Frame
+
+HZM coop [user 2026-09-13, bug-2576] "once one of the main title songs play, automatically move to the next one."
+
+Runs at the end of every S_OPENAL_Update, after the stream channels have been fed. A menu theme plays once (loop count
+1): when openal_channel_two_d_stream::update runs out of data it stops feeding, the source plays out its queue and
+stops, and the stream clears itself. That natural end is the only way s_menuMusicAuto can still be set while the channel
+is idle, because every forced stop clears it (S_TriggeredMusic_Stop, S_TriggeredMusic_SetupHandle).
+
+The next theme is the same cfg the Next button runs, so the title box and ui_menuMusicLast follow along, and the last
+theme wraps to the first. Only while disconnected: in game a map owns the channel, and the menu theme comes back through
+PlayIntroMusic on the way out.
+==============
+*/
+static void S_MenuMusic_Frame(void)
+{
+    if (!s_menuMusicAuto) {
+        return;
+    }
+    if (clc.state != CA_DISCONNECTED) {
+        s_menuMusicAuto = qfalse;
+        return;
+    }
+    if (openal.chan_trig_music.is_playing() || openal.chan_trig_music.is_paused()) {
+        return;
+    }
+    s_menuMusicAuto = qfalse;
+    // a stream that died within seconds of starting (a bad or truncated file) must not spin through the playlist
+    if (Sys_Milliseconds() - s_menuMusicStartMs < 5000) {
+        return;
+    }
+    if (*Cvar_VariableString("ui_menuMusicNext")) {
+        Cbuf_AddText("vstr ui_menuMusicNext\n");
+    } else {
+        S_MenuMusic_Start();
+    }
 }
 
 void S_TriggeredMusic_PlayIntroMusic()
