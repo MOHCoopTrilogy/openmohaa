@@ -642,15 +642,80 @@ CoopMagObject::CoopMagObject()
 
 void CoopMagObject::CoopMagStop(Event *ev)
 {
+    static cvar_t *pSurf = NULL;
+    const char    *snd   = "coop_magland_hard";
+    qboolean       bNear = qfalse;
+    int            i;
+
     avelocity = vec_zero;
     angles.x  = 0;
     angles.z  = 0;
     setAngles(angles);
     setMoveType(MOVETYPE_NONE);
-    // the helmet's landing clatter at a third the volume - a magazine is not a steel pot. The
-    // grenade_bounce_metal1-3 alias family is in all three games' ubersounds, which HelmetTouch
-    // above already depends on.
-    Sound("grenade_bounce_metal", CHAN_BODY, 0.35f);
+
+    if (!pSurf) {
+        pSurf = gi.Cvar_Get("coop_magLandSurface", "1", CVAR_ARCHIVE);
+    }
+    if (!pSurf->integer) {
+        // the old behaviour, exactly. Note the volume and channel below never did anything: argstype 0 takes
+        // both from the alias (entity.cpp:3752-3757), which is why the replacement passes neither (bug-2567).
+        Sound("grenade_bounce_metal", CHAN_BODY, 0.35f);
+        return;
+    }
+
+    // HZM coop [user 2026-09-13, bug-2566] "Can we make magazine drops sound based on whatever type of ground
+    // it's hitting (metal, wood, dirt, water etc)".
+    //
+    // ONLY WHEN SOMEONE CAN HEAR IT. A server sound is queued to every active client with no distance cull
+    // (sv_snd.c:66-85) and each client holds 64 per snapshot, so a landing nobody is near would still spend a
+    // slot on every client - in a firefight, which is exactly when the list is full and gunfire gets dropped.
+    for (i = 0; i < game.maxclients; i++) {
+        gentity_t *ent = &g_entities[i];
+
+        if (!ent->inuse || !ent->entity) {
+            continue;
+        }
+        if ((ent->entity->origin - origin).lengthSquared() < 1000.0f * 1000.0f) {
+            bNear = qtrue;
+            break;
+        }
+    }
+    if (!bNear) {
+        return;
+    }
+
+    // WHAT IT LANDED ON. The impact trace is already gone - G_Impact zeroes level.impact_trace (g_phys.cpp:192)
+    // before EV_Stop runs, and no surface flags are kept - so trace 6 units straight down with the magazine's own
+    // box and clipmask. EV_Stop only fires on a floor-like contact below it, so this finds that surface.
+    {
+        trace_t tr;
+        vec3_t  vPt;
+        int     f;
+
+        tr = G_Trace(origin, mins, maxs, origin - Vector(0, 0, 6), this, edict->clipmask, qfalse, "CoopMagLand");
+        f  = (tr.fraction < 1.0f && !tr.startsolid) ? tr.surfaceFlags : 0;
+        VectorCopy(origin, vPt);
+
+        // Retail Projectile::Touch's order (weaputils.cpp:1180-1245), as BIT tests - the footstep switch is an
+        // exact match and sends a side with two material bits to the default. METAL before ROCK because
+        // cm_load.c ORs SURF_METAL into steel brush sides. Four classes because that is all the small-object
+        // impact audio retail ships: wood and glass share hard, snow and carpet share soft.
+        if ((gi.pointcontents(vPt, 0) & MASK_WATER) || (f & SURF_PUDDLE)) {
+            snd = "coop_magland_water";
+        } else if (f & (SURF_METAL | SURF_GRILL)) {
+            snd = "coop_magland_metal";
+        } else if (f & (SURF_ROCK | SURF_WOOD | SURF_GLASS)) {
+            snd = "coop_magland_hard";
+        } else if (f & MASK_SURF_TYPE) {
+            snd = "coop_magland_soft";
+        } else {
+            snd = "coop_magland_hard"; // no material bit: footsteps and bullet holes treat that as stone too
+        }
+    }
+
+    // No channel or volume passed - the alias owns both (argstype 0). Deliberately NO BroadcastAIEvent, unlike
+    // the grenade code this is modelled on: AI must not turn toward a dropped magazine.
+    Sound(snd);
 }
 
 void HelmetObject::HelmetTouch(Event *ev)
