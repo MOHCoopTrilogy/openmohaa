@@ -908,6 +908,101 @@ void CL_CleanupUserInfo()
 
 /*
 =====================
+CL_HZM_ResetTransientAudio
+
+HZM coop [user 2026-09-13, bug-2573] "ANY time we leave the omaha beach map, whether its crashed, quit, closed,
+disconnected, switched maps, restarted map, etc. that the audio ducking that we put in there gets reset to what it
+should play on other maps. It still seems to carry sometimes (like if I disconnect during the cinematic sequence and
+then load a new map)."
+
+WHAT CARRIED: coop_duckMusicTrigger / coop_duckAmbientTrigger. The server stuffs them to 1 for Omaha's takeover and
+back to 0 ninety-five seconds later. They are flags 0, so they never reach a config - but they outlive a disconnect
+inside one process, and nothing reset them. The next map's cgame is a freshly loaded DLL (CL_ShutdownCGame unloads
+it): its first frame finds the trigger already at 1, takes that for a new duck, captures a base and ducks again -
+music swollen, every ambient loop at zero - and a map that never ducks never sends the 0 that releases it.
+S_BeginRegistration's self-heals (bugs 2298, 2318, 2369) cover s_sfxduck and the cut cvars at a map load, but not
+the triggers or coop_shellPan, and nothing runs at all on a return to the menu, where there is no registration.
+
+So every transient value the server can stuff into the mix goes back to rest here, from the places every exit passes
+through: CL_ClearState (launch, disconnect, every new gamestate - a map change, `map` on the same map, a server
+dying) and CL_ServerRestarted (`restart`, which keeps the gamestate and the cgame). A crash cannot run anything, so
+the archived saves below make the next launch's CL_Init do it instead.
+
+THE VOLUMES are the player's own slider values, and only saved copies can put them back:
+  - s_musicvolume / s_ambientvolume from coop_duckSave*, which cgame writes while a duck is in flight and sets to
+    -1 when it completes (bug-2551).
+  - s_volume from coop_duckSaveVolume, which cgame captures before the first server write of it
+    (cg_servercmds.c CG_CoopNoteServerVolume). tinnitus, xp, dbno and medkit all stuff Master volume as a literal
+    fade, and leaving mid-fade left it wherever that fade was. Restored only if s_volume still holds the last value
+    the server wrote: a player who moved the slider since keeps their own.
+Cvar_FindVar, never Cvar_VariableValue: at CL_Init a save that is not in the config does not exist, and reading it as
+0 would restore every volume to silence.
+=====================
+*/
+static void CL_HZM_ResetTransientAudio( const char *why, int state ) {
+	static const struct {
+		const char	*name;
+		const char	*rest;
+	} transient[] = {
+		{ "coop_duckMusicTrigger",		"0" },
+		{ "coop_duckAmbientTrigger",	"0" },
+		{ "s_sfxduck",					"1" },
+		{ "coop_voxCut",				"1" },
+		{ "coop_cueCut",				"1" },
+		{ "coop_muffle",				"0" },
+		{ "coop_shellPan",				"0" },
+	};
+	static const struct {
+		const char	*save;
+		const char	*vol;
+	} saved[] = {
+		{ "coop_duckSaveMusic",		"s_musicvolume" },
+		{ "coop_duckSaveAmbient",	"s_ambientvolume" },
+	};
+	char	changed[ MAX_STRING_CHARS ];
+	cvar_t	*cv, *save, *srv;
+	int		i;
+
+	changed[ 0 ] = 0;
+
+	for ( i = 0; i < (int)( sizeof( transient ) / sizeof( transient[ 0 ] ) ); i++ ) {
+		cv = Cvar_FindVar( transient[ i ].name );
+		if ( cv && fabs( cv->value - atof( transient[ i ].rest ) ) > 0.0001f ) {
+			Q_strcat( changed, sizeof( changed ), va( " %s=%s->%s", transient[ i ].name, cv->string, transient[ i ].rest ) );
+			Cvar_Set( transient[ i ].name, transient[ i ].rest );
+		}
+	}
+
+	for ( i = 0; i < (int)( sizeof( saved ) / sizeof( saved[ 0 ] ) ); i++ ) {
+		save = Cvar_FindVar( saved[ i ].save );
+		if ( save && save->string[ 0 ] && save->value >= 0.0f ) {
+			Q_strcat( changed, sizeof( changed ), va( " %s=%s->%s", saved[ i ].vol, Cvar_VariableString( saved[ i ].vol ), save->string ) );
+			Cvar_Set( saved[ i ].vol, save->string );
+			Cvar_Set( saved[ i ].save, "-1" );
+		}
+	}
+
+	save = Cvar_FindVar( "coop_duckSaveVolume" );
+	if ( save && save->string[ 0 ] && save->value >= 0.0f ) {
+		cv  = Cvar_FindVar( "s_volume" );
+		srv = Cvar_FindVar( "coop_duckSrvVolume" );
+		if ( !cv || !srv || !srv->string[ 0 ] || srv->value < 0.0f || fabs( cv->value - srv->value ) < 0.001f ) {
+			Q_strcat( changed, sizeof( changed ), va( " s_volume=%s->%s", cv ? cv->string : "", save->string ) );
+			Cvar_Set( "s_volume", save->string );
+		} else {
+			Q_strcat( changed, sizeof( changed ), va( " s_volume=%s(kept:slider moved since the server set %s)", cv->string, srv->string ) );
+		}
+		Cvar_Set( "coop_duckSaveVolume", "-1" );
+		Cvar_Set( "coop_duckSrvVolume", "-1" );
+	}
+
+	if ( changed[ 0 ] ) {
+		Com_Printf( "^~^~^ AUDIORESET why=%s state=%d%s\n", why, state, changed );
+	}
+}
+
+/*
+=====================
 CL_ClearState
 
 Called before parsing a gamestate
@@ -916,6 +1011,9 @@ Called before parsing a gamestate
 void CL_ClearState( void )
 {
 	CL_ShutdownCGame();
+
+	// HZM coop [bug-2573] after the cgame is gone, so nothing can write the mix again for this map
+	CL_HZM_ResetTransientAudio( "clearstate", clc.state );
 
 	if( !com_sv_running->integer ) {
 		S_StopAllSounds2( qtrue );
@@ -5187,6 +5285,9 @@ CL_ServerRestarted
 ==================
 */
 void CL_ServerRestarted( void ) {
+	// HZM coop [bug-2573] `restart` keeps the gamestate and the cgame, so CL_ClearState never runs for it
+	CL_HZM_ResetTransientAudio( "restart", clc.state );
+
 	//S_StopAllSounds2( qfalse );
 	// Fixed in OPM
 	//  Also stop the music

@@ -299,6 +299,84 @@ static void CG_ServerLag_f()
 
 /*
 =================
+CG_CoopNoteServerVolume
+
+HZM coop [user 2026-09-13, bug-2573] remember the player's own Master volume before the server first changes it.
+
+tinnitus.scr, xp.scr, dbno.scr, medkit.scr, player.scr and mp.scr all stuff s_volume directly - a fade down for a
+blast or a promotion, then "s_volume <coop_tinnitusBaseVol>". s_volume is CVAR_ARCHIVE and it is the player's Master
+slider, and the server can never read the client's value back, so leaving a map partway through one of those fades -
+disconnect, map change, crash - left Master wherever the fade had got to, in memory and in the config.
+
+So the first time a server statement sets it, the value it is about to replace is saved (coop_duckSaveVolume,
+archived, -1 = nothing saved), and every server write records what it set (coop_duckSrvVolume).
+CL_HZM_ResetTransientAudio (cl_main.cpp) puts the saved value back when the player leaves - unless s_volume no longer
+matches what the server last wrote, which means the player moved the slider since, and that choice stands. In play
+nothing changes: the scripts still drive s_volume exactly as before. Same pattern as coop_duckSave* (bug-2551).
+
+Runs BEFORE the statement is stuffed, so s_volume still holds the value from before the write.
+=================
+*/
+static void CG_CoopNoteServerVolume(const char *cmd)
+{
+    const char *s = cmd;
+    const char *v;
+    char        value[32];
+    int         n;
+    float       f;
+
+    while (s && *s) {
+        while (*s == ' ' || *s == '\t' || *s == ';' || *s == '\r' || *s == '\n') {
+            s++;
+        }
+        // set / seta / sets / setu s_volume <v> is the same write as s_volume <v>
+        if (!Q_stricmpn(s, "set", 3)) {
+            v = s + 3;
+            if (*v == 'a' || *v == 'A' || *v == 's' || *v == 'S' || *v == 'u' || *v == 'U') {
+                v++;
+            }
+            if (*v == ' ' || *v == '\t') {
+                s = v;
+                while (*s == ' ' || *s == '\t') {
+                    s++;
+                }
+            }
+        }
+        if (!Q_stricmpn(s, "s_volume", 8) && (s[8] == ' ' || s[8] == '\t' || s[8] == '"')) {
+            v = s + 8;
+            while (*v == ' ' || *v == '\t' || *v == '"') {
+                v++;
+            }
+            for (n = 0; n < (int)sizeof(value) - 1 && v[n] && v[n] != '"' && v[n] != ';' && v[n] != ' '
+                        && v[n] != '\t' && v[n] != '\r' && v[n] != '\n';
+                 n++) {
+                value[n] = v[n];
+            }
+            value[n] = 0;
+            if (n > 0) {
+                if (cgi.Cvar_Get("coop_duckSaveVolume", "-1", CVAR_ARCHIVE)->value < 0.0f) {
+                    cgi.Cvar_Set("coop_duckSaveVolume", va("%g", cgi.Cvar_Get("s_volume", "0.9", CVAR_ARCHIVE)->value));
+                }
+                // the sound system clamps s_volume to 0..1 (S_OPENAL_Update), so record what will really be there
+                f = atof(value);
+                if (f < 0.0f) {
+                    f = 0.0f;
+                } else if (f > 1.0f) {
+                    f = 1.0f;
+                }
+                cgi.Cvar_Get("coop_duckSrvVolume", "-1", CVAR_ARCHIVE);
+                cgi.Cvar_Set("coop_duckSrvVolume", va("%g", f));
+            }
+        }
+        // on to the next statement
+        while (*s && *s != ';' && *s != '\n') {
+            s++;
+        }
+    }
+}
+
+/*
+=================
 CG_ServerCommand
 
 The string has been tokenized and can be retrieved with
@@ -403,6 +481,8 @@ static void CG_ServerCommand(qboolean modelOnly)
             return;
         }
 
+        // HZM coop [bug-2573] note the player's own Master volume before a server write replaces it
+        CG_CoopNoteServerVolume(cmd);
         cgi.Cmd_Stuff(cmd);
         cgi.Cmd_Stuff("\n");
         return;

@@ -106,6 +106,11 @@ void S_Init(qboolean full_startup)
     s_musicVolume    = Cvar_Get("s_musicvolume", "0.9", CVAR_ARCHIVE);
     s_ambientVolume  = Cvar_Get("s_ambientvolume", "0.6", CVAR_ARCHIVE);
     s_sfxduck        = Cvar_Get("s_sfxduck", "1", CVAR_ARCHIVE); // HZM coop - effect-channel duck (music exempt)
+    // HZM coop [user 2026-09-13, bug-2573] NOT ARCHIVED ANY MORE. s_sfxduck is a scripted, momentary duck with no
+    // slider behind it, and archiving it is how a 3% world got written into a config (bug-2298). The flag has to
+    // come off AFTER Cvar_Get: a config that already carries `seta s_sfxduck` created the cvar archived before this
+    // line ran, and Cvar_Get merges flags into an existing cvar. The next config write drops the line.
+    s_sfxduck->flags &= ~CVAR_ARCHIVE;
     // HZM coop [user 2026-09-02, bug-2318] REGISTERED EAGERLY, not lazily inside set_gain.
     // Cvar_Command only sets a cvar that already EXISTS, so a server stufftext of "coop_voxCut 0"
     // would be an unknown command until something had touched it - and the first thing that would
@@ -300,7 +305,8 @@ void S_BeginRegistration()
 {
     // [user 2026-09-01, bug-2298] A STUCK CINEMATIC DUCK MUST NOT SURVIVE A MAP LOAD.
     //
-    // s_sfxduck is CVAR_ARCHIVE, and the only thing that restores it is a script thread that fades
+    // s_sfxduck was CVAR_ARCHIVE (S_Init strips that since bug-2573), and the only thing that restores it is a
+    // script thread that fades
     // it back up at the end of the beat. Any path that kills that thread first - the player dying
     // mid-fade, a disconnect, a map change, a crash - leaves the duck latched AND WRITES IT TO THE
     // CONFIG, so every later session starts with the world at whatever fraction it was left on.
