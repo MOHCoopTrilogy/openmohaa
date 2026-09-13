@@ -17129,13 +17129,20 @@ void Player::TickSprint()
 //====
 void Player::TickCoopBreath(void)
 {
-    static cvar_t *pHold = NULL, *pCool = NULL;
+    static cvar_t *pHold = NULL, *pCool = NULL, *pShare = NULL, *pReArm = NULL, *pStam = NULL;
     int            iHoldMs, iCoolMs, nowMs, dt;
     qboolean       bWalkHeld, bAds;
 
     if (!pHold) {
         pHold = gi.Cvar_Get("cg_breathHoldTime", "7", CVAR_ARCHIVE);
         pCool = gi.Cvar_Get("cg_breathCooldown", "5", CVAR_ARCHIVE);
+    }
+    if (!pShare) {
+        // [user 2026-09-13, bug-2560] "Breath hold should share the same stamina bar". 1 = the hold spends
+        // the sprint pool; 0 = the separate hold/cooldown budget below, unchanged.
+        pShare = gi.Cvar_Get("coop_breathShareStamina", "1", CVAR_ARCHIVE);
+        pReArm = gi.Cvar_Get("coop_breathReArm", "0.25", CVAR_ARCHIVE);
+        pStam  = gi.Cvar_Get("coop_sprintStamina", "5", CVAR_ARCHIVE);
     }
     iHoldMs = (int)(pHold->value * 1000.0f);
     iCoolMs = (int)(pCool->value * 1000.0f);
@@ -17157,6 +17164,40 @@ void Player::TickCoopBreath(void)
 
     if (deadflag || m_bCoopWounded) {
         return; // no steady aim while down or dying
+    }
+
+    // [user 2026-09-13, bug-2560] ONE POOL. The hold drains m_fCoopStamina at maxStam / holdTime per second,
+    // so a full bar lasts exactly cg_breathHoldTime and the old budget's length survives the merge. Heft
+    // shortens it the same way CG_BreathHoldMs does on the client. Every drain pushes the shared refill
+    // delay (m_fCoopStaminaHold), exactly as sprint, jump, slide and vault already do - so a hold cannot be
+    // tapped off and refilled for free. Runs after TickSprint's regen in the same frame (the call site),
+    // so this frame's hold is what blocks next frame's refill.
+    //
+    // m_iCoopBreathCooldownMs is the EXHAUSTED latch in this mode (0 = can hold, 1 = emptied the pool). It
+    // holds until the pool refills to coop_breathReArm; without it the pool would refill a sliver after
+    // the delay and the hold would flicker on and off at zero for as long as the key stayed down.
+    if (pShare->integer) {
+        float fMax   = (pStam->value > 0.1f) ? pStam->value : 0.1f;
+        float fHold  = pHold->value * (1.0f - CoopActiveHeft() * 0.35f);
+        float fReArm = pReArm->value;
+        float fDt    = (float)dt * 0.001f;
+
+        if (fHold < 0.1f) { fHold = 0.1f; }
+        if (fReArm < 0.0f) { fReArm = 0.0f; } else if (fReArm > 1.0f) { fReArm = 1.0f; }
+
+        if (m_iCoopBreathCooldownMs != 0 && m_fCoopStamina >= fMax * fReArm) {
+            m_iCoopBreathCooldownMs = 0;
+        }
+        if (m_iCoopBreathCooldownMs == 0 && bAds && bWalkHeld && m_fCoopStamina > 0.0f) {
+            m_bCoopBreathSteady = qtrue;
+            m_fCoopStamina -= (fMax / fHold) * fDt;
+            if (m_fCoopStamina <= 0.0f) {
+                m_fCoopStamina          = 0.0f;
+                m_iCoopBreathCooldownMs = 1;
+            }
+            m_fCoopStaminaHold = level.time + CoopStaminaDelay();
+        }
+        return;
     }
 
     if (m_iCoopBreathCooldownMs != 0) {

@@ -2318,6 +2318,7 @@ void CG_OffsetFirstPersonView(refEntity_t *pREnt, qboolean bUseWorldPosition)
                 usercmd_t bcmd;
                 qboolean  bShift;
                 int       dt;
+                qboolean  bBreathShared = qfalse; // [bug-2560] the hold is spending the sprint pool this frame
 
                 if (iHoldMs < 100) { iHoldMs = 100; }
                 if (iCoolMs < 100) { iCoolMs = 100; }
@@ -2334,7 +2335,46 @@ void CG_OffsetFirstPersonView(refEntity_t *pREnt, qboolean bUseWorldPosition)
                 bShift         = (bcmd.buttons & BUTTON_RUN) ? qfalse : qtrue;
                 s_breathSteady = qfalse;
 
-                if (s_breathCooldownEnd != 0) {
+                // [user 2026-09-13, bug-2560] "Breath hold should share the same stamina bar". The server
+                // drains the sprint pool while the hold is steady (Player::TickCoopBreath); the picture
+                // follows THAT pool, read from STAT_MGHEAT - 1..101 while off a turret, the value the
+                // stamina arc already draws (bug-2555). One snapshot behind, like every stat-driven HUD
+                // element. Exhausting the pool latches until it refills to coop_breathReArm, matching the
+                // server, so the sway does not flicker back on at a sliver of stamina.
+                // FALLS BACK to the legacy budget below when the stat carries no stamina: raw 0 means a
+                // server without the stat writer, and on a turret the same slot is MG heat.
+                {
+                    static cvar_t  *pShareB = NULL, *pReArmB = NULL;
+                    static qboolean s_breathExhausted = qfalse;
+                    int             iStamRaw = cg.snap ? cg.snap->ps.stats[STAT_MGHEAT] : 0;
+
+                    if (!pShareB) {
+                        pShareB = cgi.Cvar_Get("coop_breathShareStamina", "1", CVAR_ARCHIVE);
+                        pReArmB = cgi.Cvar_Get("coop_breathReArm", "0.25", CVAR_ARCHIVE);
+                    }
+                    if (pShareB->integer && iStamRaw > 0 && cg.snap && !(cg.snap->ps.pm_flags & PMF_TURRET)) {
+                        float fStam  = (float)(iStamRaw - 1) / 100.0f;
+                        float fReArm = pReArmB->value;
+
+                        bBreathShared = qtrue;
+                        if (s_breathExhausted && fStam >= fReArm) {
+                            s_breathExhausted = qfalse;
+                        }
+                        if (((bcmd.buttons & BUTTON_COOPADS) || bScoped) && bShift && !s_breathExhausted) {
+                            if (fStam > 0.0f) {
+                                s_breathSteady = qtrue;
+                            } else {
+                                s_breathExhausted = qtrue;
+                            }
+                        }
+                        // keep the legacy fields truthful for CG_GetBreathState: no cooldown, and the
+                        // "remaining" is the pool expressed in the old hold budget's milliseconds
+                        s_breathCooldownEnd = 0;
+                        s_breathRemainMs    = (int)(fStam * (float)iHoldMs);
+                    }
+                }
+
+                if (!bBreathShared && s_breathCooldownEnd != 0) {
                     if (cg.time >= s_breathCooldownEnd) {
                         s_breathCooldownEnd = 0;
                         s_breathRemainMs    = iHoldMs; // recharge complete
@@ -2344,7 +2384,7 @@ void CG_OffsetFirstPersonView(refEntity_t *pREnt, qboolean bUseWorldPosition)
                 // breath hold the SERVER never granted: steady sway and the inhale cue with no actual
                 // accuracy behind it, quietly draining the hold budget so it was empty when they did
                 // press ADS. The pose and FOV consumers keep using bAds.
-                } else if (((bcmd.buttons & BUTTON_COOPADS) || bScoped) && bShift && s_breathRemainMs > 0) {
+                } else if (!bBreathShared && ((bcmd.buttons & BUTTON_COOPADS) || bScoped) && bShift && s_breathRemainMs > 0) {
                     s_breathSteady = qtrue;
                     s_breathRemainMs -= dt;
                     if (s_breathRemainMs <= 0) {
@@ -2503,8 +2543,82 @@ void CG_OffsetFirstPersonView(refEntity_t *pREnt, qboolean bUseWorldPosition)
                 if (fBack > RECOIL_MAX_BACK) {
                     fBack = RECOIL_MAX_BACK;
                 }
-                VectorMA(pREnt->origin,  s_recoil * 0.8f, mat[2], pREnt->origin); // up
-                VectorMA(pREnt->origin, -fBack,           mat[0], pREnt->origin); // back toward camera
+                // [user 2026-09-09, bug-2562] "when I fire some of these guns it seems to lift the entire gun
+                // with recoil (IE the handgun) instead of the barrel." It did: this used to be the two
+                // translations below and nothing else, so grip, hands and muzzle all rose by the same
+                // amount. A gun pivots at the hand. So the climb is now a ROTATION ABOUT THE GRIP, applied to
+                // the body (the <skin>_fps.tik arms) with the bug-2502 tag-pivot compensation - read where
+                // tag_weapon_right sits, turn the body's axes, move the body so the tag has not moved - and
+                // the weapon inherits it through the tag, so both hands stay on the gun. The lift is cut to
+                // 30% so translation and rotation do not double up. NEVER the uncompensated pREnt->axis
+                // turn of bug-2142, which swings the whole rig about the player's FEET.
+                //
+                // SIGN: RotatePointAroundVector is Quake 3's (q_math.c, zrot[0][1] = sin): about view LEFT,
+                // +degrees takes forward to (cos, 0, -sin), i.e. muzzle DOWN. The climb is therefore applied
+                // as NEGATIVE degrees about mat[1]. cg_recoilRot < 0 flips it live if that ever reads wrong.
+                {
+                    static cvar_t *pRecRot = NULL, *pRecRotMax = NULL;
+                    float          fRecRot, fRecMax, fClassRot, fDeg, fUpMix;
+
+                    if (!pRecRot) {
+                        pRecRot    = cgi.Cvar_Get("cg_recoilRot", "6.0", CVAR_ARCHIVE);    // degrees of climb per unit of kick
+                        pRecRotMax = cgi.Cvar_Get("cg_recoilRotMax", "8.0", CVAR_ARCHIVE); // hard ceiling, degrees
+                    }
+                    fRecRot = pRecRot->value;
+                    fRecMax = (pRecRotMax->value > 0.0f) ? pRecRotMax->value : 0.0f;
+
+                    // how much of the kick is a wrist flip rather than a shove: a pistol mostly flips, a
+                    // shouldered rifle mostly pushes, an MG's weight barely lets it climb at all
+                    fClassRot = 0.8f;
+                    if (iClass & WEAPON_CLASS_PISTOL)      { fClassRot = 1.6f; }
+                    else if (iClass & WEAPON_CLASS_SMG)    { fClassRot = 0.9f; }
+                    else if (iClass & WEAPON_CLASS_RIFLE)  { fClassRot = 0.7f; }
+                    else if (iClass & WEAPON_CLASS_MG)     { fClassRot = 0.35f; }
+                    else if (iClass & WEAPON_CLASS_HEAVY)  { fClassRot = 0.5f; }
+
+                    fUpMix = (fRecRot != 0.0f) ? 0.3f : 1.0f; // cg_recoilRot 0 = the old pure translation, exactly
+                    VectorMA(pREnt->origin,  s_recoil * 0.8f * fUpMix, mat[2], pREnt->origin); // up
+                    VectorMA(pREnt->origin, -fBack,                    mat[0], pREnt->origin); // back toward camera
+
+                    // ADS keeps 35% of the climb: a gun that does not move when fired on the sights reads as
+                    // broken, but the hand-dialled per-gun alignments in s_adsGunTune must not be fought hard
+                    fDeg = s_recoil * fRecRot * fClassRot * (1.0f - 0.65f * CG_AdsPoseFactor());
+                    if (fDeg > fRecMax) { fDeg = fRecMax; } else if (fDeg < -fRecMax) { fDeg = -fRecMax; }
+
+                    if ((fDeg > 0.01f || fDeg < -0.01f) && pREnt->tiki) {
+                        static int    s_iRecTag  = -2;
+                        static int    s_iRecTiki = 0;
+                        vec3_t        vRcBefore, vRcAfter, vRcFix, vRcTagOfs, vRcTmp;
+                        orientation_t oRc;
+                        int           iRr;
+
+                        if (s_iRecTiki != (int)(size_t)pREnt->tiki) {
+                            s_iRecTag  = cgi.Tag_NumForName(pREnt->tiki, "tag_weapon_right");
+                            s_iRecTiki = (int)(size_t)pREnt->tiki;
+                        }
+                        VectorClear(vRcBefore);
+                        VectorClear(vRcTagOfs);
+                        if (s_iRecTag >= 0) {
+                            oRc = cgi.TIKI_Orientation(pREnt, s_iRecTag);
+                            VectorCopy(oRc.origin, vRcTagOfs);
+                            for (iRr = 0; iRr < 3; iRr++) {
+                                VectorMA(vRcBefore, vRcTagOfs[iRr], pREnt->axis[iRr], vRcBefore);
+                            }
+                        }
+                        for (iRr = 0; iRr < 3; iRr++) {
+                            RotatePointAroundVector(vRcTmp, mat[1], pREnt->axis[iRr], -fDeg); // negative = muzzle UP
+                            VectorCopy(vRcTmp, pREnt->axis[iRr]);
+                        }
+                        if (s_iRecTag >= 0) {
+                            VectorClear(vRcAfter);
+                            for (iRr = 0; iRr < 3; iRr++) {
+                                VectorMA(vRcAfter, vRcTagOfs[iRr], pREnt->axis[iRr], vRcAfter);
+                            }
+                            VectorSubtract(vRcBefore, vRcAfter, vRcFix);
+                            VectorAdd(pREnt->origin, vRcFix, pREnt->origin);
+                        }
+                    }
+                }
                 // ASYMMETRIC RECOVERY. A single fast decay reads as springy and light: real weight
                 // is a sharp kick and a SLOW return, and the heavier the weapon the slower it
                 // settles. Divide the recovery rate by the class kick, so a pistol snaps back at
