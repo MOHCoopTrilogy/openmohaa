@@ -1569,6 +1569,109 @@ int Sentient::CheckHitLocation(int iLocation)
 
 #define WATER_CONVERSION_FACTOR 1.0f
 
+/*
+====================
+CoopMapNameIsCoop
+
+HZM coop [bug-2574 review] true for a map in the coop set, by NAME. Mirrors coop_mod/main.scr::isCoopEnabledMap
+(main.scr:2083): m/e/t + a digit 1-9 + 'l' (m1l1, e2l3, t1l1), training, briefing maps, co_lobby*, coop_*. Compared
+lowercased (the script rule assumes lowercase names). Stock multiplayer maps are dm/, obj/ or lib/ paths and can never
+match. An over-long name is simply not a coop name.
+====================
+*/
+static bool CoopMapNameIsCoop(const char *map)
+{
+    char   name[MAX_QPATH];
+    size_t len, i;
+
+    if (!map) {
+        return false;
+    }
+    len = strlen(map);
+    if (len < 4 || len >= sizeof(name)) {
+        return false;
+    }
+    for (i = 0; i <= len; i++) {
+        name[i] = (char)tolower((unsigned char)map[i]);
+    }
+
+    switch (name[0]) {
+    case 'm':
+    case 'e':
+    case 't':
+        return (name[2] == 'l' && name[1] >= '1' && name[1] <= '9') || !strcmp(name, "training");
+    case 'b':
+        return name[1] == 'r' && strstr(name, "iefing") != NULL;
+    case 'c':
+        return strstr(name, "co_lobby") != NULL || (len > 5 && name[4] == '_' && strstr(name, "coop_") != NULL);
+    default:
+        return false;
+    }
+}
+
+/*
+====================
+CoopMpPlayerHit
+
+HZM coop [user 2026-09-13, bug-2574] PLAYER-VS-PLAYER DAMAGE IN MULTIPLAYER.
+
+The coop same-team filter in Sentient::ArmorDamage compares Sentient::m_Team, and it was widened from single
+player to every gametype so an officer's reinforcements cannot kill each other and coop teammates cannot
+friendly-fire. But every Player is TEAM_AMERICAN - the Sentient constructor sets it and no player tik runs the
+`german` event - so in multiplayer that filter also dropped every hit one player landed on another: no kills at
+all. Upstream exempted every non-single-player gametype (d5da32b8, sentient.cpp:1513); restoring that would put
+friendly fire back into coop, which runs as g_gametype 2.
+
+So the exemption is narrow. A hit counts only when ALL of these hold:
+  - not single player, and attacker and victim are two different Players (bots are Players);
+  - the coop framework is NOT loaded on this map. coop_mod/main.scr::main assigns level.coop_mainScriptLoaded
+    (0 on entry, game.true once up); on a map where it never ran the variable is absent or NIL. Tested by TYPE,
+    never by value: ScriptVariable::intValue throws on a non-numeric type, and this runs inside damage;
+  - and the map is not a coop map by NAME either (CoopMapNameIsCoop): a coop map whose script failed to compile
+    never sets the variable above, but it is still a coop map;
+  - then a telefrag always counts, as in stock; otherwise free-for-all, different teams, or g_teamdamage on. A
+    same-team hit only gets here at all when Player::ArmorDamage's own g_teamdamage gate let it through.
+An Actor on either end falls through to the m_Team rule exactly as before.
+====================
+*/
+static bool CoopMpPlayerHit(Sentient *victim, Sentient *attacker, int meansofdeath)
+{
+    ScriptVariable *pCoop;
+    Player         *pAtk;
+    Player         *pVic;
+
+    if (g_gametype->integer == GT_SINGLE_PLAYER || !victim || !attacker || attacker == victim) {
+        return false;
+    }
+    if (!attacker->IsSubclassOfPlayer() || !victim->IsSubclassOfPlayer()) {
+        return false;
+    }
+
+    pCoop = level.vars ? level.vars->GetVariable("coop_mainScriptLoaded") : NULL;
+    if (pCoop && pCoop->GetType() != VARIABLE_NONE) {
+        return false;
+    }
+    if (CoopMapNameIsCoop(level.mapname.c_str())) {
+        return false;
+    }
+
+    // stock lets a telefrag through whatever the teams; Player::ArmorDamage already exempts it from its team gate
+    if (meansofdeath == MOD_TELEFRAG) {
+        return true;
+    }
+
+    if (g_gametype->integer == GT_FFA) {
+        return true;
+    }
+
+    pAtk = static_cast<Player *>(attacker);
+    pVic = static_cast<Player *>(victim);
+    if (!pAtk->GetDM_Team() || !pVic->GetDM_Team()) {
+        return false;
+    }
+    return pAtk->GetDM_Team() != pVic->GetDM_Team() || g_teamdamage->integer != 0;
+}
+
 void Sentient::ArmorDamage(Event *ev)
 {
     Entity   *inflictor;
@@ -1794,10 +1897,12 @@ void Sentient::ArmorDamage(Event *ev)
 
     // COOP: same-team damage is filtered in ALL gametypes (was SP-only) so the officer's
     // reinforcements/bodyguards can't kill each other or the officer, and coop teammates don't friendly-fire.
+    // HZM coop [bug-2574] ...except a hit one player lands on another in multiplayer - see CoopMpPlayerHit.
     float fCoopPrevHealth = health; // HZM coop - headshot-kill confirm reads the alive->dead edge below
     if (!(flags & FL_GODMODE)
         && (!(attacker) || (attacker) == this
-            || !(attacker->IsSubclassOfSentient()) || (attacker->m_Team != m_Team))) {
+            || !(attacker->IsSubclassOfSentient()) || (attacker->m_Team != m_Team)
+            || CoopMpPlayerHit(this, attacker, meansofdeath))) {
         health -= damage;
         // HZM coop - gore tier 2: accumulate APPLIED damage only. Gore tiers key on this, never on health
         // fraction, because aihandler.scr fakes rank-and-file AI health at 5000 (real HP lives script-side).
