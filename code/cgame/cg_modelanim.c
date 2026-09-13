@@ -1926,6 +1926,138 @@ static void CoopFingerLife(refEntity_t *pModel)
 
 int g_iCoopSurfMask = 0;   // HZM coop surface probe: 2 bits per surface (exists, hidden)
 
+/*
+===============
+CoopFpBodyBuild
+
+HZM coop [user 2026-09-13, bug-2569] FULL-BODY FIRST PERSON - PROTOTYPE, off by default (cg_fpBody 0).
+
+Builds two render-local copies of the local player's WORLD model while it still is the world model (the caller is the
+first-person branch, before the _fps swap): pDraw with the head, hands and base-model helmet hidden and no shadow, and
+pShadow with every surface, drawn only into shadow and portal views. Returns qfalse when the body must not be drawn -
+anywhere the camera would sit inside it. Nothing here writes game, network or coop state.
+
+See the caller in CG_ModelAnim for the submit order, which is the one thing that can break the sight alignments.
+===============
+*/
+static qboolean CoopFpBodyBuild(centity_t *cent, const refEntity_t *pModel, refEntity_t *pDraw, refEntity_t *pShadow)
+{
+    static cvar_t *pOn = NULL, *pBack = NULL, *pHide = NULL, *pDebug = NULL;
+    static int     s_fpTag[NUM_BONE_CONTROLLERS];
+    static vec4_t  s_fpQuat[NUM_BONE_CONTROLLERS];
+    static void   *s_lastDebugTiki = NULL;
+    const entityState_t *s1 = &cent->currentState;
+    int            pmf, i, n;
+    vec3_t         vFwd;
+    float          fBack;
+    char           buf[512];
+    char          *p, *tok;
+
+    if (!pOn) {
+        pOn    = cgi.Cvar_Get("cg_fpBody", "0", CVAR_ARCHIVE);
+        pBack  = cgi.Cvar_Get("cg_fpBodyBack", "10", CVAR_ARCHIVE);
+        pHide  = cgi.Cvar_Get("cg_fpBodyHide", "head hand us_helmet us_helmet_inside bob_helmet_camo inside outside", CVAR_ARCHIVE);
+        pDebug = cgi.Cvar_Get("cg_fpBodyDebug", "0", CVAR_ARCHIVE);
+    }
+    if (!pOn->integer || !pModel->tiki || !cg.snap) {
+        return qfalse;
+    }
+
+    // OFF wherever the camera would sit inside the body. Predicted pm_flags, like the camera (bug-2049 lockstep).
+    pmf = cg.predicted_player_state.pm_flags;
+    if (cg.snap->ps.stats[STAT_HEALTH] <= 0 || (s1->eFlags & EF_DEAD)) { return qfalse; }
+    if (cg.snap->ps.stats[STAT_INZOOM]) { return qfalse; }
+    if (pmf & (PMF_TURRET | PMF_VIEW_PRONE | PMF_CAMERA_VIEW | PMF_COOP_COVER)) { return qfalse; }
+    if (s1->eFlags & EF_CLIMBWALL) { return qfalse; }
+
+    *pDraw   = *pModel;
+    *pShadow = *pModel;
+
+    // 1. OWN BONE CONTROLLERS. pModel's point at s1's, into which PmoveAdjustAngleSettings_Client has just written the
+    //    full view pitch on the spine - reused, the chest folds into the camera when you look down. -1 = no override,
+    //    so the body stands in the pose its own animation gives it. Static: the renderer re-poses from these at
+    //    render time (tr_model.cpp:1089-1091), after this function has returned.
+    for (i = 0; i < NUM_BONE_CONTROLLERS; i++) {
+        s_fpTag[i] = -1;
+        s_fpQuat[i][0] = 0.0f;
+        s_fpQuat[i][1] = 0.0f;
+        s_fpQuat[i][2] = 0.0f;
+        s_fpQuat[i][3] = 1.0f;
+    }
+    pDraw->bone_tag    = s_fpTag;
+    pDraw->bone_quat   = s_fpQuat;
+    pDraw->bone_count  = 0;
+    pShadow->bone_tag   = s_fpTag;
+    pShadow->bone_quat  = s_fpQuat;
+    pShadow->bone_count = 0;
+
+    // pull both back along the body's yaw so the collar sits behind the eye rather than in the near plane
+    fBack = pBack->value;
+    VectorCopy(pModel->axis[0], vFwd);
+    vFwd[2] = 0.0f;
+    if (VectorNormalize(vFwd) > 0.0f && fBack != 0.0f) {
+        VectorMA(pDraw->origin, -fBack, vFwd, pDraw->origin);
+        VectorMA(pDraw->oldorigin, -fBack, vFwd, pDraw->oldorigin);
+        VectorMA(pDraw->lightingOrigin, -fBack, vFwd, pDraw->lightingOrigin);
+        VectorCopy(pDraw->origin, pShadow->origin);
+        VectorCopy(pDraw->oldorigin, pShadow->oldorigin);
+        VectorCopy(pDraw->lightingOrigin, pShadow->lightingOrigin);
+    }
+
+    // 2. HIDE the head, hands and the base model's own helmet on the drawn copy only. Render-local surface bits,
+    //    the same mechanism as the garand hand below; the networked skin/glove bits already in the array are kept.
+    Q_strncpyz(buf, pHide->string, sizeof(buf));
+    p = buf;
+    while (*p) {
+        while (*p == ' ' || *p == ',' || *p == '\t') { p++; }
+        if (!*p) { break; }
+        tok = p;
+        while (*p && *p != ' ' && *p != ',' && *p != '\t') { p++; }
+        if (*p) { *p++ = 0; }
+        n = cgi.Surface_NameToNum(pDraw->tiki, tok);
+        if (n >= 0 && n < MAX_MODEL_SURFACES) {
+            pDraw->surfaces[n] |= MDL_SURFACE_NODRAW;
+        }
+    }
+
+    // 3. FLAGS. The drawn copy: a normal world-depth model with no shadow (its shadow would be headless). The shadow
+    //    copy: RF_THIRD_PERSON, which the renderer draws only into shadow and portal views - so it also restores the
+    //    local player's first-person shadow and mirror reflection.
+    pDraw->renderfx &= ~(RF_FIRST_PERSON | RF_THIRD_PERSON | RF_DEPTHHACK);
+    pDraw->renderfx |= RF_NOSHADOW;
+    pShadow->renderfx &= ~(RF_FIRST_PERSON | RF_DEPTHHACK | RF_NOSHADOW);
+    pShadow->renderfx |= RF_THIRD_PERSON;
+
+    cgi.ForceUpdatePose(pDraw);
+    cgi.ForceUpdatePose(pShadow);
+
+    // DEBUG, once per model: which torso/arm surfaces this model has (the shoulder question), and where the eyes bone
+    // sits against the camera's viewheight (how far back the body wants to be).
+    if (pDebug->integer && s_lastDebugTiki != (void *)pDraw->tiki) {
+        static const char *kProbe[] = {
+            "head", "hand", "sleeve", "shirt", "us_top", "us_top_c", "wehrmact_tunic", "wehrmact_tunic_c",
+            "gear", "armband", "pants", "ranger_pants", "wehrmact_pants", "us_helmet", "inside", "outside"
+        };
+        int tagEyes;
+        s_lastDebugTiki = (void *)pDraw->tiki;
+        cgi.Printf("^~^~^ FPBODY model=%s\n", cgi.TIKI_Name(pDraw->tiki));
+        for (i = 0; i < (int)(sizeof(kProbe) / sizeof(kProbe[0])); i++) {
+            n = cgi.Surface_NameToNum(pDraw->tiki, kProbe[i]);
+            if (n >= 0) {
+                cgi.Printf("^~^~^ FPBODY surface %-18s #%d %s\n", kProbe[i], n,
+                           (pDraw->surfaces[n] & MDL_SURFACE_NODRAW) ? "HIDDEN" : "drawn");
+            }
+        }
+        tagEyes = cgi.Tag_NumForName(pDraw->tiki, "eyes bone");
+        if (tagEyes >= 0) {
+            orientation_t oEyes = cgi.TIKI_Orientation(pDraw, tagEyes);
+            cgi.Printf("^~^~^ FPBODY eyes bone z=%.1f viewheight=%d back=%.1f\n", oEyes.origin[2],
+                       cg.predicted_player_state.viewheight, fBack);
+        }
+    }
+    return qtrue;
+}
+
 void CG_ModelAnim(centity_t *cent, qboolean bDoShaderTime)
 {
     entityState_t *s1;
@@ -1937,6 +2069,9 @@ void CG_ModelAnim(centity_t *cent, qboolean bDoShaderTime)
     int            iAnimFlags;
     qboolean       bThirdPerson = qfalse;
     qboolean       bCoopHideDraw = qfalse; // HZM coop - process commands/sounds but do not render [219]
+    qboolean       bCoopFpBody   = qfalse; // HZM coop [bug-2569] full-body first-person copies built this frame
+    static refEntity_t s_coopFpBodyDraw;   // static: refEntity_t is large and CG_ModelAnim is not re-entrant
+    static refEntity_t s_coopFpBodyShadow;
 
     s1 = &cent->currentState;
 
@@ -2841,6 +2976,11 @@ void CG_ModelAnim(centity_t *cent, qboolean bDoShaderTime)
                 CG_OffsetFirstPersonView(&model, qtrue);
             }
 
+            // HZM coop [user 2026-09-13, bug-2569] FULL-BODY FIRST PERSON (prototype, cg_fpBody). Built HERE, while
+            // `model` is still the world model with the server's animation and the networked surface bits - the lines
+            // below swap it to the arms-only _fps tiki and wipe those bits. Submitted after the rig; see there.
+            bCoopFpBody = CoopFpBodyBuild(cent, &model, &s_coopFpBodyDraw, &s_coopFpBodyShadow);
+
             if (!cg.pLastPlayerWorldModel || cg.pLastPlayerWorldModel != model.tiki) {
                 qhandle_t hModel;
                 char      fpsname[128];
@@ -3207,6 +3347,21 @@ void CG_ModelAnim(centity_t *cent, qboolean bDoShaderTime)
             }
         }
         cgi.R_AddRefEntityToScene(&model, s1->parent);
+
+        // HZM coop [bug-2569] THE BODY COPIES GO IN AFTER THE RIG, AND ONLY WITH IT. RE_GetRenderEntity returns the FIRST
+        // refEntity with this entity number (tr_scene.c:1038-1040) and CG_AttachEntity takes the weapon's tag pose from
+        // it (:992-1000). Submitted first, the gun, the magazines and the parked sidearm would all attach to the WORLD
+        // body and every row of s_adsGunTune would be wrong. Parent ENTITYNUM_NONE: neither copy is anyone's parent.
+        if (bCoopFpBody) {
+            static cvar_t *pFpShadow = NULL;
+            if (!pFpShadow) {
+                pFpShadow = cgi.Cvar_Get("cg_fpBodyShadow", "1", CVAR_ARCHIVE);
+            }
+            cgi.R_AddRefEntityToScene(&s_coopFpBodyDraw, ENTITYNUM_NONE);
+            if (pFpShadow->integer) {
+                cgi.R_AddRefEntityToScene(&s_coopFpBodyShadow, ENTITYNUM_NONE);
+            }
+        }
     }
 
     CG_UpdateEntityEmitters(s1->number, &model, cent);
