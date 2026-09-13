@@ -2375,6 +2375,949 @@ static void CG_UpdateHudFade(void)
     }
 }
 
+/*
+===============================================================================
+HZM coop - TOP COMPASS BAR (user design 2026-09-13, hzm-mohaa-coop-mod/_research/compass_bar_design.md)
+
+A heading strip across the top centre that REPLACES the round hud_compass ring while it is live:
+a fixed 150-degree arc, 5-degree ticks, a label every 15 degrees, 8 cardinal letters, a centre
+heading readout, the current objective (with its distance in metres) and same-team teammates.
+
+COOP-ONLY (v1). The bar is LIVE only when all three hold:
+  - the player pref coop_compassBar is on (CVAR_ARCHIVE, seeded in coop_defaults.cfg);
+  - a coop script set the session flag coop_isCoopSession (player.scr stufftexts it on setup and
+    re-pushes it from ::manage; it is reset to 0 on every CG_Init and CG_Shutdown). No MP file may
+    name it - docs/tools/check_mp_isolation.py clause 15;
+  - the exe registered coop_compassBarExe, i.e. it knows how to move the DM box. A new cgame on an
+    older exe therefore draws nothing rather than a bar under an unmoved kill feed.
+
+LIVE vs VISIBLE. coop_compassBarLive (flags 0) carries the band height in real pixels, or 0. It is
+written on change only and derives from the three conditions above plus the resolution - never
+from the per-frame gates - so the ring cannot flicker back during a scope or a cutscene. cl_ui.cpp
+hides the ring and moves the DM box down by exactly that many pixels; at 0 the layout is stock.
+CG_CompassBarVisible is the per-frame half. Turret and vehicle seats read STAT_INZOOM 80 and set
+PMF_CAMERA_VIEW, so both of those gates exempt PMF_TURRET or every vehicle would lose the bar.
+
+FADE. The bar follows the HUD fade on the same clock (s_hudFadeAlpha), squared like the stamina arc
+(bug-2555: a thin bright stroke outlives a dark panel at the same alpha), with a hard early-out, and
+the markers go with it (floor 0, user decision 2026-09-13). The only new wake is an edge: the
+current objective index changing (CG_CompassBarObjectiveChanged).
+
+ROWS. The mockup drew markers over the tick labels (the objective star on a number, teammate
+chevrons on S and W). Labels now own the top row outright; ticks hang from its bottom edge and the
+markers sit in the row below, bottom-aligned to the band and capped to that row's height, so a
+marker can cross a tick but never reach a label. Distance and name text live in the marker row too.
+The band stays at 0.040H, clear of the XP popup (virtual y21) and the ready-gate prompt (y20).
+
+There is no scissor, rotation or triangle primitive (cg_public.h): ticks, the band and every marker
+are *white stretch-pics (markers one quad per pixel row), all in real pixels from vidWidth/Height.
+coop_compassProbe 1 prints the deciding inputs every 0.5 s as "^~^~^ CBPROBE" lines.
+===============================================================================
+*/
+
+#define CB_ARC           150.0f // degrees across the bar - fixed, so ADS (fov) never rescales it
+#define CB_MARKER_FLOOR  0.0f   // marker alpha floor under the HUD fade (user decision: markers fade out too)
+#define CB_SENTINEL_L    1730   // Player::UpdateStats writes exactly this triple when there is no objective location
+#define CB_SENTINEL_R    1870
+#define CB_SENTINEL_C    1800
+#define CB_MATE_MAX_AGE  5000   // ms a radar-only teammate stays on the bar
+#define CB_MATE_FADE_AGE 1500   // ms before a radar-only teammate starts fading by packet age
+#define CB_NAME_DEG      4.0f   // a teammate's name shows only this close to the centre
+
+static cvar_t *s_cbOn      = NULL; // coop_compassBar         pref, ARCHIVE
+static cvar_t *s_cbScale   = NULL; // coop_compassBarScale    pref, ARCHIVE, clamped 0.75..1.0
+static cvar_t *s_cbOpacity = NULL; // coop_compassBarOpacity  pref, ARCHIVE, clamped 0.3..1.0
+static cvar_t *s_cbObj     = NULL; // coop_compassBarObj      pref, ARCHIVE (2 = all active is not in v1; drawn as 1)
+static cvar_t *s_cbMates   = NULL; // coop_compassBarMates    pref, ARCHIVE
+static cvar_t *s_cbLive    = NULL; // coop_compassBarLive     published band height px, flags 0
+static cvar_t *s_cbSession = NULL; // coop_isCoopSession      set by coop script, flags 0
+static cvar_t *s_cbExe     = NULL; // coop_compassBarExe      CVAR_ROM "1" from an exe that honours the band
+static cvar_t *s_cbProbe   = NULL; // coop_compassProbe       dev probe, flags 0
+
+enum { CB_DIAMOND, CB_CHEVRON, CB_CHEVRON_HOLLOW, CB_CARET_LEFT, CB_CARET_RIGHT };
+
+typedef struct {
+    float cx, half, ppd;          // centre x, half width, pixels per degree
+    float top, band;              // top margin and bottom edge (the published band height)
+    float labelH, labelCy;        // label row height and centre
+    float tickTop;                // ticks hang from here; the marker row lies below it
+    float numPx, cardPx, smallPx; // text heights: numbers + NE/SE/SW/NW, N/E/S/W, marker-row text
+    float edgeW, clampPx;         // edge fade width, current-objective pin distance from centre
+    int   objPx, matePx;          // marker sizes, capped to the marker row
+    int   tickW, minorH, majorH, cardH;
+} cbGeo_t;
+
+typedef struct {
+    char          txt[8];
+    fontheader_t *font;
+    float         x, px, alpha;
+    qboolean      north;
+} cbLabel_t;
+
+typedef struct {
+    int      clientNum;
+    float    x, alpha, absDeg;
+    qboolean hollow;
+} cbMate_t;
+
+static float CB_Abs(float v)
+{
+    return (v < 0.0f) ? -v : v;
+}
+
+static float CB_Round(float v)
+{
+    return (float)floor(v + 0.5f);
+}
+
+static float CG_CompassBarClamp(float v, float lo, float hi)
+{
+    if (!(v >= lo)) {
+        return lo; // also catches NaN from a garbage cvar
+    }
+    return (v > hi) ? hi : v;
+}
+
+static void CG_CompassBarCvars(void)
+{
+    if (s_cbOn) {
+        return;
+    }
+    s_cbOn      = cgi.Cvar_Get("coop_compassBar", "1", CVAR_ARCHIVE);
+    s_cbScale   = cgi.Cvar_Get("coop_compassBarScale", "1.0", CVAR_ARCHIVE);
+    s_cbOpacity = cgi.Cvar_Get("coop_compassBarOpacity", "0.9", CVAR_ARCHIVE);
+    s_cbObj     = cgi.Cvar_Get("coop_compassBarObj", "1", CVAR_ARCHIVE);
+    s_cbMates   = cgi.Cvar_Get("coop_compassBarMates", "1", CVAR_ARCHIVE);
+    // flags 0 on the three below: server-drivable or derived, so none of them may ever reach a config.
+    // Registered EAGERLY (from CG_Init) because a stuffed "set" of a cvar that does not exist yet lands
+    // user-created - the coop_cineHud / coop_voxCut first-frame trap (bug-2318).
+    s_cbLive    = cgi.Cvar_Get("coop_compassBarLive", "0", 0);
+    s_cbSession = cgi.Cvar_Get("coop_isCoopSession", "0", 0);
+    s_cbExe     = cgi.Cvar_Get("coop_compassBarExe", "", 0); // an old exe never registers it: "" reads 0
+    s_cbProbe   = cgi.Cvar_Get("coop_compassProbe", "0", 0);
+}
+
+static void CG_CompassBarReset(void)
+{
+    CG_CompassBarCvars();
+    cgi.Cvar_Set("coop_isCoopSession", "0");
+    cgi.Cvar_Set("coop_compassBarLive", "0");
+}
+
+void CG_CompassBarInit(void)
+{
+    CG_CompassBarReset();
+}
+
+void CG_CompassBarShutdown(void)
+{
+    CG_CompassBarReset();
+}
+
+// CS_CURRENT_OBJECTIVE changed value (cg_main.c). Wakes the HUD fade so the new marker is seen - only
+// while the bar is live, so MP and a coop player with the bar off keep today's fade exactly.
+void CG_CompassBarObjectiveChanged(void)
+{
+    CG_CompassBarCvars();
+    if (!s_cbLive->integer) {
+        return;
+    }
+    s_hudTouchTime = cg.time;
+    CG_HudFadeDebug("current objective changed (CS_CURRENT_OBJECTIVE)");
+}
+
+static int CG_CompassBarBandPx(void)
+{
+    float s = CG_CompassBarClamp(s_cbScale->value, 0.75f, 1.0f);
+
+    return (int)(0.040f * (float)cgs.glconfig.vidHeight * s + 0.5f);
+}
+
+// Written on change only (the ui_hudAlpha pattern). Compared against the cvar itself rather than a private
+// copy, so a stray console or server write to coop_compassBarLive is corrected on the next frame.
+static void CG_CompassBarPublishLive(void)
+{
+    int live = 0;
+
+    if (s_cbOn->integer && s_cbSession->integer && s_cbExe->integer && cgs.glconfig.vidHeight > 0) {
+        live = CG_CompassBarBandPx();
+    }
+    if (live != s_cbLive->integer) {
+        cgi.Cvar_Set("coop_compassBarLive", va("%i", live));
+    }
+}
+
+static qboolean CG_CompassBarVisible(void)
+{
+    const playerState_t *ps;
+    int                  pmf;
+
+    // FIRST and unconditional: the accessor consumes coop_cineHud and ages its deadline
+    if (CG_CoopCineHudActive()) {
+        return qfalse;
+    }
+    if (!cg.snap || !s_cbLive->integer || !cg_hud->integer) {
+        return qfalse;
+    }
+    ps  = &cg.snap->ps;
+    pmf = ps->pm_flags;
+    // lobby (drawhud 0), intermission, spectating (while following, ps is the other player's state)
+    if (pmf & (PMF_NO_HUD | PMF_INTERMISSION | PMF_SPECTATING)) {
+        return qfalse;
+    }
+    // the letterbox is painted BEFORE CG_Draw2D, so cgame 2D would otherwise sit on top of it
+    if (ps->stats[STAT_LETTERBOX] > 0) {
+        return qfalse;
+    }
+    // NOT gated on PMF_CAMERA_VIEW: it stays set through free-look rides such as the m1l1 truck bed (runtime
+    // 2026-09-13: camview=1 while the player turned 6 -> 40 degrees), where the stock HUD and round ring stay up.
+    // Hiding the bar there left the player with no compass at all. Real cutscenes hide the HUD through the
+    // cinematic hold, PMF_NO_HUD and the letterbox checks above.
+    // dead. While riding, STAT_HEALTH carries the VEHICLE's health, so a seat is never "dead" here
+    if (!(ps->stats[STAT_HEALTH] > 0 || (pmf & PMF_TURRET))) {
+        return qfalse;
+    }
+    // scoped rifle / binoculars use 15..30; every VehicleTurretGun user, tank drivers included, reads 80
+    if (ps->stats[STAT_INZOOM] > 0 && ps->stats[STAT_INZOOM] <= 30 && !(pmf & PMF_TURRET)) {
+        return qfalse;
+    }
+    return qtrue;
+}
+
+static void CG_CompassBarGeometry(cbGeo_t *g)
+{
+    float H = (float)cgs.glconfig.vidHeight;
+    float W = (float)cgs.glconfig.vidWidth;
+    float s = CG_CompassBarClamp(s_cbScale->value, 0.75f, 1.0f);
+    float bw, avail;
+
+    // width: 0.42W, capped at 0.75H so ultrawide does not get a 3000 px strip and the half-width stays
+    // clear of hud_timelimit/hud_score at top-right
+    bw         = CB_Round(((0.42f * W < 0.75f * H) ? 0.42f * W : 0.75f * H) * s);
+    g->cx      = (float)floor(W * 0.5f);
+    g->half    = bw * 0.5f;
+    g->ppd     = bw / CB_ARC;
+    g->band    = (float)CG_CompassBarBandPx(); // exactly the published value, so the DM box meets the band
+    g->top     = CB_Round(0.004f * H * s);
+    g->numPx   = 0.0160f * H * s;
+    g->cardPx  = 0.0185f * H * s;
+    g->smallPx = 0.0130f * H * s;
+    g->labelH  = CB_Round(g->cardPx);
+    g->labelCy = g->top + g->labelH * 0.5f;
+    g->tickTop = g->top + g->labelH + 1.0f;
+    g->edgeW   = 0.12f * g->half;
+    g->clampPx = g->half - 0.012f * H * s;
+
+    // the marker row: from the tick top to the band bottom, less one row for the dark rim, so the
+    // rim's top row still lies below the label row
+    avail     = g->band - 2.0f - g->tickTop;
+    g->objPx  = (int)CB_Round(0.016f * H * s);
+    g->matePx = (int)CB_Round(0.013f * H * s);
+    if ((float)g->objPx > avail) {
+        g->objPx = (int)avail;
+    }
+    if ((float)g->matePx > avail) {
+        g->matePx = (int)avail;
+    }
+
+    g->tickW  = (int)CB_Round(0.0019f * H);
+    g->minorH = (int)CB_Round(0.0045f * H * s);
+    g->majorH = (int)CB_Round(0.0070f * H * s);
+    g->cardH  = (int)CB_Round(0.0090f * H * s);
+    if (g->tickW < 1) {
+        g->tickW = 1;
+    }
+    if (g->minorH < 1) {
+        g->minorH = 1;
+    }
+}
+
+// smoothstep over the outer 12% of each half - there is no scissor, so the ends fade instead of clipping
+static float CG_CompassBarEdge(const cbGeo_t *g, float x)
+{
+    float t = (g->half - CB_Abs(x - g->cx)) / g->edgeW;
+
+    if (t <= 0.0f) {
+        return 0.0f;
+    }
+    if (t >= 1.0f) {
+        return 1.0f;
+    }
+    return t * t * (3.0f - 2.0f * t);
+}
+
+// One *white quad snapped to whole pixels. Adjacent quads that share a float edge round it identically,
+// so the stepped band has no gaps or doubled columns.
+static void CG_CompassBarQuad(qhandle_t hWhite, float x0, float y0, float x1, float y1)
+{
+    x0 = CB_Round(x0);
+    x1 = CB_Round(x1);
+    y0 = CB_Round(y0);
+    y1 = CB_Round(y1);
+    if (x1 <= x0) {
+        x1 = x0 + 1.0f;
+    }
+    if (y1 <= y0) {
+        return;
+    }
+    cgi.R_DrawStretchPic(x0, y0, x1 - x0, y1 - y0, 0.0f, 0.0f, 1.0f, 1.0f, hWhite);
+}
+
+// A marker as one quad per pixel row, cropped to the bar. grow widens every span and adds a row above
+// and below, which is how the dark rim is drawn under the fill.
+static void CG_CompassBarShape(qhandle_t hWhite, const cbGeo_t *g, int shape, float cx, float bottom, int size, float grow)
+{
+    float hw    = (float)size * 0.5f;
+    float thick = (shape == CB_CHEVRON_HOLLOW) ? (float)size * 0.16f : (float)size * 0.30f;
+    float lo    = g->cx - g->half;
+    float hi    = g->cx + g->half;
+    int   ig    = (int)grow;
+    int   r;
+
+    if (thick < ((shape == CB_CHEVRON_HOLLOW) ? 1.0f : 2.0f)) {
+        thick = (shape == CB_CHEVRON_HOLLOW) ? 1.0f : 2.0f;
+    }
+
+    for (r = -ig; r < size + ig; r++) {
+        float y  = bottom - (float)size + (float)r;
+        float rc = (float)r + 0.5f; // row centre; the rim rows reuse the nearest real row
+        float spans[4];
+        int   n = 0, k;
+
+        if (rc < 0.5f) {
+            rc = 0.5f;
+        } else if (rc > (float)size - 0.5f) {
+            rc = (float)size - 0.5f;
+        }
+
+        switch (shape) {
+        case CB_DIAMOND:
+            {
+                float w  = hw * (1.0f - CB_Abs(rc - hw) / hw);
+                spans[0] = cx - w - grow;
+                spans[1] = cx + w + grow;
+                n        = 1;
+            }
+            break;
+        case CB_CHEVRON:
+        case CB_CHEVRON_HOLLOW:
+            {
+                // a "v": the arms start at the edges on the top row and meet at the bottom
+                float o  = (hw - thick * 0.5f) * (1.0f - rc / (float)size);
+                float th = thick * 0.5f + grow;
+                if (o <= th) {
+                    spans[0] = cx - o - th;
+                    spans[1] = cx + o + th;
+                    n        = 1;
+                } else {
+                    spans[0] = cx - o - th;
+                    spans[1] = cx - o + th;
+                    spans[2] = cx + o - th;
+                    spans[3] = cx + o + th;
+                    n        = 2;
+                }
+            }
+            break;
+        case CB_CARET_LEFT:
+        case CB_CARET_RIGHT:
+            {
+                float w   = (float)size * 0.8f * (1.0f - CB_Abs(rc - hw) / hw);
+                float tip = (shape == CB_CARET_LEFT) ? cx - (float)size * 0.4f : cx + (float)size * 0.4f;
+                if (shape == CB_CARET_LEFT) {
+                    spans[0] = tip - grow;
+                    spans[1] = tip + w + grow;
+                } else {
+                    spans[0] = tip - w - grow;
+                    spans[1] = tip + grow;
+                }
+                n = 1;
+            }
+            break;
+        }
+
+        for (k = 0; k < n; k++) {
+            float x0 = spans[k * 2], x1 = spans[k * 2 + 1];
+            if (x0 < lo) {
+                x0 = lo;
+            }
+            if (x1 > hi) {
+                x1 = hi;
+            }
+            if (x1 > x0) {
+                CG_CompassBarQuad(hWhite, x0, y, x1, y + 1.0f);
+            }
+        }
+    }
+}
+
+static float CG_CompassBarTextWidth(fontheader_t *font, const char *txt, float px)
+{
+    if (!font || !font->sgl[0] || font->sgl[0]->height <= 0.0f) {
+        return 0.0f;
+    }
+    return (float)cgi.UI_FontStringWidth(font, txt, -1) * (px / font->sgl[0]->height);
+}
+
+// R_DrawString scales the glyphs AND the passed position by pvVirtualScreen (tr_font.cpp), so a uniform
+// {k,k} with the position divided by k puts a string of real pixel height px exactly where asked -
+// independent of the 640x480 virtual space and of cgs.uiHiResScale. align: -1 left, 0 centre, 1 right.
+static void CG_CompassBarText(fontheader_t *font, const char *txt, float x, float cy, float px, int align, const vec4_t col)
+{
+    vec2_t k;
+    vec4_t shadow;
+    float  w, y;
+
+    if (!font || !font->sgl[0] || font->sgl[0]->height <= 0.0f || col[3] <= 0.004f) {
+        return;
+    }
+    k[0] = k[1] = px / font->sgl[0]->height;
+    w           = (float)cgi.UI_FontStringWidth(font, txt, -1) * k[0];
+    if (align == 0) {
+        x -= w * 0.5f;
+    } else if (align > 0) {
+        x -= w;
+    }
+    x = CB_Round(x);
+    y = CB_Round(cy - px * 0.5f);
+
+    shadow[0] = shadow[1] = shadow[2] = 0.0f;
+    shadow[3]                         = col[3] * 0.85f;
+    cgi.R_SetColor(shadow);
+    cgi.R_DrawString(font, txt, (x + 1.0f) / k[0], (y + 1.0f) / k[1], -1, k);
+    cgi.R_SetColor(col);
+    cgi.R_DrawString(font, txt, x / k[0], y / k[1], -1, k);
+}
+
+// STAT_OBJECTIVECENTER is VIEW-relative, in tenths: AngleSubtract(v_angle, toYaw(objective - centroid)) + 180
+// (Player::UpdateStats). Undone against the SAME snapshot's viewangles, so it neither swims against the
+// predicted view nor depends on the seat. Returns the objective's world yaw.
+static qboolean CG_CompassBarObjectiveYaw(float *outYaw)
+{
+    const playerState_t *ps = &cg.snap->ps;
+    int                  l  = ps->stats[STAT_OBJECTIVELEFT];
+    int                  r  = ps->stats[STAT_OBJECTIVERIGHT];
+    int                  c  = ps->stats[STAT_OBJECTIVECENTER];
+
+    if (cg.ObjectivesCurrentIndex < 0 || cg.ObjectivesCurrentIndex >= MAX_OBJECTIVES) {
+        return qfalse; // current_objectives 0 sends -1
+    }
+    if (l <= 0 || r <= 0 || c <= 0) {
+        return qfalse; // not written by the server (clamped 1..3599 once it is)
+    }
+    // no location. A real location yields this exact triple only inside a <0.1 degree cone dead ahead
+    // within ~227 units, so hiding on an exact match costs nothing
+    if (l == CB_SENTINEL_L && r == CB_SENTINEL_R && c == CB_SENTINEL_C) {
+        return qfalse;
+    }
+    *outYaw = AngleNormalize360(ps->viewangles[YAW] - ((float)c * 0.1f - 180.0f));
+    return qtrue;
+}
+
+// LEFT/RIGHT sit (60 - atan(300 / dist)) degrees either side of CENTER, clamped to 7 when near, so the
+// distance reads back. Resolution coarsens with range, which is why it is shown as "~N m".
+static float CG_CompassBarDecodeDistance(qboolean *outHere)
+{
+    const playerState_t *ps  = &cg.snap->ps;
+    int                  d   = (ps->stats[STAT_OBJECTIVERIGHT] - ps->stats[STAT_OBJECTIVELEFT] + 3600) % 3600;
+    float                off = (float)d * 0.05f;
+    float                a;
+
+    *outHere = qfalse;
+    if (off <= 7.05f) {
+        *outHere = qtrue; // the spread is at its near clamp: "here", no number
+        return 0.0f;
+    }
+    a = 60.0f - off;
+    if (a < 0.05f) {
+        a = 0.05f;
+    }
+    return 300.0f / (float)tan(DEG2RAD(a));
+}
+
+// Exact distance from the configstring loc, used only when it is provably the point the stat follows: the
+// current index, not TOW/Liberation (per-team locations behind one shared configstring), and within 2
+// degrees of the stat bearing. set_objective_pos maps leave loc stale, and the bearing test catches that.
+static qboolean CG_CompassBarLocDistance(float objYaw, float *outDist, float *outDyaw)
+{
+    const cobjective_t *obj;
+    vec3_t              delta;
+    float               locYaw;
+
+    if (cg.ObjectivesCurrentIndex < 0 || cg.ObjectivesCurrentIndex >= MAX_OBJECTIVES) {
+        return qfalse;
+    }
+    obj = &cg.Objectives[cg.ObjectivesCurrentIndex];
+    if (!obj->hasLoc || cgs.gametype >= GT_TOW) {
+        return qfalse;
+    }
+    VectorSubtract(obj->loc, cg.snap->ps.origin, delta);
+    locYaw   = (float)(atan2(delta[1], delta[0]) * (180.0 / M_PI));
+    *outDyaw = AngleSubtract(locYaw, objYaw);
+    *outDist = VectorLength(delta);
+    return (*outDyaw >= -2.0f && *outDyaw <= 2.0f) ? qtrue : qfalse;
+}
+
+// 1 map unit = 1 inch
+static void CG_CompassBarDistanceText(char *buf, int size, float units, qboolean exact)
+{
+    int m = (int)(units * 0.0254f + 0.5f);
+
+    if (!exact && m >= 100) {
+        m = ((m + 5) / 10) * 10;
+    }
+    Com_sprintf(buf, size, exact ? "%i m" : "~%i m", m);
+}
+
+static void CG_CompassBarAddMate(
+    cbMate_t *list, int *count, const cbGeo_t *g, float camYaw, int clientNum, const float *me, float wx, float wy,
+    float alphaMul, qboolean hollow
+)
+{
+    float     yaw, deg, x;
+    cbMate_t *m;
+
+    if (*count >= MAX_CLIENTS || (wx == me[0] && wy == me[1])) {
+        return;
+    }
+    yaw = (float)(atan2(wy - me[1], wx - me[0]) * (180.0 / M_PI));
+    deg = AngleSubtract(yaw, camYaw); // engine yaw runs counter-clockwise: + is to the LEFT
+    x   = g->cx - deg * g->ppd;
+    if (CB_Abs(x - g->cx) > g->half) {
+        return; // outside the arc: teammates are hidden, never pinned
+    }
+    m            = &list[(*count)++];
+    m->clientNum = clientNum;
+    m->x         = x;
+    m->alpha     = alphaMul * CG_CompassBarEdge(g, x);
+    m->absDeg    = CB_Abs(deg);
+    m->hollow    = hollow;
+}
+
+// coop_compassProbe 1 - the values design section 7.2 step 2 needs, printed OUTSIDE every gate (TRAPS T14)
+static void CG_CompassBarProbe(qboolean visible)
+{
+    static int           nextPrint = 0;
+    const playerState_t *ps;
+    char                 ages[320];
+    float                camYaw, north, objYaw = 0.0f, decoded, locDist = -1.0f, locDyaw = 0.0f;
+    qboolean             haveObj, here = qfalse, locOk = qfalse;
+    int                  i, len = 0;
+
+    if (!cg.snap) {
+        return;
+    }
+    // cg.time runs backwards across a map load: a deadline more than one period ahead is stale
+    if (cg.time < nextPrint && cg.time >= nextPrint - 1000) {
+        return;
+    }
+    nextPrint = cg.time + 500;
+
+    ps      = &cg.snap->ps;
+    camYaw  = cg.refdefViewAngles[YAW];
+    north   = AngleNormalize360((float)ps->stats[STAT_COMPASSNORTH] * (360.0f / 65536.0f));
+    haveObj = CG_CompassBarObjectiveYaw(&objYaw);
+    decoded = CG_CompassBarDecodeDistance(&here);
+    if (haveObj) {
+        locOk = CG_CompassBarLocDistance(objYaw, &locDist, &locDyaw);
+    }
+
+    cgi.Printf(
+        "^~^~^ CBPROBE t=%d live=%d vis=%d pref=%d sess=%d exe=%d gt=%d fade=%.2f vid=%dx%d\n",
+        cg.time,
+        s_cbLive->integer,
+        (int)visible,
+        s_cbOn->integer,
+        s_cbSession->integer,
+        s_cbExe->integer,
+        (int)cgs.gametype,
+        s_hudFadeAlpha,
+        cgs.glconfig.vidWidth,
+        cgs.glconfig.vidHeight
+    );
+    cgi.Printf(
+        "^~^~^ CBPROBE yaw cam=%.1f ps=%.1f camang=%.1f north=%.1f heading=%.1f\n",
+        camYaw,
+        ps->viewangles[YAW],
+        cg.camera_angles[YAW],
+        north,
+        AngleNormalize360(north - camYaw)
+    );
+    cgi.Printf(
+        "^~^~^ CBPROBE obj idx=%d L=%d R=%d C=%d have=%d objyaw=%.1f bearing=%.1f decoded=%.0fu here=%d loc=%.0fu dyaw=%.1f exact=%d\n",
+        cg.ObjectivesCurrentIndex,
+        ps->stats[STAT_OBJECTIVELEFT],
+        ps->stats[STAT_OBJECTIVERIGHT],
+        ps->stats[STAT_OBJECTIVECENTER],
+        (int)haveObj,
+        objYaw,
+        haveObj ? AngleNormalize360(north - objYaw) : -1.0f,
+        decoded,
+        (int)here,
+        locDist,
+        locDyaw,
+        (int)locOk
+    );
+    cgi.Printf(
+        "^~^~^ CBPROBE state inzoom=%d health=%d vhealth=%d pmf=0x%x turret=%d camview=%d spec=%d nohud=%d letterbox=%d team=%d\n",
+        ps->stats[STAT_INZOOM],
+        ps->stats[STAT_HEALTH],
+        ps->stats[STAT_VEHICLE_HEALTH],
+        ps->pm_flags,
+        (ps->pm_flags & PMF_TURRET) ? 1 : 0,
+        (ps->pm_flags & PMF_CAMERA_VIEW) ? 1 : 0,
+        (ps->pm_flags & PMF_SPECTATING) ? 1 : 0,
+        (ps->pm_flags & PMF_NO_HUD) ? 1 : 0,
+        ps->stats[STAT_LETTERBOX],
+        (ps->clientNum >= 0 && ps->clientNum < MAX_CLIENTS) ? cg.clientinfo[ps->clientNum].team : -1
+    );
+
+    // radar capture: client:ageMs, "c" = clamped to the rim, "s" = also in this snapshot
+    ages[0] = 0;
+    for (i = 0; i < MAX_CLIENTS && len < (int)sizeof(ages) - 24; i++) {
+        const compassMate_t *cm = &cg.compassMates[i];
+        if (!cm->time) {
+            continue;
+        }
+        len += (int)Com_sprintf(
+            ages + len,
+            sizeof(ages) - (size_t)len,
+            " %d:%d%s%s",
+            i,
+            cg.time - cm->time,
+            cm->clamped ? "c" : "",
+            cg_entities[i].currentValid ? "s" : ""
+        );
+    }
+    cgi.Printf(
+        "^~^~^ CBPROBE radar range=%s mates%s\n",
+        cgi.Cvar_Get("com_radar_range", "1024", 0)->string,
+        len ? ages : " none"
+    );
+}
+
+static void CG_DrawCompassBar(void)
+{
+    static qhandle_t         hWhite     = 0;
+    static const char *const cardinal[] = {"N", "NE", "E", "SE", "S", "SW", "W", "NW"};
+    static const vec3_t      cKhaki     = {0.93f, 0.90f, 0.80f};
+    static const vec3_t      cRed       = {0.90f, 0.30f, 0.18f};
+    static const vec3_t      cGold      = {1.00f, 0.82f, 0.25f};
+    static const vec3_t      cMate      = {0.50f, 0.85f, 0.50f};
+    cbGeo_t                  g;
+    cbLabel_t                labels[16];
+    cbMate_t                 mates[MAX_CLIENTS];
+    qboolean                 inSnap[MAX_CLIENTS];
+    vec4_t                   col;
+    char                     buf[32], distTxt[32], nameTxt[32];
+    int                      numLabels = 0, numMates = 0, labelStep, first, b, i, j, bestMate = -1, distAlign = -1;
+    float                    H, s, camYaw, north, heading, opacity, fA2, tickA, markerA, plateHalf, gap;
+    float                    objYaw = 0.0f, objX = 0.0f, objL = 0.0f, objR = 0.0f, distX = 0.0f;
+    qboolean                 visible, objOn = qfalse, objClamped = qfalse;
+
+    CG_CompassBarCvars();
+    CG_CompassBarPublishLive();
+    visible = CG_CompassBarVisible();
+    if (s_cbProbe->integer) {
+        CG_CompassBarProbe(visible);
+    }
+    if (!visible) {
+        return;
+    }
+
+    // same clock as every other faded element, squared (bug-2555), hard early-out: nothing lingers
+    opacity = CG_CompassBarClamp(s_cbOpacity->value, 0.3f, 1.0f);
+    fA2     = s_hudFadeAlpha * s_hudFadeAlpha;
+    tickA   = opacity * fA2;
+    markerA = opacity * ((fA2 > CB_MARKER_FLOOR) ? fA2 : CB_MARKER_FLOOR);
+    if (tickA <= 0.02f && markerA <= 0.02f) {
+        return;
+    }
+
+    if (!hWhite) {
+        hWhite = cgi.R_RegisterShaderNoMip("*white");
+    }
+    CG_CompassBarGeometry(&g);
+    if (g.half < 8.0f) {
+        return;
+    }
+    H   = (float)cgs.glconfig.vidHeight;
+    s   = CG_CompassBarClamp(s_cbScale->value, 0.75f, 1.0f);
+    gap = CB_Round(0.003f * H * s) + 1.0f;
+
+    // refdefViewAngles is the final rendered camera (third person, free-cam, every seat). No smoothing:
+    // the stock ring's spring would make a numeric readout lag and overshoot.
+    camYaw  = cg.refdefViewAngles[YAW];
+    north   = AngleNormalize360((float)cg.snap->ps.stats[STAT_COMPASSNORTH] * (360.0f / 65536.0f)); // a short on the wire
+    heading = AngleNormalize360(north - camYaw); // compass bearing, clockwise
+
+    //
+    // band: black, with a stepped alpha ramp over the edge fade at both ends
+    //
+    col[0] = col[1] = col[2] = 0.0f;
+    col[3]                   = 0.35f * opacity * fA2;
+    if (col[3] > 0.004f) {
+        float x0    = g.cx - g.half;
+        float x1    = g.cx + g.half;
+        float stepW = g.edgeW / 8.0f;
+
+        cgi.R_SetColor(col);
+        CG_CompassBarQuad(hWhite, x0 + stepW * 8.0f, g.top, x1 - stepW * 8.0f, g.band);
+        for (i = 0; i < 8; i++) {
+            float t = ((float)i + 0.5f) / 8.0f;
+            col[3]  = 0.35f * opacity * fA2 * t * t * (3.0f - 2.0f * t);
+            cgi.R_SetColor(col);
+            CG_CompassBarQuad(hWhite, x0 + stepW * (float)i, g.top, x0 + stepW * (float)(i + 1), g.band);
+            CG_CompassBarQuad(hWhite, x1 - stepW * (float)(i + 1), g.top, x1 - stepW * (float)i, g.band);
+        }
+    }
+
+    //
+    // ticks (hanging from the label row) and the labels to draw later
+    //
+    labelStep = (15.0f * g.ppd >= 3.2f * g.numPx) ? 15 : 30; // 30 only where 15 would crowd (small 4:3 modes)
+    plateHalf = 1.6f * g.numPx;
+    first     = (int)floor((heading - CB_ARC * 0.5f) / 5.0f) * 5;
+    for (b = first; (float)b <= heading + CB_ARC * 0.5f; b += 5) {
+        int        bb = ((b % 360) + 360) % 360;
+        float      dx = AngleSubtract((float)bb, heading) * g.ppd;
+        float      x, ea, w;
+        int        h;
+        cbLabel_t *lab;
+
+        if (CB_Abs(dx) > g.half) {
+            continue;
+        }
+        x  = g.cx + dx;
+        ea = CG_CompassBarEdge(&g, x);
+        if (tickA * ea <= 0.004f) {
+            continue;
+        }
+
+        VectorCopy((bb == 0) ? cRed : cKhaki, col);
+        col[3] = tickA * ea;
+        cgi.R_SetColor(col);
+        h = (bb % 45 == 0) ? g.cardH : ((bb % 15 == 0) ? g.majorH : g.minorH);
+        CG_CompassBarQuad(hWhite, x - (float)g.tickW * 0.5f, g.tickTop, x + (float)g.tickW * 0.5f, g.tickTop + (float)h);
+
+        if (numLabels >= (int)(sizeof(labels) / sizeof(labels[0]))) {
+            continue;
+        }
+        lab = &labels[numLabels];
+        if (bb % 45 == 0) {
+            Q_strncpyz(lab->txt, cardinal[bb / 45], sizeof(lab->txt));
+            lab->font = (bb % 90 == 0) ? cgs.media.attackerFont : cgs.media.hudDrawFont;
+            lab->px   = (bb % 90 == 0) ? g.cardPx : g.numPx;
+        } else if (bb % labelStep == 0) {
+            Com_sprintf(lab->txt, sizeof(lab->txt), "%i", bb);
+            lab->font = cgs.media.hudDrawFont;
+            lab->px   = g.numPx;
+        } else {
+            continue;
+        }
+        w = CG_CompassBarTextWidth(lab->font, lab->txt, lab->px);
+        if (x + w * 0.5f > g.cx - plateHalf - 3.0f && x - w * 0.5f < g.cx + plateHalf + 3.0f) {
+            continue; // under the heading plate
+        }
+        lab->x     = x;
+        lab->alpha = col[3];
+        lab->north = (bb == 0) ? qtrue : qfalse;
+        numLabels++;
+    }
+
+    // exact-centre accent, in the tick row
+    VectorCopy(cRed, col);
+    col[3] = tickA;
+    cgi.R_SetColor(col);
+    CG_CompassBarQuad(hWhite, g.cx - 1.0f, g.tickTop, g.cx + 1.0f, g.tickTop + CB_Round(0.012f * H * s));
+
+    // heading plate, in the label row
+    col[0] = col[1] = col[2] = 0.0f;
+    col[3]                   = 0.55f * opacity * fA2;
+    cgi.R_SetColor(col);
+    CG_CompassBarQuad(hWhite, g.cx - plateHalf, g.top, g.cx + plateHalf, g.top + g.labelH);
+    VectorCopy(cKhaki, col);
+    col[3] = 0.45f * tickA;
+    cgi.R_SetColor(col);
+    CG_CompassBarQuad(hWhite, g.cx - plateHalf, g.top, g.cx + plateHalf, g.top + 1.0f);
+    CG_CompassBarQuad(hWhite, g.cx - plateHalf, g.top + g.labelH - 1.0f, g.cx + plateHalf, g.top + g.labelH);
+    CG_CompassBarQuad(hWhite, g.cx - plateHalf, g.top, g.cx - plateHalf + 1.0f, g.top + g.labelH);
+    CG_CompassBarQuad(hWhite, g.cx + plateHalf - 1.0f, g.top, g.cx + plateHalf, g.top + g.labelH);
+
+    //
+    // current objective: pinned to the nearer end (as a caret) when it is outside the arc
+    //
+    distTxt[0] = 0;
+    if (s_cbObj->integer && g.objPx >= 3 && markerA > 0.02f && CG_CompassBarObjectiveYaw(&objYaw)) {
+        float    half = (float)g.objPx * 0.5f;
+        float    dx   = -AngleSubtract(objYaw, camYaw) * g.ppd;
+        float    dist, locDist = 0.0f, locDyaw = 0.0f;
+        qboolean exact, here;
+
+        objOn = qtrue;
+        if (CB_Abs(dx) > g.clampPx) {
+            objClamped = qtrue;
+            dx         = (dx < 0.0f) ? -g.clampPx : g.clampPx;
+        }
+        objX = g.cx + dx;
+        objL = objX - half;
+        objR = objX + half;
+
+        dist  = CG_CompassBarDecodeDistance(&here);
+        exact = CG_CompassBarLocDistance(objYaw, &locDist, &locDyaw);
+        if (exact) {
+            dist = locDist;
+        }
+        if (exact || !here) {
+            CG_CompassBarDistanceText(distTxt, sizeof(distTxt), dist, exact);
+        }
+        if (distTxt[0]) {
+            float tw = CG_CompassBarTextWidth(cgs.media.hudDrawFont, distTxt, g.smallPx);
+            // beside the marker in the marker row; on the inner side when pinned right or out of room
+            if ((objClamped && dx > 0.0f) || (!objClamped && objR + gap + tw > g.cx + g.half)) {
+                distAlign = 1;
+                distX     = objL - gap;
+                objL      = distX - tw;
+            } else {
+                distAlign = -1;
+                distX     = objR + gap;
+                objR      = distX + tw;
+            }
+        }
+    }
+
+    //
+    // teammates, same team only: exact from the snapshot, else from the raw radar capture (cg_radar.cpp)
+    //
+    if (s_cbMates->integer && g.matePx >= 3 && markerA > 0.02f && cgs.gametype >= GT_TEAM
+        && cg.snap->ps.clientNum >= 0 && cg.snap->ps.clientNum < MAX_CLIENTS) {
+        int          local  = cg.snap->ps.clientNum;
+        int          myTeam = cg.clientinfo[local].team;
+        const float *me     = cg.snap->ps.origin;
+
+        if (myTeam >= TEAM_ALLIES) {
+            memset(inSnap, 0, sizeof(inSnap));
+            for (i = 0; i < cg.snap->numEntities; i++) {
+                const entityState_t *es = &cg.snap->entities[i];
+                int                  n  = es->number;
+
+                if (n < 0 || n >= MAX_CLIENTS || n == local || es->eType != ET_PLAYER) {
+                    continue;
+                }
+                inSnap[n] = qtrue;
+                if ((es->eFlags & EF_DEAD) || cg.clientinfo[n].team != myTeam) {
+                    continue;
+                }
+                CG_CompassBarAddMate(
+                    mates, &numMates, &g, camYaw, n, me, cg_entities[n].lerpOrigin[0], cg_entities[n].lerpOrigin[1],
+                    1.0f, qfalse
+                );
+            }
+            for (i = 0; i < MAX_CLIENTS; i++) {
+                const compassMate_t *cm  = &cg.compassMates[i];
+                int                  age = cg.time - cm->time;
+                float                ageA;
+
+                if (i == local || inSnap[i] || !cm->time || age < 0 || age >= CB_MATE_MAX_AGE) {
+                    continue;
+                }
+                if (cg.clientinfo[i].team != myTeam || !cg.clientinfo[i].name[0]) {
+                    continue;
+                }
+                ageA = (age <= CB_MATE_FADE_AGE)
+                         ? 1.0f
+                         : 1.0f - (float)(age - CB_MATE_FADE_AGE) / (float)(CB_MATE_MAX_AGE - CB_MATE_FADE_AGE);
+                CG_CompassBarAddMate(mates, &numMates, &g, camYaw, i, me, cm->origin[0], cm->origin[1], 0.6f * ageA, cm->clamped);
+            }
+        }
+    }
+
+    // farthest from centre first, so the one nearest the centre is drawn on top
+    for (i = 1; i < numMates; i++) {
+        cbMate_t m = mates[i];
+        for (j = i - 1; j >= 0 && mates[j].absDeg < m.absDeg; j--) {
+            mates[j + 1] = mates[j];
+        }
+        mates[j + 1] = m;
+    }
+    for (i = 0; i < numMates; i++) {
+        int shape = mates[i].hollow ? CB_CHEVRON_HOLLOW : CB_CHEVRON;
+        col[0] = col[1] = col[2] = 0.0f;
+        col[3]                   = markerA * mates[i].alpha * 0.85f;
+        cgi.R_SetColor(col);
+        CG_CompassBarShape(hWhite, &g, shape, mates[i].x, g.band - 1.0f, g.matePx, 1.0f);
+        VectorCopy(cMate, col);
+        col[3] = markerA * mates[i].alpha;
+        cgi.R_SetColor(col);
+        CG_CompassBarShape(hWhite, &g, shape, mates[i].x, g.band - 1.0f, g.matePx, 0.0f);
+        if (mates[i].absDeg <= CB_NAME_DEG && (bestMate < 0 || mates[i].absDeg < mates[bestMate].absDeg)) {
+            bestMate = i;
+        }
+    }
+
+    // the current objective is drawn over every teammate
+    if (objOn) {
+        float a     = markerA * (objClamped ? 0.8f : 1.0f);
+        int   shape = objClamped ? ((objX < g.cx) ? CB_CARET_LEFT : CB_CARET_RIGHT) : CB_DIAMOND;
+
+        col[0] = col[1] = col[2] = 0.0f;
+        col[3]                   = a * 0.85f;
+        cgi.R_SetColor(col);
+        CG_CompassBarShape(hWhite, &g, shape, objX, g.band - 1.0f, g.objPx, 1.0f);
+        VectorCopy(cGold, col);
+        col[3] = a;
+        cgi.R_SetColor(col);
+        CG_CompassBarShape(hWhite, &g, shape, objX, g.band - 1.0f, g.objPx, 0.0f);
+    }
+
+    //
+    // text last (every R_DrawString flushes; at most ~28 calls a frame)
+    //
+    for (i = 0; i < numLabels; i++) {
+        VectorCopy(labels[i].north ? cRed : cKhaki, col);
+        col[3] = labels[i].alpha;
+        CG_CompassBarText(labels[i].font, labels[i].txt, labels[i].x, g.labelCy, labels[i].px, 0, col);
+    }
+
+    Com_sprintf(buf, sizeof(buf), "%03i", ((int)(heading + 0.5f)) % 360);
+    col[0] = col[1] = col[2] = 1.0f;
+    col[3]                   = tickA;
+    CG_CompassBarText(cgs.media.hudDrawFont, buf, g.cx, g.labelCy, g.numPx, 0, col);
+
+    if (objOn && distTxt[0]) {
+        VectorCopy(cGold, col);
+        col[3] = markerA * (objClamped ? 0.8f : 1.0f);
+        CG_CompassBarText(
+            cgs.media.hudDrawFont, distTxt, distX, g.band - 1.0f - (float)g.objPx * 0.5f, g.smallPx, distAlign, col
+        );
+    }
+
+    // one name, for the teammate nearest the centre, and only where it does not run into the objective
+    if (bestMate >= 0) {
+        const cbMate_t *m  = &mates[bestMate];
+        float           tw, x0, x1, nx;
+        int             align = -1;
+
+        Q_strncpyz(nameTxt, cg.clientinfo[m->clientNum].name, sizeof(nameTxt));
+        tw = CG_CompassBarTextWidth(cgs.media.hudDrawFont, nameTxt, g.smallPx);
+        nx = m->x + (float)g.matePx * 0.5f + gap;
+        if (nx + tw > g.cx + g.half) {
+            align = 1;
+            nx    = m->x - (float)g.matePx * 0.5f - gap;
+        }
+        x0 = (align < 0) ? nx : nx - tw;
+        x1 = x0 + tw;
+        if (!objOn || x1 < objL - 3.0f || x0 > objR + 3.0f) {
+            VectorCopy(cMate, col);
+            col[3] = markerA * m->alpha;
+            CG_CompassBarText(
+                cgs.media.hudDrawFont, nameTxt, nx, g.band - 1.0f - (float)g.matePx * 0.5f, g.smallPx, align, col
+            );
+        }
+    }
+
+    cgi.R_SetColor(NULL);
+}
+
 // HZM gl2 re-port (bug-gl2-dbnofx / bug-gl2-suppressfx): renderergl2 has no HZM post-FX
 // module, so the low-health desaturate/red-vignette and the suppression tunnel-vignette
 // (gl1 post passes, renderergl1/tr_postprocess_gl1.c) never appear under gl2. Approximate
@@ -2842,6 +3785,9 @@ void CG_Draw2D(void)
     CG_DrawZoomOverlay();
     CG_DrawAdsVignette();
     CG_DrawLagometer();
+    // HZM coop [user 2026-09-13] top compass bar: over the ADS vignette, UNDER script huddraw, so full-screen
+    // script dims (Service Record panel, e3l4 curtain) still cover it
+    CG_DrawCompassBar();
     CG_HudDrawElements();
     CG_DrawObjectives();
     CG_DrawIcons();

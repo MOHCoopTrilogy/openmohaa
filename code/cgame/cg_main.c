@@ -509,6 +509,12 @@ void CG_ProcessConfigString(int num, qboolean modelOnly)
             }
             return;
         case CS_CURRENT_OBJECTIVE:
+            // HZM coop [user 2026-09-13] top compass bar: a NEW current objective moves the bar's marker, so
+            // it wakes the HUD fade - only while the bar is live, see CG_CompassBarObjectiveChanged. A re-push
+            // of the same index is not activity.
+            if (atoi(str) != cg.ObjectivesCurrentIndex) {
+                CG_CompassBarObjectiveChanged();
+            }
             cg.ObjectivesCurrentIndex = atoi(str);
             return;
         }
@@ -524,6 +530,17 @@ void CG_ProcessConfigString(int num, qboolean modelOnly)
             }
             objective->flags = newFlags;
             Q_strncpyz(objective->text, newText, sizeof(objective->text));
+            // HZM coop [user 2026-09-13] top compass bar: keep the objective's "loc". It is STALE on maps that
+            // steer the compass with set_objective_pos (that writes only level.m_vObjectiveLocation,
+            // scriptthread.cpp), so the bar trusts it only for an exact distance, and only while its bearing
+            // agrees with the live STAT_OBJECTIVECENTER. Read after the text is copied, so the static buffer
+            // Info_ValueForKey hands back cannot matter.
+            VectorClear(objective->loc);
+            objective->hasLoc = qfalse;
+            if (sscanf(Info_ValueForKey(str, "loc"), "%f %f %f", &objective->loc[0], &objective->loc[1], &objective->loc[2]) == 3
+                && (objective->loc[0] || objective->loc[1] || objective->loc[2])) {
+                objective->hasLoc = qtrue;
+            }
         }
 
         switch (num) {
@@ -863,6 +880,7 @@ void CG_Init(clientGameImport_t *imported, int serverMessageNum, int serverComma
     }
 
     CG_RegisterCvars();
+    CG_CompassBarInit(); // HZM coop [user 2026-09-13] top compass bar: prefs registered, session flag + band reset to 0
 
     L_InitEvents();
 
@@ -919,6 +937,10 @@ void CG_Shutdown(void)
     // HZM coop - free cam: release the mouse capture so the client input layer can never be left
     // orbiting (viewangles frozen) across a level change / cgame reload
     cgi.Cvar_Set("cg_freecamCapture", "0");
+
+    // HZM coop [user 2026-09-13] top compass bar: the coop session flag and the published band never outlive
+    // the level, so whatever loads next - an MP map included - starts with the stock ring and DM box
+    CG_CompassBarShutdown();
 
     // some mods may need to do cleanup work here,
     // like closing files or archiving session data

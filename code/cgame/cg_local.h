@@ -174,7 +174,18 @@ extern "C" {
     typedef struct cobjective_s {
         char text[MAX_STRING_CHARS];
         int  flags;
+        vec3_t   loc;    // HZM coop - top compass bar: configstring "loc" (STALE on set_objective_pos maps)
+        qboolean hasLoc; // HZM coop - top compass bar: loc parsed and non-zero
     } cobjective_t;
+
+    // HZM coop [user 2026-09-13] top compass bar: a raw copy of every radar packet, taken in
+    // CG_ReadNonPVSClient BEFORE the stock validity test that drops teammates whose last-seen state was not solid
+    typedef struct {
+        int      time;      // cg.time of the newest packet, 0 = never
+        float    origin[2]; // world XY (CL_ReadNonPVSClient already added the local origin)
+        float    yaw;
+        qboolean clamped;   // the delta sat on the com_radar_range rim: direction only, no distance
+    } compassMate_t;
 
 #define MAX_RAIN_SHADERS 16
 
@@ -350,6 +361,7 @@ extern "C" {
 		clientInfo_t clientinfo[MAX_CLIENTS];
 		radarClient_t radars[MAX_CLIENTS];
 		qhandle_t radarShaders[2];
+		compassMate_t compassMates[MAX_CLIENTS]; // HZM coop - top compass bar: raw radar capture (cg_radar.cpp)
     } cg_t;
 
     typedef struct {
@@ -706,6 +718,9 @@ const adsGunTune_t *CG_FindAdsTune(const char *wpn);
     void CG_InitializeObjectives();
     void CG_DrawObjectives();
     void CG_Draw2D(void);
+    void CG_CompassBarInit(void);             // HZM coop - top compass bar: register prefs, zero the session flag + band
+    void CG_CompassBarShutdown(void);         // HZM coop - top compass bar: zero the session flag + band
+    void CG_CompassBarObjectiveChanged(void); // HZM coop - top compass bar: CS_CURRENT_OBJECTIVE changed (HUD fade wake)
 
     //
     // cg_draw.c

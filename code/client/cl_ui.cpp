@@ -120,6 +120,7 @@ cvar_t        *ui_gmboxspam;
 cvar_t        *ui_debugload;
 cvar_t        *sound_overlay;
 cvar_t        *ui_compass_scale;
+cvar_t        *coop_compassBarLive; // HZM coop - top compass bar band height (px) published by cgame, 0 = not live
 
 static intro_stage_t intro_stage;
 static char          server_mapname[64];
@@ -1205,6 +1206,33 @@ UIFloatingDMConsole *getNewDMConsole()
 
 /*
 ====================
+UI_CompassBarTop
+
+HZM coop [user 2026-09-13] top compass bar. cgame publishes the bar's band height in real pixels in
+coop_compassBarLive while the bar is live (coop session, player pref on), else 0. The kill feed / chat
+box moves down by exactly that much and the round hud_compass ring is hidden. Clamped because any
+server may stuff a coop_* cvar; cgame rewrites a wrong value on its next frame.
+====================
+*/
+static float UI_CompassBarTop(void)
+{
+    int live;
+
+    if (!coop_compassBarLive) {
+        return 0.0f;
+    }
+    live = coop_compassBarLive->integer;
+    if (live <= 0) {
+        return 0.0f;
+    }
+    if (live > uid.vidHeight / 8) {
+        live = uid.vidHeight / 8;
+    }
+    return (float)live;
+}
+
+/*
+====================
 getDefaultGMBoxRectangle
 ====================
 */
@@ -1233,7 +1261,9 @@ static UIRect2D getDefaultDMBoxRectangle(void)
 
     width = screenWidth * uid.scaleRes[0] * ui_compass_scale->value * 0.2f;
 
-    return UIRect2D(width, 0, (screenWidth - (width + 192.0f)) * uid.scaleRes[0], 120.0f * uid.scaleRes[1]);
+    // HZM coop [user 2026-09-13] top compass bar: y was a hard 0. UI_CompassBarTop is 0 unless the bar is live,
+    // so this is the stock rectangle; gmbox and UI_GetObjectivesTop follow the shift through their max().
+    return UIRect2D(width, UI_CompassBarTop(), (screenWidth - (width + 192.0f)) * uid.scaleRes[0], 120.0f * uid.scaleRes[1]);
 }
 
 /*
@@ -1893,6 +1923,26 @@ void UI_Update(void)
     CL_FillUIDef();
     uWinMan.ServiceEvents();
 
+    // HZM coop [user 2026-09-13] top compass bar: when cgame changes the band, re-apply the gmbox and DM box
+    // frames the way UI_ResolutionChange does, so the bar toggles live without a vid_restart. Nothing runs
+    // while the band stays 0.
+    {
+        static float lastCompassBarTop = 0.0f;
+        float        compassBarTop     = UI_CompassBarTop();
+
+        if (compassBarTop != lastCompassBarTop) {
+            lastCompassBarTop = compassBarTop;
+            if (gmbox) {
+                frame = getDefaultGMBoxRectangle();
+                gmbox->setFrame(frame);
+            }
+            if (dmbox) {
+                frame = getDefaultDMBoxRectangle();
+                dmbox->setFrame(frame);
+            }
+        }
+    }
+
     //
     // draw the base HUD when in-game
     //
@@ -1918,8 +1968,8 @@ void UI_Update(void)
                 hud_ammo->GetContainerWidget()->Display(frame, 1.0);
             }
 
-            // draw the compass hud
-            if (hud_compass) {
+            // draw the compass hud (HZM coop [user 2026-09-13]: not while the top compass bar replaces it)
+            if (hud_compass && !UI_CompassBarTop()) {
                 hud_compass->ForceShow();
                 frame = uWinMan.getFrame();
                 hud_compass->GetContainerWidget()->Display(frame, 1.0);
@@ -2430,7 +2480,8 @@ void UI_Update(void)
         // show the compass
         //
         if (hud_compass) {
-            if (ui_compass->integer) {
+            // HZM coop [user 2026-09-13] the top compass bar replaces the ring while it is live
+            if (ui_compass->integer && !UI_CompassBarTop()) {
                 hud_compass->ForceShow();
             } else {
                 hud_compass->ForceHide();
@@ -5464,6 +5515,11 @@ void CL_InitializeUI(void)
     ui_debugload       = Cvar_Get("ui_debugload", "0", 0);
     Cvar_Get("ui_signshader", "", 0);
     ui_compass             = Cvar_Get("ui_compass", "1", 0);
+    // HZM coop [user 2026-09-13] top compass bar - see UI_CompassBarTop. flags 0: a per-session value cgame
+    // republishes, never a preference. coop_compassBarExe tells cgame that this exe honours the band, so a
+    // new cgame on an older exe draws no bar at all rather than a bar under an unmoved kill feed.
+    coop_compassBarLive    = Cvar_Get("coop_compassBarLive", "0", 0);
+    Cvar_Get("coop_compassBarExe", "1", CVAR_ROM);
     ui_newvidmode          = Cvar_Get("ui_newvidmode", "-1", 0);
     ui_inventoryfile       = Cvar_Get("ui_inventoryfile", "global/inventory.txt", 0);
     ui_drawcoords          = Cvar_Get("ui_drawcoords", "0", 0);
