@@ -31,6 +31,9 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 // player's archived r_pp* cvars and cannot survive a restart (bug-2584). When night is active the grade
 // path runs even if the player disabled r_ppTonemap, so a scripted dusk still darkens the world.
 static cvar_t *r_ppNightExposure = NULL, *r_ppNightContrast = NULL, *r_ppNightSaturation = NULL, *r_ppNightTemp = NULL;
+// coop PER-MAP grade layer: a SECOND non-archived layer, published by cgame from the server-set
+// coop_mapGrade cvar (see cgame CG_CoopMapGradeThink). Same contract as the night layer above.
+static cvar_t *r_ppMapExposure = NULL, *r_ppMapContrast = NULL, *r_ppMapSaturation = NULL, *r_ppMapTemp = NULL;
 
 static void RB_HZMGradeCvars(void)
 {
@@ -40,6 +43,13 @@ static void RB_HZMGradeCvars(void)
 		r_ppNightContrast   = ri.Cvar_Get("r_ppNightContrast",   "1", 0);
 		r_ppNightSaturation = ri.Cvar_Get("r_ppNightSaturation", "1", 0);
 		r_ppNightTemp       = ri.Cvar_Get("r_ppNightTemp",       "0", 0);
+		// coop PER-MAP grade layer (server-published via coop_mapGrade, relayed by cgame). NOT
+		// archived (flags 0), identity (1,1,1,0). Multiplied on top of BOTH the player's own grade
+		// and the night layer, so it never writes the player's archived r_pp* cvars (bug-2584 class).
+		r_ppMapExposure     = ri.Cvar_Get("r_ppMapExposure",     "1", 0);
+		r_ppMapContrast     = ri.Cvar_Get("r_ppMapContrast",     "1", 0);
+		r_ppMapSaturation   = ri.Cvar_Get("r_ppMapSaturation",   "1", 0);
+		r_ppMapTemp         = ri.Cvar_Get("r_ppMapTemp",         "0", 0);
 	}
 }
 
@@ -48,6 +58,13 @@ qboolean RB_HZMNightGradeActive(void)
 	RB_HZMGradeCvars();
 	return (qboolean)(r_ppNightExposure->value != 1.0f || r_ppNightContrast->value != 1.0f
 		|| r_ppNightSaturation->value != 1.0f || r_ppNightTemp->value != 0.0f);
+}
+
+qboolean RB_HZMMapGradeActive(void)
+{
+	RB_HZMGradeCvars();
+	return (qboolean)(r_ppMapExposure->value != 1.0f || r_ppMapContrast->value != 1.0f
+		|| r_ppMapSaturation->value != 1.0f || r_ppMapTemp->value != 0.0f);
 }
 
 qboolean RB_HZMToneUsesGrade(void)
@@ -63,7 +80,7 @@ qboolean RB_HZMToneUsesGrade(void)
 	if (r_tonemapMode->integer == 1 || r_ppTonemap->integer || r_ppGrade->integer)
 		return qtrue;
 
-	return RB_HZMNightGradeActive();
+	return (qboolean)(RB_HZMNightGradeActive() || RB_HZMMapGradeActive());
 }
 
 // HZM exposure-aware bloom (bug-1149): the auto-exposure luminance measurement, split out of RB_ToneMap
@@ -182,6 +199,15 @@ void RB_ToneMap(FBO_t *hdrFbo, ivec4_t hdrBox, FBO_t *ldrFbo, ivec4_t ldrBox, in
 			cont *= r_ppNightContrast->value;
 			sat  *= r_ppNightSaturation->value;
 			temp += r_ppNightTemp->value;
+
+			// coop PER-MAP grade layer: composes on top of the night layer, so the full order is
+			// player/preset -> night -> map. Identity (1,1,1,0) = no change, so at the shipped
+			// baseline (no coop_mapGrade published) this is byte-identical to before. cgame resets
+			// these to identity at CG_Init/CG_Shutdown so a grade never leaks across maps or into MP.
+			expo *= r_ppMapExposure->value;
+			cont *= r_ppMapContrast->value;
+			sat  *= r_ppMapSaturation->value;
+			temp += r_ppMapTemp->value;
 
 			grade[0] = expo;
 			grade[1] = cont;

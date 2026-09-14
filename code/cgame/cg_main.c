@@ -887,6 +887,20 @@ void CG_Init(clientGameImport_t *imported, int serverMessageNum, int serverComma
         cgi.Cvar_Set("r_ppUnderwaterAir", "1");
     }
 
+    // HZM coop [per-map grade] reset the renderer PER-MAP grade LAYER to identity on every cgame
+    // load, so a coop server's grade never leaks into the next map or into an MP server (the layer
+    // cvars are non-archived and persist within one client session). coop_mapGrade is the packed
+    // server input; clearing it means an MP server that never publishes carries no coop grade. The
+    // opt-out r_ppMapGradeOn is registered here (archived, default 1) so it exists as a real,
+    // non-coop_ cvar BEFORE any server command can try to create it - which is what keeps a hostile
+    // server from flipping the player's choice (the SEC2 set-variable filter refuses server sets of a
+    // registered non-coop_, non-user-created cvar). See cg_view.c CG_CoopMapGradeThink.
+    cgi.Cvar_Set("r_ppMapExposure",   "1");
+    cgi.Cvar_Set("r_ppMapContrast",   "1");
+    cgi.Cvar_Set("r_ppMapSaturation", "1");
+    cgi.Cvar_Set("r_ppMapTemp",       "0");
+    cgi.Cvar_Set("coop_mapGrade",     "");
+    cgi.Cvar_Get("r_ppMapGradeOn",    "1", CVAR_ARCHIVE);
     CG_RegisterCvars();
     CG_CompassBarInit(); // HZM coop [user 2026-09-13] top compass bar: prefs registered, session flag + band reset to 0
 
@@ -945,6 +959,15 @@ void CG_Shutdown(void)
     // HZM coop - free cam: release the mouse capture so the client input layer can never be left
     // orbiting (viewangles frozen) across a level change / cgame reload
     cgi.Cvar_Set("cg_freecamCapture", "0");
+
+    // HZM coop [per-map grade] the per-map grade LAYER never outlives the level: reset to identity
+    // and clear the packed input, so whatever loads next - an MP map included - starts ungraded
+    // until a coop server republishes coop_mapGrade. Mirrors the CG_Init reset above.
+    cgi.Cvar_Set("r_ppMapExposure",   "1");
+    cgi.Cvar_Set("r_ppMapContrast",   "1");
+    cgi.Cvar_Set("r_ppMapSaturation", "1");
+    cgi.Cvar_Set("r_ppMapTemp",       "0");
+    cgi.Cvar_Set("coop_mapGrade",     "");
 
     // HZM coop [user 2026-09-13] top compass bar: the coop session flag and the published band never outlive
     // the level, so whatever loads next - an MP map included - starts with the stock ring and DM box

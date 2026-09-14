@@ -7241,6 +7241,77 @@ void CG_CoopDaylightThink(void)
 }
 
 
+// HZM coop - PER-MAP COLOUR GRADE relay. The server publishes ONE packed cvar coop_mapGrade
+// ("expo cont sat temp", comma- OR space-separated) for the current coop map (coop_mod/mapgrade.scr,
+// from the docs/tools/grade_profiles.tsv table). This splits it into the renderer's SECOND grade
+// layer r_ppMapExposure/Contrast/Saturation/Temp - non-archived multipliers RB_ToneMap composes on top
+// of BOTH the player's own grade and the night layer. The player's archived r_pp* cvars are NEVER
+// written (bug-2584 class), exactly like the night layer.
+//
+// OPT-OUT: r_ppMapGradeOn (archived, default 1). It is deliberately NOT a coop_ name: a server can
+// stufftext any coop_ cvar (SrvFilter_IsVariableAllowed), so a coop_ opt-out would let a server flip
+// the player's choice. A registered, non-coop_, non-user-created archived cvar is refused by the SEC2
+// set-variable filter (SrvFilter_IsSetVariableAllowed), so ONLY the player controls it. Registered in
+// CG_Init so it exists before the first server command can try to create it.
+//
+// coop_mapGrade itself is inert data on the wire: it is only ever read here via Cvar_Get + sscanf and
+// NEVER run through vstr/exec, so it is not a laundering target (guard class SRVG_NONE). Values are
+// clamped to sane ranges so a hostile server cannot black/white the screen through this channel.
+void CG_CoopMapGradeThink(void)
+{
+    static cvar_t *pGrade = NULL, *pOn = NULL;
+    static char    s_last[128] = "\x01"; // impossible cvar value -> always publish identity on first run
+    static int     s_lastOn = -1;
+    const char    *s;
+    char           work[128];
+    char          *p;
+    float          e, c, sat, t;
+    int            on;
+
+    if (!pGrade) {
+        pGrade = cgi.Cvar_Get("coop_mapGrade", "", 0);
+        pOn    = cgi.Cvar_Get("r_ppMapGradeOn", "1", CVAR_ARCHIVE);
+    }
+
+    s  = pGrade->string;
+    on = (pOn->integer != 0);
+
+    // Only touch the renderer layer when the published grade or the opt-out actually changed.
+    if (on == s_lastOn && !strcmp(s, s_last)) {
+        return;
+    }
+    s_lastOn = on;
+    Q_strncpyz(s_last, s, sizeof(s_last));
+
+    e = c = sat = 1.0f;
+    t = 0.0f;
+
+    if (on && s[0]) {
+        Q_strncpyz(work, s, sizeof(work));
+        for (p = work; *p; p++) {
+            if (*p == ',') {
+                *p = ' ';
+            }
+        }
+        if (sscanf(work, "%f %f %f %f", &e, &c, &sat, &t) != 4) {
+            e = c = sat = 1.0f; // malformed -> identity (grade off)
+            t = 0.0f;
+        }
+        // clamp: multipliers to [0.1,4.0], additive tint to [-0.5,0.5]. Trusted values sit well
+        // inside this; the clamp only stops a hostile server from forcing a black/white screen.
+        if (e   < 0.1f) { e   = 0.1f; } else if (e   > 4.0f) { e   = 4.0f; }
+        if (c   < 0.1f) { c   = 0.1f; } else if (c   > 4.0f) { c   = 4.0f; }
+        if (sat < 0.1f) { sat = 0.1f; } else if (sat > 4.0f) { sat = 4.0f; }
+        if (t  < -0.5f) { t  = -0.5f; } else if (t   > 0.5f) { t   = 0.5f; }
+    }
+
+    cgi.Cvar_Set("r_ppMapExposure",   va("%g", e));
+    cgi.Cvar_Set("r_ppMapContrast",   va("%g", c));
+    cgi.Cvar_Set("r_ppMapSaturation", va("%g", sat));
+    cgi.Cvar_Set("r_ppMapTemp",       va("%g", t));
+}
+
+
 static void CG_ActionFoleyThink(void)
 {
     int iClass;
@@ -7459,6 +7530,7 @@ void CG_DrawActiveFrame(int serverTime, int frameTime, stereoFrame_t stereoView,
     CG_ActionFoleyThink();  // the mechanical layer, a few tens of ms behind the shot
     CoopGunFoleyThink();    // handling foley: sprint, crouch, ADS, switch, dry fire
     CG_CoopDaylightThink(); // time-of-day grade (see banner) - cheap, early-outs when unchanged
+    CG_CoopMapGradeThink(); // per-map colour grade layer (see banner) - cheap, early-outs when unchanged
     CG_CoopHeadshotCueThink(); // shooter-only headshot cue (see banner)
     CG_UpdateScriptedAudioDucks();
     // HZM coop bug-1508 - throttled internally, safe to call every frame (see function banner).
