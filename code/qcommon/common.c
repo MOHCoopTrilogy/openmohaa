@@ -1740,6 +1740,12 @@ void Com_Init( char *commandLine ) {
 	if ( setjmp (abortframe) ) {
 		Sys_Error("Error during initialization");
 	}
+#if defined(_MSC_VER) && defined(_M_X64)
+	// HZM bug-2585: Com_Error(ERR_DROP) unloads cgame.dll/game.dll BEFORE longjmp(abortframe), and MSVC x64 longjmp
+	// unwinds frame by frame through frames that live in the freed DLL -> STATUS_BAD_FUNCTION_TABLE (0xC00000FF).
+	// Frame = 0 makes longjmp restore the saved context directly, as the Linux/MinGW builds already do.
+	((_JUMP_BUFFER *)abortframe)->Frame = 0;
+#endif
 
 	// Clear queues
 	Com_Memset( &eventQueue[ 0 ], 0, MAX_QUEUED_EVENTS * sizeof( sysEvent_t ) );
@@ -2259,6 +2265,12 @@ void Com_Frame( void ) {
 	if ( setjmp (abortframe) ) {
 		return;			// an ERR_DROP was thrown
 	}
+#if defined(_MSC_VER) && defined(_M_X64)
+	// HZM bug-2585: Com_Error(ERR_DROP) unloads cgame.dll/game.dll BEFORE longjmp(abortframe), and MSVC x64 longjmp
+	// unwinds frame by frame through frames that live in the freed DLL -> STATUS_BAD_FUNCTION_TABLE (0xC00000FF).
+	// Frame = 0 makes longjmp restore the saved context directly, as the Linux/MinGW builds already do.
+	((_JUMP_BUFFER *)abortframe)->Frame = 0;
+#endif
 
 	SV_SetFrameNumber(com_frameNumber);
 

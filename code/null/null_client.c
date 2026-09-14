@@ -134,5 +134,17 @@ int R_CountTextureMemory() {
 }
 
 qboolean CL_UseLargeLightmap(const char* mapName) {
-	return qtrue;
+	// HZM bug-2585: a dedicated server always loaded the large-lightmap BSP while clients load maps/<map>_sml.bsp
+	// when it exists (cgame/cg_main.c CG_UseLargeLightmaps, client/cl_main.cpp CL_UseLargeLightmap). The map
+	// checksum is only the BSP header field, so every map whose _sml header differs (18 BT/SH maps) failed the
+	// client's checksum check and dropped. Mirror the client rule exactly so default clients load the same file.
+	char buffer[MAX_QPATH];
+
+	Com_sprintf(buffer, sizeof(buffer), "maps/%s_sml.bsp", mapName);
+
+	if (FS_ReadFileEx(buffer, NULL, qtrue) == -1) {
+		return qtrue;
+	}
+
+	return Cvar_Get("r_largemap", "0", 0)->integer;
 }
