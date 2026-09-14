@@ -7193,23 +7193,29 @@ static void CG_CoopHeadshotCueThink(void)
 
 void CG_CoopDaylightThink(void)
 {
-    static cvar_t *pDay = NULL, *pGrade = NULL, *pTmap = NULL;
-    static float   s_cur   = -1.0f;   // last published, so we write cvars only on change
-    static qboolean s_gradeOn = qfalse;
-    float          d, expo, cont, sat, temp;
-    qboolean       bFirst;
+    static cvar_t *pDay = NULL;
+    static float   s_cur = -1.0f;   // last published, so we write cvars only on change
+    float          d, expoMul, contMul, satMul, tempAdd;
 
     if (!pDay) {
-        // NOT archived. Time of day is scripted/server-driven runtime state, not a user preference -
-        // archiving it meant a night value written once (by a script, or over rcon) SURVIVED THE
-        // RESTART and the player came back to a permanently dim world with no obvious cause. The
-        // server republishes the real value on every connect, so nothing is lost by not saving it.
-        pDay   = cgi.Cvar_Get("coop_daylight", "1", 0);
-        pGrade = cgi.Cvar_Get("r_ppGrade", "0", CVAR_ARCHIVE);
-        pTmap  = cgi.Cvar_Get("r_ppTonemap", "0", CVAR_ARCHIVE);
+        // coop_daylight is NOT archived. Time of day is scripted/server-driven runtime state, not a
+        // user preference - archiving it meant a night value written once (by a script, or over rcon)
+        // SURVIVED THE RESTART. The server republishes the real value on every connect.
+        pDay = cgi.Cvar_Get("coop_daylight", "1", 0);
+
+        // The night look is a SEPARATE, NON-ARCHIVED layer (bug-2584). RB_ToneMap multiplies these
+        // onto the player's own grade (identity = 1,1,1,0), so the coop day/night cycle NEVER writes
+        // the player's archived r_ppExposure/Contrast/Saturation/Temp/Tonemap. The player's grade
+        // therefore survives a map load and a restart, and a player who never triggers night renders
+        // on the shipped ACES baseline consistently. Because these cvars are not archived, a night
+        // value written once cannot persist across a restart - the property the old `|| bFirst` guard
+        // existed for is now structural, so no guard and no clear-to-defaults is needed here.
+        cgi.Cvar_Get("r_ppNightExposure",   "1", 0);
+        cgi.Cvar_Get("r_ppNightContrast",   "1", 0);
+        cgi.Cvar_Get("r_ppNightSaturation", "1", 0);
+        cgi.Cvar_Get("r_ppNightTemp",       "0", 0);
     }
 
-    bFirst = (s_cur < -0.5f) ? qtrue : qfalse;
     d = pDay->value;
     if (d > 1.0f) { d = 1.0f; } else if (d < 0.0f) { d = 0.0f; }
     if (fabs(d - s_cur) < 0.002f) {
@@ -7217,52 +7223,21 @@ void CG_CoopDaylightThink(void)
     }
     s_cur = d;
 
-    // At full daylight, restore the engine's own defaults EXACTLY and switch the grade path back off,
-    // so a player who never triggers a night cycle renders bit-identically to before this existed.
-    // NOTE the `|| bFirst`: the r_pp* grade cvars ARE archived (they are legitimate user settings),
-    // so a night grade written in a previous session comes back at full strength on the next launch.
-    // Without this, a stale archived grade could never be cleared - s_gradeOn starts false, so the
-    // restore below was skipped exactly when it was needed most, and the world stayed dim forever.
-    if (d >= 0.999f) {
-        if (s_gradeOn || bFirst) {
-            cgi.Cvar_Set("r_ppExposure",   "0.889971");
-            cgi.Cvar_Set("r_ppContrast",   "0.951289");
-            cgi.Cvar_Set("r_ppSaturation", "1.031519");
-            cgi.Cvar_Set("r_ppTemp",       "0");
-            cgi.Cvar_Set("r_ppTonemap",    "0");
-            s_gradeOn = qfalse;
-        }
-        return;
-    }
+    // MOHAA cannot relight the world (baked lightmaps, NULL worldspawn lighting handlers), so time of
+    // day is a GRADE, not a relight. The night layer is expressed as MULTIPLIERS relative to full
+    // daylight: at d = 1 every multiplier is identity, so the grade is exactly the player's own; toward
+    // night, exposure and saturation fall and contrast rises, and the shadows cool (moonlight is blue).
+    // The endpoints are normalised against the engine grade defaults the old absolute curve interpolated
+    // to at full day, so at the shipped grade the on-screen night look is unchanged.
+    expoMul = (0.30f + (0.889971f - 0.30f) * d) / 0.889971f;   // night ~0.337x daylight exposure
+    contMul = (1.05f + (0.951289f - 1.05f) * d) / 0.951289f;   // contrast RISES into night
+    satMul  = (0.45f + (1.031519f - 0.45f) * d) / 1.031519f;   // desaturate toward night
+    tempAdd = -0.18f * (1.0f - d);                             // cool the shadows
 
-    // The grade block in RB_ToneMap is gated on (r_tonemapMode==1 || r_ppTonemap || r_ppGrade) and all
-    // three default to 0, so the path has to be armed or every value below is silently ignored.
-    // [FIX 2026-08-28] ARM WITH r_ppTonemap, NOT r_ppGrade. r_ppGrade is a PRESET SELECTOR, not an
-    // enable flag: RB_ToneMap switches on its integer and cases 1-4 OVERWRITE exposure, contrast,
-    // saturation and temperature with fixed war-film looks. Setting it to 1 to 'arm' the path therefore
-    // selected the Neutral preset (expo 1.0, sat 1.0, temp 0) and threw away every value written just
-    // above - the cvars read back correctly while the renderer used the preset, so it looked like the
-    // grade was not reaching the screen at all. r_ppTonemap enables the same block and leaves the manual
-    // values alone, and r_ppGrade must be held at 0 so `default: break` keeps them.
-    if (!s_gradeOn) {
-        cgi.Cvar_Set("r_ppTonemap", "1");
-        s_gradeOn = qtrue;
-    }
-    if (pGrade->integer) {
-        cgi.Cvar_Set("r_ppGrade", "0");   // a preset would override everything below
-    }
-
-    // night <- d -> day. Contrast RISES slightly into night: dropping exposure alone reads as a grey
-    // wash rather than darkness, because the lightmap's own ambient floor does not scale with it.
-    expo = 0.30f + (0.889971f - 0.30f) * d;
-    cont = 1.05f + (0.951289f - 1.05f) * d;
-    sat  = 0.45f + (1.031519f - 0.45f) * d;
-    temp = -0.18f * (1.0f - d);   // cool the shadows; moonlight is blue, not grey
-
-    cgi.Cvar_Set("r_ppExposure",   va("%g", expo));
-    cgi.Cvar_Set("r_ppContrast",   va("%g", cont));
-    cgi.Cvar_Set("r_ppSaturation", va("%g", sat));
-    cgi.Cvar_Set("r_ppTemp",       va("%g", temp));
+    cgi.Cvar_Set("r_ppNightExposure",   va("%g", expoMul));
+    cgi.Cvar_Set("r_ppNightContrast",   va("%g", contMul));
+    cgi.Cvar_Set("r_ppNightSaturation", va("%g", satMul));
+    cgi.Cvar_Set("r_ppNightTemp",       va("%g", tempAdd));
 }
 
 

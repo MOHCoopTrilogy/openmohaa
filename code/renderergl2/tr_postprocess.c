@@ -22,62 +22,118 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 
 #include "tr_local.h"
 
-void RB_ToneMap(FBO_t *hdrFbo, ivec4_t hdrBox, FBO_t *ldrFbo, ivec4_t ldrBox, int autoExposure)
+// HZM: does the active tone pass run the ACES grade (tonemap_hzm) rather than rend2's Hable curve?
+// The bloom bright pass needs this to choose its display-domain proxy, and RB_ToneMap uses it to gate
+// the grade branch. Factored so the predicate lives in exactly one place.
+//
+// The coop daylight/night look is a NON-ARCHIVED layer (r_ppNight*, written by cgame's
+// CG_CoopDaylightThink) multiplied on top of the player's own grade here, so night never writes the
+// player's archived r_pp* cvars and cannot survive a restart (bug-2584). When night is active the grade
+// path runs even if the player disabled r_ppTonemap, so a scripted dusk still darkens the world.
+static cvar_t *r_ppNightExposure = NULL, *r_ppNightContrast = NULL, *r_ppNightSaturation = NULL, *r_ppNightTemp = NULL;
+
+static void RB_HZMGradeCvars(void)
+{
+	if (!r_ppNightExposure) {
+		// NOT archived (flags 0): a night value written once by a script/rcon must not persist.
+		r_ppNightExposure   = ri.Cvar_Get("r_ppNightExposure",   "1", 0);
+		r_ppNightContrast   = ri.Cvar_Get("r_ppNightContrast",   "1", 0);
+		r_ppNightSaturation = ri.Cvar_Get("r_ppNightSaturation", "1", 0);
+		r_ppNightTemp       = ri.Cvar_Get("r_ppNightTemp",       "0", 0);
+	}
+}
+
+qboolean RB_HZMNightGradeActive(void)
+{
+	RB_HZMGradeCvars();
+	return (qboolean)(r_ppNightExposure->value != 1.0f || r_ppNightContrast->value != 1.0f
+		|| r_ppNightSaturation->value != 1.0f || r_ppNightTemp->value != 0.0f);
+}
+
+qboolean RB_HZMToneUsesGrade(void)
+{
+	static cvar_t *r_tonemapMode = NULL, *r_ppTonemap = NULL, *r_ppGrade = NULL;
+
+	if (!r_tonemapMode) {
+		r_tonemapMode = ri.Cvar_Get("r_tonemapMode", "0", CVAR_ARCHIVE);
+		r_ppTonemap   = ri.Cvar_Get("r_ppTonemap",   "0", CVAR_ARCHIVE);
+		r_ppGrade     = ri.Cvar_Get("r_ppGrade",     "0", CVAR_ARCHIVE);
+	}
+
+	if (r_tonemapMode->integer == 1 || r_ppTonemap->integer || r_ppGrade->integer)
+		return qtrue;
+
+	return RB_HZMNightGradeActive();
+}
+
+// HZM exposure-aware bloom (bug-1149): the auto-exposure luminance measurement, split out of RB_ToneMap
+// so RB_PostProcess can run it BEFORE bloom in r_ppBloomMode 1. That does two things: the bloom bright
+// pass reads a current-frame calcLevels texel, and auto-exposure no longer sees the bloom energy and so
+// cannot dim the glow away. Byte-identical to the block that used to live inline in RB_ToneMap; in
+// r_ppBloomMode 0 it is still called from RB_ToneMap at the same point, so mode 0 is unchanged.
+void RB_ToneMapMeasureLevels(FBO_t *hdrFbo, ivec4_t hdrBox)
 {
 	ivec4_t srcBox, dstBox;
 	vec4_t color;
 	static int lastFrameCount = 0;
 
-	if (autoExposure)
+	if (lastFrameCount == 0 || tr.frameCount < lastFrameCount || tr.frameCount - lastFrameCount > 5)
 	{
-		if (lastFrameCount == 0 || tr.frameCount < lastFrameCount || tr.frameCount - lastFrameCount > 5)
+		// determine average log luminance
+		FBO_t *srcFbo, *dstFbo, *tmp;
+		int size = 256;
+
+		lastFrameCount = tr.frameCount;
+
+		VectorSet4(dstBox, 0, 0, size, size);
+
+		FBO_Blit(hdrFbo, hdrBox, NULL, tr.textureScratchFbo[0], dstBox, &tr.calclevels4xShader[0], NULL, 0);
+
+		srcFbo = tr.textureScratchFbo[0];
+		dstFbo = tr.textureScratchFbo[1];
+
+		// downscale to 1x1 texture
+		while (size > 1)
 		{
-			// determine average log luminance
-			FBO_t *srcFbo, *dstFbo, *tmp;
-			int size = 256;
-
-			lastFrameCount = tr.frameCount;
-
+			VectorSet4(srcBox, 0, 0, size, size);
+			//size >>= 2;
+			size >>= 1;
 			VectorSet4(dstBox, 0, 0, size, size);
 
-			FBO_Blit(hdrFbo, hdrBox, NULL, tr.textureScratchFbo[0], dstBox, &tr.calclevels4xShader[0], NULL, 0);
+			if (size == 1)
+				dstFbo = tr.targetLevelsFbo;
 
-			srcFbo = tr.textureScratchFbo[0];
-			dstFbo = tr.textureScratchFbo[1];
+			//FBO_Blit(targetFbo, srcBox, NULL, tr.textureScratchFbo[nextScratch], dstBox, &tr.calclevels4xShader[1], NULL, 0);
+			FBO_FastBlit(srcFbo, srcBox, dstFbo, dstBox, GL_COLOR_BUFFER_BIT, GL_LINEAR);
 
-			// downscale to 1x1 texture
-			while (size > 1)
-			{
-				VectorSet4(srcBox, 0, 0, size, size);
-				//size >>= 2;
-				size >>= 1;
-				VectorSet4(dstBox, 0, 0, size, size);
-
-				if (size == 1)
-					dstFbo = tr.targetLevelsFbo;
-
-				//FBO_Blit(targetFbo, srcBox, NULL, tr.textureScratchFbo[nextScratch], dstBox, &tr.calclevels4xShader[1], NULL, 0);
-				FBO_FastBlit(srcFbo, srcBox, dstFbo, dstBox, GL_COLOR_BUFFER_BIT, GL_LINEAR);
-
-				tmp = srcFbo;
-				srcFbo = dstFbo;
-				dstFbo = tmp;
-			}
+			tmp = srcFbo;
+			srcFbo = dstFbo;
+			dstFbo = tmp;
 		}
-
-		// blend with old log luminance for gradual change
-		VectorSet4(srcBox, 0, 0, 0, 0);
-
-		color[0] = 
-		color[1] =
-		color[2] = 1.0f;
-		if (glRefConfig.textureFloat)
-			color[3] = 0.03f;
-		else
-			color[3] = 0.1f;
-
-		FBO_Blit(tr.targetLevelsFbo, srcBox, NULL, tr.calcLevelsFbo, NULL,  NULL, color, GLS_SRCBLEND_SRC_ALPHA | GLS_DSTBLEND_ONE_MINUS_SRC_ALPHA);
 	}
+
+	// blend with old log luminance for gradual change
+	VectorSet4(srcBox, 0, 0, 0, 0);
+
+	color[0] = 
+	color[1] =
+	color[2] = 1.0f;
+	if (glRefConfig.textureFloat)
+		color[3] = 0.03f;
+	else
+		color[3] = 0.1f;
+
+	FBO_Blit(tr.targetLevelsFbo, srcBox, NULL, tr.calcLevelsFbo, NULL,  NULL, color, GLS_SRCBLEND_SRC_ALPHA | GLS_DSTBLEND_ONE_MINUS_SRC_ALPHA);
+}
+
+void RB_ToneMap(FBO_t *hdrFbo, ivec4_t hdrBox, FBO_t *ldrFbo, ivec4_t ldrBox, int autoExposure, qboolean skipLevels)
+{
+	vec4_t color;
+
+	// skipLevels is set when RB_PostProcess already measured (r_ppBloomMode 1). Otherwise measure here,
+	// exactly as before, so r_ppBloomMode 0 is byte-identical.
+	if (autoExposure && !skipLevels)
+		RB_ToneMapMeasureLevels(hdrFbo, hdrBox);
 
 	// tonemap
 	color[0] =
@@ -85,30 +141,22 @@ void RB_ToneMap(FBO_t *hdrFbo, ivec4_t hdrBox, FBO_t *ldrFbo, ivec4_t ldrBox, in
 	color[2] = pow(2, r_cameraExposure->value - autoExposure); //exp2(r_cameraExposure->value);
 	color[3] = 1.0f;
 
-	// HZM gl2 PARITY GRADE (r_tonemapMode 1): run gl1's exact ACES grade instead of rend2's
-	// Hable, driven by the SAME r_pp* cvars gl1 uses, so gl2 reproduces the OG on-screen look.
-	// gl1's exposure term replaces r_cameraExposure, so u_Color carries the grade, not a gain.
+	// HZM gl2 PARITY GRADE: run gl1's exact ACES grade instead of rend2's Hable, driven by the SAME
+	// r_pp* cvars gl1 uses, so gl2 reproduces the OG on-screen look. gl1's exposure term replaces
+	// r_cameraExposure, so u_Color carries the grade, not a gain. Gate is RB_HZMToneUsesGrade().
 	{
-		static cvar_t *r_tonemapMode = NULL;
 		static cvar_t *r_ppExposure = NULL, *r_ppContrast = NULL, *r_ppSaturation = NULL, *r_ppTemp = NULL;
-		static cvar_t *r_ppTonemap = NULL, *r_ppGrade = NULL;
+		static cvar_t *r_ppGrade = NULL;
 
-		if (!r_tonemapMode) {
-			r_tonemapMode  = ri.Cvar_Get("r_tonemapMode",  "0",        CVAR_ARCHIVE);
+		if (!r_ppExposure) {
 			r_ppExposure   = ri.Cvar_Get("r_ppExposure",   "0.889971", CVAR_ARCHIVE);
 			r_ppContrast   = ri.Cvar_Get("r_ppContrast",   "0.951289", CVAR_ARCHIVE);
 			r_ppSaturation = ri.Cvar_Get("r_ppSaturation", "1.031519", CVAR_ARCHIVE);
 			r_ppTemp       = ri.Cvar_Get("r_ppTemp",       "0",        CVAR_ARCHIVE);
-			// HZM fix: the postfx menu's Tonemap/Grade checkbox and Grade 0-4 preset slider
-			// (r_ppTonemap/r_ppGrade) were never read anywhere in gl2 - only the console-only,
-			// undocumented-in-any-menu r_tonemapMode==1 gated this path, so the menu controls
-			// were silent no-ops. gl1's gate is `r_ppTonemap->integer || r_ppGrade->integer`
-			// (tr_postprocess_gl1.c:750-751) - mirror it here instead of requiring r_tonemapMode.
-			r_ppTonemap    = ri.Cvar_Get("r_ppTonemap",    "0",        CVAR_ARCHIVE);
 			r_ppGrade      = ri.Cvar_Get("r_ppGrade",      "0",        CVAR_ARCHIVE);
 		}
 
-		if (r_tonemapMode->integer == 1 || r_ppTonemap->integer || r_ppGrade->integer) {
+		if (RB_HZMToneUsesGrade()) {
 			vec4_t grade;
 			float  expo = r_ppExposure->value;
 			float  cont = r_ppContrast->value;
@@ -124,6 +172,16 @@ void RB_ToneMap(FBO_t *hdrFbo, ivec4_t hdrBox, FBO_t *ldrFbo, ivec4_t ldrBox, in
 			case 4: expo = 1.0f;  cont = 1.35f; sat = 0.55f; temp = -0.02f; break; // Bleach bypass
 			default: break;
 			}
+
+			// coop night layer: non-archived multipliers on top of whatever the player chose (or the
+			// preset above). Identity is (1,1,1,0), so at full daylight this is a no-op and the grade
+			// is exactly the player's own. This is the ONLY place the night look is applied - cgame
+			// never writes the archived r_pp* cvars (bug-2584).
+			RB_HZMGradeCvars();
+			expo *= r_ppNightExposure->value;
+			cont *= r_ppNightContrast->value;
+			sat  *= r_ppNightSaturation->value;
+			temp += r_ppNightTemp->value;
 
 			grade[0] = expo;
 			grade[1] = cont;
@@ -689,15 +747,23 @@ blended back onto it.
 void RB_HZMBloom(FBO_t *srcFbo, ivec4_t srcBox)
 {
 	static cvar_t *r_ppBloom = NULL, *r_ppBloomThreshold = NULL, *r_ppBloomIntensity = NULL;
-	ivec4_t quarterBox;
+	static cvar_t *r_ppBloomMode = NULL, *r_ppBloomKnee = NULL;
+	ivec4_t bloomBox;
 	vec2_t  dir;
 	vec4_t  color;
+	int     mode;
+	FBO_t  *b0, *b1;
 
 	if (!r_ppBloom) {
 		// same names and same defaults as renderergl1 tr_init.c, so one set of levers drives both
 		r_ppBloom          = ri.Cvar_Get("r_ppBloom",          "1",   CVAR_ARCHIVE);
 		r_ppBloomThreshold = ri.Cvar_Get("r_ppBloomThreshold", "0.6", CVAR_ARCHIVE);
 		r_ppBloomIntensity = ri.Cvar_Get("r_ppBloomIntensity", "1.3", CVAR_ARCHIVE);
+		// r_ppBloomMode 1 = exposure-aware glow (seeded 1 in coop_defaults.cfg); 0 = the byte-identical
+		// legacy pass, the clean A/B fallback. Default 0 in code so an un-seeded profile is unchanged.
+		// r_ppBloomKnee is the display-domain smoothstep half-width around the threshold (mode 1 only).
+		r_ppBloomMode      = ri.Cvar_Get("r_ppBloomMode",      "0",   CVAR_ARCHIVE);
+		r_ppBloomKnee      = ri.Cvar_Get("r_ppBloomKnee",      "0.1", CVAR_ARCHIVE);
 	}
 
 	if (!r_ppBloom->integer)
@@ -706,25 +772,70 @@ void RB_HZMBloom(FBO_t *srcFbo, ivec4_t srcBox)
 	if (!srcFbo || !tr.quarterFbo[0] || !tr.quarterFbo[1])
 		return;
 
-	VectorSet4(quarterBox, 0, 0, tr.quarterFbo[0]->width, tr.quarterFbo[0]->height);
+	// Mode 1 needs the 16F half-res pair (only allocated when the scene buffer is HDR float). If it is
+	// missing, fall back to the legacy mode-0 path so an r_hdr 0 install still gets bloom.
+	mode = r_ppBloomMode->integer;
+	if (mode && (!tr.bloomFbo[0] || !tr.bloomFbo[1]))
+		mode = 0;
 
-	// 1) bright-pass the scene into the half-res target (threshold rides u_Color.x)
-	VectorSet4(color, r_ppBloomThreshold->value, 0.0f, 0.0f, 1.0f);
-	FBO_Blit(srcFbo, srcBox, NULL, tr.quarterFbo[0], quarterBox, &tr.bloomBrightShader, color, 0);
+	if (mode == 0) {
+		ivec4_t quarterBox;
 
-	// 2) horizontal then vertical 9-tap Gaussian, ping-ponging between the two half-res targets
+		VectorSet4(quarterBox, 0, 0, tr.quarterFbo[0]->width, tr.quarterFbo[0]->height);
+
+		// 1) bright-pass the scene into the half-res target (threshold rides u_Color.x; u_Color.z 0 = mode 0)
+		VectorSet4(color, r_ppBloomThreshold->value, 0.0f, 0.0f, 1.0f);
+		FBO_Blit(srcFbo, srcBox, NULL, tr.quarterFbo[0], quarterBox, &tr.bloomBrightShader, color, 0);
+
+		// 2) horizontal then vertical 9-tap Gaussian, ping-ponging between the two half-res targets
+		VectorSet2(dir, 1.0f, 0.0f);
+		FBO_Blit(tr.quarterFbo[0], quarterBox, dir, tr.quarterFbo[1], quarterBox, &tr.bloomBlurShader, NULL, 0);
+
+		VectorSet2(dir, 0.0f, 1.0f);
+		FBO_Blit(tr.quarterFbo[1], quarterBox, dir, tr.quarterFbo[0], quarterBox, &tr.bloomBlurShader, NULL, 0);
+
+		// 3) additive composite back over the scene at full res (intensity rides u_Color)
+		color[0] =
+		color[1] =
+		color[2] = r_ppBloomIntensity->value;
+		color[3] = 1.0f;
+		FBO_Blit(tr.quarterFbo[0], quarterBox, NULL, srcFbo, srcBox, NULL, color,
+			GLS_SRCBLEND_ONE | GLS_DSTBLEND_ONE);
+		return;
+	}
+
+	// MODE 1 - exposure-aware. Threshold in the DISPLAY domain of the active tone curve; the kept
+	// highlight keeps its linear HDR colour (capped at a firefly ceiling) in a 16F buffer, so the glow
+	// is not clipped and auto-exposure (measured before this, in RB_PostProcess) cannot dim it away.
+	b0 = tr.bloomFbo[0];
+	b1 = tr.bloomFbo[1];
+	VectorSet4(bloomBox, 0, 0, b0->width, b0->height);
+
+	// u_Color = (threshold, knee, modeSel, maxBright). modeSel folds in the tone path so the shader
+	// picks the matching display proxy: 1 = ACES/grade domain, 2 = rend2 Hable + auto-exposure domain.
+	color[0] = r_ppBloomThreshold->value;
+	color[1] = r_ppBloomKnee->value;
+	color[2] = RB_HZMToneUsesGrade() ? 1.0f : 2.0f;
+	color[3] = 8.0f;   // firefly ceiling on the kept linear colour
+
+	// the Hable-domain proxy reads the smoothed auto-exposure luminance; FBO_Blit does not touch
+	// TB_LEVELSMAP, so this bind survives into the bright pass. Harmless on the grade domain.
+	GL_BindToTMU(tr.calcLevelsImage, TB_LEVELSMAP);
+	FBO_Blit(srcFbo, srcBox, NULL, b0, bloomBox, &tr.bloomBrightShader, color, 0);
+
+	// separable blur on the 16F pair (u_dir rides u_InvTexRes via FBO_Blit's srcTexScale, as in mode 0)
 	VectorSet2(dir, 1.0f, 0.0f);
-	FBO_Blit(tr.quarterFbo[0], quarterBox, dir, tr.quarterFbo[1], quarterBox, &tr.bloomBlurShader, NULL, 0);
+	FBO_Blit(b0, bloomBox, dir, b1, bloomBox, &tr.bloomBlurShader, NULL, 0);
 
 	VectorSet2(dir, 0.0f, 1.0f);
-	FBO_Blit(tr.quarterFbo[1], quarterBox, dir, tr.quarterFbo[0], quarterBox, &tr.bloomBlurShader, NULL, 0);
+	FBO_Blit(b1, bloomBox, dir, b0, bloomBox, &tr.bloomBlurShader, NULL, 0);
 
-	// 3) additive composite back over the scene at full res (intensity rides u_Color)
+	// additive composite back over the HDR scene, bilinear-upsampled from D/2 (intensity rides u_Color)
 	color[0] =
 	color[1] =
 	color[2] = r_ppBloomIntensity->value;
 	color[3] = 1.0f;
-	FBO_Blit(tr.quarterFbo[0], quarterBox, NULL, srcFbo, srcBox, NULL, color,
+	FBO_Blit(b0, bloomBox, NULL, srcFbo, srcBox, NULL, color,
 		GLS_SRCBLEND_ONE | GLS_DSTBLEND_ONE);
 }
 

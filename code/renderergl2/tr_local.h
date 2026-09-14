@@ -2228,6 +2228,7 @@ typedef struct {
 	image_t					*screenScratchImage;
 	image_t					*textureScratchImage[2];
 	image_t                 *quarterImage[2];
+	image_t                 *bloomImage[2];   // HZM exposure-aware bloom (r_ppBloomMode 1): RGBA16F, DISPLAY/2
 	image_t					*calcLevelsImage;
 	image_t					*targetLevelsImage;
 	image_t					*fixedLevelsImage;
@@ -2253,6 +2254,7 @@ typedef struct {
 	FBO_t					*globalFogFbo;
 	FBO_t					*textureScratchFbo[2];
 	FBO_t                   *quarterFbo[2];
+	FBO_t                   *bloomFbo[2];     // HZM exposure-aware bloom (r_ppBloomMode 1)
 	FBO_t					*calcLevelsFbo;
 	FBO_t					*targetLevelsFbo;
 	FBO_t					*sunShadowFbo[4];

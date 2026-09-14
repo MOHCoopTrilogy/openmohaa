@@ -3601,6 +3601,18 @@ void R_CreateBuiltinImages( void ) {
 			tr.quarterImage[x] = R_CreateImage(va("*quarter%d", x), NULL, width / 2, height / 2, IMGTYPE_COLORALPHA, IMGFLAG_NO_COMPRESSION | IMGFLAG_CLAMPTOEDGE, GL_RGBA8);
 		}
 
+		// HZM exposure-aware bloom (r_ppBloomMode 1): a half-res RGBA16F pair, distinct from the
+		// RGBA8 quarterImage[] that mode 0 keeps using. The bright pass writes unclamped highlight
+		// energy (up to a firefly ceiling) here, so it needs float storage; only worth it when the
+		// scene buffer is actually HDR float. When it is not, RB_HZMBloom falls back to mode 0.
+		if (hdrFormat == GL_RGBA16F_ARB)
+		{
+			for (x = 0; x < 2; x++)
+			{
+				tr.bloomImage[x] = R_CreateImage(va("*bloom%d", x), NULL, width / 2, height / 2, IMGTYPE_COLORALPHA, IMGFLAG_NO_COMPRESSION | IMGFLAG_CLAMPTOEDGE, hdrFormat);
+			}
+		}
+
 		// (bug-1177) r_ppSSAO is the coop menu's AO master; r_ssao is stock rend2's. Either enables SSAO.
 		if (r_ssao->integer || (r_ppSSAO && r_ppSSAO->integer))
 		{

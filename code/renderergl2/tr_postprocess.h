@@ -25,7 +25,10 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 
 #include "tr_fbo.h"
 
-void RB_ToneMap(FBO_t *hdrFbo, ivec4_t hdrBox, FBO_t *ldrFbo, ivec4_t ldrBox, int autoExposure);
+void RB_ToneMap(FBO_t *hdrFbo, ivec4_t hdrBox, FBO_t *ldrFbo, ivec4_t ldrBox, int autoExposure, qboolean skipLevels);
+void RB_ToneMapMeasureLevels(FBO_t *hdrFbo, ivec4_t hdrBox);   // HZM: auto-exposure measure, split so mode-1 bloom can run it early
+qboolean RB_HZMToneUsesGrade(void);      // HZM: is the ACES grade (tonemap_hzm) the active tone pass this frame?
+qboolean RB_HZMNightGradeActive(void);   // HZM: is the non-archived coop night grade layer non-identity?
 void RB_GlobalFog(FBO_t *srcFbo, ivec4_t srcBox, FBO_t *dstFbo, ivec4_t dstBox);
 void RB_HZMSsao(FBO_t *srcFbo, ivec4_t srcBox);    // HZM gl1-parity SSAO GENERATION (r_ppSSAO); head of the post chain, before the AO composite
 void RB_HZMBloom(FBO_t *srcFbo, ivec4_t srcBox);   // HZM gl1-parity bloom (r_ppBloom), runs before the tone stage

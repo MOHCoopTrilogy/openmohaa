@@ -403,6 +403,17 @@ void FBO_Init(void)
 		}
 	}
 
+	// HZM exposure-aware bloom (r_ppBloomMode 1): colour-only FBOs over the 16F bloomImage pair.
+	if (tr.bloomImage[0])
+	{
+		for (i = 0; i < 2; i++)
+		{
+			tr.bloomFbo[i] = FBO_Create(va("_bloom%d", i), tr.bloomImage[i]->width, tr.bloomImage[i]->height);
+			FBO_AttachImage(tr.bloomFbo[i], tr.bloomImage[i], GL_COLOR_ATTACHMENT0, 0);
+			R_CheckFBO(tr.bloomFbo[i]);
+		}
+	}
+
 	if (tr.hdrDepthImage)
 	{
 		tr.hdrDepthFbo = FBO_Create("_hdrDepth", tr.hdrDepthImage->width, tr.hdrDepthImage->height);

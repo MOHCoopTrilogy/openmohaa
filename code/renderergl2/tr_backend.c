@@ -2129,6 +2129,8 @@ const void *RB_PostProcess(const void *data)
 	FBO_t *srcFbo, *dstFbo;
 	ivec4_t srcBox, dstBox;
 	qboolean autoExposure;
+	qboolean bloomPreMeasured = qfalse;   // HZM exposure-aware bloom (bug-1149): measured before bloom in mode 1
+	static cvar_t *r_ppBloomModeBE = NULL, *r_ppBloomBE = NULL;
 
 	// finish any 2D drawing if needed
 	if(tess.numIndexes)
@@ -2231,6 +2233,21 @@ const void *RB_PostProcess(const void *data)
 		// grade -> FXAA -> sharpen), so it goes here - after the optional pre-tone fog, ahead of
 		// the tone stage. Driven by r_ppBloom / r_ppBloomThreshold / r_ppBloomIntensity, the same
 		// Advanced-Graphics levers gl1 reads, so one set of sliders controls both renderers.
+		// HZM exposure-aware bloom (bug-1149): in r_ppBloomMode 1, measure auto-exposure BEFORE bloom
+		// composites its energy - so the glow is not dimmed away and the bright pass reads a
+		// current-frame calcLevels texel. Mode 0 leaves the measurement inside RB_ToneMap, unchanged.
+		if (!r_ppBloomModeBE) {
+			r_ppBloomModeBE = ri.Cvar_Get("r_ppBloomMode", "0", CVAR_ARCHIVE);
+			r_ppBloomBE     = ri.Cvar_Get("r_ppBloom",     "1", CVAR_ARCHIVE);
+		}
+		if (srcFbo && r_ppBloomBE->integer && r_ppBloomModeBE->integer
+		    && r_hdr->integer && (r_toneMap->integer || r_forceToneMap->integer)
+		    && (r_autoExposure->integer || r_forceAutoExposure->integer))
+		{
+			RB_ToneMapMeasureLevels(srcFbo, srcBox);
+			bloomPreMeasured = qtrue;
+		}
+
 		if (srcFbo)
 		{
 			// gl1 order is SSAO -> DoF -> bloom -> god rays -> grade, so DoF leads
@@ -2246,7 +2263,7 @@ const void *RB_PostProcess(const void *data)
 
 				// Use an intermediate FBO because it can't blit to the same FBO directly
 				// and can't read from an MSAA dstFbo later.
-				RB_ToneMap(srcFbo, srcBox, tr.screenScratchFbo, srcBox, autoExposure);
+				RB_ToneMap(srcFbo, srcBox, tr.screenScratchFbo, srcBox, autoExposure, bloomPreMeasured);
 				FBO_FastBlit(tr.screenScratchFbo, srcBox, srcFbo, srcBox, GL_COLOR_BUFFER_BIT, GL_NEAREST);
 			}
 			else if (r_cameraExposure->value != 0.0f)

@@ -1526,6 +1526,7 @@ void GLSL_InitGPUShaders(void)
 
 	GLSL_InitUniforms(&tr.bloomBrightShader);
 	GLSL_SetUniformInt(&tr.bloomBrightShader, UNIFORM_TEXTUREMAP, TB_COLORMAP);
+	GLSL_SetUniformInt(&tr.bloomBrightShader, UNIFORM_LEVELSMAP,  TB_LEVELSMAP);   // HZM exposure-aware bloom: mode 2 (Hable) proxy reads calcLevels here
 	GLSL_FinishGPUShader(&tr.bloomBrightShader);
 
 	numEtcShaders++;
