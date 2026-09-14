@@ -350,7 +350,15 @@ void RB_BeginDrawingView (void) {
 		FBO_t *fbo = backEnd.viewParms.targetFbo;
 
 		if (fbo == NULL)
-			fbo = tr.renderFbo;
+		{
+			// HZM render scale: the WORLD scene renders into sceneFbo (SCENE size); RDF_NOWORLDMODEL
+			// views (UI / HUD 3D widgets) keep the DISPLAY-size renderFbo. At scale 1.0 sceneFbo IS
+			// renderFbo, so both branches pick the same buffer.
+			if (backEnd.refdef.rdflags & RDF_NOWORLDMODEL)
+				fbo = tr.renderFbo;
+			else
+				fbo = tr.sceneFbo ? tr.sceneFbo : tr.renderFbo;
+		}
 
 		if (tr.renderCubeFbo && fbo == tr.renderCubeFbo)
 		{
@@ -1619,7 +1627,7 @@ const void	*RB_DrawSurfs( const void *data ) {
 			if (tr.msaaResolveFbo)
 			{
 				// If we're using multisampling, resolve the depth first
-				FBO_FastBlit(tr.renderFbo, NULL, tr.msaaResolveFbo, NULL, GL_DEPTH_BUFFER_BIT, GL_NEAREST);
+				FBO_FastBlit(tr.sceneFbo, NULL, tr.msaaResolveFbo, NULL, GL_DEPTH_BUFFER_BIT, GL_NEAREST);   // HZM render scale: scene is the MSAA target
 			}
 			else if (tr.renderFbo == NULL && tr.renderDepthImage)
 			{
@@ -1647,18 +1655,19 @@ const void	*RB_DrawSurfs( const void *data ) {
 
 				FBO_Bind(tr.screenShadowFbo);
 
-				box[0] = backEnd.viewParms.viewportX      * tr.screenShadowFbo->width / (float)glConfig.vidWidth;
-				box[1] = backEnd.viewParms.viewportY      * tr.screenShadowFbo->height / (float)glConfig.vidHeight;
-				box[2] = backEnd.viewParms.viewportWidth  * tr.screenShadowFbo->width / (float)glConfig.vidWidth;
-				box[3] = backEnd.viewParms.viewportHeight * tr.screenShadowFbo->height / (float)glConfig.vidHeight;
+				// HZM render scale: screenShadowFbo and the viewport are both SCENE-sized, so normalise by scene dims.
+				box[0] = backEnd.viewParms.viewportX      * tr.screenShadowFbo->width / (float)tr.sceneWidth;
+				box[1] = backEnd.viewParms.viewportY      * tr.screenShadowFbo->height / (float)tr.sceneHeight;
+				box[2] = backEnd.viewParms.viewportWidth  * tr.screenShadowFbo->width / (float)tr.sceneWidth;
+				box[3] = backEnd.viewParms.viewportHeight * tr.screenShadowFbo->height / (float)tr.sceneHeight;
 
 				qglViewport(box[0], box[1], box[2], box[3]);
 				qglScissor(box[0], box[1], box[2], box[3]);
 
-				box[0] = backEnd.viewParms.viewportX / (float)glConfig.vidWidth;
-				box[1] = backEnd.viewParms.viewportY / (float)glConfig.vidHeight;
-				box[2] = box[0] + backEnd.viewParms.viewportWidth / (float)glConfig.vidWidth;
-				box[3] = box[1] + backEnd.viewParms.viewportHeight / (float)glConfig.vidHeight;
+				box[0] = backEnd.viewParms.viewportX / (float)tr.sceneWidth;
+				box[1] = backEnd.viewParms.viewportY / (float)tr.sceneHeight;
+				box[2] = box[0] + backEnd.viewParms.viewportWidth / (float)tr.sceneWidth;
+				box[3] = box[1] + backEnd.viewParms.viewportHeight / (float)tr.sceneHeight;
 
 				texCoords[0][0] = box[0]; texCoords[0][1] = box[3];
 				texCoords[1][0] = box[2]; texCoords[1][1] = box[3];
@@ -2050,7 +2059,7 @@ const void	*RB_SwapBuffers( const void *data ) {
 
 	if (glRefConfig.framebufferObject)
 	{
-		if (tr.msaaResolveFbo && r_hdr->integer)
+		if (tr.msaaResolveFbo && r_hdr->integer && !tr.renderScaleActive)   // HZM render scale: when scaled, renderFbo is already single-sampled display
 		{
 			// Resolving an RGB16F MSAA FBO to the screen messes with the brightness, so resolve to an RGB16F FBO first
 			FBO_FastBlit(tr.renderFbo, NULL, tr.msaaResolveFbo, NULL, GL_COLOR_BUFFER_BIT, GL_NEAREST);
@@ -2136,9 +2145,26 @@ const void *RB_PostProcess(const void *data)
 	if(tess.numIndexes)
 		RB_EndSurface();
 
+	// HZM render scale: does RCAS run this frame? (scene scaled AND r_fsrSharpness > 0). Set before
+	// the early-out and before RB_HZMScreenFx, which reads tr.rcasActive to skip r_ppSharpen.
+	tr.rcasActive = (qboolean)(tr.renderScaleActive && tr.displayScratchFbo
+	                           && r_fsrSharpness && r_fsrSharpness->value > 0.0f);
+
 	if (!glRefConfig.framebufferObject || !r_postProcess->integer)
 	{
-		// do nothing
+		// HZM render scale: even with post-processing off, the scaled scene still has to reach the
+		// display FBO, or the HUD / present would draw over an empty native buffer.
+		if (glRefConfig.framebufferObject && tr.renderScaleActive
+		    && tr.sceneFbo && tr.renderFbo && tr.sceneFbo != tr.renderFbo)
+		{
+			FBO_t *rsSrc = tr.sceneFbo;
+			if (tr.msaaResolveFbo)
+			{
+				FBO_FastBlit(tr.sceneFbo, NULL, tr.msaaResolveFbo, NULL, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+				rsSrc = tr.msaaResolveFbo;
+			}
+			RB_RenderScaleResample(rsSrc);
+		}
 		return (const void *)(cmd + 1);
 	}
 
@@ -2148,14 +2174,17 @@ const void *RB_PostProcess(const void *data)
 		backEnd.viewParms = cmd->viewParms;
 	}
 
-	srcFbo = tr.renderFbo;
+	// HZM render scale: the post chain runs on the SCENE buffer (S); the final resample brings it
+	// to the DISPLAY buffer (dstFbo). At scale 1.0 sceneFbo == renderFbo, so srcFbo == dstFbo and
+	// the pipeline is byte-identical (no resample runs).
+	srcFbo = tr.sceneFbo ? tr.sceneFbo : tr.renderFbo;
 	dstFbo = tr.renderFbo;
 
 	if (tr.msaaResolveFbo)
 	{
 		// Resolve the MSAA before anything else
 		// Can't resolve just part of the MSAA FBO, so multiple views will suffer a performance hit here
-		FBO_FastBlit(tr.renderFbo, NULL, tr.msaaResolveFbo, NULL, GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT, GL_NEAREST);
+		FBO_FastBlit(srcFbo, NULL, tr.msaaResolveFbo, NULL, GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT, GL_NEAREST);
 		srcFbo = tr.msaaResolveFbo;
 	}
 
@@ -2187,10 +2216,11 @@ const void *RB_PostProcess(const void *data)
 	if ((r_ssao->integer || (r_ppSSAO && r_ppSSAO->integer)) && backEnd.ssaoValid
 	    && tr.screenSsaoImage && tr.screenSsaoFbo)
 	{
-		srcBox[0] = backEnd.viewParms.viewportX      * tr.screenSsaoImage->width  / (float)glConfig.vidWidth;
-		srcBox[1] = backEnd.viewParms.viewportY      * tr.screenSsaoImage->height / (float)glConfig.vidHeight;
-		srcBox[2] = backEnd.viewParms.viewportWidth  * tr.screenSsaoImage->width  / (float)glConfig.vidWidth;
-		srcBox[3] = backEnd.viewParms.viewportHeight * tr.screenSsaoImage->height / (float)glConfig.vidHeight;
+		// HZM render scale: screenSsaoImage is SCENE/2 and the viewport is SCENE-sized, so use scene dims.
+		srcBox[0] = backEnd.viewParms.viewportX      * tr.screenSsaoImage->width  / (float)tr.sceneWidth;
+		srcBox[1] = backEnd.viewParms.viewportY      * tr.screenSsaoImage->height / (float)tr.sceneHeight;
+		srcBox[2] = backEnd.viewParms.viewportWidth  * tr.screenSsaoImage->width  / (float)tr.sceneWidth;
+		srcBox[3] = backEnd.viewParms.viewportHeight * tr.screenSsaoImage->height / (float)tr.sceneHeight;
 
 		FBO_Blit(tr.screenSsaoFbo, srcBox, NULL, srcFbo, dstBox, NULL, NULL, GLS_SRCBLEND_DST_COLOR | GLS_DSTBLEND_ZERO);
 	}
@@ -2307,8 +2337,17 @@ const void *RB_PostProcess(const void *data)
 	else
 		RB_GaussianBlur(srcFbo, srcFbo, backEnd.refdef.blurFactor);
 
-	if (srcFbo != dstFbo)
+	// HZM render scale: bring the fully post-processed scene (srcFbo @S) to the display FBO (@D)
+	// via FSR 1 EASU / SSAA tent / bilinear, then optional RCAS. At scale 1.0 renderScaleActive is
+	// qfalse and srcFbo == dstFbo, so this is exactly the old no-op (byte-identical).
+	if (tr.renderScaleActive && dstFbo == tr.renderFbo && srcFbo != dstFbo)
+	{
+		RB_RenderScaleResample(srcFbo);
+	}
+	else if (srcFbo != dstFbo)
+	{
 		FBO_FastBlit(srcFbo, srcBox, dstFbo, dstBox, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+	}
 
 #if 0
 	if (0)

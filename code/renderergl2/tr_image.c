@@ -3548,16 +3548,78 @@ void R_CreateBuiltinImages( void ) {
 
 	if (glRefConfig.framebufferObject)
 	{
-		int width, height, hdrFormat, rgbFormat;
+		int width, height, dispW, dispH, hdrFormat, rgbFormat;
 
-		width = glConfig.vidWidth;
-		height = glConfig.vidHeight;
+		// HZM render-scale supersampling (r_renderScale, CVAR_LATCH): the 3D scene and the whole
+		// post chain render at SCENE size; the 2D/HUD, present, screenshots and levelshots stay at
+		// DISPLAY size. Resolve the (latched) scale once, here, before any scene image is sized.
+		// At scale 1.0 sceneWidth == vidWidth and renderScaleActive is qfalse, so every image below
+		// is created exactly as before and the pipeline is byte-identical to today.
+		dispW = glConfig.vidWidth;
+		dispH = glConfig.vidHeight;
+		{
+			float scale = r_renderScale ? r_renderScale->value : 1.0f;
+			int   maxDim = glRefConfig.maxRenderbufferSize;
+			int   sw, sh;
+			double maxPixels;
+
+			if (scale < 0.5f) scale = 0.5f;
+			if (scale > 2.0f) scale = 2.0f;
+
+			sw = (int)(dispW * scale + 0.5f);
+			sh = (int)(dispH * scale + 0.5f);
+
+			// FBO_Create errors if a dimension exceeds maxRenderbufferSize; clamp to it, and to at
+			// most 4x the display's pixel count (the 2.0 ceiling already implies this, but a very
+			// small maxDim on old hardware could otherwise force a lopsided clamp).
+			if (maxDim > 0)
+			{
+				if (sw > maxDim) sw = maxDim;
+				if (sh > maxDim) sh = maxDim;
+			}
+			maxPixels = 4.0 * (double)dispW * (double)dispH;
+			if ((double)sw * (double)sh > maxPixels && sw > 0 && sh > 0)
+			{
+				double f = sqrt(maxPixels / ((double)sw * (double)sh));
+				sw = (int)(sw * f);
+				sh = (int)(sh * f);
+			}
+			if (sw < 1) sw = 1;
+			if (sh < 1) sh = 1;
+
+			tr.renderScale       = scale;
+			tr.sceneWidth        = sw;
+			tr.sceneHeight       = sh;
+			tr.renderScaleActive = (qboolean)(sw != dispW || sh != dispH);
+
+			if (r_renderScaleDebug && r_renderScaleDebug->integer)
+				ri.Printf(PRINT_ALL, "^~^~^ RSCALE scale=%.3f scene=%dx%d display=%dx%d active=%d\n",
+					scale, sw, sh, dispW, dispH, tr.renderScaleActive);
+		}
+
+		// SCENE-space images (renderImage, depth, screenScratch, hdrDepth, sunRays, quarter,
+		// screenSsao, screenShadow) are sized to the render-scaled scene. bloomImage stays at
+		// DISPLAY/2 (resolution-independent halo), and the new displayImage is DISPLAY-sized.
+		width = tr.sceneWidth;
+		height = tr.sceneHeight;
 
 		hdrFormat = GL_RGBA8;
 		if (r_hdr->integer && glRefConfig.textureFloat)
 			hdrFormat = GL_RGBA16F_ARB;
 
 		rgbFormat = GL_RGBA8;
+
+		// HZM render scale: RGBA8 display-size target that backs renderFbo when the scene is scaled.
+		// The final resample stage (EASU / SSAA tent) writes the scaled scene into this, then the
+		// HUD/2D and present draw over it at native resolution. Not created at scale 1.0 (renderFbo
+		// then aliases sceneFbo, byte-identical).
+		// displayScratchImage is the RCAS ping target: the resample writes the scaled scene into it,
+		// then RCAS reads it and writes displayImage (no read-write of one image).
+		if (tr.renderScaleActive)
+		{
+			tr.displayImage = R_CreateImage("*display", NULL, dispW, dispH, IMGTYPE_COLORALPHA, IMGFLAG_NO_COMPRESSION | IMGFLAG_CLAMPTOEDGE, GL_RGBA8);
+			tr.displayScratchImage = R_CreateImage("*displayScratch", NULL, dispW, dispH, IMGTYPE_COLORALPHA, IMGFLAG_NO_COMPRESSION | IMGFLAG_CLAMPTOEDGE, GL_RGBA8);
+		}
 
 		tr.renderImage = R_CreateImage("_render", NULL, width, height, IMGTYPE_COLORALPHA, IMGFLAG_NO_COMPRESSION | IMGFLAG_CLAMPTOEDGE, hdrFormat);
 
@@ -3609,7 +3671,8 @@ void R_CreateBuiltinImages( void ) {
 		{
 			for (x = 0; x < 2; x++)
 			{
-				tr.bloomImage[x] = R_CreateImage(va("*bloom%d", x), NULL, width / 2, height / 2, IMGTYPE_COLORALPHA, IMGFLAG_NO_COMPRESSION | IMGFLAG_CLAMPTOEDGE, hdrFormat);
+				// DISPLAY/2, independent of render scale (halo radius + cost stay put); dispW==width at scale 1.0.
+				tr.bloomImage[x] = R_CreateImage(va("*bloom%d", x), NULL, dispW / 2, dispH / 2, IMGTYPE_COLORALPHA, IMGFLAG_NO_COMPRESSION | IMGFLAG_CLAMPTOEDGE, hdrFormat);
 			}
 		}
 

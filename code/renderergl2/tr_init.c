@@ -112,6 +112,11 @@ cvar_t  *r_arb_seamless_cube_map;
 cvar_t  *r_arb_vertex_array_object;
 cvar_t  *r_ext_direct_state_access;
 
+cvar_t  *r_renderScale;      // HZM render-scale supersampling (0.5-2.0, latched); AMD FSR 1 filters
+cvar_t  *r_upscaleFilter;
+cvar_t  *r_fsrSharpness;
+cvar_t  *r_renderScaleDebug;
+
 cvar_t  *r_cameraExposure;
 
 cvar_t  *r_externalGLSL;
@@ -1430,6 +1435,18 @@ void R_Register( void )
 	r_ext_framebuffer_object = ri.Cvar_Get( "r_ext_framebuffer_object", "1", CVAR_ARCHIVE | CVAR_LATCH);
 	r_ext_texture_float = ri.Cvar_Get( "r_ext_texture_float", "1", CVAR_ARCHIVE | CVAR_LATCH);
 	r_ext_framebuffer_multisample = ri.Cvar_Get( "r_ext_framebuffer_multisample", "0", CVAR_ARCHIVE | CVAR_LATCH);
+
+	// HZM render-scale supersampling + AMD FSR 1 (r_renderScale). r_renderScale resizes the scene
+	// FBOs, so it is CVAR_ARCHIVE|CVAR_LATCH and applies at LAUNCH ONLY - a menu vid_restart while
+	// a session is live crashes this renderer (bug-1181), so the Video menu option carries a
+	// "(needs restart)" label, like AO. The other three allocate nothing and are live-editable.
+	r_renderScale = ri.Cvar_Get( "r_renderScale", "1.0", CVAR_ARCHIVE | CVAR_LATCH );
+	ri.Cvar_CheckRange( r_renderScale, 0.5f, 2.0f, qfalse );
+	r_upscaleFilter = ri.Cvar_Get( "r_upscaleFilter", "1", CVAR_ARCHIVE );   // 0 bilinear, 1 FSR EASU (<1) / SSAA tent (>1)
+	ri.Cvar_CheckRange( r_upscaleFilter, 0, 1, qtrue );
+	r_fsrSharpness = ri.Cvar_Get( "r_fsrSharpness", "0.25", CVAR_ARCHIVE );  // 0..1 RCAS strength; 0 = off, replaces r_ppSharpen while > 0
+	ri.Cvar_CheckRange( r_fsrSharpness, 0.0f, 1.0f, qfalse );
+	r_renderScaleDebug = ri.Cvar_Get( "r_renderScaleDebug", "0", CVAR_TEMP );
 	r_arb_seamless_cube_map = ri.Cvar_Get( "r_arb_seamless_cube_map", "0", CVAR_ARCHIVE | CVAR_LATCH);
 	r_arb_vertex_array_object = ri.Cvar_Get( "r_arb_vertex_array_object", "1", CVAR_ARCHIVE | CVAR_LATCH);
 	r_ext_direct_state_access = ri.Cvar_Get("r_ext_direct_state_access", "1", CVAR_ARCHIVE | CVAR_LATCH);

@@ -952,6 +952,14 @@ typedef enum
 	// rule above. u_LightOrigin convention: w == 0 direction toward the light, w == 1 point.
 	UNIFORM_HZMSPECLIGHT,
 
+	// HZM render-scale supersampling + AMD FSR 1 (r_renderScale). Appended LAST, per the rule
+	// above: uniformsInfo[] is indexed by this enum, so a mid-enum insert resolves every later
+	// uniform to the wrong name. EASU uses all four; RCAS and the SSAA downsample use u_FsrCon0.
+	UNIFORM_FSRCON0,
+	UNIFORM_FSRCON1,
+	UNIFORM_FSRCON2,
+	UNIFORM_FSRCON3,
+
 	UNIFORM_COUNT
 } uniform_t;
 
@@ -2229,6 +2237,8 @@ typedef struct {
 	image_t					*textureScratchImage[2];
 	image_t                 *quarterImage[2];
 	image_t                 *bloomImage[2];   // HZM exposure-aware bloom (r_ppBloomMode 1): RGBA16F, DISPLAY/2
+	image_t                 *displayImage;    // HZM render scale: RGBA8 at DISPLAY size, backs renderFbo when scaled
+	image_t                 *displayScratchImage; // HZM render scale: RGBA8 at DISPLAY size, RCAS ping target
 	image_t					*calcLevelsImage;
 	image_t					*targetLevelsImage;
 	image_t					*fixedLevelsImage;
@@ -2241,6 +2251,13 @@ typedef struct {
 	image_t					*textureDepthImage;
 
 	FBO_t					*renderFbo;
+	// HZM render scale (r_renderScale): the 3D world scene + post chain render into sceneFbo at
+	// SCENE size (round(vid*scale)); renderFbo stays at DISPLAY size and carries the 2D/HUD,
+	// present, screenshots and levelshots. When scale == 1.0 (and no MSAA) sceneFbo IS renderFbo
+	// (same pointer), so the pipeline is byte-identical to today. displayScratchFbo is the ping
+	// target for RCAS at display size (only allocated when scaled).
+	FBO_t					*sceneFbo;
+	FBO_t					*displayScratchFbo;
 	FBO_t					*msaaResolveFbo;
 	FBO_t					*sunRaysFbo;
 	FBO_t					*depthFbo;
@@ -2306,6 +2323,9 @@ typedef struct {
 	shaderProgram_t bloomBlurShader;    // HZM gl1-parity bloom separable Gaussian
 	shaderProgram_t fxaaShader;         // HZM gl1-parity FXAA (r_ppFXAA)
 	shaderProgram_t sharpenShader;      // HZM gl1-parity CAS sharpen (r_ppSharpen)
+	shaderProgram_t fsrEasuShader;      // HZM render scale: AMD FSR 1 EASU upscale (scale < 1.0)
+	shaderProgram_t fsrRcasShader;      // HZM render scale: AMD FSR 1 RCAS sharpen (r_fsrSharpness)
+	shaderProgram_t fsrDownscaleShader; // HZM render scale: SSAA tent downsample (scale > 1.0)
 	shaderProgram_t rainDropsShader;    // HZM gl1-parity rain-on-lens (r_ppRainDrops)
 	shaderProgram_t lowHealthShader;    // HZM gl1-parity low-health desat + red vignette + heartbeat
 	shaderProgram_t suppressionShader;  // HZM gl1-parity suppression tunnel-vignette
@@ -2324,6 +2344,19 @@ typedef struct {
 	shaderProgram_t ssaoShader;
 	shaderProgram_t depthBlurShader[4];
 	shaderProgram_t testcubeShader;
+
+	// HZM render scale (r_renderScale, latched): resolved once at R_CreateBuiltinImages.
+	// sceneWidth/Height = round(vid * renderScale), clamped; renderScaleActive is set when the
+	// scene size differs from the display size (guards the byte-identical scale==1.0 path).
+	// fsrEasuAvailable is false if the EASU program failed to build (falls back to a bilinear
+	// blit). rcasActive is recomputed per world frame in RB_PostProcess and read by RB_HZMScreenFx
+	// so it can skip r_ppSharpen while RCAS runs.
+	float					renderScale;
+	int						sceneWidth;
+	int						sceneHeight;
+	qboolean				renderScaleActive;
+	qboolean				fsrEasuAvailable;
+	qboolean				rcasActive;
 
 
 	// -----------------------------------------
@@ -2745,6 +2778,12 @@ extern cvar_t  *r_ppSSAORadius;
 extern cvar_t  *r_ppSSAOIntensity;
 extern cvar_t  *r_ppSSAOBias;
 extern cvar_t  *r_ppSSAODepthAware;
+
+// HZM render-scale supersampling + AMD FSR 1 (r_renderScale)
+extern cvar_t  *r_renderScale;      // CVAR_ARCHIVE|CVAR_LATCH, 0.5-2.0, default 1.0 (launch-only, bug-1181)
+extern cvar_t  *r_upscaleFilter;    // CVAR_ARCHIVE, 0 = bilinear blit, 1 = FSR EASU (<1) / SSAA tent (>1)
+extern cvar_t  *r_fsrSharpness;     // CVAR_ARCHIVE, 0..1 RCAS strength (0 = off); replaces r_ppSharpen while >0
+extern cvar_t  *r_renderScaleDebug; // CVAR_TEMP, 1 = print the resolved scene/display size once per map
 
 // Global farplane fog state, latched from the MAIN world view in RB_DrawSurfs (which is
 // where gl1 calls RB_SetupFog) so the post pass can never inherit a portal / sky-portal /

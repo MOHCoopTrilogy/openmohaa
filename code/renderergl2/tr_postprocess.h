@@ -38,5 +38,6 @@ void RB_HZMExtraFx(FBO_t *srcFbo, ivec4_t srcBox);  // HZM NEW: underwater, fros
 void RB_BokehBlur(FBO_t *src, ivec4_t srcBox, FBO_t *dst, ivec4_t dstBox, float blur);
 void RB_SunRays(FBO_t *srcFbo, ivec4_t srcBox, FBO_t *dstFbo, ivec4_t dstBox);
 void RB_GaussianBlur(FBO_t *srcFbo, FBO_t *dstFbo, float blur);
+void RB_RenderScaleResample(FBO_t *src);   // HZM render scale + FSR 1: resample SCENE -> DISPLAY, then optional RCAS
 
 #endif

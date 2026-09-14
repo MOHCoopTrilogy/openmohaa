@@ -71,6 +71,9 @@ extern const char *fallbackShader_filmgrain_fp;
 extern const char *fallbackShader_frost_fp;
 extern const char *fallbackShader_globalfog_vp;
 extern const char *fallbackShader_globalfog_fp;
+extern const char *fallbackShader_fsr_easu_fp;      // HZM render scale: AMD FSR 1 EASU
+extern const char *fallbackShader_fsr_rcas_fp;      // HZM render scale: AMD FSR 1 RCAS
+extern const char *fallbackShader_fsr_downscale_fp; // HZM render scale: SSAA tent downsample
 
 typedef struct uniformInfo_s
 {
@@ -200,6 +203,12 @@ static uniformInfo_t uniformsInfo[] =
 
 	// HZM coop (bug-2508): alphaGen lightingSpecular light, u_LightOrigin convention (w 0 = dir)
 	{ "u_HzmSpecLight",    GLSL_VEC4 },
+
+	// HZM render-scale supersampling + AMD FSR 1 - see UNIFORM_FSRCON0. Kept LAST, in enum order.
+	{ "u_FsrCon0",         GLSL_VEC4 },
+	{ "u_FsrCon1",         GLSL_VEC4 },
+	{ "u_FsrCon2",         GLSL_VEC4 },
+	{ "u_FsrCon3",         GLSL_VEC4 },
 };
 
 typedef enum
@@ -1577,6 +1586,53 @@ void GLSL_InitGPUShaders(void)
 
 	numEtcShaders++;
 
+	// HZM render scale + AMD FSR 1 (r_renderScale). All three use the tonemap vertex shader
+	// (var_TexCoords). EASU needs textureGather, which is GLSL 4.00 or GL_ARB_gpu_shader5 - put
+	// the #extension directly after #version via extradefines (GLSL_GetShaderHeader emits `extra'
+	// there). If EASU fails to build (no gpu_shader5) leave tr.fsrEasuAvailable qfalse and fall
+	// back to a bilinear upscale; do NOT ERR_FATAL, so the renderer still runs on that GPU.
+	attribs = ATTR_POSITION | ATTR_TEXCOORD;
+	extradefines[0] = 0;
+	Q_strcat(extradefines, sizeof(extradefines), "#extension GL_ARB_gpu_shader5 : enable\n");
+
+	tr.fsrEasuAvailable = qfalse;
+	if (GLSL_InitGPUShader(&tr.fsrEasuShader, "fsr_easu", attribs, qtrue, extradefines, qtrue, fallbackShader_tonemap_vp, fallbackShader_fsr_easu_fp))
+	{
+		GLSL_InitUniforms(&tr.fsrEasuShader);
+		GLSL_SetUniformInt(&tr.fsrEasuShader, UNIFORM_TEXTUREMAP, TB_COLORMAP);
+		GLSL_FinishGPUShader(&tr.fsrEasuShader);
+		tr.fsrEasuAvailable = qtrue;
+		numEtcShaders++;
+	}
+	else
+	{
+		ri.Printf(PRINT_WARNING, "FSR EASU shader failed to build (GL_ARB_gpu_shader5 missing?); render scale < 1.0 will use a bilinear upscale.\n");
+	}
+
+	attribs = ATTR_POSITION | ATTR_TEXCOORD;
+	extradefines[0] = 0;
+
+	if (!GLSL_InitGPUShader(&tr.fsrRcasShader, "fsr_rcas", attribs, qtrue, extradefines, qtrue, fallbackShader_tonemap_vp, fallbackShader_fsr_rcas_fp))
+	{
+		ri.Error(ERR_FATAL, "Could not load fsr_rcas shader!");
+	}
+	GLSL_InitUniforms(&tr.fsrRcasShader);
+	GLSL_SetUniformInt(&tr.fsrRcasShader, UNIFORM_TEXTUREMAP, TB_COLORMAP);
+	GLSL_FinishGPUShader(&tr.fsrRcasShader);
+	numEtcShaders++;
+
+	attribs = ATTR_POSITION | ATTR_TEXCOORD;
+	extradefines[0] = 0;
+
+	if (!GLSL_InitGPUShader(&tr.fsrDownscaleShader, "fsr_downscale", attribs, qtrue, extradefines, qtrue, fallbackShader_tonemap_vp, fallbackShader_fsr_downscale_fp))
+	{
+		ri.Error(ERR_FATAL, "Could not load fsr_downscale shader!");
+	}
+	GLSL_InitUniforms(&tr.fsrDownscaleShader);
+	GLSL_SetUniformInt(&tr.fsrDownscaleShader, UNIFORM_TEXTUREMAP, TB_COLORMAP);
+	GLSL_FinishGPUShader(&tr.fsrDownscaleShader);
+	numEtcShaders++;
+
 	attribs = ATTR_POSITION | ATTR_TEXCOORD;
 	extradefines[0] = 0;
 
@@ -1966,6 +2022,9 @@ void GLSL_ShutdownGPUShaders(void)
 	GLSL_DeleteGPUShader(&tr.bloomBlurShader);
 	GLSL_DeleteGPUShader(&tr.fxaaShader);
 	GLSL_DeleteGPUShader(&tr.sharpenShader);
+	GLSL_DeleteGPUShader(&tr.fsrEasuShader);      // HZM render scale (r_renderScale)
+	GLSL_DeleteGPUShader(&tr.fsrRcasShader);
+	GLSL_DeleteGPUShader(&tr.fsrDownscaleShader);
 	GLSL_DeleteGPUShader(&tr.rainDropsShader);
 	GLSL_DeleteGPUShader(&tr.heatHazeShader);
 	GLSL_DeleteGPUShader(&tr.lowHealthShader);

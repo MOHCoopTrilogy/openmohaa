@@ -747,6 +747,21 @@ void RE_RenderScene( const refdef_t *fd ) {
 	parms.viewportY = glConfig.vidHeight - ( tr.refdef.y + tr.refdef.height );
 	parms.viewportWidth = tr.refdef.width;
 	parms.viewportHeight = tr.refdef.height;
+
+	// HZM render scale (r_renderScale): the WORLD scene renders into the scaled scene FBO, so
+	// scale its viewport from display pixels to scene pixels here. RDF_NOWORLDMODEL views
+	// (UI / HUD 3D widgets) keep display pixels and render into renderFbo's own depth. Portal /
+	// mirror sub-views inherit this scaled viewport through parms; projection is fov-based and
+	// so is scale-independent. At scale 1.0 renderScaleActive is qfalse and this is skipped.
+	if (tr.renderScaleActive && !( fd->rdflags & RDF_NOWORLDMODEL ))
+	{
+		float rscale = tr.renderScale;
+		parms.viewportX      = (int)(parms.viewportX      * rscale + 0.5f);
+		parms.viewportY      = (int)(parms.viewportY      * rscale + 0.5f);
+		parms.viewportWidth  = (int)(parms.viewportWidth  * rscale + 0.5f);
+		parms.viewportHeight = (int)(parms.viewportHeight * rscale + 0.5f);
+	}
+
 	parms.isPortal = qfalse;
 
 	parms.fovX = tr.refdef.fov_x;

@@ -841,6 +841,115 @@ void RB_HZMBloom(FBO_t *srcFbo, ivec4_t srcBox)
 
 /*
 =============
+RB_RenderScaleResample
+
+HZM render-scale supersampling + AMD FSR 1 (r_renderScale). ONE stage at the very end of the post
+chain: bring the fully post-processed scene from SCENE size (src, tr.sceneFbo or its MSAA resolve)
+to DISPLAY size (tr.renderFbo), before any 2D/HUD is drawn.
+
+  scale < 1.0 : FSR 1 EASU spatial upscale (r_upscaleFilter 1), or a bilinear blit (0 / no EASU)
+  scale > 1.0 : SSAA quality tent downsample (r_upscaleFilter 1), or a bilinear blit (0)
+  scale == 1.0: never called (tr.renderScaleActive is qfalse; the pipeline is byte-identical)
+
+Optional RCAS then sharpens at display size (r_fsrSharpness > 0). RCAS reads the resample's output
+in tr.displayScratchFbo and writes tr.renderFbo, so it never reads and writes one image. While RCAS
+runs, RB_HZMScreenFx skips r_ppSharpen (no double sharpening) - see tr.rcasActive.
+
+FsrEasuConF / the RCAS sharpness are ported from FidelityFX-FSR-1.0 ffx_fsr1.h (MIT, AMD 2021) with
+the constants passed as plain floats (no uint bit-reinterpret) - see code/thirdparty/FidelityFX-FSR-1.0.
+=============
+*/
+static void FsrEasuConF(float *con0, float *con1, float *con2, float *con3,
+    float inViewX, float inViewY, float inSizeX, float inSizeY, float outX, float outY)
+{
+	// Output integer position to a pixel position in the input viewport.
+	con0[0] = inViewX / outX;
+	con0[1] = inViewY / outY;
+	con0[2] = 0.5f * inViewX / outX - 0.5f;
+	con0[3] = 0.5f * inViewY / outY - 0.5f;
+	// Viewport pixel position to normalized image space (upper-left of the 'F' tap).
+	con1[0] =  1.0f / inSizeX;
+	con1[1] =  1.0f / inSizeY;
+	con1[2] =  1.0f / inSizeX;
+	con1[3] = -1.0f / inSizeY;
+	con2[0] = -1.0f / inSizeX;
+	con2[1] =  2.0f / inSizeY;
+	con2[2] =  1.0f / inSizeX;
+	con2[3] =  2.0f / inSizeY;
+	con3[0] =  0.0f;
+	con3[1] =  4.0f / inSizeY;
+	con3[2] =  0.0f;
+	con3[3] =  0.0f;
+}
+
+void RB_RenderScaleResample(FBO_t *src)
+{
+	FBO_t *dst = tr.renderFbo;
+	FBO_t *resampleDst;
+	float s  = tr.renderScale;
+	float sw = (float)tr.sceneWidth,   sh = (float)tr.sceneHeight;
+	float dw = (float)glConfig.vidWidth, dh = (float)glConfig.vidHeight;
+	qboolean useFilter = (r_upscaleFilter && r_upscaleFilter->integer);
+
+	if (!src || !dst || !tr.renderScaleActive)
+		return;
+
+	// RCAS (if active) reads the resample output from displayScratch and writes renderFbo, so the
+	// resample must land in displayScratch first. Otherwise it writes renderFbo directly.
+	resampleDst = tr.rcasActive ? tr.displayScratchFbo : dst;
+	if (!resampleDst)
+		resampleDst = dst;
+
+	if (useFilter && s < 1.0f && tr.fsrEasuAvailable)
+	{
+		float con0[4], con1[4], con2[4], con3[4];
+		FsrEasuConF(con0, con1, con2, con3, sw, sh, sw, sh, dw, dh);
+		GLSL_SetUniformVec4(&tr.fsrEasuShader, UNIFORM_FSRCON0, con0);
+		GLSL_SetUniformVec4(&tr.fsrEasuShader, UNIFORM_FSRCON1, con1);
+		GLSL_SetUniformVec4(&tr.fsrEasuShader, UNIFORM_FSRCON2, con2);
+		GLSL_SetUniformVec4(&tr.fsrEasuShader, UNIFORM_FSRCON3, con3);
+		FBO_Blit(src, NULL, NULL, resampleDst, NULL, &tr.fsrEasuShader, NULL, 0);
+	}
+	else if (useFilter && s > 1.0f)
+	{
+		// 4-tap bilinear tent: taps at +-(0.5 * S/D - 0.25) source texels, in source UV.
+		vec4_t con0;
+		float offx = (0.5f * sw / dw - 0.25f) / sw;
+		float offy = (0.5f * sh / dh - 0.25f) / sh;
+		if (offx < 0.0f) offx = 0.0f;
+		if (offy < 0.0f) offy = 0.0f;
+		VectorSet4(con0, offx, offy, 0.0f, 0.0f);
+		GLSL_SetUniformVec4(&tr.fsrDownscaleShader, UNIFORM_FSRCON0, con0);
+		FBO_Blit(src, NULL, NULL, resampleDst, NULL, &tr.fsrDownscaleShader, NULL, 0);
+	}
+	else
+	{
+		// bilinear blit (r_upscaleFilter 0, or EASU unavailable at scale < 1.0). glBlitFramebuffer
+		// scales with GL_LINEAR.
+		FBO_FastBlit(src, NULL, resampleDst, NULL, GL_COLOR_BUFFER_BIT, GL_LINEAR);
+	}
+
+	if (tr.rcasActive)
+	{
+		// r_fsrSharpness is a 0..1 amount; 1 = maximum sharpening (0 stops), lower = softer.
+		// RCAS con.x = 2^(-stops), stops = 2 * (1 - amount).
+		vec4_t con0;
+		float amount = r_fsrSharpness->value;
+		float stops, sharp;
+
+		if (amount > 1.0f) amount = 1.0f;
+		if (amount < 0.0f) amount = 0.0f;
+		stops = 2.0f * (1.0f - amount);
+		sharp = (float)pow(2.0, -(double)stops);
+
+		VectorSet4(con0, sharp, 0.0f, 0.0f, 0.0f);
+		GLSL_SetUniformVec4(&tr.fsrRcasShader, UNIFORM_FSRCON0, con0);
+		FBO_Blit(resampleDst, NULL, NULL, dst, NULL, &tr.fsrRcasShader, NULL, 0);
+	}
+}
+
+/*
+=============
 RB_HZMScreenFx
 
 HZM gl2 POST-FX PORT (bug-1150): the screen-space tail of renderergl1's chain - FXAA, then the
@@ -999,13 +1108,18 @@ void RB_HZMScreenFx(FBO_t *srcFbo, ivec4_t srcBox)
 		prevValid = qtrue;
 	}
 
-	if (r_ppFXAA->integer)
+	// HZM render scale (Decision D9): FXAA off while supersampling (scale > 1.0) - the extra scene
+	// resolution already resolves edges, and downsampling then averages FXAA's smear. At scale < 1.0
+	// FXAA stays ON: it anti-aliases the scene before EASU (which expects AA input).
+	if (r_ppFXAA->integer && !(tr.renderScaleActive && tr.renderScale > 1.0f))
 	{
 		FBO_Blit(srcFbo, srcBox, texScale, tr.screenScratchFbo, srcBox, &tr.fxaaShader, NULL, 0);
 		FBO_FastBlit(tr.screenScratchFbo, srcBox, srcFbo, srcBox, GL_COLOR_BUFFER_BIT, GL_NEAREST);
 	}
 
-	if (r_ppSharpen->integer)
+	// HZM render scale (Decision D5): while RCAS runs at the resample stage it replaces r_ppSharpen,
+	// so nothing is sharpened twice. tr.rcasActive is set in RB_PostProcess before this pass.
+	if (r_ppSharpen->integer && !tr.rcasActive)
 	{
 		VectorSet4(color, r_ppSharpenAmount->value, 0.0f, 0.0f, 1.0f);
 		FBO_Blit(srcFbo, srcBox, texScale, tr.screenScratchFbo, srcBox, &tr.sharpenShader, color, 0);

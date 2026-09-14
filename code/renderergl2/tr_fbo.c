@@ -280,26 +280,50 @@ void FBO_Init(void)
 	if (multisample != r_ext_framebuffer_multisample->integer)
 		ri.Cvar_SetValue("r_ext_framebuffer_multisample", (float)multisample);
 	
-	// only create a render FBO if we need to resolve MSAA or do HDR
-	// otherwise just render straight to the screen (tr.renderFbo = NULL)
+	// HZM render scale (r_renderScale): the world scene + post chain render into tr.sceneFbo at
+	// SCENE size (tr.renderImage was sized to round(vid * scale) in R_CreateBuiltinImages), while
+	// tr.renderFbo is the DISPLAY-size target that carries the 2D/HUD and the present. Only create
+	// these if we need to resolve MSAA or do HDR; otherwise render straight to the screen
+	// (tr.sceneFbo = tr.renderFbo = NULL) and render scale is a no-op.
 	if (multisample && glRefConfig.framebufferMultisample)
 	{
-		tr.renderFbo = FBO_Create("_render", tr.renderDepthImage->width, tr.renderDepthImage->height);
-		FBO_CreateBuffer(tr.renderFbo, hdrFormat, 0, multisample);
-		FBO_CreateBuffer(tr.renderFbo, GL_DEPTH_COMPONENT24, 0, multisample);
-		R_CheckFBO(tr.renderFbo);
+		tr.sceneFbo = FBO_Create("_scene", tr.renderImage->width, tr.renderImage->height);
+		FBO_CreateBuffer(tr.sceneFbo, hdrFormat, 0, multisample);
+		FBO_CreateBuffer(tr.sceneFbo, GL_DEPTH_COMPONENT24, 0, multisample);
+		R_CheckFBO(tr.sceneFbo);
 
-		tr.msaaResolveFbo = FBO_Create("_msaaResolve", tr.renderDepthImage->width, tr.renderDepthImage->height);
+		tr.msaaResolveFbo = FBO_Create("_msaaResolve", tr.renderImage->width, tr.renderImage->height);
 		FBO_AttachImage(tr.msaaResolveFbo, tr.renderImage, GL_COLOR_ATTACHMENT0, 0);
 		FBO_AttachImage(tr.msaaResolveFbo, tr.renderDepthImage, GL_DEPTH_ATTACHMENT, 0);
 		R_CheckFBO(tr.msaaResolveFbo);
 	}
 	else if (r_hdr->integer)
 	{
-		tr.renderFbo = FBO_Create("_render", tr.renderDepthImage->width, tr.renderDepthImage->height);
-		FBO_AttachImage(tr.renderFbo, tr.renderImage, GL_COLOR_ATTACHMENT0, 0);
-		FBO_AttachImage(tr.renderFbo, tr.renderDepthImage, GL_DEPTH_ATTACHMENT, 0);
+		tr.sceneFbo = FBO_Create("_scene", tr.renderImage->width, tr.renderImage->height);
+		FBO_AttachImage(tr.sceneFbo, tr.renderImage, GL_COLOR_ATTACHMENT0, 0);
+		FBO_AttachImage(tr.sceneFbo, tr.renderDepthImage, GL_DEPTH_ATTACHMENT, 0);
+		R_CheckFBO(tr.sceneFbo);
+	}
+
+	// The display target. When the scene is scaled (and we have a scene FBO), renderFbo is a
+	// separate DISPLAY-size RGBA8 FBO with its own depth (for RDF_NOWORLDMODEL / RDF_HUD 3D that
+	// still render at display size), plus a display-size scratch that the final resample / RCAS
+	// ping through. At scale 1.0 renderFbo simply ALIASES sceneFbo, so every renderFbo reference in
+	// the 2D / present / screenshot / MSAA-resolve paths keeps its exact meaning (byte-identical).
+	if (tr.renderScaleActive && tr.sceneFbo && tr.displayImage && tr.displayScratchImage)
+	{
+		tr.renderFbo = FBO_Create("_render", tr.displayImage->width, tr.displayImage->height);
+		FBO_AttachImage(tr.renderFbo, tr.displayImage, GL_COLOR_ATTACHMENT0, 0);
+		FBO_CreateBuffer(tr.renderFbo, GL_DEPTH_COMPONENT24, 0, 0);
 		R_CheckFBO(tr.renderFbo);
+
+		tr.displayScratchFbo = FBO_Create("_displayScratch", tr.displayScratchImage->width, tr.displayScratchImage->height);
+		FBO_AttachImage(tr.displayScratchFbo, tr.displayScratchImage, GL_COLOR_ATTACHMENT0, 0);
+		R_CheckFBO(tr.displayScratchFbo);
+	}
+	else
+	{
+		tr.renderFbo = tr.sceneFbo;
 	}
 
 	// clear render buffer
@@ -307,6 +331,12 @@ void FBO_Init(void)
 	if (tr.renderFbo)
 	{
 		GL_BindFramebuffer(GL_FRAMEBUFFER, tr.renderFbo->frameBuffer);
+		qglClear( GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT );
+	}
+	// HZM render scale: also clear the scene FBO when it is a distinct buffer from renderFbo.
+	if (tr.sceneFbo && tr.sceneFbo != tr.renderFbo)
+	{
+		GL_BindFramebuffer(GL_FRAMEBUFFER, tr.sceneFbo->frameBuffer);
 		qglClear( GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT );
 	}
 

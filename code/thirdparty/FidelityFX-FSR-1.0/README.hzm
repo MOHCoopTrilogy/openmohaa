@@ -1,0 +1,35 @@
+FidelityFX Super Resolution 1.0 (FSR 1) - pristine upstream reference copy
+==========================================================================
+
+Source:  https://github.com/GPUOpen-Effects/FidelityFX-FSR
+Commit:  a21ffb8f6c13233ba336352bdff293894c706575  (branch master, retrieved 2026-09-13)
+Files:   license.txt      (verbatim from repo root)
+         ffx_a.h          (verbatim from ffx-fsr/ffx_a.h)
+         ffx_fsr1.h       (verbatim from ffx-fsr/ffx_fsr1.h)
+
+License: MIT (see license.txt). Copyright (c) 2021 Advanced Micro Devices, Inc.
+         ffx_a.h also carries a second MIT notice crediting Michal Drobot (c) 2014
+         for concepts used in its FLOAT APPROXIMATIONS section.
+
+These headers are NOT compiled. shaders.cmake only stringifies renderergl2/glsl/*.glsl,
+so nothing here is built into the dll. They are kept as the reference the trimmed GLSL
+ports were derived from, and to carry the upstream license verbatim.
+
+The compiled ports live in renderergl2/glsl/:
+  fsr_easu_fp.glsl       - EASU spatial upscale (FSR_EASU_F 32-bit float path)
+  fsr_rcas_fp.glsl       - RCAS sharpen (FSR_RCAS_F 32-bit float path, DENOISE on)
+  fsr_downscale_fp.glsl  - HZM SSAA tent downsample (not FSR; used at render scale > 1)
+
+Port notes:
+  - 32-bit float path only (no A_HALF / float16 / Vulkan-GLSL types).
+  - Constants (FsrEasuCon / FsrRcasCon) are computed on the CPU in
+    renderergl2/tr_postprocess.c and passed as plain vec4 floats (u_FsrCon0..3);
+    the upstream uint bit-reinterpret (AU1_AF1 / AF4_AU4) is not used.
+  - The bit-hack rcp / rsqrt approximations (APrxLoRcpF1 etc.) are replaced by exact
+    GLSL (1.0/x, inversesqrt) on the 32-bit float path.
+  - EASU textureGather requires GLSL 4.00 or GL_ARB_gpu_shader5; the port declares
+    the extension and the renderer falls back to a bilinear blit if EASU fails to build.
+
+Binary distribution: the MIT notice in license.txt must ship with any binary that
+embeds these shaders (the compiled renderer_opengl2.dll does). Add it to the release
+third-party notices.
