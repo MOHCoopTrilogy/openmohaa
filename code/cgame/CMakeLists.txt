@@ -21,7 +21,8 @@ set(SOURCES_SHARED
 file(GLOB_RECURSE SOURCES_BG "../fgame/bg_misc.cpp" "../fgame/bg_pmove.cpp" "../fgame/bg_slidemove.cpp" "../fgame/bg_voteoptions.cpp")
 file(GLOB_RECURSE SOURCES_CGAME "./*.c" "./*.cpp")
 
-add_library(cgame SHARED ${SOURCES_CGAME} ${SOURCES_BG})
+# HZM coop [SEC2] the server-command statement rules shared with the exe (security layers 1 and 2)
+add_library(cgame SHARED ${SOURCES_CGAME} ${SOURCES_BG} "../qcommon/cmd_filter.c")
 target_compile_definitions(cgame PRIVATE CGAME_DLL)
 target_compile_features(cgame PUBLIC cxx_nullptr)
 target_compile_features(cgame PUBLIC c_variadic_macros)

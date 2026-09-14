@@ -23,6 +23,7 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 
 #include "q_shared.h"
 #include "qcommon.h"
+#include "cmd_filter.h"
 
 #define	MAX_CMD_BUFFER  128*1024
 #define	MAX_CMD_LINE	8192 // was increased for testing purposes
@@ -44,6 +45,31 @@ typedef struct cmdalias_s {
 int			cmd_wait;
 cmd_t		cmd_text;
 byte		cmd_text_buf[MAX_CMD_BUFFER];
+// HZM coop [SEC2] per-byte ORIGIN of cmd_text_buf. CMD_ORIGIN_LOCAL (0) for everything the console, a
+// bind, a cfg, the UI or the engine queues; CMD_ORIGIN_SERVER + n for text that arrived from the server,
+// n = how many vstr/exec/alias expansions deep it is. The tags move in lockstep with every data move
+// (Cbuf_InsertText's shift, Cbuf_Execute's memmove), so origin travels with the bytes through
+// front-insertion and is handed EXPLICITLY to Cmd_ExecuteStringOrigin - there is no "current origin"
+// state that could leak onto a later line or into an EXEC_NOW call.
+static byte	cmd_text_origin[MAX_CMD_BUFFER];
+
+static int Cmd_ClampOrigin( int origin ) {
+	if ( origin < CMD_ORIGIN_LOCAL ) {
+		return CMD_ORIGIN_LOCAL;
+	}
+	if ( origin > CMD_ORIGIN_MAX ) {
+		return CMD_ORIGIN_MAX;
+	}
+	return origin;
+}
+
+// what a line of origin `origin` expands into (vstr / exec / alias): local stays local, server goes one deeper
+static int Cmd_ChildOrigin( int origin ) {
+	if ( origin == CMD_ORIGIN_LOCAL ) {
+		return CMD_ORIGIN_LOCAL;
+	}
+	return Cmd_ClampOrigin( origin + 1 );
+}
 static		cmdalias_t *cmd_alias;
 int			alias_count;
 
@@ -98,6 +124,17 @@ Adds command text at the end of the buffer, does NOT add a final \n
 ============
 */
 void Cbuf_AddText( const char *text ) {
+	Cbuf_AddTextOrigin( text, CMD_ORIGIN_LOCAL );
+}
+
+/*
+============
+Cbuf_AddTextOrigin
+
+HZM coop [SEC2] Cbuf_AddText, tagging every added byte with `origin`
+============
+*/
+void Cbuf_AddTextOrigin( const char *text, int origin ) {
 	size_t l;
 	
 	l = strlen (text);
@@ -108,7 +145,57 @@ void Cbuf_AddText( const char *text ) {
 		return;
 	}
 	Com_Memcpy(&cmd_text.data[cmd_text.cursize], text, l);
+	memset(&cmd_text_origin[cmd_text.cursize], Cmd_ClampOrigin(origin), l);
 	cmd_text.cursize += l;
+}
+
+/*
+============
+Cbuf_AddTextLineOrigin
+
+HZM coop [SEC2] Cbuf_AddTextOrigin of `text` and a terminating \n, both or neither. A text added without
+its newline (because only the newline overflowed) would stay an open line and merge with whatever is
+queued behind it. Returns qfalse, having added nothing, when the two do not fit.
+============
+*/
+qboolean Cbuf_AddTextLineOrigin( const char *text, int origin ) {
+	size_t l;
+
+	l = strlen (text);
+
+	if ((size_t)cmd_text.cursize + l + 1 >= (size_t)cmd_text.maxsize)
+	{
+		Com_Printf ("Cbuf_AddText: overflow\n");
+		return qfalse;
+	}
+	Cbuf_AddTextOrigin( text, origin );
+	Cbuf_AddTextOrigin( "\n", origin );
+	return qtrue;
+}
+
+/*
+============
+Cbuf_RemoveServerText
+
+HZM coop [SEC2] drop every SERVER-origin byte from the command buffer, keeping the LOCAL bytes in their
+order. Called when the client leaves a server, so a wait-deferred remainder of that server's text can
+never run against the next one. Returns how many bytes were removed.
+============
+*/
+int Cbuf_RemoveServerText( void ) {
+	size_t	i;
+	size_t	kept = 0;
+
+	for ( i = 0; i < cmd_text.cursize; i++ ) {
+		if ( cmd_text_origin[ i ] == CMD_ORIGIN_LOCAL ) {
+			cmd_text.data[ kept ] = cmd_text.data[ i ];
+			cmd_text_origin[ kept ] = CMD_ORIGIN_LOCAL;
+			kept++;
+		}
+	}
+	i = cmd_text.cursize - kept;
+	cmd_text.cursize = kept;
+	return (int)i;
 }
 
 
@@ -121,6 +208,18 @@ Adds a \n to the text
 ============
 */
 void Cbuf_InsertText( const char *text ) {
+	Cbuf_InsertTextOrigin( text, CMD_ORIGIN_LOCAL );
+}
+
+/*
+============
+Cbuf_InsertTextOrigin
+
+HZM coop [SEC2] Cbuf_InsertText, tagging the inserted bytes (and the added \n) with `origin` and
+shifting the existing tags together with the existing text
+============
+*/
+void Cbuf_InsertTextOrigin( const char *text, int origin ) {
 	size_t	len;
 	intptr_t	i;
 
@@ -133,6 +232,7 @@ void Cbuf_InsertText( const char *text ) {
 	// move the existing command text
 	for ( i = cmd_text.cursize - 1 ; i >= 0 ; i-- ) {
 		cmd_text.data[ i + len ] = cmd_text.data[ i ];
+		cmd_text_origin[ i + len ] = cmd_text_origin[ i ];
 	}
 
 	// copy the new text in
@@ -140,6 +240,7 @@ void Cbuf_InsertText( const char *text ) {
 
 	// add a \n
 	cmd_text.data[ len - 1 ] = '\n';
+	memset( cmd_text_origin, Cmd_ClampOrigin( origin ), len );
 
 	cmd_text.cursize += len;
 }
@@ -197,6 +298,8 @@ void Cbuf_Execute (int msec)
 	char	*text;
 	char	line[MAX_CMD_LINE];
 	int		quotes;
+	int		j;
+	int		lineOrigin;
 
 	alias_count = 0;
 	
@@ -255,6 +358,14 @@ void Cbuf_Execute (int msec)
 			i = MAX_CMD_LINE - 1;
 		}
 				
+		// HZM coop [SEC2] a line is server-origin if ANY of its bytes is (the deepest expansion wins), so
+		// a server line can never shed its origin by merging with local text
+		lineOrigin = CMD_ORIGIN_LOCAL;
+		for (j = 0; j < i; j++) {
+			if (cmd_text_origin[j] > lineOrigin)
+				lineOrigin = cmd_text_origin[j];
+		}
+
 		Com_Memcpy (line, text, i);
 		line[i] = 0;
 		
@@ -269,11 +380,12 @@ void Cbuf_Execute (int msec)
 			i++;
 			cmd_text.cursize -= i;
 			memmove (text, text+i, cmd_text.cursize);
+			memmove (cmd_text_origin, cmd_text_origin+i, cmd_text.cursize);
 		}
 
 // execute the command line
 
-		Cmd_ExecuteString (line);		
+		Cmd_ExecuteStringOrigin (line, lineOrigin);
 	}
 }
 
@@ -289,10 +401,12 @@ void Cbuf_Execute (int msec)
 
 /*
 ===============
-Cmd_Exec_f
+Cmd_ExecOrigin
+
+HZM coop [SEC2] exec, inserting the file with the child of the running line's origin
 ===============
 */
-void Cmd_Exec_f( void ) {
+static void Cmd_ExecOrigin( int origin ) {
 	qboolean quiet;
 	union {
 		char	*c;
@@ -318,20 +432,30 @@ void Cmd_Exec_f( void ) {
 	if (!quiet)
 		Com_Printf ("execing %s\n", filename);
 	
-	Cbuf_InsertText (f.c);
+	Cbuf_InsertTextOrigin (f.c, Cmd_ChildOrigin( origin ));
 
 	FS_FreeFile (f.v);
+}
+
+/*
+===============
+Cmd_Exec_f
+===============
+*/
+void Cmd_Exec_f( void ) {
+	Cmd_ExecOrigin( CMD_ORIGIN_LOCAL );
 }
 
 
 /*
 ===============
-Cmd_Vstr_f
+Cmd_VstrOrigin
 
 Inserts the current value of a variable as command text
+HZM coop [SEC2] with the child of the running line's origin
 ===============
 */
-void Cmd_Vstr_f( void ) {
+static void Cmd_VstrOrigin( int origin ) {
 	char	*v;
 
 	if (Cmd_Argc () != 2) {
@@ -340,7 +464,16 @@ void Cmd_Vstr_f( void ) {
 	}
 
 	v = Cvar_VariableString( Cmd_Argv( 1 ) );
-	Cbuf_InsertText( va("%s\n", v ) );
+	Cbuf_InsertTextOrigin( va("%s\n", v ), Cmd_ChildOrigin( origin ) );
+}
+
+/*
+===============
+Cmd_Vstr_f
+===============
+*/
+void Cmd_Vstr_f( void ) {
+	Cmd_VstrOrigin( CMD_ORIGIN_LOCAL );
 }
 
 
@@ -999,7 +1132,7 @@ Cmd_ExecuteString
 A complete command line has been parsed, so try to execute it
 ============
 */
-void	Cmd_ExecuteString( const char *text ) {	
+void	Cmd_ExecuteStringOrigin( const char *text, int origin ) {
 	cmd_function_t	*cmd, **prev;
 	cmdalias_t		*a;
 
@@ -1007,6 +1140,21 @@ void	Cmd_ExecuteString( const char *text ) {
 	Cmd_TokenizeString( text );		
 	if ( !Cmd_Argc() ) {
 		return;		// no tokens
+	}
+
+	// HZM coop [SEC2] security layer 2: a server-origin line runs only if the shared statement rules
+	// allow it, judged on the tokens it will actually run with. This covers what the cgame reception
+	// filter structurally cannot see: a write and its vstr in separate stufftexts of one snapshot, a
+	// wait-deferred remainder, and every line a vstr / exec / alias expands a server line into.
+	if ( origin != CMD_ORIGIN_LOCAL ) {
+		int depth = origin - CMD_ORIGIN_SERVER;
+
+		if ( !Cmd_IsServerLineAllowed( depth ) ) {
+			if ( Cvar_VariableIntegerValue( "coop_covtrace" ) ) {
+				Com_Printf( "^~^~^ COVX DROP origin=server depth=%i %.80s\n", depth, text );
+			}
+			return;
+		}
 	}
 
 	// check registered command functions	
@@ -1024,7 +1172,14 @@ void	Cmd_ExecuteString( const char *text ) {
 				// let the cgame or game handle it
 				break;
 			} else {
-				cmd->function ();
+				// HZM coop [SEC2] exec and vstr insert text: give them this line's origin explicitly
+				if ( cmd->function == Cmd_Exec_f ) {
+					Cmd_ExecOrigin( origin );
+				} else if ( cmd->function == Cmd_Vstr_f ) {
+					Cmd_VstrOrigin( origin );
+				} else {
+					cmd->function ();
+				}
 			}
 			return;
 		}
@@ -1038,7 +1193,7 @@ void	Cmd_ExecuteString( const char *text ) {
 			if( alias_count >= MAX_ALIAS_COUNT ) {
 				Com_Printf( "ALIAS_LOOP_COUNT\n" );
 			} else {
-				Cbuf_InsertText( a->value );
+				Cbuf_InsertTextOrigin( a->value, Cmd_ChildOrigin( origin ) );
 			}
 			return;
 		}
@@ -1062,6 +1217,68 @@ void	Cmd_ExecuteString( const char *text ) {
 	// send it as a server command if we are connected
 	// this will usually result in a chat message
 	CL_ForwardCommandToServer ( text );
+}
+
+/*
+============
+Cmd_ExecuteString
+
+HZM coop [SEC2] console and engine-hardcoded text: always LOCAL origin. Cbuf_ExecuteText(EXEC_NOW) and
+the cgi/uii command imports come through here, so a command a server-origin line triggers (e.g.
+pushmenu_teamselect -> EXEC_NOW ui_getplayermodel) still runs unfiltered.
+============
+*/
+void	Cmd_ExecuteString( const char *text ) {
+	Cmd_ExecuteStringOrigin( text, CMD_ORIGIN_LOCAL );
+}
+
+/*
+============
+Cmd_IsRegisteredCommandOrAlias
+============
+*/
+static qboolean Cmd_IsRegisteredCommandOrAlias( const char *name ) {
+	cmdalias_t *a;
+
+	if ( Cmd_FindCommand( name ) ) {
+		return qtrue;
+	}
+	for ( a = cmd_alias; a != NULL; a = a->next ) {
+		if ( !Q_stricmp( a->name, name ) ) {
+			return qtrue;
+		}
+	}
+	return qfalse;
+}
+
+/*
+============
+Cmd_IsServerLineAllowed
+
+HZM coop [SEC2] security layer 2: may the ALREADY-TOKENIZED server-origin line (Cmd_Argc/Cmd_Argv) run?
+The same SrvFilter_CheckArgs the cgame reception filter calls, with the exe's view of the world: the
+live cvar table, the listen-host flag read at execution time (com_sv_running, which is where
+cgs.localServer comes from), and the registered-command lookup cgame does not have. `depth` is how
+many vstr/exec/alias expansions below the stufftext the line is; past CMD_SERVER_MAX_DEPTH it fails
+closed (a self-referential vstr split across two stufftexts would otherwise never end).
+============
+*/
+qboolean Cmd_IsServerLineAllowed( int depth ) {
+	srvFilterEnv_t env;
+
+	memset( &env, 0, sizeof( env ) );
+	env.CvarFind				= Cvar_FindVar;
+	env.Printf					= Com_Printf;
+	env.tag					= "COVX";
+	env.localServer				= ( com_sv_running && com_sv_running->integer ) ? qtrue : qfalse;
+	env.covtrace				= Cvar_VariableIntegerValue( "coop_covtrace" ) ? qtrue : qfalse;
+	env.IsRegisteredCommand		= Cmd_IsRegisteredCommandOrAlias;
+
+	if ( depth > CMD_SERVER_MAX_DEPTH ) {
+		return SrvFilter_DropReason( &env, "depth", NULL );
+	}
+
+	return SrvFilter_CheckArgs( &env, cmd_argc, cmd_argv, 0 );
 }
 
 /*

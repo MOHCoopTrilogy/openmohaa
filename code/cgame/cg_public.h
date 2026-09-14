@@ -86,7 +86,11 @@ functions imported from the main executable
 ==================================================================
 */
 
-#define CGAME_IMPORT_API_VERSION 3
+// HZM coop [SEC2] 4: the exe stamps apiversion in CL_InitCGameDLL (it never did before, so an older exe
+// leaves it 0) and Cmd_StuffServer is appended at the END of clientGameImport_t. cgame uses it only when
+// apiversion >= CGAME_IMPORT_API_VERSION_STUFFSERVER.
+#define CGAME_IMPORT_API_VERSION 4
+#define CGAME_IMPORT_API_VERSION_STUFFSERVER 4
 
     /*
 ==================================================================
@@ -455,6 +459,12 @@ functions exported to the main executable
         void (*R_SetRagdollPose)(int entityNumber, dtiki_t *tiki, int count, const float *mat34, const vec3_t mins, const vec3_t maxs);
         void (*R_ClearRagdoll)(int entityNumber);
         void (*R_ClearAllRagdolls)(void);
+
+        // HZM coop [SEC2] security layer 2 - APPENDED LAST so every earlier member keeps its offset.
+        // Cbuf_AddText with the text (and its own trailing newline) tagged SERVER origin, so the exe
+        // filters every line it becomes at execution. Present only when apiversion >=
+        // CGAME_IMPORT_API_VERSION_STUFFSERVER; an older exe's struct ends before it.
+        void (*Cmd_StuffServer)(const char *text);
 
     } clientGameImport_t;
 

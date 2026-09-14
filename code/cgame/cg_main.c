@@ -24,6 +24,7 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 // Init functions for the cgame
 
 #include "cg_local.h"
+#include <stddef.h> // HZM coop [SEC2] offsetof
 #include "cg_parsemsg.h"
 #include "cg_archive.h"
 #include "cg_radar.h"
@@ -810,7 +811,14 @@ void CG_Init(clientGameImport_t *imported, int serverMessageNum, int serverComma
         imported->R_ClearAllRagdolls();
     }
 
-    cgi = *imported;
+    // HZM coop [SEC2] an exe older than CGAME_IMPORT_API_VERSION_STUFFSERVER never stamped apiversion and
+    // its clientGameImport_t ends before Cmd_StuffServer: copy only what it has.
+    if (imported->apiversion >= CGAME_IMPORT_API_VERSION_STUFFSERVER) {
+        cgi = *imported;
+    } else {
+        memcpy(&cgi, imported, offsetof(clientGameImport_t, Cmd_StuffServer));
+        cgi.Cmd_StuffServer = NULL;
+    }
 
     cg_protocol = cgi.Cvar_Get("com_protocol", "", 0)->integer;
     cg_target_game = (target_game_e)cgi.Cvar_Get("com_target_game", "0", 0)->integer;

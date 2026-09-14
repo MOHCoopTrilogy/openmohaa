@@ -483,8 +483,16 @@ static void CG_ServerCommand(qboolean modelOnly)
 
         // HZM coop [bug-2573] note the player's own Master volume before a server write replaces it
         CG_CoopNoteServerVolume(cmd);
-        cgi.Cmd_Stuff(cmd);
-        cgi.Cmd_Stuff("\n");
+        // HZM coop [SEC2] security layer 2: hand the text to the exe tagged SERVER origin, so every line
+        // it becomes (what a vstr or exec expands it into, what a wait defers) is filtered again when it
+        // runs. Only an exe that stamps the new API version provides the import; on an older exe fall
+        // back to the untagged path (layer 1 above still applies).
+        if (cgi.apiversion >= CGAME_IMPORT_API_VERSION_STUFFSERVER && cgi.Cmd_StuffServer) {
+            cgi.Cmd_StuffServer(cmd);
+        } else {
+            cgi.Cmd_Stuff(cmd);
+            cgi.Cmd_Stuff("\n");
+        }
         return;
     }
 

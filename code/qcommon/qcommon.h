@@ -626,6 +626,23 @@ void	Cmd_ExecuteString( const char *text );
 // Parses a single line of text into arguments and tries to execute it
 // as if it was typed at the console
 
+// HZM coop [SEC2] command origin: every byte of the command buffer carries one (qcommon/cmd.c)
+#define CMD_ORIGIN_LOCAL		0	// console, binds, cfgs, UI, engine-hardcoded text
+#define CMD_ORIGIN_SERVER		1	// server text; CMD_ORIGIN_SERVER + n is n vstr/exec/alias expansions deep
+#define CMD_ORIGIN_MAX			255
+#define CMD_SERVER_MAX_DEPTH	16	// a deeper server-origin expansion fails closed
+
+void	Cbuf_AddTextOrigin( const char *text, int origin );
+qboolean Cbuf_AddTextLineOrigin( const char *text, int origin );
+// text + "\n" with `origin`, both or neither (qfalse on overflow)
+int		Cbuf_RemoveServerText( void );
+// drop every server-origin byte, keeping local bytes in order; returns the bytes removed
+void	Cbuf_InsertTextOrigin( const char *text, int origin );
+void	Cmd_ExecuteStringOrigin( const char *text, int origin );
+// Cmd_ExecuteString( text ) is Cmd_ExecuteStringOrigin( text, CMD_ORIGIN_LOCAL )
+qboolean Cmd_IsServerLineAllowed( int depth );
+// security layer 2: may the currently tokenized server-origin line run
+
 
 /*
 ==============================================================

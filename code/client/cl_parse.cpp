@@ -24,6 +24,7 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 #include "client.h"
 #include "cl_ui.h"
 #include "../qcommon/bg_compat.h"
+#include "../qcommon/cmd_filter.h" // HZM coop [SEC2] SrvFilter_GuardClass
 
 const char *svc_strings[256] = {
 	"svc_bad",
@@ -408,6 +409,74 @@ int cl_connectedToCheatServer;
 
 /*
 ==================
+CL_SystemInfoSetCvars
+
+Scan through all the variables in the systeminfo and locally set cvars to match. Returns whether the
+server set fs_game.
+HZM coop [SEC2] split out of CL_SystemInfoChanged (docs/tools/sec2_filter_selftest runs it) and hardened.
+Neither command filter sees configstrings, and a cvar created here is CVAR_ROM, so a server could plant
+a value the client later runs through vstr from its own origin (coop_loCmt01 before ui/loadout/init.cfg
+has run, then a tile click) and lock the client's own write out. A coop_ cvar or a guard-list cvar is
+therefore never created or overwritten from systeminfo; no stock systeminfo key is either.
+==================
+*/
+static qboolean CL_SystemInfoSetCvars( const char *systemInfo ) {
+	const char		*s;
+	char			key[BIG_INFO_KEY];
+	char			value[BIG_INFO_VALUE];
+	qboolean		gameSet;
+
+	gameSet = qfalse;
+	// scan through all the variables in the systeminfo and locally set cvars to match
+	s = systemInfo;
+	while ( s ) {
+		int cvar_flags;
+		
+		Info_NextPair( &s, key, value );
+		if ( !key[0] ) {
+			break;
+		}
+
+		// HZM coop [SEC2] never from systeminfo: a coop_ cvar or a guard-list cvar (see above)
+		if ( !Q_stricmpn( key, "coop_", 5 ) || SrvFilter_GuardClass( key ) != SRVG_NONE ) {
+			if ( Cvar_VariableIntegerValue( "coop_covtrace" ) ) {
+				Com_Printf( "^~^~^ COVX SYSINFO skip %.64s\n", key );
+			}
+			continue;
+		}
+		
+		// ehw!
+		if (!Q_stricmp(key, "fs_game"))
+		{
+			if(FS_CheckDirTraversal(value))
+			{
+				Com_Printf(S_COLOR_YELLOW "WARNING: Server sent invalid fs_game value %s\n", value);
+				continue;
+			}
+				
+			gameSet = qtrue;
+		}
+
+		if((cvar_flags = Cvar_Flags(key)) == CVAR_NONEXISTENT)
+			Cvar_Get(key, value, CVAR_SERVER_CREATED | CVAR_ROM);
+		else
+		{
+			// If this cvar may not be modified by a server discard the value.
+			if(!(cvar_flags & (CVAR_SYSTEMINFO | CVAR_SERVER_CREATED)))
+			{
+				Com_Printf(S_COLOR_YELLOW "WARNING: server is not allowed to set %s=%s\n", key, value);
+				continue;
+			}
+
+			Cvar_Set(key, value);
+		}
+	}
+
+	return gameSet;
+}
+
+/*
+==================
 CL_SystemInfoChanged
 
 The systeminfo configstring has been changed, so parse
@@ -418,8 +487,6 @@ gamestate, and possibly during gameplay.
 void CL_SystemInfoChanged( void ) {
 	char			*systemInfo;
 	const char		*s, *t;
-	char			key[BIG_INFO_KEY];
-	char			value[BIG_INFO_VALUE];
 	qboolean		gameSet;
 
 	systemInfo = cl.gameState.stringData + cl.gameState.stringOffsets[ CS_SYSTEMINFO ];
@@ -461,43 +528,7 @@ void CL_SystemInfoChanged( void ) {
 	t = Info_ValueForKey( systemInfo, "sv_referencedPakNames" );
 	FS_PureServerSetReferencedPaks( s, t );
 
-	gameSet = qfalse;
-	// scan through all the variables in the systeminfo and locally set cvars to match
-	s = systemInfo;
-	while ( s ) {
-		int cvar_flags;
-		
-		Info_NextPair( &s, key, value );
-		if ( !key[0] ) {
-			break;
-		}
-		
-		// ehw!
-		if (!Q_stricmp(key, "fs_game"))
-		{
-			if(FS_CheckDirTraversal(value))
-			{
-				Com_Printf(S_COLOR_YELLOW "WARNING: Server sent invalid fs_game value %s\n", value);
-				continue;
-			}
-				
-			gameSet = qtrue;
-		}
-
-		if((cvar_flags = Cvar_Flags(key)) == CVAR_NONEXISTENT)
-			Cvar_Get(key, value, CVAR_SERVER_CREATED | CVAR_ROM);
-		else
-		{
-			// If this cvar may not be modified by a server discard the value.
-			if(!(cvar_flags & (CVAR_SYSTEMINFO | CVAR_SERVER_CREATED)))
-			{
-				Com_Printf(S_COLOR_YELLOW "WARNING: server is not allowed to set %s=%s\n", key, value);
-				continue;
-			}
-
-			Cvar_Set(key, value);
-		}
-	}
+	gameSet = CL_SystemInfoSetCvars( systemInfo );
 	// if game folder should not be set and it is set at the client side
 	if ( !gameSet && *Cvar_VariableString("fs_game") ) {
 		Cvar_Set( "fs_game", "" );

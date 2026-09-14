@@ -28,6 +28,12 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 #include "../qcommon/localization.h"
 #include "../qcommon/bg_compat.h"
 
+// HZM coop [SEC2] the last stufftext handed to cgame, so CL_CG_Stuff can tag it SERVER when a previous
+// cgame.dll (one without Cmd_StuffServer) relays it through cgi.Cmd_Stuff
+static char		cl_cgPendingStuffText[BIG_INFO_STRING];
+static qboolean	cl_cgPendingStuff = qfalse;
+static qboolean	cl_cgPendingNewline = qfalse;
+
 extern qboolean loadCamera(const char *name);
 extern void startCamera(int time);
 extern qboolean getCameraInfo(int time, vec3_t *origin, vec3_t *angles);
@@ -460,6 +466,15 @@ qboolean CL_GetServerCommand( int serverCommandNumber, qboolean differentServer 
 		cmd = Cmd_Argv(0);
 	}
 
+	// HZM coop [SEC2] remember a stufftext's text for CL_CG_Stuff (a previous cgame.dll relays it right
+	// after this returns)
+	cl_cgPendingStuff = qfalse;
+	cl_cgPendingNewline = qfalse;
+	if (!strcmp(cmd, "stufftext")) {
+		Q_strncpyz(cl_cgPendingStuffText, Cmd_Argv(1), sizeof(cl_cgPendingStuffText));
+		cl_cgPendingStuff = qtrue;
+	}
+
 	return CL_ProcessServerCommand(s, cmd, differentServer);
 }
 
@@ -606,6 +621,54 @@ void CL_ClearSavedCgameState() {
 
 /*
 ====================
+CL_CG_StuffServer
+
+HZM coop [SEC2] cgi->Cmd_StuffServer: a server stufftext enters the command buffer tagged SERVER, with
+its own SERVER-tagged newline so it can never merge with the next local line. The two go in together or
+not at all: a text whose newline alone overflowed would stay an open line.
+====================
+*/
+static void CL_CG_StuffServer( const char *text ) {
+	cl_cgPendingStuff = qfalse;
+	cl_cgPendingNewline = qfalse;
+	if ( !Cbuf_AddTextLineOrigin( text, CMD_ORIGIN_SERVER ) ) {
+		if ( Cvar_VariableIntegerValue( "coop_covtrace" ) ) {
+			Com_Printf( "^~^~^ COVX DROP overflow stufftext %.80s\n", text );
+		}
+	}
+}
+
+/*
+====================
+CL_CG_Stuff
+
+HZM coop [SEC2] cgi->Cmd_Stuff. A previous cgame.dll (no Cmd_StuffServer) relays a server stufftext as
+cgi.Cmd_Stuff( text ) then cgi.Cmd_Stuff( "\n" ), right after CL_GetServerCommand handed it exactly that
+text. Recognise the pair and tag it SERVER, so layer 2 still filters it; anything else a cgame stuffs is
+its own text and stays LOCAL. A cgame that changed the text before stuffing it no longer matches, and
+that text runs LOCAL - unfiltered, exactly as on the previous exe. The recognised text goes in WITH its
+newline (CL_CG_StuffServer, both or neither) and cgame's following "\n" is swallowed, so the same bytes
+land in the same order and an overflow cannot leave the server line open.
+====================
+*/
+static void CL_CG_Stuff( const char *text ) {
+	if ( cl_cgPendingNewline && !strcmp( text, "\n" ) ) {
+		cl_cgPendingNewline = qfalse;
+		return;
+	}
+	cl_cgPendingNewline = qfalse;
+
+	if ( cl_cgPendingStuff && !strcmp( text, cl_cgPendingStuffText ) ) {
+		CL_CG_StuffServer( text );
+		cl_cgPendingNewline = qtrue;
+		return;
+	}
+
+	Cbuf_AddText( text );
+}
+
+/*
+====================
 CL_InitCGameDLL
 ====================
 */
@@ -617,6 +680,10 @@ void CL_InitCGameDLL( clientGameImport_t *cgi, clientGameExport_t **cge ) {
 	}
 
 	memset( cgi, 0, sizeof( clientGameImport_t ) );
+
+	// HZM coop [SEC2] a real handshake: cgame uses the appended Cmd_StuffServer only when this says the
+	// exe provides it (apiversion was never stamped before, so an older exe reads as 0)
+	cgi->apiversion						= CGAME_IMPORT_API_VERSION;
 
 	cgi->Printf							= Com_Printf;
 	cgi->DPrintf						= Com_DPrintf;
@@ -640,7 +707,7 @@ void CL_InitCGameDLL( clientGameImport_t *cgi, clientGameExport_t **cge ) {
 	cgi->Argv							= Cmd_Argv;
 
 	cgi->AddCommand						= CL_AddCgameCommand;
-	cgi->Cmd_Stuff						= Cbuf_AddText;
+	cgi->Cmd_Stuff						= CL_CG_Stuff; // HZM coop [SEC2] recognises a previous cgame's stufftext
 	cgi->Cmd_Execute					= Cbuf_ExecuteText;
 	cgi->Cmd_TokenizeString				= Cmd_TokenizeString;
 
@@ -837,6 +904,7 @@ void CL_InitCGameDLL( clientGameImport_t *cgi, clientGameExport_t **cge ) {
 	cgi->R_SetRagdollPose			= re.SetRagdollPose;	// HZM coop - ragdoll bridge
 	cgi->R_ClearRagdoll				= re.ClearRagdoll;
 	cgi->R_ClearAllRagdolls			= re.ClearAllRagdolls; // bug-780
+	cgi->Cmd_StuffServer			= CL_CG_StuffServer; // HZM coop [SEC2] appended last (cg_public.h)
 
 	cgi->fsDebug					= fs_debug;
 	cgi->HudDrawElements			= cls.HudDrawElements;

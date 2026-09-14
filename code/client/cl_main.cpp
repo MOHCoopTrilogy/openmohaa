@@ -1067,6 +1067,18 @@ void CL_Disconnect() {
 		return;
 	}
 
+	// HZM coop [SEC2] leaving a server other than our own listen server: drop every command-buffer byte it
+	// queued (a wait-deferred stufftext remainder), keeping local bytes in order, so none of it can run
+	// against the next server - in particular a local one, where the listen-host allow-lists apply.
+	// Leaving localhost keeps them: "disconnect; pushmenu briefingroom" (training.scr) needs its tail.
+	if ( Q_stricmp( clc.servername, "localhost" ) ) {
+		int removed = Cbuf_RemoveServerText();
+
+		if ( removed && Cvar_VariableIntegerValue( "coop_covtrace" ) ) {
+			Com_Printf( "^~^~^ COVX STRIP disconnect bytes=%i\n", removed );
+		}
+	}
+
 	// shutting down the client so enter full screen ui mode
 	Cvar_Set("r_uiFullScreen", "1");
 
@@ -4126,6 +4138,9 @@ void CL_Init( void ) {
 	cl_freezeDemo = Cvar_Get ("cl_freezeDemo", "0", CVAR_TEMP );
 	rcon_client_password = Cvar_Get ("rconPassword", "", CVAR_TEMP );
 	cl_activeAction = Cvar_Get( "activeAction", "", CVAR_TEMP );
+	// HZM coop [SEC2] CL_NextDemo executes this cvar's value. Registered (engine-owned) so a server can
+	// neither create it through stufftext nor through systeminfo.
+	Cvar_Get( "nextdemo", "", CVAR_TEMP );
 
 	cl_timedemo = Cvar_Get ("timedemo", "0", 0);
 	cl_timedemoLog = Cvar_Get ("cl_timedemoLog", "", CVAR_ARCHIVE);
