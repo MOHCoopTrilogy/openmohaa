@@ -18442,6 +18442,36 @@ void Player::UserSelectWeapon(bool bWait)
     nationality_t nationality;
     char          buf[256];
 
+    // HZM-MP-BEGIN(mp_weaponselect_redirect)
+    // E5 [MP armories slice 2, plan 14] - on a live MP framework map the stock weapon picker is
+    // replaced by the side's MP armory screen. This is the single choke point for team join, team
+    // switch, the fire-click join, the P key and the ESC "Select Weapon" re-entry, and it covers
+    // both protocol branches, so redirecting here retires the stock picker without editing the
+    // SelectPrimaryWeapon* menus (which also load in coop). coop_mpRun is set ONLY by
+    // coop_mod/mp.scr::main and a level load wipes it, so it is never present on a coop map - coop's
+    // own weapon select is byte-for-byte untouched. Tested by TYPE, never value, like CoopMpPlayerHit.
+    // The exec target has the ui/coop_ prefix the shipped stufftext filter already admits
+    // (cmd_filter.c) so remote clients on the shipped cgame.dll accept it - no new grammar entry.
+    // Bots also reach UserSelectWeapon but server commands to bots are dropped in sv_game.
+    {
+        ScriptVariable *pMpRun = level.vars ? level.vars->GetVariable("coop_mpRun") : NULL;
+        if (pMpRun && pMpRun->GetType() != VARIABLE_NONE) {
+            if (GetTeam() == TEAM_AXIS) {
+                gi.SendServerCommand(
+                    edict - g_entities,
+                    bWait ? "stufftext \"wait 250;exec ui/coop_mpx_armory/open.cfg\""
+                          : "stufftext \"exec ui/coop_mpx_armory/open.cfg\"");
+            } else {
+                gi.SendServerCommand(
+                    edict - g_entities,
+                    bWait ? "stufftext \"wait 250;exec ui/coop_mpa_armory/open.cfg\""
+                          : "stufftext \"exec ui/coop_mpa_armory/open.cfg\"");
+            }
+            return;
+        }
+    }
+    // HZM-MP-END(mp_weaponselect_redirect)
+
     if (g_protocol < PROTOCOL_MOHTA_MIN) {
         //
         // nationality was first introduced in 2.0

@@ -1540,6 +1540,40 @@ void Level::ServerSpawned(void)
             //  Recast navigation
             navigationMap.LoadWorldMap(m_mapfile);
         }
+
+        // HZM-MP-BEGIN(mp_mapscript_hook)
+        // E4 [MP armories slice 2, S2] - start the MP framework on a non-coop multiplayer map that
+        // does NOT run global/ambient.scr, so script-less stock maps (siegecastle_obj, stalingrad_3_obj)
+        // and third-party MP maps get the armory with no per-map script edit. On maps that DO exec
+        // ambient.scr this is a no-op: ambient already exec'd coop_mod/mp.scr::main at prespawn, which
+        // set level.coop_mpRun. This fires only when ALL hold (R4 mitigation - three level-var gates
+        // plus the compile-success gate; CoopMpPlayerHit is the precedent for reading level vars):
+        //   - not single player;
+        //   - coop is NOT loaded (coop_mainScriptLoaded / ambient_script_run absent) and MP has not
+        //     already started (coop_mpRun absent) - tested by TYPE, never value, like CoopMpPlayerHit;
+        //   - and the map has no script OR its script compiled. A parse-killed coop map never set
+        //     coop_mainScriptLoaded but must NOT get MP: GetScript() returns NULL on a compile
+        //     exception, so "has a script but it is NULL" blocks the hook (R4).
+        if (g_gametype->integer != GT_SINGLE_PLAYER) {
+            ScriptVariable *pMpRun = level.vars ? level.vars->GetVariable("coop_mpRun") : NULL;
+            ScriptVariable *pCoop  = level.vars ? level.vars->GetVariable("coop_mainScriptLoaded") : NULL;
+            ScriptVariable *pAmb   = level.vars ? level.vars->GetVariable("ambient_script_run") : NULL;
+            bool bCoopLoaded = (pCoop && pCoop->GetType() != VARIABLE_NONE)
+                            || (pAmb && pAmb->GetType() != VARIABLE_NONE);
+            bool bMpStarted  = (pMpRun && pMpRun->GetType() != VARIABLE_NONE);
+            if (!bCoopLoaded && !bMpStarted) {
+                bool bScriptOk = true;
+                if (gi.FS_ReadFile(m_mapscript.c_str(), NULL, qtrue) != -1) {
+                    bScriptOk = (Director.GetScript(m_mapscript) != NULL);
+                }
+                if (bScriptOk) {
+                    gi.DPrintf("HZM-MP: no coop on '%s' (gametype %d) - starting MP framework\n",
+                               level_name.c_str(), g_gametype->integer);
+                    Director.ExecuteThread("coop_mod/mp.scr", "main");
+                }
+            }
+        }
+        // HZM-MP-END(mp_mapscript_hook)
     } else {
         Director.LoadMenus();
     }
