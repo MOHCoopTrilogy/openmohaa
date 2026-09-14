@@ -209,6 +209,9 @@ static uniformInfo_t uniformsInfo[] =
 	{ "u_FsrCon1",         GLSL_VEC4 },
 	{ "u_FsrCon2",         GLSL_VEC4 },
 	{ "u_FsrCon3",         GLSL_VEC4 },
+
+	// HZM gl2 soft particles - see UNIFORM_SOFTPARTICLE. Kept LAST, in enum order.
+	{ "u_SoftParticle",    GLSL_VEC4 },
 };
 
 typedef enum
@@ -1143,6 +1146,7 @@ void GLSL_InitGPUShaders(void)
 
 		GLSL_SetUniformInt(&tr.genericShader[i], UNIFORM_DIFFUSEMAP, TB_DIFFUSEMAP);
 		GLSL_SetUniformInt(&tr.genericShader[i], UNIFORM_LIGHTMAP,   TB_LIGHTMAP);
+		GLSL_SetUniformInt(&tr.genericShader[i], UNIFORM_SCREENDEPTHMAP, TB_SCREENDEPTH); // HZM soft particles
 
 		GLSL_FinishGPUShader(&tr.genericShader[i]);
 
@@ -1387,6 +1391,7 @@ void GLSL_InitGPUShaders(void)
 		GLSL_SetUniformInt(&tr.lightallShader[i], UNIFORM_SPECULARMAP, TB_SPECULARMAP);
 		GLSL_SetUniformInt(&tr.lightallShader[i], UNIFORM_SHADOWMAP,   TB_SHADOWMAP);
 		GLSL_SetUniformInt(&tr.lightallShader[i], UNIFORM_CUBEMAP,     TB_CUBEMAP);
+		GLSL_SetUniformInt(&tr.lightallShader[i], UNIFORM_SCREENDEPTHMAP, TB_SCREENDEPTH); // HZM soft particles
 
 		GLSL_FinishGPUShader(&tr.lightallShader[i]);
 

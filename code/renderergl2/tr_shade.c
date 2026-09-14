@@ -1492,6 +1492,97 @@ upload:
 	GLSL_SetUniformVec4( sp, UNIFORM_GLOBALFOGPARAMS, fogParams );
 }
 
+/*
+=================
+RB_SetSoftParticleUniforms
+
+HZM gl2 SOFT PARTICLES (r_softParticles, design section 5). Uploads u_SoftParticle for one draw
+through the generic or lightall program. Mode 0 (inert) is uploaded for everything that is not a
+qualifying emitter sprite, so a sprite that set a live mode can never leak it into the next world
+draw of the same program. With r_softParticles off this early-returns and touches no uniform, so
+the fragment path is byte-identical to today.
+
+  u_SoftParticle = (1/fadeDistance, projMat[10], projMat[14], mode)
+  mode 0 off, 1 fade alpha, 2 fade rgb (additive), 3 lerp toward white (modulate), 4 debug
+
+Gated to emitter sprites (backEnd.inSpriteList) once the sprite-list depth snapshot exists
+(softDepthValid), never on RF_DEPTHHACK sprites (muzzle flashes) whose depth range would mismatch
+the snapshot, never 2D, only on blended sprites that do not write depth, and never on a shader that
+carried the "nosoftparticles" keyword.
+=================
+*/
+void RB_SetSoftParticleUniforms( shaderProgram_t *sp, int stateBits )
+{
+	vec4_t sp4;
+	vec2_t invTexRes;
+	int    blendSrcBits, blendDstBits;
+	int    mode;
+	const float *m;
+
+	if ( !r_softParticles || !r_softParticles->integer ) {
+		return;
+	}
+
+	VectorSet4( sp4, 0.0f, 0.0f, 0.0f, 0.0f );	// mode 0 = off
+
+	if ( !backEnd.inSpriteList || !backEnd.softDepthValid || backEnd.spriteDepthHack
+		|| backEnd.projection2D || !tr.hdrDepthImage ) {
+		goto upload;
+	}
+	if ( stateBits & GLS_DEPTHMASK_TRUE ) {
+		goto upload;
+	}
+	if ( tess.shader && tess.shader->noSoftParticles ) {
+		goto upload;
+	}
+
+	blendSrcBits = stateBits & GLS_SRCBLEND_BITS;
+	blendDstBits = stateBits & GLS_DSTBLEND_BITS;
+	if ( !blendSrcBits && !blendDstBits ) {
+		goto upload;	// opaque sprite: nothing to fade
+	}
+
+	// classify the blend like RB_SetGlobalFogUniforms and pick the matching fade
+	if ( ( blendSrcBits == GLS_SRCBLEND_ONE                   && blendDstBits == GLS_DSTBLEND_ONE )
+		|| ( blendSrcBits == GLS_SRCBLEND_SRC_ALPHA           && blendDstBits == GLS_DSTBLEND_ONE )
+		|| ( blendSrcBits == GLS_SRCBLEND_DST_COLOR           && blendDstBits == GLS_DSTBLEND_ONE )
+		|| ( blendSrcBits == GLS_SRCBLEND_ONE_MINUS_DST_COLOR && blendDstBits == GLS_DSTBLEND_ONE ) ) {
+		mode = 2;	// additive -> fade rgb toward black
+	} else if ( ( blendSrcBits == GLS_SRCBLEND_DST_COLOR && blendDstBits == GLS_DSTBLEND_ZERO )
+		|| ( blendSrcBits == GLS_SRCBLEND_ZERO           && blendDstBits == GLS_DSTBLEND_SRC_COLOR ) ) {
+		mode = 3;	// modulate -> fade toward white
+	} else if ( ( blendSrcBits == GLS_SRCBLEND_SRC_ALPHA          && blendDstBits == GLS_DSTBLEND_ONE_MINUS_SRC_ALPHA )
+		|| ( blendSrcBits == GLS_SRCBLEND_ONE_MINUS_SRC_ALPHA && blendDstBits == GLS_DSTBLEND_SRC_ALPHA ) ) {
+		mode = 1;	// alpha blend -> fade alpha
+	} else {
+		goto upload;	// unknown combination: leave it alone
+	}
+
+	// a well-formed perspective projection has [10] < -1 and [14] < 0 (same guard as the fog latch)
+	m = backEnd.viewParms.projectionMatrix;
+	if ( m[14] >= 0.0f || m[10] >= -1.0f ) {
+		goto upload;
+	}
+
+	if ( r_softParticlesDebug && r_softParticlesDebug->integer ) {
+		mode = 4;
+	}
+
+	sp4[0] = 1.0f / ( ( r_softParticleDistance && r_softParticleDistance->value > 0.0f )
+		? r_softParticleDistance->value : 24.0f );
+	sp4[1] = m[10];
+	sp4[2] = m[14];
+	sp4[3] = (float)mode;
+
+	// the depth snapshot fills the whole scene FBO, so uv = gl_FragCoord.xy / scene size
+	invTexRes[0] = 1.0f / (float)tr.sceneWidth;
+	invTexRes[1] = 1.0f / (float)tr.sceneHeight;
+	GLSL_SetUniformVec2( sp, UNIFORM_INVTEXRES, invTexRes );
+
+upload:
+	GLSL_SetUniformVec4( sp, UNIFORM_SOFTPARTICLE, sp4 );
+}
+
 static void RB_IterateStagesGeneric( shaderCommands_t *input )
 {
 	int stage;
@@ -1685,6 +1776,10 @@ static void RB_IterateStagesGeneric( shaderCommands_t *input )
 			(qboolean)( input->shader->isSky
 			            || input->shader == tr.sunShader
 			            || input->shader == tr.sunFlareShader ) );
+
+		// HZM gl2 SOFT PARTICLES (r_softParticles): uploads mode 0 for every non-sprite draw and
+		// the qualifying fade mode for emitter sprites. No-op when r_softParticles is off.
+		RB_SetSoftParticleUniforms( sp, pStage->stateBits );
 
 		// HZM gl2 parity (bug #73 "gun over the menus"): a 2D stage must NEVER depth-test.
 		// renderergl1 forces this (tr_shade.c RB_StageIteratorGeneric:

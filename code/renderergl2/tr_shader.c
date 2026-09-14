@@ -1914,6 +1914,14 @@ static qboolean ParseStage( shaderStage_t *stage, char **text )
 			shader.noGlobalFog = qtrue;
 			continue;
 		}
+		else if (!Q_stricmp(token, "nosoftparticles"))
+		{
+			// [HZM soft particles] opt this shader out of the r_softParticles depth fade
+			// (RB_SetSoftParticleUniforms). For emitters that must stay hard-edged, e.g. a
+			// first-person smoke wisp spawned in front of the viewmodel.
+			shader.noSoftParticles = qtrue;
+			continue;
+		}
 		else if (!Q_stricmp(token, "depthmask"))
 		{
 			depthMaskBits = GLS_DEPTHMASK_TRUE;

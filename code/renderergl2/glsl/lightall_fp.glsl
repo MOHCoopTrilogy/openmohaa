@@ -119,6 +119,46 @@ vec3 ApplyGlobalFog(vec3 color)
 	return mix(operand, u_GlobalFogColor.rgb, frac);
 }
 
+// HZM gl2 soft particles (r_softParticles). u_ScreenDepthMap is the scene-depth snapshot bound on
+// TB_SCREENDEPTH (TMU 7); u_InvTexRes is 1/scene-FBO size so uv = gl_FragCoord.xy * u_InvTexRes.
+// u_SoftParticle = (1/fadeDistance, projMat[10], projMat[14], mode). mode 0 leaves this inert, so
+// with r_softParticles off the fragment output is byte-identical. Body kept identical to the copy
+// in lightall_fp.glsl (these two fragment shaders are stringified independently - no includes).
+uniform sampler2D u_ScreenDepthMap;
+uniform vec2      u_InvTexRes;
+uniform vec4      u_SoftParticle;
+
+void ApplySoftParticle(inout vec3 rgb, inout float a)
+{
+	if (u_SoftParticle.w < 0.5)
+	{
+		return;
+	}
+
+	float zs = texture2D(u_ScreenDepthMap, gl_FragCoord.xy * u_InvTexRes).r;
+	float ds = u_SoftParticle.z / min(u_SoftParticle.y + (2.0 * zs - 1.0), -1e-6);
+	float df = u_SoftParticle.z / min(u_SoftParticle.y + (2.0 * gl_FragCoord.z - 1.0), -1e-6);
+	float k  = clamp((ds - df) * u_SoftParticle.x, 0.0, 1.0);
+
+	if (u_SoftParticle.w > 3.5)
+	{
+		rgb = vec3(k);                // debug: the fade factor as greyscale
+		a   = 1.0;
+	}
+	else if (u_SoftParticle.w > 2.5)
+	{
+		rgb = mix(vec3(1.0), rgb, k); // mode 3: modulate, fade toward white
+	}
+	else if (u_SoftParticle.w > 1.5)
+	{
+		rgb *= k;                     // mode 2: additive, fade toward black
+	}
+	else
+	{
+		a *= k;                       // mode 1: alpha blend
+	}
+}
+
 #define EPSILON 0.00000001
 
 #if defined(USE_PARALLAXMAP)
@@ -586,6 +626,8 @@ void main()
 	gl_FragColor.rgb = diffuse.rgb * lightColor;
 
 #endif
+
+	ApplySoftParticle(gl_FragColor.rgb, alpha);
 
 	gl_FragColor.rgb = ApplyGlobalFog(gl_FragColor.rgb);
 

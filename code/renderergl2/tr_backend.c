@@ -1590,6 +1590,8 @@ const void	*RB_DrawSurfs( const void *data ) {
 	// exists right after allocation. See backEndState_t::ssaoValid.
 	if (!isShadowView) {
 		backEnd.ssaoValid = qfalse;
+		// HZM gl2 SOFT PARTICLES: the sprite-list depth snapshot for this view has not run yet.
+		backEnd.softDepthValid = qfalse;
 	}
 
 	// HZM gl2 fog parity: latch the global farplane fog for this view, mirroring gl1's
@@ -2664,6 +2666,15 @@ void RB_RenderSpriteSurfList(drawSurf_t* drawSurfs, int numDrawSurfs) {
 	backEnd.pc.c_surfaces += numDrawSurfs;
 	backEnd.or = backEnd.viewParms.world;
 
+	// HZM gl2 SOFT PARTICLES (r_softParticles): open the per-fragment fade window for the sprite
+	// list and bind the scene-depth snapshot on TB_SCREENDEPTH. spriteDepthHack is set per sprite
+	// below so RF_DEPTHHACK muzzle flashes are excluded. inSpriteList is cleared at the end.
+	backEnd.inSpriteList = qtrue;
+	backEnd.spriteDepthHack = qfalse;
+	if (backEnd.softDepthValid && tr.hdrDepthImage) {
+		GL_BindToTMU(tr.hdrDepthImage, TB_SCREENDEPTH);
+	}
+
 	oldShader = NULL;
     depthRange = qfalse;
     oldDepthRange = qfalse;
@@ -2681,6 +2692,9 @@ void RB_RenderSpriteSurfList(drawSurf_t* drawSurfs, int numDrawSurfs) {
             RB_BeginSurface(shader, 0, 0);
             oldShader = shader;
         }
+
+		// HZM gl2 SOFT PARTICLES: record this sprite's depth-hack state for RB_SetSoftParticleUniforms.
+		backEnd.spriteDepthHack = depthRange;
 		
 		GL_SetModelviewMatrix( backEnd.or.modelMatrix );
 
@@ -2723,6 +2737,9 @@ void RB_RenderSpriteSurfList(drawSurf_t* drawSurfs, int numDrawSurfs) {
 		}
 		qglDepthRange(0.0, 1.0);
 	}
+
+	// HZM gl2 SOFT PARTICLES: close the fade window; world draws in later frames upload mode 0.
+	backEnd.inSpriteList = qfalse;
 }
 
 /*
@@ -2743,7 +2760,34 @@ const void* RB_SpriteSurfs(const void* data) {
 
     backEnd.refdef = cmd->refdef;
     backEnd.viewParms = cmd->viewParms;
-	
+
+    // HZM gl2 SOFT PARTICLES (r_softParticles, design section 5): snapshot the scene depth into
+    // hdrDepthImage so the sprite fragment shader can fade emitter particles as they approach
+    // geometry. Per view (the portal-sky view gets its own), and gated so it costs nothing with
+    // the feature off, on an RDF_NOWORLDMODEL (UI 3D) view, or before any world surface exists.
+    // Mirrors the SSAO/DoF snapshot recipe in RB_DrawSurfs (blit renderDepthImage -> hdrDepthFbo,
+    // resolving MS depth first when multisampling).
+    backEnd.softDepthValid = qfalse;
+    if (r_softParticles && r_softParticles->integer && cmd->numDrawSurfs > 0
+        && !(backEnd.refdef.rdflags & RDF_NOWORLDMODEL) && tr.hdrDepthFbo)
+    {
+        FBO_t *oldFbo = glState.currentFBO;
+        vec4_t srcTexCoords;
+
+        if (tr.msaaResolveFbo) {
+            FBO_FastBlit(tr.sceneFbo, NULL, tr.msaaResolveFbo, NULL, GL_DEPTH_BUFFER_BIT, GL_NEAREST);
+        }
+
+        VectorSet4(srcTexCoords, 0.0f, 0.0f, 1.0f, 1.0f);
+        FBO_BlitFromTexture(tr.renderDepthImage, srcTexCoords, NULL, tr.hdrDepthFbo, NULL, NULL, NULL, 0);
+
+        // restore the scene render target and this view's viewport/scissor for the sprite draws
+        FBO_Bind(oldFbo ? oldFbo : (tr.sceneFbo ? tr.sceneFbo : tr.renderFbo));
+        SetViewportAndScissor();
+
+        backEnd.softDepthValid = qtrue;
+    }
+
 	//RB_SetupFog();
     RB_RenderSpriteSurfList(cmd->drawSurfs, cmd->numDrawSurfs);
 

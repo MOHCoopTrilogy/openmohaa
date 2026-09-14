@@ -3631,7 +3631,10 @@ void R_CreateBuiltinImages( void ) {
 		// DoF port has to opt in or it would sample a NULL image.
 		// (bug-1177) r_ppSSAO joins the OR for the same reason - purely widening it, so the image can
 		// only exist in MORE cases than before: shadow blur and DoF cannot regress, nothing double-allocates.
-		if (r_shadowBlur->integer || r_ssao->integer || (r_ppSSAO && r_ppSSAO->integer) || (r_ppDoF && r_ppDoF->integer))
+		// (r_softParticles) joins the OR: the sprite-list depth snapshot copies into hdrDepthImage.
+		// Purely widening it - the image can only exist in MORE cases than before. r_softParticles is
+		// CVAR_LATCH so this gate is decided once at launch (bug-1177 pattern).
+		if (r_shadowBlur->integer || r_ssao->integer || (r_ppSSAO && r_ppSSAO->integer) || (r_ppDoF && r_ppDoF->integer) || (r_softParticles && r_softParticles->integer))
 			tr.hdrDepthImage = R_CreateImage("*hdrDepth", NULL, width, height, IMGTYPE_COLORALPHA, IMGFLAG_NO_COMPRESSION | IMGFLAG_CLAMPTOEDGE, GL_R32F);
 
 		if (r_drawSunRays->integer)

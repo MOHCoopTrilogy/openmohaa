@@ -116,6 +116,9 @@ cvar_t  *r_renderScale;      // HZM render-scale supersampling (0.5-2.0, latched
 cvar_t  *r_upscaleFilter;
 cvar_t  *r_fsrSharpness;
 cvar_t  *r_renderScaleDebug;
+cvar_t  *r_softParticles;      // HZM gl2 soft particles: sprites depth-fade near geometry
+cvar_t  *r_softParticleDistance;
+cvar_t  *r_softParticlesDebug;
 
 cvar_t  *r_cameraExposure;
 
@@ -1447,6 +1450,15 @@ void R_Register( void )
 	r_fsrSharpness = ri.Cvar_Get( "r_fsrSharpness", "0.25", CVAR_ARCHIVE );  // 0..1 RCAS strength; 0 = off, replaces r_ppSharpen while > 0
 	ri.Cvar_CheckRange( r_fsrSharpness, 0.0f, 1.0f, qfalse );
 	r_renderScaleDebug = ri.Cvar_Get( "r_renderScaleDebug", "0", CVAR_TEMP );
+
+	// HZM gl2 soft particles (r_softParticles, design section 5; user decision D8: ON by default,
+	// distance 24, restart applies). r_softParticles is CVAR_LATCH because it widens the
+	// hdrDepthImage allocation gate (tr_image.c) - a live vid_restart crashes gl2 (bug-1181), so
+	// the Video menu row carries a "(needs restart)" label like AO. The distance is live.
+	r_softParticles = ri.Cvar_Get( "r_softParticles", "1", CVAR_ARCHIVE | CVAR_LATCH );
+	r_softParticleDistance = ri.Cvar_Get( "r_softParticleDistance", "24", CVAR_ARCHIVE );
+	ri.Cvar_CheckRange( r_softParticleDistance, 1.0f, 256.0f, qfalse );
+	r_softParticlesDebug = ri.Cvar_Get( "r_softParticlesDebug", "0", CVAR_TEMP );
 	r_arb_seamless_cube_map = ri.Cvar_Get( "r_arb_seamless_cube_map", "0", CVAR_ARCHIVE | CVAR_LATCH);
 	r_arb_vertex_array_object = ri.Cvar_Get( "r_arb_vertex_array_object", "1", CVAR_ARCHIVE | CVAR_LATCH);
 	r_ext_direct_state_access = ri.Cvar_Get("r_ext_direct_state_access", "1", CVAR_ARCHIVE | CVAR_LATCH);

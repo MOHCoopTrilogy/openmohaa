@@ -506,7 +506,13 @@ enum
 	TB_SHADOWMAP   = 5,
 	TB_CUBEMAP     = 6,
 	TB_SHADOWMAP4  = 6,
-	NUM_TEXTURE_BUNDLES = 7
+	NUM_TEXTURE_BUNDLES = 7,
+	// HZM gl2 soft particles (r_softParticles): the scene-depth snapshot binds on a NINTH TMU,
+	// past the 0-6 bundle range (lightall already uses all seven). NUM_TEXTURE_BUNDLES still
+	// sizes the per-stage bundle[] and tess texcoords[] arrays and MUST stay 7; NUM_TEXTURE_UNITS
+	// only sizes the DSA texture bind cache (tr_dsa.c), so widening that to 8 is safe.
+	TB_SCREENDEPTH = 7,
+	NUM_TEXTURE_UNITS = 8
 };
 
 typedef enum
@@ -663,6 +669,9 @@ typedef struct shader_s {
 										// nofog tracers and muzzle flashes fogged toward BLACK (the
 										// correct target for an additive stage) and rendered as dark
 										// bands in heavy fog. User-reported on e1l1, which is thick dust.
+	qboolean	noSoftParticles;		// [HZM soft particles] shader asked for "nosoftparticles": never
+										// depth-fade this shader's sprites (first-person smoke wisps in front
+										// of the viewmodel, or any emitter that must stay hard-edged).
 
 	int         vertexAttribs;          // not all shaders will need all data to be gathered
 
@@ -959,6 +968,13 @@ typedef enum
 	UNIFORM_FSRCON1,
 	UNIFORM_FSRCON2,
 	UNIFORM_FSRCON3,
+
+	// HZM gl2 soft particles (r_softParticles). Appended LAST, per the rule above:
+	// uniformsInfo[] is indexed by this enum, so a mid-enum insert resolves every later
+	// uniform to the wrong name.
+	//   u_SoftParticle = (1/fadeDistance, projMat[10], projMat[14], mode)
+	//   mode 0 off, 1 fade alpha, 2 fade rgb (additive), 3 lerp toward white (modulate), 4 debug
+	UNIFORM_SOFTPARTICLE,
 
 	UNIFORM_COUNT
 } uniform_t;
@@ -2166,6 +2182,17 @@ typedef struct {
 	// (covers the first frame after vid_restart and any RDF_NOWORLDMODEL scene too).
 	qboolean    ssaoValid;
 
+	// HZM gl2 soft particles (r_softParticles). softDepthValid mirrors ssaoValid: cleared at the
+	// top of every non-shadow RB_DrawSurfs and set only once the sprite-list depth snapshot has
+	// been taken for this view, so a sprite fragment never samples a stale or virgin depth copy.
+	// inSpriteList is raised only around RB_RenderSpriteSurfList so the per-fragment fade is
+	// gated to emitter sprites; spriteDepthHack tracks the current sprite's RF_DEPTHHACK (muzzle
+	// flashes) so they are excluded - their compressed depth range would compare wrong against
+	// the snapshot.
+	qboolean    softDepthValid;
+	qboolean    inSpriteList;
+	qboolean    spriteDepthHack;
+
 	//
 	// OPENMOHAA-specific stuff
 	//
@@ -2784,6 +2811,11 @@ extern cvar_t  *r_renderScale;      // CVAR_ARCHIVE|CVAR_LATCH, 0.5-2.0, default
 extern cvar_t  *r_upscaleFilter;    // CVAR_ARCHIVE, 0 = bilinear blit, 1 = FSR EASU (<1) / SSAA tent (>1)
 extern cvar_t  *r_fsrSharpness;     // CVAR_ARCHIVE, 0..1 RCAS strength (0 = off); replaces r_ppSharpen while >0
 extern cvar_t  *r_renderScaleDebug; // CVAR_TEMP, 1 = print the resolved scene/display size once per map
+
+// HZM gl2 soft particles (r_softParticles)
+extern cvar_t  *r_softParticles;        // CVAR_ARCHIVE|CVAR_LATCH, default 1 (launch-only: widens the hdrDepth alloc gate)
+extern cvar_t  *r_softParticleDistance; // CVAR_ARCHIVE, default 24 world units, live
+extern cvar_t  *r_softParticlesDebug;   // CVAR_TEMP, 1 = draw the fade factor k as greyscale on particles
 
 // Global farplane fog state, latched from the MAIN world view in RB_DrawSurfs (which is
 // where gl1 calls RB_SetupFog) so the post pass can never inherit a portal / sky-portal /

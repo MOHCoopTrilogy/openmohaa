@@ -1826,6 +1826,15 @@ static void CG_DrawStaminaArc(void)
     // together without desynchronising them.
     fA = s_hudFadeAlpha * s_hudFadeAlpha;
 
+    // [bug-2593] Hard cutoff to match the URC HUD widgets, which draw NOTHING once their fade
+    // multiplier is essentially out (uiwidget.cpp: m_hudFadeMul <= 0.02 returns early). A thin
+    // bright stroke stays perceptible at an alpha where the dark panels have already gone, so
+    // stop drawing the arc at the same point the rest of the bottom-left cluster does, and the
+    // whole cluster vanishes together instead of the frame lingering through the fade tail.
+    if (s_hudFadeAlpha <= 0.02f) {
+        return;
+    }
+
     // [user 2026-09-09] "the gauge itself for stamina you can barely see, i thought you were going
     // to make the white outline itself the stamina bar." It IS the outline - the failure was
     // CONTRAST. At 0.40 grey against a 1.00 white remainder, a thin stroke over a dark scene reads
