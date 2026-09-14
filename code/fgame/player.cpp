@@ -4861,7 +4861,9 @@ void Player::ClientMove(usercmd_t *ucmd)
         // handled separately. Left in place + tunable: lower coop_adsSpeedMult below 1.0 to re-enable.
         m_iCoopSpeedBase = client->ps.speed; // HZM coop [222] - SPEEDPROBE: speed before the ADS/weapon mults
 
-        if ((last_ucmd.buttons & BUTTON_COOPADS) && !m_bCoopSprinting) {
+        // HZM MP - Aim Down Sights OFF: RMB does not slow the walk when ADS is disabled (MP only, 0 in coop;
+        // coop_adsSpeedMult defaults 1.0 so this is a no-op unless a coop host tuned it, but gate it anyway).
+        if ((last_ucmd.buttons & BUTTON_COOPADS) && !m_bCoopSprinting && !CoopMpRealismOff(MPREALISM_NOADS)) {
             cvar_t *pAdsMult = gi.Cvar_Get("coop_adsSpeedMult", "1.0", CVAR_ARCHIVE);
             float   amult    = pAdsMult ? pAdsMult->value : 1.0f;
             if (amult < 0.1f) { amult = 0.1f; } else if (amult > 1.0f) { amult = 1.0f; }
@@ -14013,6 +14015,33 @@ void Player::EventCoopLimpTest(Event *ev)
               gi.Cvar_Get("coop_limpStart", "0.30", CVAR_ARCHIVE)->string);
 }
 
+// HZM MP - is the host "realism" toggle for iBit (MPREALISM_* in q_shared.h) active on THIS server?
+//
+// True only when the serverinfo bitmask g_mpRealismOff has the bit set AND this is not a coop session. The
+// mask is set only by the MP realism script on an MP server (its coop-refusal guard keeps it off coop), so
+// it is 0 in every coop session and the fast path returns at once - coop's prone / cover / ADS are
+// structurally untouched. The coop-loaded backstop (level.coop_mainScriptLoaded, tested by TYPE exactly as
+// Sentient's MP-hit test does, never by value) is belt-and-braces so a stray value can never gate coop
+// gameplay. g_mpRealismOff is registered CVAR_SERVERINFO|CVAR_ROM in gamecvars.cpp before any script; the
+// pointer is stable for the process, so caching it is safe (as CG_MpHardcoreActive caches its own).
+bool Player::CoopMpRealismOff(int iBit)
+{
+    static cvar_t  *pMask = NULL;
+    ScriptVariable *pCoop;
+
+    if (!pMask) {
+        pMask = gi.Cvar_Get("g_mpRealismOff", "0", CVAR_SERVERINFO | CVAR_ROM);
+    }
+    if (!pMask || !(pMask->integer & iBit)) {
+        return false;
+    }
+    pCoop = level.vars ? level.vars->GetVariable("coop_mainScriptLoaded") : NULL;
+    if (pCoop && pCoop->GetType() != VARIABLE_NONE) {
+        return false; // coop is loaded on this map - never gate coop gameplay whatever the flag says
+    }
+    return true;
+}
+
 // HZM coop [user 2026-08-24] PRONE - hold the crouch key.
 //
 // DIVISION OF LABOUR, and it is not arbitrary. In MOHAA the STATEMAP owns stance: `height prone`
@@ -14067,7 +14096,12 @@ void Player::TickCoopProne()
                                                        | PMF_FROZEN | PMF_NO_MOVE)));
     bCanEnter  = (qboolean)(!bMustLeave && groundentity && !m_bCoopSliding);
 
-    if (!pOn->integer || bMustLeave) {
+    // HZM MP - Prone OFF (host realism toggle). MP only; inert in coop (CoopMpRealismOff is 0 there). Treat
+    // it EXACTLY like the coop_prone cvar being off: fold it into the disable branch below, so a player
+    // simply cannot go prone (the entry accumulator never builds) and one who is already prone when a host
+    // flips it on mid-match is stood back up, identical to the shipped coop_prone-off path. Coop's prone is
+    // structurally untouched: the bit is never set on a coop server and the coop-loaded backstop guards it.
+    if (!pOn->integer || bMustLeave || CoopMpRealismOff(MPREALISM_NOPRONE)) {
         // gated - this used to print unconditionally, i.e. on every death and every vehicle mount, for
         // every player, on a shipped build. The user's standing rule is no dev prints to players.
         if (m_bCoopProne && gi.Cvar_Get("coop_proneDebug", "0", 0)->integer) {
@@ -17010,7 +17044,9 @@ void Player::TickSprint()
             m_bCoopJumpPrev = bJumpNow;
         }
 
-        aiming  = (IsZoomed() || (last_ucmd.buttons & BUTTON_COOPADS)) ? qtrue : qfalse; // ADS now on its own button
+        // HZM MP - Aim Down Sights OFF: RMB no longer counts as aiming, so it neither suppresses sprint nor
+        // steadies the shot (MP only, 0 in coop). Scoped zoom (IsZoomed) still blocks sprint, as in stock.
+        aiming  = (IsZoomed() || ((last_ucmd.buttons & BUTTON_COOPADS) && !CoopMpRealismOff(MPREALISM_NOADS))) ? qtrue : qfalse; // ADS now on its own button
         walkKey = (last_ucmd.buttons & BUTTON_RUN) ? qfalse : qtrue;       // Shift held = walk-key state
         altWalk = (last_ucmd.buttons & BUTTON_COOPWALK) ? qtrue : qfalse;  // Alt held = forced slow walk
 
@@ -17158,7 +17194,9 @@ void Player::TickCoopBreath(void)
     if (dt < 0 || dt > 500) { dt = 0; } // clamp pauses / map loads, exactly as the client does
     m_iCoopBreathLastMs = nowMs;
 
-    bAds      = (last_ucmd.buttons & BUTTON_COOPADS) ? qtrue : qfalse;
+    // HZM MP - Aim Down Sights OFF: RMB does not steady the aim (breath hold) when ADS is disabled (MP
+    // only, 0 in coop). Scoped weapons steady through their own zoom path, not this button.
+    bAds      = ((last_ucmd.buttons & BUTTON_COOPADS) && !CoopMpRealismOff(MPREALISM_NOADS)) ? qtrue : qfalse;
     bWalkHeld = (last_ucmd.buttons & BUTTON_RUN) ? qfalse : qtrue;
     m_bCoopBreathSteady = qfalse;
 
@@ -17424,6 +17462,23 @@ void Player::TickCoopCover()
 {
     qboolean wallValid = qfalse;
     qboolean lowValid  = qfalse;
+
+    // HZM MP - Take Cover OFF (host realism toggle). MP only; inert in coop (CoopMpRealismOff is 0 there).
+    // Clear every cover flag and bail before either entry path (the manual bus-26 request that reaches here
+    // via EventCoopSetCover, or the auto-cover dwell below), so the wall/low pose can never engage. Coop's
+    // cover is structurally untouched: the bit is never set on a coop server and the coop-loaded backstop
+    // guards it. Mirrors the hard-cancel clear a few lines down.
+    if (CoopMpRealismOff(MPREALISM_NOCOVER)) {
+        m_bCoopCoverRequested = false;
+        m_bCoopCoverWall      = false;
+        m_bCoopCoverLow       = false;
+        m_bCoopBlindfire      = false;
+        m_bCoopCoverPeek      = false;
+        m_fCoopCoverBadTime   = 0.0f;
+        m_fCoopCoverAutoDwell = 0.0f;
+        SendCoopCoverView();
+        return;
+    }
 
     if (!m_bCoopCoverRequested) {
         // HZM coop [user 2026-08-09] AUTO COVER. The user's ask verbatim: "crouch behind cover and

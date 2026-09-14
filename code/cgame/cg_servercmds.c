@@ -116,6 +116,33 @@ static qboolean QueryLandminesAllowed2(const char *mapname, int dmflags)
 
 /*
 ================
+CG_MpRealismOffActive
+
+HZM MP - is the host "realism" toggle for iBit (MPREALISM_* in q_shared.h) active on THIS server? True only
+when the serverinfo bit is set (cgs.mpRealismOff, parsed below) AND this is not a coop session. The bitmask
+is set only by the MP realism script on an MP server, so cgs.mpRealismOff is 0 in every coop session and the
+fast path returns at once; the coop_isCoopSession backstop (same flag the compass bar reads, set 1 by coop's
+player.scr, reset to 0 on CG_Init/Shutdown) is belt-and-braces so a stray serverinfo value can never touch the
+coop view. A listen host reads the serverinfo cgs copy here, never cgi.Cvar_Get("g_mpRealismOff").
+================
+*/
+qboolean CG_MpRealismOffActive(int iBit)
+{
+    static cvar_t *pSess = NULL;
+    if (!(cgs.mpRealismOff & iBit)) {
+        return qfalse;
+    }
+    if (!pSess) {
+        pSess = cgi.Cvar_Get("coop_isCoopSession", "0", 0);
+    }
+    if (pSess && pSess->integer) {
+        return qfalse; // coop session - never touch the coop view whatever the flag says
+    }
+    return qtrue;
+}
+
+/*
+================
 CG_ParseServerinfo
 
 This is called explicitly when the gamestate is first received,
@@ -142,6 +169,10 @@ void CG_ParseServerinfo(void)
     // server, so it is absent/0 in coop. Read by CG_MpHardcoreActive (cg_drawtools.cpp) to hide the
     // crosshair + health/stamina chrome. No new server->client shape: it rides the ordinary serverinfo.
     cgs.mpHardcore = atoi(Info_ValueForKey(info, "g_mpHardcore"));
+    // HZM MP - host "realism" toggles bitmask (MPREALISM_* in q_shared.h). Set 1/0 only by the MP realism
+    // script on an MP server, so it is absent/0 in coop. Read by CG_MpRealismOffActive (below) to force
+    // first person / drop the ADS view. No new server->client shape: it rides the ordinary serverinfo.
+    cgs.mpRealismOff = atoi(Info_ValueForKey(info, "g_mpRealismOff"));
 
     version = Info_ValueForKey(info, "version");
     if (strstr(version, "Spearhead")) {

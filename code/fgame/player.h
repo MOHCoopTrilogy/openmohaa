@@ -1167,6 +1167,7 @@ public:
     void  TickCoopSidearm(); // HZM coop - quick-draw sidearm (MUST run after TickCoopNade)
     void  CoopDirectThrow(); // HZM coop - throw with NO weapon switch (coop_quickNade 2)
     void  TickCoopLook();  // HZM coop - head tracking + torso counter-rotation
+    bool  CoopMpRealismOff(int iBit); // HZM MP - host realism toggle active for this bit (g_mpRealismOff; MP only, 0 in coop)
     void  TickCoopProne(); // HZM coop - hold-crouch prone state machine
     void  TickCoopStress(); // HZM coop - server-side stress envelope
     float  CoopBraceBonus();   // brace envelope as the STABILITY bonus sees it (prone scaled)

@@ -344,6 +344,16 @@ void CVAR_Init(void)
     // it, only script sets it and cgame reads it off the wire. g_mp* naming per roadmap slice 9.
     gi.Cvar_Get("g_mpHardcore", "0", CVAR_SERVERINFO);
 
+    // HZM MP - host "realism" toggles bitmask (see MPREALISM_* in q_shared.h). MP-owned serverinfo cvar
+    // the cgame reads (CG_ParseServerinfo -> cgs.mpRealismOff) to force first person / drop the ADS view,
+    // and game.dll reads (Player::CoopMpRealismOff) to block prone / cover. CVAR_ROM so a client cannot
+    // set it from its own console/config to re-enable a disabled mechanic; the MP realism script still
+    // sets it (gi.cvar_set forces through ROM). Set 1/0 only by that script and only on an MP server (the
+    // MP refusal guard), so it is 0 in every coop session. Registered here - before any script - so a
+    // script setcvar cannot create it flag-less and defeat serverinfo (TRAPS T7). No stored pointer: the
+    // game reads it through the helper, the script sets it, the cgame reads it off the wire.
+    gi.Cvar_Get("g_mpRealismOff", "0", CVAR_SERVERINFO | CVAR_ROM);
+
     flood_msgs      = gi.Cvar_Get("flood_msgs", "4", 0);
     flood_persecond = gi.Cvar_Get("flood_persecond", "4", 0);
     flood_waitdelay = gi.Cvar_Get("flood_waitdelay", "10", 0);

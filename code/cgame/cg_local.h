@@ -416,6 +416,12 @@ extern "C" {
         // an MP server). 0 in every coop session, so gating the crosshair/stamina hides on it is
         // structurally coop-safe; CG_MpHardcoreActive() adds a coop_isCoopSession backstop as well.
         int        mpHardcore;
+        // HZM MP - host "realism" toggles bitmask (MPREALISM_* in q_shared.h). Parsed from the serverinfo
+        // key g_mpRealismOff (registered CVAR_SERVERINFO|CVAR_ROM in fgame/gamecvars.cpp; set 1/0 only by
+        // the MP realism script on an MP server). 0 in every coop session, so forcing first person /
+        // dropping the ADS view on its bits is structurally coop-safe; CG_MpRealismOffActive() adds a
+        // coop_isCoopSession backstop as well. A listen host reads THIS serverinfo copy, never cgi.Cvar_Get.
+        int        mpRealismOff;
         int        cinematic;
         int        mapChecksum;
         qboolean   useMapChecksum;
@@ -663,6 +669,7 @@ const adsGunTune_t *CG_FindAdsTune(const char *wpn);
     qboolean CG_FrustumCullSphere(const vec3_t vPos, float fRadius);
     void  CG_OffsetFirstPersonView(refEntity_t *pREnt, qboolean bUseWorldPosition);
     qboolean CG_AimingDownSights(void); // HZM coop - RMB-held iron-sight ADS gate (zoom + 3rd->1st person)
+    qboolean CG_MpRealismOffActive(int iBit); // HZM MP - host realism toggle active for this bit (MP only; 0 in coop)
     qboolean CG_AdsForceFirstPerson(void); // HZM coop - staged 3P ADS: "render FIRST person this frame" (camera + own-model draw MUST both use this)
     void  CG_AdsFactorAdvance(void); // HZM coop - advance the ONE ADS ease; called once per frame from CG_DrawActiveFrame BEFORE any consumer
     float CG_AdsPoseFactor(void);    // HZM coop - 0 = hip, 1 = full sight alignment. The only ADS ease; rotation, shift and zoom all read it

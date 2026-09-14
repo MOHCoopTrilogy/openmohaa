@@ -4997,6 +4997,16 @@ qboolean CG_AimingDownSights(void)
             return qtrue;
         }
     }
+    // HZM MP - Aim Down Sights OFF (host realism toggle). MP only; inert in coop (CG_MpRealismOffActive
+    // gates on the serverinfo bit + !coop session). This is the single source of truth for iron-sight ADS,
+    // so returning false here drops the whole modern ADS view - the zoom, the pose, the 3rd->1st person
+    // snap and the crosshair hide - and RMB reads as stock hip-fire. SCOPED rifles are untouched: their
+    // zoom rides STAT_INZOOM (returned false at the top of this function) and the server-side scope toggle,
+    // not this button (decision H2). The mount-forced ADS above is deliberately left in place - mounting an
+    // MG is not the modern ADS mechanic.
+    if (CG_MpRealismOffActive(MPREALISM_NOADS)) {
+        return qfalse;
+    }
     cgi.GetUserCmd(cgi.GetCurrentCmdNumber(), &cmd);
     return (cmd.buttons & BUTTON_COOPADS) ? qtrue : qfalse; // ADS on its own button, decoupled from secondary-fire/bash
 }
@@ -6457,6 +6467,12 @@ static int CG_CalcViewValues(void)
         // ("scope is looking into the back of the players head" - user). A scoped RMB must read
         // EXACTLY like first person from any 3P mode; turrets keep their fake fov-80 zoom chase.
         if (ps->stats[STAT_INZOOM] && !(ps->pm_flags & PMF_TURRET)) { cg.renderingThirdPerson = qfalse; }
+        // HZM MP - Third Person OFF (host realism toggle). MP only; inert in coop (CG_MpRealismOffActive
+        // gates on the serverinfo bit + !coop session). This is the LAST 3P force, so it wins over the
+        // cover force above - a covered player on an MP server with third person disabled still renders
+        // first person, and the u_view3p mirror below reports the forced first-person value. It does NOT
+        // write the archived cg_3rd_person; only the EFFECTIVE view this frame is overridden.
+        if (CG_MpRealismOffActive(MPREALISM_NO3P)) { cg.renderingThirdPerson = qfalse; }
         // HZM coop [232] - the cover orbit-seed / pitch un-jam machinery that lived here was
         // REMOVED: cover no longer captures the mouse into the orbit at all (CG_FreecamEligible)
         // - the aim is live, the camera chases it, and the engine's own +/-85 pitch clamp is the

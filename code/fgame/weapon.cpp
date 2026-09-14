@@ -2046,7 +2046,10 @@ void Weapon::Shoot(Event *ev)
                             static cvar_t *pAds = NULL;
                             int            btn  = player->GetLastButtons();
                             if (!pAds) { pAds = gi.Cvar_Get("coop_adsSpread", "0.55", CVAR_ARCHIVE); }
-                            if ((player->IsZoomed() || (btn & BUTTON_COOPADS)) && pAds->value > 0.02f
+                            // HZM MP - Aim Down Sights OFF (host realism toggle): drop the iron-sight ADS
+                            // accuracy bonus so RMB reads as stock (MP only, 0 in coop). SCOPED rifles keep
+                            // it - their zoom is IsZoomed(), not this button (decision H2).
+                            if ((player->IsZoomed() || ((btn & BUTTON_COOPADS) && !player->CoopMpRealismOff(MPREALISM_NOADS))) && pAds->value > 0.02f
                                 && pAds->value < 1.0f) {
                                 vSpread *= pAds->value;
                             }
@@ -2444,7 +2447,10 @@ void Weapon::Shoot(Event *ev)
                             static cvar_t *pAds = NULL;
                             int            btn  = player->GetLastButtons();
                             if (!pAds) { pAds = gi.Cvar_Get("coop_adsSpread", "0.55", CVAR_ARCHIVE); }
-                            if ((player->IsZoomed() || (btn & BUTTON_COOPADS)) && pAds->value > 0.02f
+                            // HZM MP - Aim Down Sights OFF (host realism toggle): drop the iron-sight ADS
+                            // accuracy bonus so RMB reads as stock (MP only, 0 in coop). SCOPED rifles keep
+                            // it - their zoom is IsZoomed(), not this button (decision H2).
+                            if ((player->IsZoomed() || ((btn & BUTTON_COOPADS) && !player->CoopMpRealismOff(MPREALISM_NOADS))) && pAds->value > 0.02f
                                 && pAds->value < 1.0f) {
                                 vSpread *= pAds->value;
                             }

@@ -2062,6 +2062,16 @@ typedef struct playerState_s {
 #define	BUTTON_ANY			   (1 << BUTTON_ANY_BITINDEX)		   // any key whatsoever
 #define BUTTON_MOUSE           (1 << BUTTON_MOUSE_BITINDEX)
 
+// HZM MP - host "realism" toggles, packed into the serverinfo cvar g_mpRealismOff. 0 = nothing disabled
+// = stock behaviour, so a stock server and a coop session are byte-identical and need no new code path.
+// Set 1/0 only by the MP realism script on an MP server (its coop-refusal guard keeps it off coop), so
+// the mask is 0 in every coop session. The cgame reads its serverinfo copy (cgs) and game.dll reads the
+// cvar; both add a coop-session backstop before acting. These bit values MUST match the MP realism script.
+#define MPREALISM_NOADS        1   // aim-down-sights off (scoped rifles still zoom)
+#define MPREALISM_NOPRONE      2   // prone off
+#define MPREALISM_NOCOVER      4   // take-cover off
+#define MPREALISM_NO3P         8   // third person off (forced first person)
+
 typedef enum {
     WEAPON_COMMAND_NONE,
 	WEAPON_COMMAND_USE_PISTOL,

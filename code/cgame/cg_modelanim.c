@@ -2103,6 +2103,13 @@ void CG_ModelAnim(centity_t *cent, qboolean bDoShaderTime)
     if (cg.snap->ps.stats[STAT_INZOOM] && !(cg.snap->ps.pm_flags & PMF_TURRET)) {
         bThirdPerson = qfalse;
     }
+    // HZM MP - Third Person OFF (host realism toggle). MP only; inert in coop. Force the own-body draw to
+    // first person so it stays in LOCKSTEP with the matching camera force in cg_view.c (else the 1P camera
+    // sits inside the still-drawn head). Last 3P decision here, mirroring the camera side. Reads the stable
+    // serverinfo copy, so it cannot diverge between the two sites the way the pm_flags sources can (bug-2049).
+    if (CG_MpRealismOffActive(MPREALISM_NO3P)) {
+        bThirdPerson = qfalse;
+    }
     // HZM coop - REMOVED the 3rd-person MG42 experiment's `bThirdPerson |= PMF_TURRET` line. It force-drew
     // your own body in 3rd person on EVERY turret (MG42 nest, jeep .30cal, halftrack), overriding the
     // upstream line above (which deliberately excludes turrets so the mounted view stays clean first-person).
