@@ -473,6 +473,20 @@ static void IN_InitJoystick( void )
 	gamepad = NULL;
 	memset(&stick_state, '\0', sizeof (stick_state));
 
+	// [HZM 2026-09-14, bug-2606] A misbehaving HID / Bluetooth controller (an Xbox or DualSense
+	// pad, a Steam virtual gamepad, a GameInput device) can hang SDL_Init(SDL_INIT_JOYSTICK)
+	// forever during device enumeration, which black-screens the entire client at boot (R_Init
+	// stops at "Calling SDL_Init(SDL_INIT_JOYSTICK)..."). The existing in_joystick gate ("Joystick
+	// is not active") sat AFTER that call, so it could not prevent the hang. in_joystick defaults
+	// to 0 and is registered in IN_Init before this runs, so honour it up front: when it is 0 the
+	// client never touches the SDL joystick/gamecontroller subsystems at all. Set in_joystick 1
+	// (CVAR_LATCH) to opt back into controller support.
+	if ( in_joystick && !in_joystick->integer ) {
+		Com_DPrintf( "Joystick disabled (in_joystick 0); skipping SDL joystick init.\n" );
+		Cvar_Get( "in_availableJoysticks", "", CVAR_ROM );
+		return;
+	}
+
 	// SDL 2.0.4 requires SDL_INIT_JOYSTICK to be initialized separately from
 	// SDL_INIT_GAMECONTROLLER for SDL_JoystickOpen() to work correctly,
 	// despite https://wiki.libsdl.org/SDL_Init (retrieved 2016-08-16)
