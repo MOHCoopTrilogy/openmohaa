@@ -1464,6 +1464,28 @@ static int   s_coopAimSet = 0;
 static int   s_coopHitTime = 0;
 static qboolean s_coopHitKill = qfalse;
 
+// HZM MP - HARDCORE modifier (user 2026-09-14). True only when the server published the serverinfo flag
+// g_mpHardcore (parsed into cgs.mpHardcore by CG_ParseServerinfo) AND this is not a coop session. The
+// flag is set only by the MP hardcore script on an MP server, so cgs.mpHardcore is 0 in every coop
+// session and the fast path returns immediately there; the coop_isCoopSession backstop (same flag the
+// compass bar reads, set 1 by coop's player.scr, reset to 0 on CG_Init/Shutdown) is belt-and-braces so a
+// stray serverinfo value can never blank the coop HUD. Consumers: CG_DrawCrosshair, CG_DrawStaminaArc
+// (both skip drawing) and CG_UpdateHudFade (forces the health/ammo chrome alpha to 0).
+static qboolean CG_MpHardcoreActive(void)
+{
+    static cvar_t *pSess = NULL;
+    if (!cgs.mpHardcore) {
+        return qfalse;
+    }
+    if (!pSess) {
+        pSess = cgi.Cvar_Get("coop_isCoopSession", "0", 0);
+    }
+    if (pSess && pSess->integer) {
+        return qfalse; // coop session - never touch the coop HUD whatever the flag says
+    }
+    return qtrue;
+}
+
 void CG_DrawCrosshair()
 {
     centity_t *friendEnt;
@@ -1476,6 +1498,11 @@ void CG_DrawCrosshair()
     float      width, height;
 
     shader = (qhandle_t)0;
+
+    // HZM MP - Hardcore removes the crosshair (MP only; inert in coop - see CG_MpHardcoreActive).
+    if (CG_MpHardcoreActive()) {
+        return;
+    }
 
     if (!cg_hud->integer || !ui_crosshair->integer) {
         return;
@@ -1774,6 +1801,10 @@ static void CG_DrawStaminaArc(void)
     vec4_t           col;
 
     if (!cg.snap) {
+        return;
+    }
+    // HZM MP - Hardcore removes the stamina indicator (MP only; inert in coop - see CG_MpHardcoreActive).
+    if (CG_MpHardcoreActive()) {
         return;
     }
     if (!pOn) {
@@ -2374,6 +2405,22 @@ static void CG_UpdateHudFade(void)
     } else {
         s_hudFadeAlpha -= step;
         if (s_hudFadeAlpha < 0.0f) { s_hudFadeAlpha = 0.0f; }
+    }
+
+    // HZM MP - HARDCORE hides the persistent health/ammo chrome by forcing the PUBLISHED alpha to 0.
+    // MP only (CG_MpHardcoreActive gates on cgs.mpHardcore + !coop session), so coop's fade is untouched.
+    // Only the published value is overridden, not the internal s_hudFadeAlpha, so normal fading resumes
+    // the instant the flag clears (the next non-hardcore frame republishes the real alpha because lastPub
+    // was left at 0). NOTE: ui_hudAlpha drives BOTH the hud_health AND hud_ammo menus (cl_ui.cpp
+    // UI_ApplyHudFadeAlpha), so this also hides the ammo panel - the health bar is a client URC menu, not
+    // cgame-drawn, and ui_hudAlpha is the only cgame-side lever for it (it is shared with ammo). The
+    // crosshair and stamina arc are hidden at their own draw sites above.
+    if (CG_MpHardcoreActive()) {
+        if (lastPub != 0.0f) {
+            cgi.Cvar_Set("ui_hudAlpha", "0");
+            lastPub = 0.0f;
+        }
+        return;
     }
 
     // publish for the client UI layer - on change only (no per-frame cvar churn at rest)

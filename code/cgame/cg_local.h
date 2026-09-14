@@ -411,6 +411,11 @@ extern "C" {
         int        fraglimit;
         int        timelimit;
         int        maxclients;
+        // HZM MP - HARDCORE modifier (user 2026-09-14). Parsed from the serverinfo key g_mpHardcore
+        // (registered CVAR_SERVERINFO in fgame/gamecvars.cpp; set 1/0 only by the MP hardcore script on
+        // an MP server). 0 in every coop session, so gating the crosshair/stamina hides on it is
+        // structurally coop-safe; CG_MpHardcoreActive() adds a coop_isCoopSession backstop as well.
+        int        mpHardcore;
         int        cinematic;
         int        mapChecksum;
         qboolean   useMapChecksum;

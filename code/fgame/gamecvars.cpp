@@ -336,6 +336,14 @@ void CVAR_Init(void)
     g_allowjointime   = gi.Cvar_Get("g_allowjointime", "30", CVAR_SERVERINFO);
     g_teamswitchdelay = gi.Cvar_Get("g_teamswitchdelay", "15", 0);
 
+    // HZM MP - HARDCORE modifier flag (user 2026-09-14). MP-owned CVAR_SERVERINFO cvar the cgame reads
+    // (CG_ParseServerinfo -> cgs.mpHardcore) to hide the crosshair + health/stamina chrome. Set 1/0 only
+    // by the MP hardcore script from its host toggle, and only on an MP server (the MP coop-refusal
+    // guard), so it is 0 in every coop session. Registered here - before any script - so a script setcvar
+    // cannot create it flag-less and defeat serverinfo (TRAPS T7). No stored pointer: the game never reads
+    // it, only script sets it and cgame reads it off the wire. g_mp* naming per roadmap slice 9.
+    gi.Cvar_Get("g_mpHardcore", "0", CVAR_SERVERINFO);
+
     flood_msgs      = gi.Cvar_Get("flood_msgs", "4", 0);
     flood_persecond = gi.Cvar_Get("flood_persecond", "4", 0);
     flood_waitdelay = gi.Cvar_Get("flood_waitdelay", "10", 0);

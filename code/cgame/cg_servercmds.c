@@ -138,6 +138,10 @@ void CG_ParseServerinfo(void)
     cgs.fraglimit  = atoi(Info_ValueForKey(info, "fraglimit"));
     cgs.timelimit  = atoi(Info_ValueForKey(info, "timelimit"));
     cgs.maxclients = atoi(Info_ValueForKey(info, "sv_maxclients"));
+    // HZM MP - HARDCORE modifier flag (user 2026-09-14). Set 1/0 only by the MP hardcore script on an MP
+    // server, so it is absent/0 in coop. Read by CG_MpHardcoreActive (cg_drawtools.cpp) to hide the
+    // crosshair + health/stamina chrome. No new server->client shape: it rides the ordinary serverinfo.
+    cgs.mpHardcore = atoi(Info_ValueForKey(info, "g_mpHardcore"));
 
     version = Info_ValueForKey(info, "version");
     if (strstr(version, "Spearhead")) {
