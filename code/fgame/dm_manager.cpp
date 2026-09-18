@@ -378,6 +378,12 @@ PlayerStart *DM_Team::FarthestSpawnPoint(void)
 PlayerStart *DM_Team::GetRandomSpawnpoint(void)
 {
     PlayerStart *spot      = NULL;
+    // [HZM] MP arena modes script-spawn their team spawns AFTER InitGame built the (empty, for SP-campaign
+    // bsps) lists. Rebuild once when empty so those runtime spawns register instead of collapsing everyone
+    // onto one fallback point. Coop never creates runtime info_player_allied/axis, so this stays a no-op there.
+    if (!m_spawnpoints.NumObjects()) {
+        dmManager.BuildSpawnpointList();
+    }
     int          numPoints = m_spawnpoints.NumObjects();
 
     if (numPoints) {
@@ -407,6 +413,12 @@ PlayerStart *DM_Team::GetRandomSpawnpointWithMetric(
     PlayerStart *spot     = NULL;
     int          numSpots = 0;
     int          iPoint   = 0;
+
+    // [HZM] rebuild once if empty, so runtime script-spawned team spawns (MP arena on SP campaign maps) are
+    // seen instead of falling back to a single point. Coop-safe (coop spawns no runtime info_player_*).
+    if (!m_spawnpoints.NumObjects()) {
+        dmManager.BuildSpawnpointList();
+    }
 
     for (int i = 1; i <= m_spawnpoints.NumObjects(); i++) {
         spot = m_spawnpoints.ObjectAt(i);
@@ -1055,32 +1067,15 @@ void DM_Manager::PrintAllClients(str s)
     }
 }
 
-void DM_Manager::InitGame(void)
+void DM_Manager::BuildSpawnpointList(void)
 {
-    int i;
+    // Clear first so a mid-game re-scan (lazy rebuild from the spawn selectors) does not duplicate entries.
+    m_team_spectator.m_spawnpoints.ClearObjectList();
+    m_team_freeforall.m_spawnpoints.ClearObjectList();
+    m_team_allies.m_spawnpoints.ClearObjectList();
+    m_team_axis.m_spawnpoints.ClearObjectList();
 
-    if (fraglimit) {
-        if (fraglimit->integer < 0) {
-            gi.cvar_set("fraglimit", "0");
-        }
-        if (fraglimit->integer > 10000) {
-            gi.cvar_set("fraglimit", "10000");
-        }
-        fraglimit = gi.Cvar_Get("fraglimit", "0", CVAR_SERVERINFO);
-    }
-
-    if (timelimit) {
-        if (timelimit->integer < 0) {
-            gi.cvar_set("timelimit", "0");
-        }
-        // 180 minutes maximum
-        if (timelimit->integer > 10800) {
-            gi.cvar_set("timelimit", "10800");
-        }
-        timelimit = gi.Cvar_Get("timelimit", "0", CVAR_SERVERINFO);
-    }
-
-    for (i = 1; i <= level.m_SimpleArchivedEntities.NumObjects(); i++) {
+    for (int i = 1; i <= level.m_SimpleArchivedEntities.NumObjects(); i++) {
         SimpleArchivedEntity *const ent       = level.m_SimpleArchivedEntities.ObjectAt(i);
         const char *const           classname = ent->getClassID();
 
@@ -1108,6 +1103,34 @@ void DM_Manager::InitGame(void)
             m_team_freeforall.m_spawnpoints.AddObject(spawnpoint);
         }
     }
+}
+
+void DM_Manager::InitGame(void)
+{
+    int i;
+
+    if (fraglimit) {
+        if (fraglimit->integer < 0) {
+            gi.cvar_set("fraglimit", "0");
+        }
+        if (fraglimit->integer > 10000) {
+            gi.cvar_set("fraglimit", "10000");
+        }
+        fraglimit = gi.Cvar_Get("fraglimit", "0", CVAR_SERVERINFO);
+    }
+
+    if (timelimit) {
+        if (timelimit->integer < 0) {
+            gi.cvar_set("timelimit", "0");
+        }
+        // 180 minutes maximum
+        if (timelimit->integer > 10800) {
+            gi.cvar_set("timelimit", "10800");
+        }
+        timelimit = gi.Cvar_Get("timelimit", "0", CVAR_SERVERINFO);
+    }
+
+    BuildSpawnpointList();
 
     if (g_gametype->integer > GT_SINGLE_PLAYER) {
         if (g_gametype->integer < GT_MAX_GAME_TYPE) {
@@ -1981,6 +2004,17 @@ void DM_Manager::BuildPlayerTeamInfo(DM_Team *dmTeam, int *iPlayerList, DM_Team 
             continue;
         }
 
+        // [HZM scoreboard] BOTH branches carry the player's SHARED coop/MP RANK in the old "Time" slot
+        // (the client always labels this column "Rank"). The mod publishes coop_sbRank<clientnum> per
+        // player; read it the same way TOW/Liberation read their cvars. Guard empty/space so the single
+        // space-delimited token can never desync the fixed-stride scores parse.
+        char        szRankCvar[64];
+        const char *pszRank;
+        Com_sprintf(szRankCvar, sizeof(szRankCvar), "coop_sbRank%i", pTeamPlayer->client->ps.clientNum);
+        pszRank = gi.Cvar_Get(szRankCvar, "-", 0)->string;
+        if (!pszRank || !pszRank[0] || strchr(pszRank, ' ')) {
+            pszRank = "-";
+        }
         if (g_gametype->integer >= GT_TEAM) {
             Com_sprintf(
                 entry,
@@ -1991,7 +2025,7 @@ void DM_Manager::BuildPlayerTeamInfo(DM_Team *dmTeam, int *iPlayerList, DM_Team 
                                            : -pTeamPlayer->GetTeam(), // negative team means death
                 pTeamPlayer->GetNumKills(),
                 pTeamPlayer->GetNumDeaths(),
-                G_TimeString(level.svsFloatTime - pTeamPlayer->edict->client->pers.enterTime),
+                pszRank,
                 (pTeamPlayer->edict->r.svFlags & SVF_BOT) ? "bot" : va("%d", pTeamPlayer->client->ps.ping)
             );
         } else {
@@ -2002,7 +2036,7 @@ void DM_Manager::BuildPlayerTeamInfo(DM_Team *dmTeam, int *iPlayerList, DM_Team 
                 pTeamPlayer->client->ps.clientNum,
                 pTeamPlayer->GetNumKills(),
                 pTeamPlayer->GetNumDeaths(),
-                G_TimeString(level.svsFloatTime - pTeamPlayer->edict->client->pers.enterTime),
+                pszRank,
                 (pTeamPlayer->edict->r.svFlags & SVF_BOT) ? "bot" : va("%d", pTeamPlayer->client->ps.ping)
             );
         }

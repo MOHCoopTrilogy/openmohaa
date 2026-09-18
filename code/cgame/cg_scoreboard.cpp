@@ -27,17 +27,19 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 
 void CG_GetScoreBoardColor(float *fR, float *fG, float *fB, float *fA)
 {
-    *fR = 0.0f;
-    *fG = 0.0f;
-    *fB = 0.0f;
-    *fA = 0.7f;
+    // [HZM modern scoreboard] deep translucent dark-glass rows to match the ui/*_scoreboard.urc panel skin.
+    *fR = 0.05f;
+    *fG = 0.06f;
+    *fB = 0.09f;
+    *fA = 0.82f;
 }
 
 void CG_GetScoreBoardFontColor(float *fR, float *fG, float *fB, float *fA)
 {
-    *fR = 1.0f;
-    *fG = 1.0f;
-    *fB = 1.0f;
+    // [HZM] crisp near-white row text.
+    *fR = 0.90f;
+    *fG = 0.92f;
+    *fB = 0.96f;
     *fA = 1.0f;
 }
 
@@ -101,8 +103,11 @@ const char *CG_GetColumnName_ver_15(int iColumnNum, int *iColumnWidth)
         }
         break;
     case 4:
-        iReturnWidth    = 64;
-        pszReturnString = "Time";
+        iReturnWidth = 64;
+        // [HZM scoreboard] this slot always carries the shared coop/MP RANK now (dm_manager fills
+        // coop_sbRank<clientnum> for every player, both team and FFA). Labeled unconditionally so the
+        // header is correct no matter what cgs.gametype is when the scoreboard list is first built.
+        pszReturnString = "Rank";
         break;
     case 5:
         iReturnWidth    = 64;
@@ -143,8 +148,10 @@ const char *CG_GetColumnName_ver_6(int iColumnNum, int *iColumnWidth)
         }
         break;
     case 3:
-        iReturnWidth    = 64;
-        pszReturnString = "Time";
+        iReturnWidth = 64;
+        // [HZM] this slot carries the shared coop/MP RANK (dm_manager fills coop_sbRank<clientnum> here);
+        // renamed for the older protocol too so the header reads "Rank" regardless of client protocol.
+        pszReturnString = "Rank";
         break;
     case 4:
         iReturnWidth    = 64;
@@ -195,18 +202,19 @@ void CG_ParseScores_ver_15()
     vSameTeamTextColor[1]  = 1.0f;
     vSameTeamTextColor[2]  = 1.0f;
     vSameTeamTextColor[3]  = 1.0f;
-    vSameTeamBackColor[0]  = 0.1f;
-    vSameTeamBackColor[1]  = 0.5f;
-    vSameTeamBackColor[2]  = 0.1f;
-    vSameTeamBackColor[3]  = 0.4f;
+    // [HZM modern scoreboard] muted team tints over the dark-glass panel (was harsh 0.5 green/red).
+    vSameTeamBackColor[0]  = 0.12f;
+    vSameTeamBackColor[1]  = 0.40f;
+    vSameTeamBackColor[2]  = 0.28f;
+    vSameTeamBackColor[3]  = 0.55f;
     vOtherTeamTextColor[0] = 1.0f;
     vOtherTeamTextColor[1] = 1.0f;
     vOtherTeamTextColor[2] = 1.0f;
     vOtherTeamTextColor[3] = 1.0f;
-    vOtherTeamBackColor[0] = 0.5f;
-    vOtherTeamBackColor[1] = 0.1f;
-    vOtherTeamBackColor[2] = 0.1f;
-    vOtherTeamBackColor[3] = 0.4f;
+    vOtherTeamBackColor[0] = 0.46f;
+    vOtherTeamBackColor[1] = 0.14f;
+    vOtherTeamBackColor[2] = 0.14f;
+    vOtherTeamBackColor[3] = 0.52f;
     vNoTeamTextColor[0]    = 1.0f;
     vNoTeamTextColor[1]    = 1.0f;
     vNoTeamTextColor[2]    = 1.0f;
@@ -215,27 +223,22 @@ void CG_ParseScores_ver_15()
     vNoTeamBackColor[1]    = 0.1f;
     vNoTeamBackColor[2]    = 0.1f;
     vNoTeamBackColor[3]    = 0.4f;
-    vDeadTextColorDead[0]  = 1.0f;
-    vDeadTextColorDead[1]  = 0.1f;
-    vDeadTextColorDead[2]  = 0.1f;
-    vDeadTextColorDead[3]  = 1.0f;
+    vDeadTextColorDead[0]  = 0.66f;
+    vDeadTextColorDead[1]  = 0.38f;
+    vDeadTextColorDead[2]  = 0.38f;
+    vDeadTextColorDead[3]  = 0.90f;
 
     vThisClientTextColor[0] = 0.0f;
     vThisClientTextColor[1] = 0.0f;
     vThisClientTextColor[2] = 0.0f;
     vThisClientTextColor[3] = 1.0f;
 
-    if (cgs.gametype > GT_FFA) {
-        vThisClientBackColor[0] = 0.5f;
-        vThisClientBackColor[1] = 0.75f;
-        vThisClientBackColor[2] = 0.5f;
-    } else {
-        vThisClientBackColor[0] = 0.75f;
-        vThisClientBackColor[1] = 0.75f;
-        vThisClientBackColor[2] = 0.75f;
-    }
-
-    vThisClientBackColor[3] = 0.8f;
+    // [HZM modern scoreboard] highlight YOUR row in the accent gold (matches the header/HUD theme) so you
+    // spot yourself instantly; black text over it (vThisClientTextColor) keeps it high-contrast.
+    vThisClientBackColor[0] = 0.98f;
+    vThisClientBackColor[1] = 0.82f;
+    vThisClientBackColor[2] = 0.35f;
+    vThisClientBackColor[3] = 0.85f;
 
     iCurrentEntry = 1;
     if (cgs.gametype > GT_FFA) {
@@ -455,18 +458,19 @@ void CG_ParseScores_ver_6()
     vSameTeamTextColor[1]  = 1.0f;
     vSameTeamTextColor[2]  = 1.0f;
     vSameTeamTextColor[3]  = 1.0f;
-    vSameTeamBackColor[0]  = 0.1f;
-    vSameTeamBackColor[1]  = 0.5f;
-    vSameTeamBackColor[2]  = 0.1f;
-    vSameTeamBackColor[3]  = 0.4f;
+    // [HZM modern scoreboard] muted team tints over the dark-glass panel (was harsh 0.5 green/red).
+    vSameTeamBackColor[0]  = 0.12f;
+    vSameTeamBackColor[1]  = 0.40f;
+    vSameTeamBackColor[2]  = 0.28f;
+    vSameTeamBackColor[3]  = 0.55f;
     vOtherTeamTextColor[0] = 1.0f;
     vOtherTeamTextColor[1] = 1.0f;
     vOtherTeamTextColor[2] = 1.0f;
     vOtherTeamTextColor[3] = 1.0f;
-    vOtherTeamBackColor[0] = 0.5f;
-    vOtherTeamBackColor[1] = 0.1f;
-    vOtherTeamBackColor[2] = 0.1f;
-    vOtherTeamBackColor[3] = 0.4f;
+    vOtherTeamBackColor[0] = 0.46f;
+    vOtherTeamBackColor[1] = 0.14f;
+    vOtherTeamBackColor[2] = 0.14f;
+    vOtherTeamBackColor[3] = 0.52f;
     vNoTeamTextColor[0]    = 1.0f;
     vNoTeamTextColor[1]    = 1.0f;
     vNoTeamTextColor[2]    = 1.0f;
@@ -475,27 +479,22 @@ void CG_ParseScores_ver_6()
     vNoTeamBackColor[1]    = 0.1f;
     vNoTeamBackColor[2]    = 0.1f;
     vNoTeamBackColor[3]    = 0.4f;
-    vDeadTextColorDead[0]  = 1.0f;
-    vDeadTextColorDead[1]  = 0.1f;
-    vDeadTextColorDead[2]  = 0.1f;
-    vDeadTextColorDead[3]  = 1.0f;
+    vDeadTextColorDead[0]  = 0.66f;
+    vDeadTextColorDead[1]  = 0.38f;
+    vDeadTextColorDead[2]  = 0.38f;
+    vDeadTextColorDead[3]  = 0.90f;
 
     vThisClientTextColor[0] = 0.0f;
     vThisClientTextColor[1] = 0.0f;
     vThisClientTextColor[2] = 0.0f;
     vThisClientTextColor[3] = 1.0f;
 
-    if (cgs.gametype > GT_FFA) {
-        vThisClientBackColor[0] = 0.5f;
-        vThisClientBackColor[1] = 0.75f;
-        vThisClientBackColor[2] = 0.5f;
-    } else {
-        vThisClientBackColor[0] = 0.75f;
-        vThisClientBackColor[1] = 0.75f;
-        vThisClientBackColor[2] = 0.75f;
-    }
-
-    vThisClientBackColor[3] = 0.8f;
+    // [HZM modern scoreboard] highlight YOUR row in the accent gold (matches the header/HUD theme) so you
+    // spot yourself instantly; black text over it (vThisClientTextColor) keeps it high-contrast.
+    vThisClientBackColor[0] = 0.98f;
+    vThisClientBackColor[1] = 0.82f;
+    vThisClientBackColor[2] = 0.35f;
+    vThisClientBackColor[3] = 0.85f;
 
     iCurrentEntry = 1;
     if (cgs.gametype > GT_FFA) {

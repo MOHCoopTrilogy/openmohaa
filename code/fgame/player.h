@@ -1296,6 +1296,9 @@ public:
     void GetConnState(Event *ev);
     void GetDamageMultiplier(Event *ev);
     void GetKills(Event *ev);
+    // HZM-MP-BEGIN(mp_getlasthitmod_decl)
+    void GetLastHitMod(Event *ev);
+    // HZM-MP-END(mp_getlasthitmod_decl)
     void GetDeaths(Event *ev);
     void GetKillHandler(Event *ev);
     void GetMoveSpeedScale(Event *ev);

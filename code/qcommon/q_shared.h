@@ -1735,7 +1735,7 @@ typedef enum
 #define MAX_SERVER_SOUNDS			64
 #define MAX_SERVER_SOUNDS_BITS		(MAX_SERVER_SOUNDS-1)
 
-#define	MAX_MODELS			2048		// HZM COOP: raised 1024->2048 (bug-866: CS_MODELS overflow made
+#define	MAX_MODELS			2048		// HZM COOP: raised 1024->2048 (bug-892: CS_MODELS overflow made
 // e1l2 props/enemies register as model 0 = invisible). entityState.modelindex is a 16-bit
 // netfield (msg.cpp), so 2048 fits with no protocol/bit change. Layout: highest configstring
 // index CS_AXIS = 3673 < MAX_CONFIGSTRINGS (4096). Rebuild exe + game.dll + cgame.dll together.

@@ -39,10 +39,17 @@ BotMovement::BotMovement()
 
     m_iCheckPathTime = 0;
     m_iTempAwayTime  = 0;
-    m_iNumBlocks     = 0;
+    m_iNumBlocks       = 0;
+    m_iStuckPushTime   = 0; // [HZM bot wall-slide]
+    m_iFeelerCommitTime = 0; // [HZM bot feelers]
+    m_iFeelerSide       = 1;
 
     m_bAvoidCollision     = false;
     m_iCollisionCheckTime = 0;
+
+    // [HZM Phase 2] sentinel far from any real map coord so the FIRST attract selection always rolls a scatter
+    // goal; thereafter it is re-rolled only when the node origin actually moves (see MoveToBestAttractivePoint).
+    m_vScatterAnchor = Vector(1.0e9f, 1.0e9f, 1.0e9f);
 }
 
 BotMovement::~BotMovement()
@@ -53,6 +60,43 @@ BotMovement::~BotMovement()
 void BotMovement::SetControlledEntity(Player *newEntity)
 {
     controlledEntity = newEntity;
+}
+
+// [HZM bot feelers] Clearance (trace fraction 0..1) of a whisker cast from the bot along dirAngles rotated by
+// degOff degrees of yaw, out to len units, using the bot's own collision box. 1 = fully clear, near 0 = wall
+// right in front. This is the "always aware of surroundings" sense the reactive block-recovery lacked (that
+// one only looked 32u ahead every 250ms; these look ~112u every frame). Bot-only.
+float BotMovement::WhiskerClear(const Vector& dirAngles, float degOff, float len)
+{
+    Vector a = dirAngles;
+    a[1] += degOff; // yaw
+    Vector f, r, u;
+    AngleVectors(a, f, r, u);
+    f.z = 0;
+    if (f.lengthSquared() < 0.01f) {
+        return 1.0f;
+    }
+    VectorNormalize2D(f);
+
+    Vector mins = controlledEntity->mins;
+    Vector maxs = controlledEntity->maxs;
+    maxs.z -= STEPSIZE;
+    Vector base = controlledEntity->origin + Vector(0, 0, STEPSIZE);
+
+    trace_t t = G_Trace(base, mins, maxs, base + f * len, controlledEntity, MASK_PLAYERSOLID, qtrue, "BotFeeler");
+
+    // [HZM bot feelers] EXPECT GROUND (user): an opening with no floor under it is a pit, not a safe path - the
+    // feeler must not steer the bot off a ledge. Drop a trace at the reached point; if no ground within a
+    // survivable step-down (~STEPSIZE + 200), treat this direction as (almost) blocked so the steering avoids it.
+    Vector  fwdPt = t.endpos;
+    trace_t g     = G_Trace(
+        fwdPt, mins, maxs, fwdPt - Vector(0, 0, STEPSIZE + 200.0f), controlledEntity, MASK_PLAYERSOLID, qtrue,
+        "BotFeelerGround"
+    );
+    if (g.fraction >= 1.0f) {
+        return Q_min(t.fraction, 0.15f);
+    }
+    return t.fraction;
 }
 
 void BotMovement::MoveThink(usercmd_t& botcmd)
@@ -193,7 +237,21 @@ void BotMovement::MoveThink(usercmd_t& botcmd)
 
                 m_vCurrentGoal = controlledEntity->origin + delta + dir * 128;
             } else {
-                m_vCurrentGoal = controlledEntity->origin + Vector(G_CRandom(512), G_CRandom(512), G_CRandom(512));
+                // [HZM Phase 4a] before the blind random jump (and the eventual give-up at m_iNumBlocks>=5),
+                // aim for a REACHABLE point near the real goal, with the accept radius growing per block, so a
+                // bot stuck pathing to an exact unreachable spot re-routes to solid ground instead of grinding
+                // the wall. bot_nav_reroute 0 restores the stock random escape. Bot-only (coop instantiates no
+                // BotMovement); no shared/RecastPather change.
+                static cvar_t *s_botReroute = NULL;
+                if (!s_botReroute) {
+                    s_botReroute = gi.Cvar_Get("bot_nav_reroute", "1", CVAR_ARCHIVE);
+                }
+                if (s_botReroute->integer) {
+                    MoveNear(m_vTargetPos, 128.0f + 96.0f * m_iNumBlocks);
+                } else {
+                    m_vCurrentGoal =
+                        controlledEntity->origin + Vector(G_CRandom(512), G_CRandom(512), G_CRandom(512));
+                }
             }
         }
 
@@ -241,6 +299,155 @@ void BotMovement::MoveThink(usercmd_t& botcmd)
     botcmd.forwardmove = (signed char)Q_clamp(x, -127, 127);
     botcmd.rightmove   = (signed char)Q_clamp(y, -127, 127);
     botcmd.upmove      = 0;
+
+    // [HZM bot feelers] Proactive surroundings awareness (user: "always aware of surroundings", "whiskers long
+    // enough they won't brush walls until they find the opening", "360 and up and down", "use their whiskers the
+    // whole way towards the enemy spawn"). Every frame while the bot wants to move: feel FAR ahead along the goal
+    // direction; if that is closing, feel the two forward diagonals and steer toward the clearer one BEFORE
+    // touching the wall (arcing into the opening). If the whole forward arc is boxed, sweep a wide ring to find
+    // ANY open heading and peel toward it. Vertical awareness (ledge up / drop) stays in CheckJump /
+    // CheckJumpOverEdge below. This is the preventative layer; the reactive wall-slide after it only fires if a
+    // bot is still fully pinned. bot_feelers 0 restores stock. Bot-only (coop instantiates no BotMovement).
+    {
+        // NOTE default 0: the always-on whisker steer over-fired on winding maps (constant re-steer => weaving,
+        // slower, MORE stuck in the bot study). Kept for tuning; the targeted reactive wall-slide below is the
+        // movement win. The dominant Push-bot problem is convergence (teams never reach LOS), fixed elsewhere.
+        static cvar_t *s_botFeel = NULL;
+        if (!s_botFeel) {
+            s_botFeel = gi.Cvar_Get("bot_feelers", "0", CVAR_ARCHIVE);
+        }
+        bool bWants = (botcmd.forwardmove > 40 || botcmd.forwardmove < -40 || botcmd.rightmove > 40
+                       || botcmd.rightmove < -40);
+        // NOTE: this block always runs (when moving) so BOT-BOT SEPARATION below stays active regardless of
+        // bot_feelers; only the whisker STEER is gated on bot_feelers (via c below).
+        if (controlledEntity && bWants) {
+            Vector gdir = m_vCurrentGoal - controlledEntity->origin;
+            gdir.z = 0;
+            if (gdir.lengthSquared() > 1.0f) {
+                Vector ga = gdir.toAngles();
+
+                // [HZM bot feelers] BOT-BOT SEPARATION (user: "if bots are stuck in each other the same whiskers
+                // should slightly nudge them out of each other"). If a PLAYER (teammate/bot) is jammed right
+                // ahead, peel sideways on a per-bot deterministic side (odd/even entnum -> opposite sides) so two
+                // bots wedged into each other pick different ways and pop apart instead of both grinding the same
+                // way. Takes priority over wall-steering for this frame.
+                bool bSep = false;
+                {
+                    Vector fdir, fr, fu;
+                    AngleVectors(ga, fdir, fr, fu);
+                    fdir.z = 0;
+                    if (fdir.lengthSquared() > 0.01f) {
+                        VectorNormalize2D(fdir);
+                        Vector smins = controlledEntity->mins;
+                        Vector smaxs = controlledEntity->maxs;
+                        smaxs.z -= STEPSIZE;
+                        Vector  sbase = controlledEntity->origin + Vector(0, 0, STEPSIZE);
+                        trace_t bt    = G_Trace(
+                            sbase, smins, smaxs, sbase + fdir * 56.0f, controlledEntity, MASK_PLAYERSOLID, qtrue,
+                            "BotSep"
+                        );
+                        if (bt.fraction < 1.0f && bt.ent && bt.ent->entity && bt.ent->entity != world
+                            && bt.ent->entity->IsSubclassOfPlayer()) {
+                            int side         = (controlledEntity->entnum & 1) ? 1 : -1;
+                            botcmd.rightmove = (signed char)(side * 110);
+                            if (botcmd.forwardmove > 60) {
+                                botcmd.forwardmove = 60; // keep some push so they slide past, not just apart
+                            }
+                            bSep = true;
+                        }
+                    }
+                }
+
+                // feelers OFF (default) or separating this frame => c=1 so the whisker STEER below is skipped.
+                // TIGHTER trigger (only when a wall is genuinely CLOSE, < ~0.45 of a 150u look) - the old 0.85
+                // fired almost constantly on winding maps and caused weaving/slowdown.
+                float c = (bSep || !s_botFeel->integer) ? 1.0f : WhiskerClear(ga, 0.0f, 150.0f);
+                if (!bSep && c < 0.45f) {
+                    // COMMITMENT (the anti-weave fix): only RE-decide the steer side when the previous commit has
+                    // expired, then HOLD it ~450ms so the bot arcs smoothly around the obstruction instead of
+                    // flip-flopping every frame (which slowed and stuck it before).
+                    if (level.inttime >= m_iFeelerCommitTime) {
+                        float l1 = WhiskerClear(ga, 45.0f, 130.0f);  // +yaw = left
+                        float r1 = WhiskerClear(ga, -45.0f, 130.0f); // -yaw = right
+                        if (l1 < 0.4f && r1 < 0.4f) {
+                            // both diagonals also closing: probe wider for any opening and pick the better side
+                            float lw      = WhiskerClear(ga, 80.0f, 110.0f);
+                            float rw      = WhiskerClear(ga, -80.0f, 110.0f);
+                            m_iFeelerSide = (rw >= lw) ? 1 : -1;
+                        } else {
+                            m_iFeelerSide = (r1 >= l1) ? 1 : -1; // toward the clearer diagonal (+1 = right)
+                        }
+                        m_iFeelerCommitTime = level.inttime + 450;
+                    }
+                    // apply the committed steer, blended onto the path's own rightmove
+                    float newR = (float)botcmd.rightmove + (float)(m_iFeelerSide * 100);
+                    Q_clamp(newR, -127.0f, 127.0f);
+                    botcmd.rightmove = (signed char)newR;
+                    if (c < 0.28f && botcmd.forwardmove > 85) {
+                        botcmd.forwardmove = 85; // wall very close: ease throttle so the steer arcs, not rams
+                    }
+                }
+            }
+        }
+    }
+
+    // [HZM bot wall-slide] Reactive unstick. The stock block-recovery only re-checks every ~1s and takes another
+    // ~1s to react, so a bot pushing into a wall / thin opening grinds in place for up to ~2s each time - the
+    // dominant "running-in-place" seen in the Push bot study. Here, the MOMENT the bot is pushing hard (high
+    // forwardmove) but its horizontal speed is near zero, we inject a strafe so it slides ALONG the obstruction
+    // to find the gap, alternating side every ~600ms so it probes both ways. This composes with (does not
+    // replace) the slower reroute/give-up logic above. bot_wallslide 0 restores stock. Bot-only (coop
+    // instantiates no BotMovement); no shared RecastPather change.
+    {
+        static cvar_t *s_botSlide = NULL;
+        if (!s_botSlide) {
+            s_botSlide = gi.Cvar_Get("bot_wallslide", "1", CVAR_ARCHIVE);
+        }
+        bool bWantsMove = (botcmd.forwardmove > 60 || botcmd.forwardmove < -60 || botcmd.rightmove > 60
+                           || botcmd.rightmove < -60);
+        if (s_botSlide->integer && controlledEntity && bWantsMove) {
+            float velH2 = controlledEntity->velocity.x * controlledEntity->velocity.x
+                        + controlledEntity->velocity.y * controlledEntity->velocity.y;
+            if (velH2 < Square(20)) {
+                if (!m_iStuckPushTime) {
+                    m_iStuckPushTime = level.inttime;
+                }
+                int held = level.inttime - m_iStuckPushTime;
+                // grinding for >150ms: run a 3-phase escape, ~450ms each, cycling until we break free -
+                //   phase 0: strafe right along the wall   phase 1: strafe left   phase 2: back off the wall
+                // The back-off peels a bot out of a dead-end POCKET where both strafes are also blocked (the axis
+                // stuck-mode the single-side slide could not fix).
+                if (held >= 150) {
+                    int phase = (held / 450) % 3;
+                    if (phase == 0) {
+                        botcmd.rightmove = 127;
+                    } else if (phase == 1) {
+                        botcmd.rightmove = -127;
+                    } else {
+                        botcmd.forwardmove = (signed char)(-botcmd.forwardmove * 0.8f); // reverse off the obstruction
+                    }
+                    // while strafing, ease forward so the lateral motion translates into sideways travel, AND
+                    // JUMP: a stuck bot pushing into a low LEDGE/step - too tall for the 18u auto-step and with no
+                    // jump link in the world-only navmesh (e.g. the m3l3 log the axis pile against, where real
+                    // players must hop up) - clears it with forward momentum + a hop. Harmless bunny-hop if it is
+                    // actually a flat wall. CheckJump below only fires along the PATH direction, which is why a
+                    // path-less ledge never triggered it.
+                    if (phase < 2) {
+                        botcmd.upmove = 127;
+                        if (botcmd.forwardmove > 80) {
+                            botcmd.forwardmove = 80;
+                        } else if (botcmd.forwardmove < -80) {
+                            botcmd.forwardmove = -80;
+                        }
+                    }
+                }
+            } else {
+                m_iStuckPushTime = 0;
+            }
+        } else {
+            m_iStuckPushTime = 0;
+        }
+    }
 
     CheckJump(botcmd);
 
@@ -626,7 +833,9 @@ bool BotMovement::MoveToBestAttractivePoint(int iMinPriority)
     int                         bestPriority;
 
     if (m_pPrimaryAttract) {
-        MoveTo(m_pPrimaryAttract->origin);
+        // [HZM Phase 2] path to THIS bot's scattered goal (set on acquisition below), not the shared node
+        // origin - otherwise every bot re-converges to the same 16u bubble every frame and blocks each other.
+        MoveTo(m_vAttractScatterGoal);
 
         if (!IsMoving()) {
             m_pPrimaryAttract = NULL;
@@ -702,7 +911,38 @@ bool BotMovement::MoveToBestAttractivePoint(int iMinPriority)
     if (bestNode) {
         m_pPrimaryAttract = bestNode;
         m_fAttractTime    = 0;
-        MoveTo(bestNode->origin);
+        // [HZM Phase 2] scatter this bot to a distinct reachable point in a ring around the objective node so
+        // N bots do not stack on one origin (the reported clumping/blocking). bot_objective_spread 0 = stock.
+        //
+        // CRITICAL: re-roll the scattered goal ONLY when the node's origin has actually moved (>64u from the
+        // point we last scattered around). The fast path at the top of this function NULLs m_pPrimaryAttract
+        // the frame a bot arrives (IsMoving()==false with an empty path), so a fresh selection runs every frame
+        // once the bot is standing on its goal. Rolling a new random ring point on each of those re-selections
+        // made bots hop endlessly between scatter points - the "stuttering in place" bug (bug-2696). Anchoring
+        // the roll to the node origin keeps each bot on ONE stable spread point while the objective is static,
+        // yet still re-scatters when a mode moves the node (e.g. the Push frontline advancing).
+        if (VectorLengthSquared(bestNode->origin - m_vScatterAnchor) > 4096.0f) {
+            m_vScatterAnchor = bestNode->origin;
+
+            static cvar_t *bot_objective_spread = NULL;
+            if (!bot_objective_spread) {
+                bot_objective_spread = gi.Cvar_Get("bot_objective_spread", "128", CVAR_ARCHIVE);
+            }
+            m_vAttractScatterGoal = bestNode->origin;
+            if (bot_objective_spread->value > 1.0f) {
+                for (int tries = 0; tries < 5; tries++) {
+                    float  ang  = G_Random(360.0f);
+                    float  rad  = bot_objective_spread->value * (0.35f + G_Random(0.65f));
+                    Vector cand = bestNode->origin
+                                + Vector((float)cos(DEG2RAD(ang)) * rad, (float)sin(DEG2RAD(ang)) * rad, 0);
+                    if (CanMoveTo(cand)) {
+                        m_vAttractScatterGoal = cand;
+                        break;
+                    }
+                }
+            }
+        }
+        MoveTo(m_vAttractScatterGoal);
         return true;
     } else {
         // No attractive point found

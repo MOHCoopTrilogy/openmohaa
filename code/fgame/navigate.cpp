@@ -3823,7 +3823,15 @@ Event EV_AttractiveNode_SetUse
     "Set if AI should use or not"
 );
 
-CLASS_DECLARATION(SimpleArchivedEntity, AttractiveNode, NULL) {
+// [HZM 2026-09-16] Give AttractiveNode a script-spawnable classname so the mod's multiplayer mode scripts can
+// create objective attraction points for the multiplayer bots (playerbot). The bot side is already wired
+// (BotMovement::MoveToBestAttractivePoint iterates the global attractiveNodes container at every idle/curious
+// decision point) but the stock game NEVER instantiates a node, so the bots only ever run-and-shoot. A
+// distinctive name ("hzm_attractnode") is used so no stock/third-party .bsp auto-spawns one. Cooperative play
+// is unaffected by construction: cooperative AI is actor.cpp and never reads attractiveNodes; cooperative
+// games run no playerbots; and only the multiplayer mode scripts (gated so a cooperative map creates none)
+// ever spawn these.
+CLASS_DECLARATION(SimpleArchivedEntity, AttractiveNode, "hzm_attractnode") {
     {&EV_AttractiveNode_GetPriority,    &AttractiveNode::GetPriority   },
     {&EV_AttractiveNode_SetPriority,    &AttractiveNode::SetPriority   },
     {&EV_AttractiveNode_GetDistance,    &AttractiveNode::GetDistance   },

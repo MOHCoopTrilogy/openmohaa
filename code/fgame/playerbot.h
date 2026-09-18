@@ -65,6 +65,12 @@ public:
     Vector GetCurrentGoal() const;
     Vector GetCurrentPathDirection() const;
 
+    // [HZM bot probe] read-only accessors for the behavioural telemetry in BotController::ProbeThink
+    Vector GetTargetPos() const { return m_vTargetPos; }
+    int    GetNumBlocks() const { return m_iNumBlocks; }
+    bool   IsJumping() const { return m_bJump; }
+    bool   IsPathing() const { return m_bPathing; }
+
 private:
     Vector CalculateDir(const Vector& delta) const;
     Vector CalculateRelativeWishDirection(const Vector& dir) const;
@@ -72,6 +78,7 @@ private:
     void   CheckEndPos(Entity *entity);
     void   CheckJump(usercmd_t& botcmd);
     void   CheckJumpOverEdge(usercmd_t& botcmd);
+    float  WhiskerClear(const Vector& dirAngles, float degOff, float len); // [HZM bot feelers] trace clearance 0..1
     void   NewMove();
     Vector FixDeltaFromCollision(const Vector& delta);
     void   CalculateBestFrontAvoidance(
@@ -96,8 +103,13 @@ private:
     Vector m_vCurrentDir;
     Vector m_vLastCheckPos[2];
     float  m_fAttractTime;
+    Vector m_vAttractScatterGoal; // [HZM] per-bot scattered destination around the primary attract node
+    Vector m_vScatterAnchor;      // [HZM] node origin the scatter goal was rolled around (re-roll only when it moves)
     int    m_iTempAwayTime;
     int    m_iNumBlocks;
+    int    m_iStuckPushTime;    // [HZM bot wall-slide] inttime the bot began pushing-but-not-moving (0 = not stuck)
+    int    m_iFeelerCommitTime; // [HZM bot feelers] hold the chosen steer side until this inttime (anti-weave)
+    int    m_iFeelerSide;       // [HZM bot feelers] committed steer sign for rightmove (+1 right / -1 left)
     int    m_iCheckPathTime;
     int    m_iLastBlockTime;
     int    m_iTempAwayState;
@@ -183,6 +195,7 @@ private:
     Vector            m_vLastEnemyPos;
     Vector            m_vLastDeathPos;
     SafePtr<Sentient> m_pEnemy;
+    SafePtr<Sentient> m_pLastAimEnemy; // [HZM] last enemy we aimed at, to detect a fresh lock for aim convergence
     int               m_iEnemyEyesTag;
 
     // Input
@@ -197,12 +210,18 @@ private:
     // Taunts
     int m_iNextTauntTime;
     int m_iLastFireTime;
+    int m_iLastPainTime;  // [HZM] last time the bot took damage (set in Pain) - gates cover-seeking
+    int m_iEnemyLockTime; // [HZM] when the current enemy was first locked - drives aim convergence
+    int m_iProbeLastTime; // [HZM bot probe] throttle: last inttime ProbeThink logged for this bot
+
+    void ProbeThink(const usercmd_t& ucmd); // [HZM bot probe] per-bot behavioural telemetry (bot_probe 1)
 
 private:
     DelegateHandle delegateHandle_gotKill;
     DelegateHandle delegateHandle_killed;
     DelegateHandle delegateHandle_stufftext;
     DelegateHandle delegateHandle_spawned;
+    DelegateHandle delegateHandle_damage;
 
 private:
     Weapon *FindWeaponWithAmmo(void);
@@ -235,6 +254,9 @@ private:
     void        State_EndAttack(void);
     void        State_Attack(void);
     bool        IsValidEnemy(Sentient *sent) const;
+    // [HZM Phase 1] find a nearby, reachable spot that breaks line of sight to threatPos (cover). Returns
+    // false if none of the sampled spots qualify. Used by State_Attack for cover-peek + fall-back.
+    bool        FindCoverPosition(const Vector& threatPos, Vector& outCover);
 
     static void InitState_Grenade(botfunc_t *func);
     bool        CheckCondition_Grenade(void);
@@ -277,6 +299,7 @@ public:
 
     void Killed(const Event& ev);
     void GotKill(const Event& ev);
+    void Pain(const Event& ev);
     void EventStuffText(const str& text);
 
     BotMovement& GetMovement();

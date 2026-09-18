@@ -831,7 +831,15 @@ void Level::Init(void)
     m_numVoters    = 0;
 
     m_LoopProtection = true;
-    m_LoopDrop       = true;
+    // HZM coop [user 2026-09-16, bug-2662] NON-FATAL loop protection. Stock defaults m_LoopDrop=true, which
+    // turns a script-VM command overflow (a thread that runs >15000 ops in one frame without yielding) into
+    // a HARD server drop - kicking every coop player to the main menu. A stock-AI edge does exactly this:
+    // anim/attack.scr's attack state calls AttackStandMoveToIntervalDir in a while(1); when the interval dir
+    // is unreachable the sub returns with no wait, so the loop can spin. With m_LoopDrop=false the protection
+    // still fires (kills the runaway thread and logs its source position) but the SERVER SURVIVES - the AI
+    // just drops that one behaviour for a frame instead of crashing the game. Coop ships to players, so a
+    // graceful degrade beats a crash; the source-pos log still surfaces the offending thread for a real fix.
+    m_LoopDrop       = false;
 
     m_letterbox_time = -1.0f;
 
@@ -1615,6 +1623,24 @@ void Level::SetMap(const char *themapname)
     m_precachescript = "maps/" + level_name + "_precache.scr";
     m_pathfile       = "maps/" + level_name + ".pth";
     m_mapfile        = "maps/" + level_name + ".bsp";
+
+    // HZM-MP-BEGIN(mp_force_arena)
+    // MP "Push" launches a coop CAMPAIGN map (m1l2b, m2l1, ...) as a multiplayer arena. Running that map's
+    // own script would load coop and the MP framework would defer. The one-shot server cvar sv_mpForceArena
+    // (set by the Push launch, CONSUMED here so it never lingers into a later coop load) BLANKS the map
+    // script path while keeping the real .bsp: with no map script, coop never loads and the map is exactly
+    // a script-less multiplayer map, which the E4 mp_mapscript_hook (Level::ServerSpawned) starts the MP
+    // framework on - the same path stock script-less MP maps use. Only fires for a real MP gametype, so
+    // coop (also gt2) is byte-for-byte unaffected: the cvar is always 0 in coop.
+    {
+        cvar_t *pForceArena = gi.Cvar_Get("sv_mpForceArena", "0", 0);
+        if (g_gametype->integer != GT_SINGLE_PLAYER && pForceArena && pForceArena->integer) {
+            gi.cvar_set("sv_mpForceArena", "0");
+            gi.Printf("HZM-MP: sv_mpForceArena - '%s' launched as a script-less MP arena\n", level_name.c_str());
+            m_mapscript = "";
+        }
+    }
+    // HZM-MP-END(mp_force_arena)
 }
 
 void Level::LoadAllScripts(const char *name, const char *extension)

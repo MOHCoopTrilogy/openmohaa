@@ -30,6 +30,17 @@ if(MSVC)
 	add_definitions(-D_CRT_SECURE_NO_WARNINGS -D_CRT_NONSTDC_NO_DEPRECATE)
 	# Treat no return type as error
 	add_compile_options(/we4715)
+	# HZM [user 2026-09-16, bug-2666] ship Release binaries WITH debug info so any crash dump can be
+	# named down to the function/line. /Zi keeps full Release optimization but emits a PDB (it does not
+	# change codegen); /DEBUG links it; /MAP writes a plain-text symbol map (RVA -> function) so a crash
+	# address like "renderer_opengl2.dll +0x633C1" resolves even without a debugger installed. /OPT:REF
+	# and /OPT:ICF are the Release defaults - restated so /DEBUG does not silently disable them.
+	add_compile_options($<$<CONFIG:Release>:/Zi>)
+	add_link_options(
+		$<$<CONFIG:Release>:/DEBUG>
+		$<$<CONFIG:Release>:/OPT:REF>
+		$<$<CONFIG:Release>:/OPT:ICF>
+		$<$<CONFIG:Release>:/MAP>)
 endif()
 
 #

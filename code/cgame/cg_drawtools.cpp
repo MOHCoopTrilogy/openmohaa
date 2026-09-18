@@ -2487,6 +2487,10 @@ static cvar_t *s_cbObj     = NULL; // coop_compassBarObj      pref, ARCHIVE (2 =
 static cvar_t *s_cbMates   = NULL; // coop_compassBarMates    pref, ARCHIVE
 static cvar_t *s_cbLive    = NULL; // coop_compassBarLive     published band height px, flags 0
 static cvar_t *s_cbSession = NULL; // coop_isCoopSession      set by coop script, flags 0
+// MP analog of coop_isCoopSession: the MP framework sets it so the modern compass bar draws in multiplayer
+// too (user 2026-09-17). Coop never sets it, so coop is byte-identical. The cvar name is only ever written
+// inside the HZM-MP hook markers below (isolation clause 14, mp_compass_session).
+static cvar_t *s_cbMpSession = NULL; // the MP compass-session flag, set by MP script, flags 0
 static cvar_t *s_cbExe     = NULL; // coop_compassBarExe      CVAR_ROM "1" from an exe that honours the band
 static cvar_t *s_cbProbe   = NULL; // coop_compassProbe       dev probe, flags 0
 
@@ -2549,6 +2553,9 @@ static void CG_CompassBarCvars(void)
     // user-created - the coop_cineHud / coop_voxCut first-frame trap (bug-2318).
     s_cbLive    = cgi.Cvar_Get("coop_compassBarLive", "0", 0);
     s_cbSession = cgi.Cvar_Get("coop_isCoopSession", "0", 0);
+    // HZM-MP-BEGIN(mp_compass_reg)
+    s_cbMpSession = cgi.Cvar_Get("coop_mpCompass", "0", 0); // MP session flag - eager (bug-2318 first-frame trap)
+    // HZM-MP-END(mp_compass_reg)
     s_cbExe     = cgi.Cvar_Get("coop_compassBarExe", "", 0); // an old exe never registers it: "" reads 0
     s_cbProbe   = cgi.Cvar_Get("coop_compassProbe", "0", 0);
 }
@@ -2557,6 +2564,9 @@ static void CG_CompassBarReset(void)
 {
     CG_CompassBarCvars();
     cgi.Cvar_Set("coop_isCoopSession", "0");
+    // HZM-MP-BEGIN(mp_compass_reset)
+    cgi.Cvar_Set("coop_mpCompass", "0"); // clean slate each map; re-set on MP spawn
+    // HZM-MP-END(mp_compass_reset)
     cgi.Cvar_Set("coop_compassBarLive", "0");
 }
 
@@ -2595,7 +2605,8 @@ static void CG_CompassBarPublishLive(void)
 {
     int live = 0;
 
-    if (s_cbOn->integer && s_cbSession->integer && s_cbExe->integer && cgs.glconfig.vidHeight > 0) {
+    if (s_cbOn->integer && (s_cbSession->integer || s_cbMpSession->integer) && s_cbExe->integer
+        && cgs.glconfig.vidHeight > 0) {
         live = CG_CompassBarBandPx();
     }
     if (live != s_cbLive->integer) {

@@ -3678,10 +3678,25 @@ static void SortNewShader( void ) {
 	float	sort;
 	shader_t	*newShader;
 
+	// HZM [user 2026-09-16, bug-2666] settings-apply / vid_restart teardown race. Applying a new
+	// resolution tears the renderer down and back up; a late shader registration can reach here while
+	// tr.shaders / tr.sortedShaders are in a half-built state, so newShader or a sortedShaders[] entry
+	// is NULL and the ->sort / ->sortedIndex read dereferenced ~NULL (crash in GeneratePermanentShader,
+	// resolved from the .map). This is the same class the backEndData guard in FixRenderCommandList
+	// covers - guard the pointers here too rather than trust the transient state.
+	if ( tr.numShaders < 1 ) {
+		return;
+	}
 	newShader = tr.shaders[ tr.numShaders - 1 ];
+	if ( !newShader ) {
+		return;
+	}
 	sort = newShader->sort;
 
 	for ( i = tr.numShaders - 2 ; i >= 0 ; i-- ) {
+		if ( !tr.sortedShaders[ i ] ) {
+			break;
+		}
 		if ( tr.sortedShaders[ i ]->sort <= sort ) {
 			break;
 		}
@@ -3730,6 +3745,11 @@ static shader_t *GeneratePermanentShader( void ) {
 	}
 
 	newShader = ri.Hunk_Alloc( sizeof( shader_t ), h_low );
+	// [bug-2666] never build on a NULL allocation - during a vid_restart teardown the hunk can be
+	// transient, and the `*newShader = shader` copy below would fault writing to NULL.
+	if ( !newShader ) {
+		return tr.defaultShader;
+	}
 
 	*newShader = shader;
 
@@ -3752,6 +3772,11 @@ static shader_t *GeneratePermanentShader( void ) {
 			break;
 		}
 		newShader->stages[i] = ri.Hunk_Alloc( sizeof( stages[i] ), h_low );
+		// [bug-2666] guard a transient-teardown NULL stage alloc (the copy below would fault at NULL).
+		if ( !newShader->stages[i] ) {
+			newShader->numUnfoggedPasses = i;
+			break;
+		}
 		*newShader->stages[i] = stages[i];
 
 		for ( b = 0 ; b < NUM_TEXTURE_BUNDLES ; b++ ) {

@@ -694,6 +694,24 @@ static void CG_CoopSidearmUp_f(void)
     cgi.SendClientCommand("-coopsidearm");
 }
 
+// E2 [MP armories slice 2, F1] - "hzm_armory" console command.
+// The MP branch and the coop fallback are separated by clause 14g.
+static void CG_HzmArmory_f(void)
+{
+    // HZM-MP-BEGIN(mp_armory_cmd)
+    cvar_t *pSession = cgi.Cvar_Get("coop_mp_session", "0", 0);
+    if (pSession->integer == 1) {
+        if (cg.snap && cg.snap->ps.stats[STAT_TEAM] == TEAM_AXIS) {
+            cgi.Cmd_Execute(EXEC_NOW, "pushmenu coop_mpx_armory\n");
+        } else {
+            cgi.Cmd_Execute(EXEC_NOW, "pushmenu coop_mpa_armory\n");
+        }
+        return;
+    }
+    // HZM-MP-END(mp_armory_cmd)
+    cgi.Cmd_Execute(EXEC_NOW, "pushmenu coop_loadout\n");
+}
+
 static consoleCommand_t commands[] = {
     {"shoulderswap",           &CG_AdsSwapShoulder_f       },
     {"useweaponclass",         &CG_UseWeaponClass_f        },
@@ -776,6 +794,7 @@ static consoleCommand_t commands[] = {
     {"lcamsave",               &CG_LcamSave_f              },
     {"+coopsidearm",           &CG_CoopSidearmDown_f       }, // HZM coop - relay, see T22/bug-2460
     {"-coopsidearm",           &CG_CoopSidearmUp_f         }, // HZM coop - both halves or host-only
+    {"hzm_armory",             &CG_HzmArmory_f             }, // HZM MP armories E2
 };
 
 /*

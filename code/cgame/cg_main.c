@@ -901,6 +901,60 @@ void CG_Init(clientGameImport_t *imported, int serverMessageNum, int serverComma
     cgi.Cvar_Set("r_ppMapTemp",       "0");
     cgi.Cvar_Set("coop_mapGrade",     "");
     cgi.Cvar_Get("r_ppMapGradeOn",    "1", CVAR_ARCHIVE);
+
+    // HZM-MP-BEGIN(mp_armory_session)
+    // E2 session flag: zeroed on every cgame init so an MP session from a previous connection never
+    // bleeds into the next. The server stuffs "set coop_mp_session 1" when mp.scr starts.
+    cgi.Cvar_Set("coop_mp_session", "0");
+    // HZM-MP-END(mp_armory_session)
+
+    // HZM-MP-BEGIN(mp_kit_userinfo)
+    // E1 [MP armories slice 2] - register the carried default kit cvars as USERINFO|ARCHIVE so a
+    // player's MP weapon picks travel with them across servers via the userinfo string. Six slots
+    // per side (Allied k1..k6, Axis k1..k6). The armory commit cfgs seta these; the server reads
+    // them back with info_valueforkey on connect to apply the carried kit with no marker round-trip.
+    // Precedent: coop_pin1..5 in cl_main.cpp:4198-4202 (same flags, same pattern).
+    // About 170 of ~800 free userinfo bytes (progression 2.2).
+    {
+        static const char *const kKitCvars[12] = {
+            "coop_mpa_k1", "coop_mpa_k2", "coop_mpa_k3",
+            "coop_mpa_k4", "coop_mpa_k5", "coop_mpa_k6",
+            "coop_mpx_k1", "coop_mpx_k2", "coop_mpx_k3",
+            "coop_mpx_k4", "coop_mpx_k5", "coop_mpx_k6"
+        };
+        int ki;
+        for (ki = 0; ki < 12; ki++) {
+            cgi.Cvar_Get(kKitCvars[ki], "", CVAR_ARCHIVE | CVAR_USERINFO);
+        }
+    }
+    // HZM-MP-END(mp_kit_userinfo)
+
+    // HZM-MP-BEGIN(mp_prog_blob)
+    // Slice 3 [MP progression, arch A] - the carried progression blob: a signed, compact snapshot of
+    // the player's MP counters. USERINFO|ARCHIVE so it travels between servers and persists across
+    // sessions exactly like the kit cvars above; the server reads it with info_valueforkey on connect,
+    // verifies its mp_sign tag, and pushes an updated value back with `seta coop_mpProgBlob ...`. ~90
+    // bytes, well inside the remaining userinfo budget. Same flags/pattern as coop_pin1..5.
+    cgi.Cvar_Get("coop_mpProgBlob", "", CVAR_ARCHIVE | CVAR_USERINFO);
+    // HZM-MP-END(mp_prog_blob)
+
+    // HZM-MP-BEGIN(mp_cos_userinfo)
+    // MP cosmetics carry: the player's chosen skin/helmet/glove id per side, USERINFO|ARCHIVE so the
+    // appearance choices travel between servers and persist across sessions exactly like the kit cvars.
+    // The armory option cfgs seta these; the server reads them with info_valueforkey on spawn and applies
+    // the cosmetic (mp_cosmetics.scr). Same flags/pattern as coop_mpProgBlob / the kit cvars above.
+    {
+        static const char *const kCosCvars[6] = {
+            "coop_mpa_cosSkin", "coop_mpa_cosHelm", "coop_mpa_cosGlove",
+            "coop_mpx_cosSkin", "coop_mpx_cosHelm", "coop_mpx_cosGlove"
+        };
+        int ci;
+        for (ci = 0; ci < 6; ci++) {
+            cgi.Cvar_Get(kCosCvars[ci], "", CVAR_ARCHIVE | CVAR_USERINFO);
+        }
+    }
+    // HZM-MP-END(mp_cos_userinfo)
+
     CG_RegisterCvars();
     CG_CompassBarInit(); // HZM coop [user 2026-09-13] top compass bar: prefs registered, session flag + band reset to 0
 

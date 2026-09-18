@@ -2935,10 +2935,22 @@ static void SortNewShader( void ) {
 	float	sort;
 	shader_t	*newShader;
 
+	// HZM [user 2026-09-16, bug-2666] settings-apply / vid_restart teardown race - see the gl2 copy of
+	// this function. A late shader registration during a resolution change can reach here with a half-
+	// built tr.shaders / tr.sortedShaders, so guard the pointers instead of trusting the transient state.
+	if ( tr.numShaders < 1 ) {
+		return;
+	}
 	newShader = tr.shaders[ tr.numShaders - 1 ];
+	if ( !newShader ) {
+		return;
+	}
 	sort = newShader->sort;
 
 	for ( i = tr.numShaders - 2 ; i >= 0 ; i-- ) {
+		if ( !tr.sortedShaders[ i ] ) {
+			break;
+		}
 		if ( tr.sortedShaders[ i ]->sort <= sort ) {
 			break;
 		}
@@ -2982,6 +2994,10 @@ static shader_t *GeneratePermanentShader( void ) {
 	}
 
 	newShader = ri.Hunk_Alloc( sizeof( shader_t ), h_dontcare);
+	// [bug-2666] never build on a NULL allocation (vid_restart teardown); the copy below writes to NULL.
+	if ( !newShader ) {
+		return tr.defaultShader;
+	}
 
 	*newShader = shader;
 	newShader->next = currentShader->shader;

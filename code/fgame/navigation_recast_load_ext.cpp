@@ -948,6 +948,8 @@ Container<ExtensionArea> NavigationMapExtension_JumpFall::GetSupportedAreas() co
     // Take high fall as a last resort, when no alternative is available
     list.AddObject(ExtensionArea(RECAST_AREA_HIGH_FALL, 20.0));
 
+    // [HZM bot nav] reverted 2.0 -> stock 100.0 while isolating a ~80s dedicated-server hang. Making straight
+    // off-mesh links cheap may have let the pather loop on a bad link; reinstate only once proven safe.
     list.AddObject(ExtensionArea(RECAST_AREA_STRAIGHT, 100.0));
 
     return list;

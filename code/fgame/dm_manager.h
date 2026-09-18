@@ -205,6 +205,11 @@ public:
     ~DM_Manager();
 
     void InitGame(void);
+    // [HZM] (re)collect all info_player_* into the per-team spawn lists from the current entity set. Called by
+    // InitGame, and lazily by the spawn selectors when a team's list is empty - so team spawns SCRIPT-SPAWNED
+    // after InitGame (the MP "arena" modes on SP campaign maps, whose bsps carry no MP team spawns) actually
+    // register. Coop never script-spawns info_player_allied/axis, so this is a no-op there.
+    void BuildSpawnpointList(void);
     void AddPlayer(Player *player);
     bool JoinTeam(Player *player, teamtype_t teamType);
     void LeaveTeam(Player *player);

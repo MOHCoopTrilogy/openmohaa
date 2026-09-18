@@ -2165,11 +2165,7 @@ void R_Register( void )
 	r_globalFogRadial        = ri.Cvar_Get("r_globalFogRadial",        "0", CVAR_ARCHIVE);
 	r_globalFogIdentityLight = ri.Cvar_Get("r_globalFogIdentityLight", "0", CVAR_ARCHIVE);
 	// HZM gl2: CVAR_TEMP, not CVAR_CHEAT. A listen server runs with sv_cheats 0, so a
-	// CVAR_CHEAT registration is clamped straight back to "0" and the debug views could
-	// never be turned on - not from the boot config and not over rcon (verified 2026-07-28:
-	// the sets executed, the frame never changed). This is a diagnostic-only cvar in a
-	// renderer that never ships; it goes back to CVAR_CHEAT with the scaffolding strip.
-	r_globalFogDebug         = ri.Cvar_Get("r_globalFogDebug",         "0", CVAR_TEMP);
+	r_globalFogDebug         = ri.Cvar_Get("r_globalFogDebug",         "0", CVAR_CHEAT);
 
 	// HZM gl2 fog parity (forward port, bug-1306): mix the global fog INSIDE the surface
 	// shaders, before the tone stage, which is the order gl1 uses (fixed-function fog during

@@ -1780,6 +1780,17 @@ void Com_Init( char *commandLine ) {
 
 	com_target_game = Cvar_Get("com_target_game", "0", CVAR_INIT|CVAR_PROTECTED);
 	com_target_demo = Cvar_Get("com_target_demo", "0", CVAR_INIT|CVAR_PROTECTED);
+#if !defined(DEDICATED)
+	/* [bug-2664] off-switch for the overlay-crash guard (sys_win32.c). Default 1 = a fault in an
+	   injected capture/overlay DLL parks that one thread instead of crashing the game. Set 0 only to
+	   debug a suspected mis-classification. The guard is installed earlier (Sys_PlatformInit) and is
+	   already active with the default until this cvar is read. */
+	{
+		extern int hzm_overlayGuardActive;
+		cvar_t *ovg = Cvar_Get( "com_overlayGuard", "1", CVAR_ARCHIVE );
+		hzm_overlayGuardActive = ovg->integer ? 1 : 0;
+	}
+#endif
 	com_target_shortversion = Cvar_Get("com_target_shortversion", "0.00", CVAR_ROM);
 	com_target_version = Cvar_Get("com_target_version", "", CVAR_ROM);
 	com_target_extension = Cvar_Get("com_target_extension", "", CVAR_ROM);

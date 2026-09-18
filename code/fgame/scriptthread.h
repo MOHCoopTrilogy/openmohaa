@@ -234,6 +234,8 @@ public:
     void        EventClearObjectives(Event *ev);
     void        SetObjectiveLocation(Vector vLocation);
     void        SetObjectiveLocation(Event *ev);
+    void        SetObjectiveLocationAllies(Event *ev);
+    void        SetObjectiveLocationAxis(Event *ev);
     void        ClearObjectiveLocation(void);
     void        ClearObjectiveLocation(Event *ev);
 
@@ -350,6 +352,13 @@ public:
 
     void SubscribeEvent(Event *ev);
     void UnsubscribeEvent(Event *ev);
+
+    // HZM-MP-BEGIN(mp_sign_decl)
+    // Slice 2 - MP progression signing builtins. HMAC over a server secret so a client cannot forge
+    // the userinfo-carried progress blob (arch A). Coop never calls these.
+    void MpSign(Event *ev);
+    void MpVerify(Event *ev);
+    // HZM-MP-END(mp_sign_decl)
 
     void FS_ReadContent(Event *ev);
     void CompileCensus(Event *ev);

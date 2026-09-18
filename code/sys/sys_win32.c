@@ -806,6 +806,127 @@ void Sys_GLimpInit( void )
 }
 
 /*
+============================================================================
+HZM coop [user 2026-09-16, bug-2664] OVERLAY-CRASH GUARD.
+
+Third-party CAPTURE / OVERLAY / streaming software injects DLLs and worker threads straight
+into our process: NVIDIA Share/ShadowPlay (nvspcap), Steam & Discord overlays, RivaTuner/RTSS,
+OBS game-capture hooks, Parsec, anti-cheat, ... When one of THOSE threads faults, the default
+Windows handler kills OUR whole process - the player is crashed to desktop through no fault of
+the game or mod (confirmed from a tester's minidumps: an access violation executing at 0x0 on a
+pure COM/UI worker thread with nvspcap64.dll injected). We compile the engine, so we own the
+FIRST-CHANCE handler.
+
+A Vectored Exception Handler runs before anyone else on every exception. For a hard fault it asks
+one question: did this come from OUR code or from a FOREIGN injected module? If either the faulting
+instruction or its immediate caller is one of our modules, it is OUR bug - pass it straight through
+(EXCEPTION_CONTINUE_SEARCH) so it still crashes and still writes its minidump; we never want to hide
+our own defects. If the fault is purely in foreign/injected code, we neutralise it: redirect that one
+thread to a harmless permanent park so the PROCESS SURVIVES. The overlay loses its worker (its capture
+may stop); the game keeps running. Parking (not ExitThread) avoids re-entrant DLL thread-detach faults.
+
+Kept deliberately minimal and API-light inside the handler (no Com_Printf - it can run on any thread in
+any state); it uses only GetModuleHandleEx/GetModuleFileName + OutputDebugString.
+============================================================================
+*/
+#if !defined(DEDICATED)
+int hzm_overlayGuardActive = 1;   /* com_overlayGuard sets this once cvars exist; default on */
+static volatile LONG hzm_overlayGuardHits = 0;
+
+static int HZM_AddrIsOurModule( void *addr )
+{
+	HMODULE     hmod = NULL;
+	char        path[MAX_PATH];
+	const char *base;
+	int         i;
+	static const char *ours[] = {
+		"openmohaa.exe", "omohaaded.exe", "game.dll", "cgame.dll",
+		"renderer_opengl1.dll", "renderer_opengl2.dll", NULL
+	};
+
+	if ( !addr ) {
+		return 0;   /* not in any module (e.g. a call through a NULL pointer) -> not ours */
+	}
+	if ( !GetModuleHandleExA(
+			GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+			(LPCSTR)addr, &hmod ) || !hmod ) {
+		return 0;
+	}
+	path[0] = 0;
+	GetModuleFileNameA( hmod, path, sizeof(path) );
+	base = strrchr( path, '\\' );
+	base = base ? base + 1 : path;
+	for ( i = 0; ours[i]; i++ ) {
+		if ( !Q_stricmp( base, ours[i] ) ) {
+			return 1;
+		}
+	}
+	return 0;
+}
+
+/* the neutralised foreign thread is redirected here: it parks forever, harmlessly. */
+static void HZM_ForeignThreadPark( void )
+{
+	for ( ;; ) {
+		SleepEx( 60000, FALSE );
+	}
+}
+
+static LONG CALLBACK HZM_OverlayGuard( PEXCEPTION_POINTERS ep )
+{
+	DWORD  code;
+	void  *rip, *ret;
+
+	if ( !hzm_overlayGuardActive || !ep || !ep->ExceptionRecord || !ep->ContextRecord ) {
+		return EXCEPTION_CONTINUE_SEARCH;
+	}
+	code = ep->ExceptionRecord->ExceptionCode;
+	/* only the hard faults an overlay realistically produces; leave breakpoints, C++ EH,
+	   guard-page, etc. untouched so normal flow is never disturbed. */
+	if ( code != EXCEPTION_ACCESS_VIOLATION
+	  && code != EXCEPTION_ILLEGAL_INSTRUCTION
+	  && code != EXCEPTION_PRIV_INSTRUCTION ) {
+		return EXCEPTION_CONTINUE_SEARCH;
+	}
+
+	rip = (void *)ep->ContextRecord->Rip;
+	ret = NULL;
+	if ( ep->ContextRecord->Rsp ) {
+		/* the return address of the call that led here - valid for the common
+		   "call through a NULL/garbage function pointer" case where Rip is not in any module.
+		   read under SEH so a bad Rsp cannot fault the handler itself. */
+		__try {
+			ret = *(void **)ep->ContextRecord->Rsp;
+		} __except ( EXCEPTION_EXECUTE_HANDLER ) {
+			ret = NULL;
+		}
+	}
+
+	/* OUR code (faulting instruction OR its immediate caller)? -> it is our bug: let it crash +
+	   write its minidump normally. We only ever neutralise foreign injected code. */
+	if ( HZM_AddrIsOurModule( rip ) || HZM_AddrIsOurModule( ret ) ) {
+		return EXCEPTION_CONTINUE_SEARCH;
+	}
+
+	/* foreign/injected code faulted (a capture/overlay DLL). Park this thread so the process lives.
+	   Re-align the stack to the x64 ABI (RSP must be 8 mod 16 at a function entry - we are jumping,
+	   not calling) so the parked function's own calls stay aligned. */
+	InterlockedIncrement( &hzm_overlayGuardHits );
+	OutputDebugStringA( "^~^~^ OVERLAYGUARD: neutralised a fault in injected/overlay code; game kept alive\n" );
+	ep->ContextRecord->Rsp = ( ep->ContextRecord->Rsp & ~(DWORD_PTR)0xF ) - 8;
+	ep->ContextRecord->Rip = (DWORD_PTR)&HZM_ForeignThreadPark;
+	return EXCEPTION_CONTINUE_EXECUTION;
+}
+
+void Sys_InstallOverlayGuard( void )
+{
+	AddVectoredExceptionHandler( 1 /* run first, before any injected handler */, HZM_OverlayGuard );
+}
+#else
+void Sys_InstallOverlayGuard( void ) {}
+#endif
+
+/*
 ==============
 Sys_PlatformInit
 
@@ -814,6 +935,10 @@ Windows specific initialisation
 */
 void Sys_PlatformInit( void )
 {
+	/* [bug-2664] install the overlay-crash guard as early as possible - before any injected
+	   capture/overlay worker thread can fault - so a broken overlay never takes the game down. */
+	Sys_InstallOverlayGuard();
+
 /* HZM [user 2026-08-10] bug-1667: this block used to be #ifndef DEDICATED, so a dedicated
    server never raised the Windows timer resolution and it stayed at the default ~15.6ms.
    Every sleep in the frame loop then rounds UP to a multiple of that, quantising a 25ms

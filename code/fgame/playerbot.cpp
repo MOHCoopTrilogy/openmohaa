@@ -62,6 +62,8 @@ BotController::BotController()
     m_botCmd.rightmove   = 0;
     m_botCmd.upmove      = 0;
 
+    m_iProbeLastTime = 0; // [HZM bot probe]
+
     m_botEyes.angles[0] = 0;
     m_botEyes.angles[1] = 0;
     m_botEyes.ofs[0]    = 0;
@@ -75,6 +77,8 @@ BotController::BotController()
     m_iLastSeenTime       = 0;
     m_iLastUnseenTime     = 0;
     m_iLastBurstTime      = 0;
+    m_iLastPainTime       = 0; // [HZM] cover-seek gate
+    m_iEnemyLockTime      = 0; // [HZM Phase 5b] aim-convergence clock
 
     m_iNextTauntTime = 0;
 
@@ -87,6 +91,7 @@ BotController::~BotController()
     if (controlledEnt) {
         controlledEnt->delegate_gotKill.Remove(delegateHandle_gotKill);
         controlledEnt->delegate_killed.Remove(delegateHandle_killed);
+        controlledEnt->delegate_damage.Remove(delegateHandle_damage);
         controlledEnt->delegate_stufftext.Remove(delegateHandle_stufftext);
         controlledEnt->delegate_spawned.Remove(delegateHandle_spawned);
     }
@@ -399,17 +404,34 @@ void BotController::NoticeEvent(Vector vPos, int iType, Entity *pEnt, float fDis
     float     fRangeFactor;
     Vector    delta1, delta2;
 
+    // [HZM Phase 3a] reactive-hearing cvars (MP-bot-only; NoticeEvent binds only to bot-controlled Players).
+    static cvar_t *s_botHearing     = NULL;
+    static cvar_t *s_botHearReact   = NULL;
+    static cvar_t *s_botHearFovFire = NULL;
+    if (!s_botHearing) {
+        s_botHearing     = gi.Cvar_Get("bot_hearing", "1", CVAR_ARCHIVE);
+        s_botHearReact   = gi.Cvar_Get("bot_hearing_react", "1", CVAR_ARCHIVE);
+        s_botHearFovFire = gi.Cvar_Get("bot_fov_fire", "45", CVAR_ARCHIVE);
+    }
+    const bool bGunfire =
+        (iType == AI_EVENT_WEAPON_FIRE || iType == AI_EVENT_WEAPON_IMPACT || iType == AI_EVENT_EXPLOSION);
+
     if (m_iCuriousTime) {
         delta1 = vPos - controlledEnt->origin;
         delta2 = m_vNewCuriousPos - controlledEnt->origin;
-        if (delta1.lengthSquared() < delta2.lengthSquared()) {
+        // [HZM Phase 3a] nearest/newest wins: keep the current curious point only if the NEW event is
+        // FARTHER (this test was inverted, which fixated bots on a distant old sound and made them ignore a
+        // closer new threat). Gunfire under bot_hearing always passes so a fresh shot is never dropped here.
+        if (delta1.lengthSquared() > delta2.lengthSquared() && !(s_botHearing->integer && bGunfire)) {
             return;
         }
     }
 
     fRangeFactor = 1.0 - (fDistanceSquared / fRadiusSquared);
 
-    if (fRangeFactor < random()) {
+    // [HZM Phase 3a] you always notice gunfire aimed near you: bypass the probabilistic distance drop for
+    // weapon fire / explosions (kept for footsteps and voices).
+    if (fRangeFactor < random() && !(s_botHearing->integer && bGunfire)) {
         return;
     }
 
@@ -455,6 +477,28 @@ void BotController::NoticeEvent(Vector vPos, int iType, Entity *pEnt, float fDis
     case AI_EVENT_WEAPON_FIRE:
     case AI_EVENT_WEAPON_IMPACT:
     case AI_EVENT_EXPLOSION:
+        // [HZM Phase 3a] REACT to gunfire instead of only wandering toward it. If we can see the shooter and
+        // they are an enemy, engage now; otherwise snap our facing toward the shot source (peek) and sharpen
+        // the next reaction. bot_hearing/bot_hearing_react gate it back to the stock curiosity-only behavior.
+        if (s_botHearing->integer && s_botHearReact->integer && pSentOwner && IsValidEnemy(pSentOwner)) {
+            float maxDist = Q_min(world->m_fAIVisionDistance, world->farplane_distance * 0.828);
+            if (controlledEnt->CanSee(pSentOwner, s_botHearFovFire->value, maxDist, false)) {
+                if (!m_pEnemy) {
+                    m_iLastUnseenTime = level.inttime;
+                }
+                m_pEnemy             = pSentOwner;
+                m_vLastEnemyPos      = pSentOwner->origin;
+                m_iAttackTime        = level.inttime + 1000;
+                m_iAttackStopAimTime = level.inttime + 2000;
+            } else {
+                m_vLastEnemyPos      = vPos;      // face + peek toward the sound, do not run onto it
+                m_iAttackStopAimTime = level.inttime + 1500;
+                m_iLastUnseenTime    = 0;         // awareness: shorten the next reaction gate
+            }
+        }
+        m_iCuriousTime   = level.inttime + 20000;
+        m_vNewCuriousPos = vPos;
+        break;
     case AI_EVENT_AMERICAN_VOICE:
     case AI_EVENT_GERMAN_VOICE:
     case AI_EVENT_AMERICAN_URGENT:
@@ -567,6 +611,9 @@ void BotController::State_Reset(void)
     m_vLastDeathPos   = vec_zero;
     m_pEnemy          = NULL;
     m_iEnemyEyesTag   = -1;
+    m_iLastPainTime   = 0;
+    m_pLastAimEnemy   = NULL; // [HZM Phase 5b] force a fresh aim-convergence ramp on the next enemy lock
+    m_iEnemyLockTime  = 0;
 }
 
 /*
@@ -753,6 +800,73 @@ bool BotController::IsValidEnemy(Sentient *sent) const
     return true;
 }
 
+bool BotController::FindCoverPosition(const Vector& threatPos, Vector& outCover)
+{
+    // [HZM Phase 1] Sample a small ring of nearby spots and return the NEAREST that is both (a) reachable
+    // from us in a straight line (bot->candidate not walled off) and (b) COVERED from the threat
+    // (candidate->threat IS blocked by geometry). Cheap (a handful of point traces) and best-effort: returns
+    // false if none qualify, so the caller just keeps its normal behaviour. MP playerbots only.
+    Vector vBotEye = controlledEnt->origin;
+    vBotEye.z += controlledEnt->viewheight;
+
+    Vector vThreatEye = threatPos;
+    vThreatEye.z += 48.0f; // approximate standing eye height above the threat's origin
+
+    Vector vToThreat = threatPos - controlledEnt->origin;
+    vToThreat.z = 0;
+    if (vToThreat.length() < 1.0f) {
+        return false;
+    }
+    VectorNormalizeFast(vToThreat);
+    Vector vRight(vToThreat[1], -vToThreat[0], 0.0f); // ground-plane right-hand perpendicular
+
+    // offset weights: x = along 'right', y = along 'toThreat' (negative y = away from the threat)
+    static const float offs[7][2] = {
+        {-1.0f, 0.0f },
+        { 1.0f, 0.0f },
+        {-0.8f, -0.6f},
+        { 0.8f, -0.6f},
+        { 0.0f, -1.0f},
+        {-0.5f, -0.3f},
+        { 0.5f, -0.3f}
+    };
+
+    bool   bFound     = false;
+    float  bestDistSq = 0.0f;
+    Vector vBest;
+
+    for (int i = 0; i < 7; i++) {
+        const float dist    = 200.0f;
+        Vector      cand    = controlledEnt->origin + vRight * (offs[i][0] * dist) + vToThreat * (offs[i][1] * dist);
+        Vector      candEye = cand;
+        candEye.z += controlledEnt->viewheight;
+
+        // (a) reachable-ish: the straight line from us to the candidate must be clear
+        trace_t tReach = G_Trace(vBotEye, vec_zero, vec_zero, candEye, controlledEnt, MASK_SOLID, false, "BotCoverReach");
+        if (tReach.fraction < 0.98f) {
+            continue;
+        }
+
+        // (b) covered: the line from the candidate to the threat must be BLOCKED by geometry
+        trace_t tCover = G_Trace(candEye, vec_zero, vec_zero, vThreatEye, controlledEnt, MASK_SOLID, false, "BotCoverLos");
+        if (tCover.fraction >= 0.98f) {
+            continue; // still exposed there
+        }
+
+        float d = (cand - controlledEnt->origin).lengthSquared();
+        if (!bFound || d < bestDistSq) {
+            bFound     = true;
+            bestDistSq = d;
+            vBest      = cand;
+        }
+    }
+
+    if (bFound) {
+        outCover = vBest;
+    }
+    return bFound;
+}
+
 bool BotController::CheckCondition_Attack(void)
 {
     Container<Sentient *> sents       = SentientList;
@@ -770,7 +884,25 @@ bool BotController::CheckCondition_Attack(void)
 
         maxDistance = Q_min(world->m_fAIVisionDistance, world->farplane_distance * 0.828);
 
-        if (controlledEnt->CanSee(sent, 80, maxDistance, false)) {
+        // [HZM Phase 1a] graded acquisition cone (MP-bot-only): wide up close, narrowing with range, so bots
+        // notice enemies in their PERIPHERY, not only dead-ahead (the "bots must look right at me" bug). Only
+        // CanSee's ARGUMENTS change; Sentient::CanSee (shared with coop) is untouched. bot_perception 0 = 80.
+        static cvar_t *s_botPerception = NULL;
+        static cvar_t *s_botFovAcquire = NULL;
+        static cvar_t *s_botFovAcqFar  = NULL;
+        if (!s_botPerception) {
+            s_botPerception = gi.Cvar_Get("bot_perception", "1", CVAR_ARCHIVE);
+            s_botFovAcquire = gi.Cvar_Get("bot_fov_acquire", "150", CVAR_ARCHIVE);
+            s_botFovAcqFar  = gi.Cvar_Get("bot_fov_acquire_far", "90", CVAR_ARCHIVE);
+        }
+        float fFovAcq = 80.0f;
+        if (s_botPerception->integer && maxDistance > 1.0f) {
+            float fDistSq = (sent->origin - controlledEnt->origin).lengthSquared();
+            float tRange  = Q_min(1.0f, (float)sqrt(fDistSq) / maxDistance);
+            fFovAcq       = s_botFovAcquire->value + tRange * (s_botFovAcqFar->value - s_botFovAcquire->value);
+        }
+
+        if (controlledEnt->CanSee(sent, fFovAcq, maxDistance, false)) {
             if (m_pEnemy != sent) {
                 m_iEnemyEyesTag = -1;
             }
@@ -828,8 +960,18 @@ void BotController::State_Attack(void)
 
     m_vOldEnemyPos = m_vLastEnemyPos;
 
+    // [HZM Phase 1b] widen the punishing ~10deg firing cone so a bot roughly facing you opens fire instead of
+    // needing to be aimed dead-on (also covers the "crouched facing me, never fired" case). bot_perception 0
+    // restores the stock 20. Only CanSee's arguments change.
+    static cvar_t *s_botFovFire  = NULL;
+    static cvar_t *s_botPercFire = NULL;
+    if (!s_botFovFire) {
+        s_botFovFire  = gi.Cvar_Get("bot_fov_fire", "45", CVAR_ARCHIVE);
+        s_botPercFire = gi.Cvar_Get("bot_perception", "1", CVAR_ARCHIVE);
+    }
+    float fFovFire = s_botPercFire->integer ? s_botFovFire->value : 20.0f;
     bCanSee =
-        controlledEnt->CanSee(m_pEnemy, 20, Q_min(world->m_fAIVisionDistance, world->farplane_distance * 0.828), false);
+        controlledEnt->CanSee(m_pEnemy, fFovFire, Q_min(world->m_fAIVisionDistance, world->farplane_distance * 0.828), false);
 
     if (bCanSee) {
         if (!pWeap) {
@@ -996,14 +1138,37 @@ void BotController::State_Attack(void)
             vTarget = m_pEnemy->origin;
         }
 
+        // [HZM Phase 5b] aim CONVERGENCE: on first locking a new enemy the horizontal aim is loose (early
+        // misses read as suppression) and tightens over ~1.4s to a residual-jitter floor - this removes the
+        // "instant lock-on" aimbot tell. Only the horizontal miss spread ([0]/[1]) scales; the vertical aim
+        // point ([2], body height) is left alone. bot_combat_realism 0 = the stock flat spread.
+        static cvar_t *s_botCombat = NULL;
+        if (!s_botCombat) {
+            s_botCombat = gi.Cvar_Get("bot_combat_realism", "1", CVAR_ARCHIVE);
+        }
+        if (m_pEnemy != m_pLastAimEnemy) {
+            m_pLastAimEnemy  = m_pEnemy;
+            m_iEnemyLockTime = level.inttime;
+        }
+        float fAimConv = 1.0f;
+        if (s_botCombat->integer) {
+            fAimConv = 1.7f - (float)(level.inttime - m_iEnemyLockTime) / 1400.0f;
+            if (fAimConv < 0.35f) {
+                fAimConv = 0.35f;
+            }
+            if (fAimConv > 1.7f) {
+                fAimConv = 1.7f;
+            }
+        }
+
         if (level.inttime >= m_iLastAimTime + 100) {
             if (m_iEnemyEyesTag != -1) {
-                m_vAimOffset[0] = G_CRandom((m_pEnemy->maxs.x - m_pEnemy->mins.x) * 0.5);
-                m_vAimOffset[1] = G_CRandom((m_pEnemy->maxs.y - m_pEnemy->mins.y) * 0.5);
+                m_vAimOffset[0] = G_CRandom((m_pEnemy->maxs.x - m_pEnemy->mins.x) * 0.5) * fAimConv;
+                m_vAimOffset[1] = G_CRandom((m_pEnemy->maxs.y - m_pEnemy->mins.y) * 0.5) * fAimConv;
                 m_vAimOffset[2] = -G_Random(m_pEnemy->maxs.z * 0.5);
             } else {
-                m_vAimOffset[0] = G_CRandom((m_pEnemy->maxs.x - m_pEnemy->mins.x) * 0.5);
-                m_vAimOffset[1] = G_CRandom((m_pEnemy->maxs.y - m_pEnemy->mins.y) * 0.5);
+                m_vAimOffset[0] = G_CRandom((m_pEnemy->maxs.x - m_pEnemy->mins.x) * 0.5) * fAimConv;
+                m_vAimOffset[1] = G_CRandom((m_pEnemy->maxs.y - m_pEnemy->mins.y) * 0.5) * fAimConv;
                 m_vAimOffset[2] = 16 + G_Random(m_pEnemy->viewheight - 16);
             }
             m_iLastAimTime = level.inttime;
@@ -1012,6 +1177,35 @@ void BotController::State_Attack(void)
         rotation.AimAt(vTarget + m_vAimOffset);
     } else {
         AimAtAimNode();
+    }
+
+    // [HZM Phase 1] COVER + FALL BACK, layered on the stock advance logic below. The bot keeps aiming/firing
+    // (handled above) while it repositions. Escalates by health: healthy -> fight (fall through); hurt +
+    // under fire + exposed -> peek from cover; critical -> break contact. It ONLY ever moves to a cover spot
+    // that FindCoverPosition validated as reachable (a clear straight-line trace from the bot), so it must
+    // not send a bot into a wall; the raw "run directly away" fallback was removed because that point can be
+    // off the navmesh. Gated on bot_botcover (default on) so it can be toggled off live for A/B testing.
+    static cvar_t *bot_botcover = NULL;
+    if (!bot_botcover) {
+        bot_botcover = gi.Cvar_Get("bot_botcover", "1", CVAR_ARCHIVE);
+    }
+    if (bot_botcover->integer) {
+        float fHealthFrac = 1.0f;
+        if (controlledEnt->max_health > 0) {
+            fHealthFrac = (float)controlledEnt->health / (float)controlledEnt->max_health;
+        }
+        const bool bRecentlyShot = (m_iLastPainTime != 0 && level.inttime < m_iLastPainTime + 2500);
+
+        // Move to cover only when a VALIDATED cover spot exists. Critical health tries hard; a hurt+exposed
+        // bot peeks (committed via !IsMoving so it does not thrash). No cover -> keep the stock fight logic.
+        if ((fHealthFrac <= 0.35f) || (fHealthFrac < 0.6f && bRecentlyShot && bCanSee && !movement.IsMoving())) {
+            Vector vCover;
+            if (FindCoverPosition(m_vLastEnemyPos, vCover)) {
+                movement.MoveTo(vCover);
+                m_iAttackTime = level.inttime + 1000;
+                return;
+            }
+        }
     }
 
     if (bNoMove) {
@@ -1216,6 +1410,132 @@ void BotController::Think()
     GetEyeInfo(&eyeinfo);
 
     G_ClientThink(controlledEnt->edict, &ucmd, &eyeinfo);
+
+    ProbeThink(ucmd); // [HZM bot probe] behavioural telemetry AFTER the move is applied this frame
+}
+
+// [HZM bot probe] Per-bot behavioural telemetry for the Push bot study. Silent unless bot_probe >= 1; the
+// value doubles as the per-bot log interval in ms (>=2), default 250. One compact, machine-parseable line per
+// bot per interval, logged AFTER G_ClientThink so origin/velocity reflect this frame's applied move:
+//   spd   = horizontal speed (jump z excluded) - near 0 with fm!=0 is "running in place"
+//   fm/rm/um = this frame's movement INTENT (forward/right/up); um>0 or jmp=1 is a jump (stuck tell)
+//   blk   = cumulative block count (walking into geometry); jmp = movement wants to jump; pth = following a path
+//   gd    = distance to the current move goal; en/ed = enemy entnum/distance; seen/pain = ms since last saw
+//           an enemy / last took damage (reaction latency). Team a=allies x=axis for the allies-vs-axis study.
+void BotController::ProbeThink(const usercmd_t& ucmd)
+{
+    static cvar_t *s_botProbe = NULL;
+    if (!s_botProbe) {
+        s_botProbe = gi.Cvar_Get("bot_probe", "0", 0);
+    }
+    if (!s_botProbe->integer || !controlledEnt) {
+        return;
+    }
+
+    int interval = s_botProbe->integer > 1 ? s_botProbe->integer : 250;
+    if (level.inttime - m_iProbeLastTime < interval) {
+        return;
+    }
+    m_iProbeLastTime = level.inttime;
+
+    teamtype_t team = controlledEnt->GetTeam();
+    char       tm    = (team == TEAM_ALLIES) ? 'a' : ((team == TEAM_AXIS) ? 'x' : '?');
+    int        alive = controlledEnt->IsDead() ? 0 : 1;
+    Vector     org   = controlledEnt->origin;
+    Vector     vel   = controlledEnt->velocity;
+    Vector     velH(vel.x, vel.y, 0);
+    float      spd   = velH.length();
+
+    Vector goal     = movement.GetCurrentGoal();
+    float  goalDist = (goal - org).length();
+
+    int   enemyEnt  = -1;
+    float enemyDist = -1.0f;
+    if (m_pEnemy) {
+        enemyEnt  = m_pEnemy->entnum;
+        enemyDist = (m_pEnemy->origin - org).length();
+    }
+
+    int seenAgo = m_iLastSeenTime ? (level.inttime - m_iLastSeenTime) : -1;
+    int painAgo = m_iLastPainTime ? (level.inttime - m_iLastPainTime) : -1;
+    int fire    = (ucmd.buttons & (BUTTON_ATTACKLEFT | BUTTON_ATTACKRIGHT)) ? 1 : 0;
+
+    gi.Printf(
+        "^~^~^ BOTPROBE e=%d tm=%c al=%d hp=%d px=%.0f py=%.0f pz=%.0f spd=%.0f fm=%d rm=%d um=%d fire=%d "
+        "blk=%d jmp=%d pth=%d gd=%.0f en=%d ed=%.0f seen=%d pain=%d\n",
+        controlledEnt->entnum, tm, alive, (int)controlledEnt->health,
+        org.x, org.y, org.z, spd,
+        (int)ucmd.forwardmove, (int)ucmd.rightmove, (int)ucmd.upmove, fire,
+        movement.GetNumBlocks(), movement.IsJumping() ? 1 : 0, movement.IsPathing() ? 1 : 0, goalDist,
+        enemyEnt, enemyDist, seenAgo, painAgo
+    );
+}
+
+void BotController::Pain(const Event& ev)
+{
+    Entity   *attacker;
+    Sentient *sent;
+
+    // [HZM] React to being shot, even from outside our current view. Acquire the attacker as our enemy and
+    // remember where the shot came from, so the bot turns to fight back / moves to the last known position
+    // instead of carrying on obliviously. The reaction-time gate in State_Attack still applies via
+    // m_iLastUnseenTime, so this reads as "someone hit me - where?" rather than an instant aimbot snap.
+    if (!controlledEnt || controlledEnt->IsDead()) {
+        return;
+    }
+
+    attacker = ev.GetEntity(1);
+    if (!attacker || !attacker->IsSubclassOfSentient()) {
+        return;
+    }
+
+    sent = static_cast<Sentient *>(attacker);
+    if (!IsValidEnemy(sent)) {
+        return;
+    }
+
+    // Remember we were just shot (drives cover-seeking in State_Attack), even during an ongoing fight.
+    m_iLastPainTime = level.inttime;
+
+    // [HZM Phase 3b] Switch to whoever just shot us UNLESS our current enemy is both SEEN and at least as
+    // close - so a flank shot while we're fighting someone else actually turns us around (the "shot from
+    // behind, no reaction" case), while stray third-party splash mid-fight doesn't yank us off a live target.
+    // bot_flankreact 0 = stock sticky enemy.
+    static cvar_t *s_botFlank = NULL;
+    if (!s_botFlank) {
+        s_botFlank = gi.Cvar_Get("bot_flankreact", "1", CVAR_ARCHIVE);
+    }
+    if (m_pEnemy && IsValidEnemy(m_pEnemy)) {
+        if (!s_botFlank->integer) {
+            return;
+        }
+        bool  bCurUnseen = (m_iLastUnseenTime != 0);
+        float dNew       = (sent->origin - controlledEnt->origin).lengthSquared();
+        float dCur       = (m_pEnemy->origin - controlledEnt->origin).lengthSquared();
+        if (!bCurUnseen && dCur <= dNew) {
+            return; // keep the current enemy only if we can see it and it is at least as close
+        }
+    }
+
+    m_pEnemy             = sent;
+    m_vLastEnemyPos      = sent->origin;
+    m_iLastUnseenTime    = level.inttime;
+    m_iAttackTime        = level.inttime + 1000;
+    m_iAttackStopAimTime = level.inttime + 2000; // keep aiming toward the shooter so we turn to face them
+
+    // [HZM bot probe] reaction-to-being-shot event: who hit us, from how far, and that we turned to fight back.
+    {
+        static cvar_t *s_botProbeP = NULL;
+        if (!s_botProbeP) {
+            s_botProbeP = gi.Cvar_Get("bot_probe", "0", 0);
+        }
+        if (s_botProbeP->integer) {
+            gi.Printf(
+                "^~^~^ BOTPAIN e=%d by=%d bydist=%.0f\n",
+                controlledEnt->entnum, attacker->entnum, (sent->origin - controlledEnt->origin).length()
+            );
+        }
+    }
 }
 
 void BotController::Killed(const Event& ev)
@@ -1299,6 +1619,7 @@ void BotController::setControlledEntity(Player *player)
     delegateHandle_gotKill =
         player->delegate_gotKill.Add(std::bind(&BotController::GotKill, this, std::placeholders::_1));
     delegateHandle_killed = player->delegate_killed.Add(std::bind(&BotController::Killed, this, std::placeholders::_1));
+    delegateHandle_damage = player->delegate_damage.Add(std::bind(&BotController::Pain, this, std::placeholders::_1));
     delegateHandle_stufftext =
         player->delegate_stufftext.Add(std::bind(&BotController::EventStuffText, this, std::placeholders::_1));
     delegateHandle_spawned = player->delegate_spawned.Add(std::bind(&BotController::Spawned, this));

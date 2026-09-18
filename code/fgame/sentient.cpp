@@ -1651,9 +1651,23 @@ static bool CoopMpPlayerHit(Sentient *victim, Sentient *attacker, int meansofdea
     if (pCoop && pCoop->GetType() != VARIABLE_NONE) {
         return false;
     }
-    if (CoopMapNameIsCoop(level.mapname.c_str())) {
-        return false;
+
+    // HZM-MP-BEGIN(mp_pvp_campaign)
+    // [bug-2713] MP MODES ON CAMPAIGN MAPS. Push / Base Assault / etc. run SP campaign maps as MP arenas
+    // (sv_mpForceArena), and the level var coop_mpRun is set on exactly those sessions - never on a coop map (a
+    // level load wipes it, and only the MP framework writes it). That flag definitively marks an MP session
+    // where PvP MUST work, so it OVERRIDES the coop-map-NAME heuristic below - which would otherwise block every
+    // hit because the map (m2l1, m3l3, ...) is a campaign-map name. Tested by TYPE, never by value (intValue
+    // throws on a non-numeric type, and this runs inside the damage path).
+    {
+        ScriptVariable *pMpRun = level.vars ? level.vars->GetVariable("coop_mpRun") : NULL;
+        if (pMpRun && pMpRun->GetType() != VARIABLE_NONE) {
+            // MP arena session: fall through to the normal DM team check below (skip the coop-map-name block).
+        } else if (CoopMapNameIsCoop(level.mapname.c_str())) {
+            return false;
+        }
     }
+    // HZM-MP-END(mp_pvp_campaign)
 
     // stock lets a telefrag through whatever the teams; Player::ArmorDamage already exempts it from its team gate
     if (meansofdeath == MOD_TELEFRAG) {
@@ -1986,19 +2000,28 @@ void Sentient::ArmorDamage(Event *ev)
                 // install the give would FAIL - and a failed give is bug-1959b (Holster and RemoveWeapons
                 // have already run). p38.tik is in Pak0, and the Walther P38 was the standard German
                 // sidearm by 1944 anyway, with the Luger being phased out. Correct and always present.
-                const char *pSide = "models/weapons/p38.tik";   // TIK PATH, not the display name
-
-                switch (pAct->m_iNationality) {
-                case ACTOR_NATIONALITY_AMERICAN:
-                case ACTOR_NATIONALITY_BRITISH:
-                    pSide = "models/weapons/colt45.tik";
-                    break;
-                case ACTOR_NATIONALITY_ITALIAN:
-                case ACTOR_NATIONALITY_RUSSIAN:
-                case ACTOR_NATIONALITY_GERMAN:
-                default:
-                    pSide = "models/weapons/p38.tik";
-                    break;
+                // TEAM is authoritative in coop and is what decides an allied vs Axis sidearm: allied AI are
+                // force-teamed to TEAM_AMERICAN (aihandler.scr), while SP map actors routinely leave
+                // m_iNationality at ACTOR_NATIONALITY_DEFAULT (it is only set by an explicit `nationality usa`
+                // spawn key). Keying on nationality alone therefore fell through to the P38 default and handed
+                // American soldiers a Walther P38 - an Axis pistol - when disarmed (bug-2661, user-reported).
+                // Use the team first; fall back to nationality only when no team is set. p38.tik/colt45.tik are
+                // both in Pak0 so the give never fails (bug-1959b).  TIK PATH, not the display name.
+                const char *pSide;
+                if (m_Team == TEAM_AMERICAN) {
+                    pSide = "models/weapons/colt45.tik";   // allies (US/UK/USSR are all TEAM_AMERICAN in coop)
+                } else if (m_Team == TEAM_GERMAN) {
+                    pSide = "models/weapons/p38.tik";       // Axis
+                } else {
+                    switch (pAct->m_iNationality) {
+                    case ACTOR_NATIONALITY_AMERICAN:
+                    case ACTOR_NATIONALITY_BRITISH:
+                        pSide = "models/weapons/colt45.tik";
+                        break;
+                    default:
+                        pSide = "models/weapons/p38.tik";
+                        break;
+                    }
                 }
 
                 m_bCoopSidearmSwap = true;   // latch BEFORE the give, so a failed give cannot loop

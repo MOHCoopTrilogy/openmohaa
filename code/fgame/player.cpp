@@ -1629,6 +1629,17 @@ Event EV_Player_GetKills
     "gets kills number of player",
     EV_RETURN
 );
+// HZM-MP-BEGIN(mp_getlasthitmod)
+Event EV_Player_GetLastHitMod
+(
+    "getlasthitmod",
+    EV_DEFAULT,
+    NULL,
+    NULL,
+    "gets the means-of-death enum of the last hit this player took",
+    EV_RETURN
+);
+// HZM-MP-END(mp_getlasthitmod)
 Event EV_Player_GetDeaths
 (
     "getdeaths",
@@ -2140,6 +2151,9 @@ CLASS_DECLARATION(Sentient, Player, "player") {
     {&EV_Player_GetDeaths,                &Player::GetDeaths                    },
     {&EV_Player_GetKillHandler,           &Player::GetKillHandler               },
     {&EV_Player_GetKills,                 &Player::GetKills                     },
+    // HZM-MP-BEGIN(mp_getlasthitmod_reg)
+    {&EV_Player_GetLastHitMod,            &Player::GetLastHitMod                },
+    // HZM-MP-END(mp_getlasthitmod_reg)
     {&EV_Player_GetLegsState,             &Player::GetLegsState                 },
     {&EV_Player_GetStateFile,             &Player::GetStateFile                 },
     {&EV_Player_GetTorsoState,            &Player::GetTorsoState                },
@@ -11605,6 +11619,10 @@ void Player::ArmorDamage(Event *ev)
     if (g_gametype->integer != GT_SINGLE_PLAYER) {
         // players that are not allowed fighting mustn't take damage
         if (!m_bAllowFighting && mod != MOD_TELEFRAG) {
+            // [DMG PROBE] why the hit was dropped (coop_dmgProbe 1)
+            static cvar_t *pDbgNF = NULL;
+            if (!pDbgNF) { pDbgNF = gi.Cvar_Get("coop_dmgProbe", "0", 0); }
+            if (pDbgNF->integer) { gi.Printf("^~^~^ DMGREJECT victim=%d reason=noFight mod=%d\n", entnum, mod); }
             return;
         }
 
@@ -11615,6 +11633,19 @@ void Player::ArmorDamage(Event *ev)
                 if (g_gametype->integer >= GT_TEAM && !g_teamdamage->integer) {
                     // check for team damage
                     if (attacker->GetDM_Team() == GetDM_Team() && mod != MOD_TELEFRAG) {
+                        // [DMG PROBE] same-team drop: show both dm_team enums AND whether current_team ptr is set
+                        static cvar_t *pDbgST = NULL;
+                        if (!pDbgST) { pDbgST = gi.Cvar_Get("coop_dmgProbe", "0", 0); }
+                        if (pDbgST->integer) {
+                            gi.Printf(
+                                "^~^~^ DMGREJECT victim=%d reason=sameTeam vT=%d aT=%d vPtr=%d aPtr=%d\n",
+                                entnum,
+                                (int)dm_team,
+                                (int)attacker->dm_team,
+                                (GetDM_Team() ? 1 : 0),
+                                (attacker->GetDM_Team() ? 1 : 0)
+                            );
+                        }
                         return;
                     }
                 }
@@ -12204,12 +12235,43 @@ void Player::GetNationalityPrefix(Event *ev)
 {
     nationality_t nationality;
 
+    // HZM-MP-BEGIN(mp_voice_nationality)
+    {
+        ScriptVariable *pMpRun = level.vars ? level.vars->GetVariable("coop_mpRun") : NULL;
+        if (pMpRun && pMpRun->GetType() != VARIABLE_NONE && model.length() > 0) {
+            const char *m   = model.c_str();
+            const char *sep = strrchr(m, '/');
+            const char *stem = sep ? sep + 1 : m;
+
+            char buf[128];
+            Q_strncpyz(buf, stem, sizeof(buf));
+            char *dot = strrchr(buf, '.');
+            if (dot) {
+                *dot = '\0';
+            }
+
+            const char *nat = buf;
+            if (!Q_stricmpn(nat, "hzmax_", 6)) {
+                nat += 6;
+            }
+
+            if (GetTeam() == TEAM_AXIS) {
+                nationality = GetPlayerAxisTeamType(nat);
+            } else {
+                nationality = GetPlayerAlliedTeamType(nat);
+            }
+            goto emit;
+        }
+    }
+    // HZM-MP-END(mp_voice_nationality)
+
     if (GetTeam() == TEAM_AXIS) {
         nationality = GetPlayerAxisTeamType(client->pers.dm_playergermanmodel);
     } else {
         nationality = GetPlayerAlliedTeamType(client->pers.dm_playermodel);
     }
 
+emit:
     switch (nationality) {
     case NA_RUSSIAN:
         ev->AddString("dfrru");
@@ -19151,6 +19213,13 @@ void Player::GetKills(Event *ev)
 {
     ev->AddInteger(num_kills);
 }
+
+// HZM-MP-BEGIN(mp_getlasthitmod_impl)
+void Player::GetLastHitMod(Event *ev)
+{
+    ev->AddInteger((int)pain_type);
+}
+// HZM-MP-END(mp_getlasthitmod_impl)
 
 void Player::GetMoveSpeedScale(Event *ev)
 {

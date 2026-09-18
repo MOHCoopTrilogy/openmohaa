@@ -273,7 +273,17 @@ static	void R_LoadLightmaps( lump_t *l, lump_t *surfs ) {
 	numLightmaps = len / (tr.lightmapSize * tr.lightmapSize * 3);
 
 	// check for deluxe mapping
-	if (numLightmaps <= 1)
+	// HZM [bug-1331]: the interleaved lightmap/deluxemap page layout this parity heuristic
+	// detects is a rend2/ioq3 convention. MOHAA's dsurface_t carries a single lightmapNum (no
+	// Q3 lightmapStyles[] array) and its q3map2 bakes predate deluxe mapping, so on a stock
+	// MOHAA BSP whose surface lightmapNums happen to all be even the heuristic FALSELY enables
+	// deluxe, then halves numLightmaps and remaps every surface's lightmap index (>>1) - which
+	// samples the wrong baked page (e2l1 alarm-styled bridge rails read red, e2l2 panels). The
+	// shader path already gates deluxe on r_deluxeMapping (tr_shader.c); the loader did not, so
+	// r_deluxeMapping 0 disabled the deluxe SHADER but left the load-time page corruption. Gate
+	// the loader on the same cvar: default (1) is byte-identical to before; 0 gives a clean 1:1
+	// GL1-equivalent load with no halving/remap.
+	if (numLightmaps <= 1 || !r_deluxeMapping->integer)
 	{
 		tr.worldDeluxeMapping = qfalse;
 	}

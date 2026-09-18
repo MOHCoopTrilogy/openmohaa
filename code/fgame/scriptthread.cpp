@@ -55,6 +55,151 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 
 #define scriptfiles sv_scriptfiles
 
+// HZM-MP-BEGIN(mp_signcrypto)
+// Slice 2 - self-contained SHA-256 + HMAC for the mp_sign/mp_verify progression builtins. Vendored
+// here (not qcommon/md5.c, which is exe-only and whose md5string is broken on x64) so game.dll has a
+// keyed hash with no new link dependency and no CMake change. The tag only needs to be a deterministic,
+// key-dependent value a client cannot reproduce without the server key (design bar T1: casual tamper);
+// correctness against the SHA-256 vectors is a bonus, not required for that property.
+namespace {
+typedef unsigned int   mp_u32;
+typedef unsigned char  mp_u8;
+
+struct MpSha256 {
+    mp_u32 h[8];
+    mp_u8  buf[64];
+    mp_u32 nbuf;
+    unsigned long long nbits;
+};
+
+static inline mp_u32 mp_ror(mp_u32 x, int n) { return (x >> n) | (x << (32 - n)); }
+
+static void mp_sha256_init(MpSha256 *s)
+{
+    static const mp_u32 iv[8] = {0x6a09e667u, 0xbb67ae85u, 0x3c6ef372u, 0xa54ff53au,
+                                 0x510e527fu, 0x9b05688cu, 0x1f83d9abu, 0x5be0cd19u};
+    for (int i = 0; i < 8; i++) { s->h[i] = iv[i]; }
+    s->nbuf  = 0;
+    s->nbits = 0;
+}
+
+static void mp_sha256_block(MpSha256 *s, const mp_u8 *p)
+{
+    static const mp_u32 k[64] = {
+        0x428a2f98u,0x71374491u,0xb5c0fbcfu,0xe9b5dba5u,0x3956c25bu,0x59f111f1u,0x923f82a4u,0xab1c5ed5u,
+        0xd807aa98u,0x12835b01u,0x243185beu,0x550c7dc3u,0x72be5d74u,0x80deb1feu,0x9bdc06a7u,0xc19bf174u,
+        0xe49b69c1u,0xefbe4786u,0x0fc19dc6u,0x240ca1ccu,0x2de92c6fu,0x4a7484aau,0x5cb0a9dcu,0x76f988dau,
+        0x983e5152u,0xa831c66du,0xb00327c8u,0xbf597fc7u,0xc6e00bf3u,0xd5a79147u,0x06ca6351u,0x14292967u,
+        0x27b70a85u,0x2e1b2138u,0x4d2c6dfcu,0x53380d13u,0x650a7354u,0x766a0abbu,0x81c2c92eu,0x92722c85u,
+        0xa2bfe8a1u,0xa81a664bu,0xc24b8b70u,0xc76c51a3u,0xd192e819u,0xd6990624u,0xf40e3585u,0x106aa070u,
+        0x19a4c116u,0x1e376c08u,0x2748774cu,0x34b0bcb5u,0x391c0cb3u,0x4ed8aa4au,0x5b9cca4fu,0x682e6ff3u,
+        0x748f82eeu,0x78a5636fu,0x84c87814u,0x8cc70208u,0x90befffau,0xa4506cebu,0xbef9a3f7u,0xc67178f2u};
+    mp_u32 w[64];
+    for (int i = 0; i < 16; i++) {
+        w[i] = ((mp_u32)p[i * 4] << 24) | ((mp_u32)p[i * 4 + 1] << 16)
+             | ((mp_u32)p[i * 4 + 2] << 8) | ((mp_u32)p[i * 4 + 3]);
+    }
+    for (int i = 16; i < 64; i++) {
+        mp_u32 s0 = mp_ror(w[i - 15], 7) ^ mp_ror(w[i - 15], 18) ^ (w[i - 15] >> 3);
+        mp_u32 s1 = mp_ror(w[i - 2], 17) ^ mp_ror(w[i - 2], 19) ^ (w[i - 2] >> 10);
+        w[i] = w[i - 16] + s0 + w[i - 7] + s1;
+    }
+    mp_u32 a = s->h[0], b = s->h[1], c = s->h[2], d = s->h[3];
+    mp_u32 e = s->h[4], f = s->h[5], g = s->h[6], hh = s->h[7];
+    for (int i = 0; i < 64; i++) {
+        mp_u32 S1 = mp_ror(e, 6) ^ mp_ror(e, 11) ^ mp_ror(e, 25);
+        mp_u32 ch = (e & f) ^ ((~e) & g);
+        mp_u32 t1 = hh + S1 + ch + k[i] + w[i];
+        mp_u32 S0 = mp_ror(a, 2) ^ mp_ror(a, 13) ^ mp_ror(a, 22);
+        mp_u32 maj = (a & b) ^ (a & c) ^ (b & c);
+        mp_u32 t2 = S0 + maj;
+        hh = g; g = f; f = e; e = d + t1; d = c; c = b; b = a; a = t1 + t2;
+    }
+    s->h[0] += a; s->h[1] += b; s->h[2] += c; s->h[3] += d;
+    s->h[4] += e; s->h[5] += f; s->h[6] += g; s->h[7] += hh;
+}
+
+static void mp_sha256_update(MpSha256 *s, const mp_u8 *data, size_t len)
+{
+    s->nbits += (unsigned long long)len * 8;
+    while (len) {
+        mp_u32 take = 64 - s->nbuf;
+        if (take > len) { take = (mp_u32)len; }
+        memcpy(s->buf + s->nbuf, data, take);
+        s->nbuf += take; data += take; len -= take;
+        if (s->nbuf == 64) { mp_sha256_block(s, s->buf); s->nbuf = 0; }
+    }
+}
+
+static void mp_sha256_final(MpSha256 *s, mp_u8 out[32])
+{
+    unsigned long long bits = s->nbits;
+    mp_u8 pad = 0x80;
+    mp_sha256_update(s, &pad, 1);
+    mp_u8 zero = 0;
+    while (s->nbuf != 56) { mp_sha256_update(s, &zero, 1); }
+    mp_u8 lenbe[8];
+    for (int i = 0; i < 8; i++) { lenbe[7 - i] = (mp_u8)(bits >> (i * 8)); }
+    mp_sha256_update(s, lenbe, 8);
+    for (int i = 0; i < 8; i++) {
+        out[i * 4]     = (mp_u8)(s->h[i] >> 24);
+        out[i * 4 + 1] = (mp_u8)(s->h[i] >> 16);
+        out[i * 4 + 2] = (mp_u8)(s->h[i] >> 8);
+        out[i * 4 + 3] = (mp_u8)(s->h[i]);
+    }
+}
+
+// HMAC-SHA256(key, msg) -> 32 bytes.
+static void mp_hmac_sha256(const mp_u8 *key, size_t keylen, const mp_u8 *msg, size_t msglen, mp_u8 out[32])
+{
+    mp_u8 k[64];
+    memset(k, 0, sizeof(k));
+    if (keylen > 64) {
+        MpSha256 s; mp_sha256_init(&s); mp_sha256_update(&s, key, keylen); mp_sha256_final(&s, k);
+    } else {
+        memcpy(k, key, keylen);
+    }
+    mp_u8 ipad[64], opad[64];
+    for (int i = 0; i < 64; i++) { ipad[i] = k[i] ^ 0x36; opad[i] = k[i] ^ 0x5c; }
+    mp_u8 inner[32];
+    MpSha256 s;
+    mp_sha256_init(&s); mp_sha256_update(&s, ipad, 64); mp_sha256_update(&s, msg, msglen); mp_sha256_final(&s, inner);
+    mp_sha256_init(&s); mp_sha256_update(&s, opad, 64); mp_sha256_update(&s, inner, 32); mp_sha256_final(&s, out);
+}
+
+// The server signing key: the sv_mpProgKey cvar (host-set, persists in the server config), else a
+// compiled default so a stock install works out of the box (all default servers then share it - a
+// carried blob verifies on any of them; a host who wants private tamper-resistance sets their own).
+// Read engine-side only; the payload the script passes never contains the key (design: keys stay out
+// of script vars).
+static str mp_progKey()
+{
+    const char *k = gi.Cvar_Get("sv_mpProgKey", "hzm-mp-prog-v1-default-key", 0)->string;
+    if (!k || !k[0]) { k = "hzm-mp-prog-v1-default-key"; }
+    return str(k);
+}
+
+// tag = first MP_TAG_HEX hex chars of HMAC-SHA256(key, payload). 16 hex = 64 bits: forgery-infeasible
+// for casual tamper, compact enough for a userinfo cvar.
+static const int MP_TAG_HEX = 16;
+static str mp_makeTag(const str& payload)
+{
+    str key = mp_progKey();
+    mp_u8 mac[32];
+    mp_hmac_sha256((const mp_u8 *)key.c_str(), key.length(),
+                   (const mp_u8 *)payload.c_str(), payload.length(), mac);
+    static const char *hex = "0123456789abcdef";
+    char tag[MP_TAG_HEX + 1];
+    for (int i = 0; i < MP_TAG_HEX / 2; i++) {
+        tag[i * 2]     = hex[(mac[i] >> 4) & 0xf];
+        tag[i * 2 + 1] = hex[mac[i] & 0xf];
+    }
+    tag[MP_TAG_HEX] = 0;
+    return str(tag);
+}
+} // namespace
+// HZM-MP-END(mp_signcrypto)
+
 Event EV_ScriptThread_GetCvar
 (
     "getcvar",
@@ -1149,6 +1294,24 @@ Event EV_ScriptThread_SetObjectiveLocation
     "pos",
     "Sets the position in the world of the current objective"
 );
+// HZM: per-team objective compass positions (used by MP Push so allies and axis point at
+// opposite ends of the map). Set level.force_team_objective 1 to make the engine honour them.
+Event EV_ScriptThread_SetObjectiveLocationAllies
+(
+    "set_objective_pos_allies",
+    EV_DEFAULT,
+    "v",
+    "pos",
+    "Sets the world position of the ALLIES compass objective (needs level.force_team_objective 1)"
+);
+Event EV_ScriptThread_SetObjectiveLocationAxis
+(
+    "set_objective_pos_axis",
+    EV_DEFAULT,
+    "v",
+    "pos",
+    "Sets the world position of the AXIS compass objective (needs level.force_team_objective 1)"
+);
 Event EV_ScriptThread_ClearObjectiveLocation(
     "clear_objective_pos",
     EV_DEFAULT,
@@ -1703,6 +1866,26 @@ Event EV_ScriptThread_Event_Unsubscribe
     "Unsubscribe the script from the specified event.",
     EV_NORMAL
 );
+// HZM-MP-BEGIN(mp_sign_ev)
+Event EV_ScriptThread_MpSign
+(
+    "mp_sign",
+    EV_DEFAULT,
+    "s",
+    "payload",
+    "MP progression: returns the server HMAC tag for payload (arch A signing; coop never calls it).",
+    EV_RETURN
+);
+Event EV_ScriptThread_MpVerify
+(
+    "mp_verify",
+    EV_DEFAULT,
+    "ss",
+    "payload tag",
+    "MP progression: returns 1 if tag is a valid server HMAC of payload, else 0.",
+    EV_RETURN
+);
+// HZM-MP-END(mp_sign_ev)
 Event EV_ScriptThread_Conprintf
 (
     "conprintf",
@@ -2266,6 +2449,8 @@ CLASS_DECLARATION(Listener, ScriptThread, NULL) {
     {&EV_ScriptThread_AddObjective,            &ScriptThread::EventAddObjective       },
     {&EV_ScriptThread_SetCurrentObjective,     &ScriptThread::EventSetCurrentObjective},
     {&EV_ScriptThread_SetObjectiveLocation,    &ScriptThread::SetObjectiveLocation    },
+    {&EV_ScriptThread_SetObjectiveLocationAllies, &ScriptThread::SetObjectiveLocationAllies},
+    {&EV_ScriptThread_SetObjectiveLocationAxis, &ScriptThread::SetObjectiveLocationAxis },
     {&EV_ScriptThread_ClearObjectiveLocation,  &ScriptThread::ClearObjectiveLocation  },
     {&EV_ScriptThread_DrawHud,                 &ScriptThread::EventDrawHud            },
 
@@ -2297,6 +2482,10 @@ CLASS_DECLARATION(Listener, ScriptThread, NULL) {
     {&EV_ScriptThread_UnregisterEv,            &ScriptThread::UnregisterEvent         },
     {&EV_ScriptThread_Event_Subscribe,         &ScriptThread::SubscribeEvent          },
     {&EV_ScriptThread_Event_Unsubscribe,       &ScriptThread::UnsubscribeEvent        },
+    // HZM-MP-BEGIN(mp_sign_reg)
+    {&EV_ScriptThread_MpSign,                  &ScriptThread::MpSign                  },
+    {&EV_ScriptThread_MpVerify,                &ScriptThread::MpVerify                },
+    // HZM-MP-END(mp_sign_reg)
     {&EV_ScriptThread_CancelWaiting,           &ScriptThread::CancelWaiting           },
     {&EV_ScriptThread_GetTime,                 &ScriptThread::GetTime                 },
     {&EV_ScriptThread_GetTimeZone,             &ScriptThread::GetTimeZone             },
@@ -4634,6 +4823,17 @@ void ScriptThread::SetObjectiveLocation(Vector vLocation)
 void ScriptThread::SetObjectiveLocation(Event *ev)
 {
     SetObjectiveLocation(ev->GetVector(1));
+}
+
+// HZM: per-team compass objective setters (see EV_ScriptThread_SetObjectiveLocationAllies/Axis).
+void ScriptThread::SetObjectiveLocationAllies(Event *ev)
+{
+    level.m_vAlliedObjectiveLocation = ev->GetVector(1);
+}
+
+void ScriptThread::SetObjectiveLocationAxis(Event *ev)
+{
+    level.m_vAxisObjectiveLocation = ev->GetVector(1);
 }
 
 void ScriptThread::ClearObjectiveLocation(void)
@@ -7192,6 +7392,33 @@ void ScriptThread::UnsubscribeEvent(Event *ev)
 
     delegate->Unregister(label);
 }
+
+// HZM-MP-BEGIN(mp_sign_impl)
+void ScriptThread::MpSign(Event *ev)
+{
+    str payload = ev->GetString(1);
+    ev->AddString(mp_makeTag(payload));
+}
+
+void ScriptThread::MpVerify(Event *ev)
+{
+    str payload = ev->GetString(1);
+    str tag     = ev->GetString(2);
+    str want    = mp_makeTag(payload);
+
+    // constant-time-ish compare (length first, then OR the byte diffs) - the tag is not secret but
+    // avoids a trivial early-out timing tell.
+    int ok = 0;
+    if (tag.length() == want.length()) {
+        unsigned char diff = 0;
+        for (size_t i = 0; i < want.length(); i++) {
+            diff |= (unsigned char)(tag[i] ^ want[i]);
+        }
+        ok = (diff == 0) ? 1 : 0;
+    }
+    ev->AddInteger(ok);
+}
+// HZM-MP-END(mp_sign_impl)
 
 void ScriptThread::TypeOfVariable(Event *ev)
 {

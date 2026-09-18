@@ -3053,6 +3053,26 @@ void CG_ModelAnim(centity_t *cent, qboolean bDoShaderTime)
                     pGloveIdx = cgi.Cvar_Get("coop_gloveIdx", "0", 0);
                 }
                 g = pGloveIdx->integer;
+                // HZM-MP-BEGIN(mp_glove_cvar)
+                // E3 [MP armories slice 2, plan 4] - in an MP session, read the MP glove cvar
+                // instead of coop_gloveIdx. gloves.scr stuffs coop_gloveIdx only on change, so an
+                // MP write would stick into the next coop map. coop_mp_glove is MP-only and zeroed
+                // when the MP session ends. Coop never sets coop_mp_session, so the coop path is
+                // byte-for-byte identical to what it was before this block.
+                {
+                    static cvar_t *pMpSession = NULL;
+                    static cvar_t *pMpGlove   = NULL;
+                    if (!pMpSession) {
+                        pMpSession = cgi.Cvar_Get("coop_mp_session", "0", 0);
+                    }
+                    if (pMpSession->integer == 1) {
+                        if (!pMpGlove) {
+                            pMpGlove = cgi.Cvar_Get("coop_mp_glove", "0", 0);
+                        }
+                        g = pMpGlove->integer;
+                    }
+                }
+                // HZM-MP-END(mp_glove_cvar)
                 if (g > 0 && g <= 7 && model.tiki) {
                     static const char *kHandSurfaces[3] = {"triggerhand", "lefthand", "garandhand"};
                     int                bits             = (g & 3) | ((g & 4) << 4);

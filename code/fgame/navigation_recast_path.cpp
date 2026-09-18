@@ -37,11 +37,18 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 #include "entity.h"
 #include "bg_local.h"
 
+// [HZM bot nav] kept at stock 256: raising to 512 was suspected in a ~80s dedicated-server hang under 8 bots
+// (a fixed 256-sized buffer elsewhere could overflow). Reinstate only after that is proven safe.
 #define MAX_NPOLYS 256
 
 RecastPathMaster pathMaster;
 
-static const vec3_t DETOUR_EXTENT = {(MAXS_X - MINS_X) / 2, (MAXS_Z - MINS_Z) / 2, (MAXS_Y - MINS_Y) / 2};
+// [HZM bot nav] The stock snap box was {(MAXS_X-MINS_X)/2, (MAXS_Z-MINS_Z)/2, (MAXS_Y-MINS_Y)/2} = ~{15,47,15}
+// (Recast axis order: X, height, Y). A bot more than ~15u off the mesh horizontally - standing on a brush-entity
+// floor/step/ledge that the world-only build never meshed - got NO nearest poly, so findNearestPoly failed and
+// the path silently died: the dominant "no-path -> wander/idle" stuck mode in the Push bot study (esp. axis).
+// Widen it generously so a bot re-acquires the mesh instead of giving up. Bot-nav only.
+static const vec3_t DETOUR_EXTENT = {48.0f, 96.0f, 48.0f};
 
 struct DetourData {
 public:
@@ -57,7 +64,7 @@ RecastPather::RecastPather()
     , moving(false)
 {
     detourData = new DetourData();
-    detourData->corridor.init(256);
+    detourData->corridor.init(MAX_NPOLYS); // [HZM bot nav] match the raised path cap
 }
 
 RecastPather::~RecastPather()
