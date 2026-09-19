@@ -280,7 +280,9 @@ SV_NET_OutOfBandPrint
 */
 void SV_NET_OutOfBandPrint(netprofclient_t* netprof, netadr_t adr, const char* format, ...) {
     va_list	argptr;
-    char	string[MAX_MSGLEN];
+    // [bug-2727] static, not stack - see NET_OutOfBandPrint. 256KB per frame in the OOB
+    // reply chain overflows the stack; single-threaded server send makes static safe.
+    static char	string[MAX_MSGLEN];
 
     va_start(argptr, format);
     Q_vsnprintf(string, sizeof(string), format, argptr);

@@ -783,7 +783,11 @@ Sends a text message in an out-of-band datagram
 */
 void QDECL NET_OutOfBandPrint( netsrc_t sock, netadr_t adr, const char *format, ... ) {
 	va_list		argptr;
-	char		string[MAX_MSGLEN];
+	// [bug-2727] static, not stack: MAX_MSGLEN is 256KB here, and this sits in the
+	// getstatus/getinfo/connect reply chain (SVC_Status -> SV_NET_OutOfBandPrint -> here),
+	// each frame another 256KB. On the stack that overflows the moment a server browser
+	// sends getstatus. The server OOB path is single-threaded, so static is safe (ioq3 pattern).
+	static char	string[MAX_MSGLEN];
 
 
 	// set the header
@@ -815,7 +819,9 @@ Sends a data message in an out-of-band datagram (only used for "connect")
 ================
 */
 void QDECL NET_OutOfBandData( netsrc_t sock, netadr_t adr, byte *format, int len ) {
-	byte		string[MAX_MSGLEN*2];
+	// [bug-2727] static, not stack: MAX_MSGLEN*2 is 512KB - a single stack frame this large
+	// blows the stack on the connect path. Single-threaded OOB send, so static is safe.
+	static byte	string[MAX_MSGLEN*2];
 	int			i;
 	msg_t		mbuf;
 

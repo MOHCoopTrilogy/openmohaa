@@ -493,7 +493,11 @@ the simple info query.
 */
 void SVC_Status( netadr_t from ) {
 	char	player[1024];
-	char	status[MAX_MSGLEN];
+	// [bug-2727] static, not stack: 256KB. Combined with the two OOB-send frames below it
+	// (SV_NET_OutOfBandPrint -> NET_OutOfBandPrint) and the inbound bufData, a getstatus
+	// reply put >1MB on the stack and crashed the server (0xC00000FD) as soon as a browser
+	// queried it. Connectionless path is single-threaded, so static is safe.
+	static char	status[MAX_MSGLEN];
 	int		i;
 	client_t	*cl;
 	playerState_t	*ps;
