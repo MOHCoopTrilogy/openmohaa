@@ -562,7 +562,10 @@ static void DrawSkyBox( shader_t *shader )
 			}
 		}
 
-		DrawSkySide( shader->sky.outerbox[sky_texorder[i]],
+		// HZM gl2 [2026-09-25] r_skyHDCompare 1: draw the HD set kept in outerboxAlt (compare mode only - it
+		// is NULL otherwise, and in normal HD mode outerbox already IS the HD set). 2/0: outerbox.
+		DrawSkySide( ( r_skyHDCompare && r_skyHDCompare->integer == 1 && shader->sky.outerboxAlt[sky_texorder[i]] )
+						? shader->sky.outerboxAlt[sky_texorder[i]] : shader->sky.outerbox[sky_texorder[i]],
 			         sky_mins_subd,
 					 sky_maxs_subd );
 	}
@@ -914,7 +917,35 @@ void RB_StageIteratorSky( void ) {
 	// by the generic shader routine
 	R_BuildCloudData( &tess );
 
-	RB_StageIteratorGeneric();
+	// HZM gl2 [2026-09-25] r_skyHDCompare 1: draw each sky layer with its HD twin (hzmSkyHDAlt, set only in
+	// compare mode by tr_shader.c R_HZM_SkyHDLayers), then restore - no other stage type is touched.
+	{
+		image_t		*hzmSaved[MAX_SHADER_STAGES];
+		int			hzmI;
+		qboolean	hzmSwap = ( r_skyHDCompare && r_skyHDCompare->integer == 1 ) ? qtrue : qfalse;
+
+		for ( hzmI = 0; hzmI < MAX_SHADER_STAGES; hzmI++ ) {
+			hzmSaved[hzmI] = NULL;
+			if ( !tess.xstages[hzmI] ) {
+				break;
+			}
+			if ( hzmSwap && tess.xstages[hzmI]->hzmSkyHDAlt ) {
+				hzmSaved[hzmI] = tess.xstages[hzmI]->bundle[0].image[0];
+				tess.xstages[hzmI]->bundle[0].image[0] = tess.xstages[hzmI]->hzmSkyHDAlt;
+			}
+		}
+
+		RB_StageIteratorGeneric();
+
+		for ( hzmI = 0; hzmI < MAX_SHADER_STAGES; hzmI++ ) {
+			if ( !tess.xstages[hzmI] ) {
+				break;
+			}
+			if ( hzmSaved[hzmI] ) {
+				tess.xstages[hzmI]->bundle[0].image[0] = hzmSaved[hzmI];
+			}
+		}
+	}
 
 	// draw the inner skybox
 

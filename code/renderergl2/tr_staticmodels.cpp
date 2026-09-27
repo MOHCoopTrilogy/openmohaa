@@ -25,7 +25,10 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 #include "tr_local.h"
 #include "tiki.h"
 
-#define MAX_STATIC_MODELS_SURFS    8192
+// HZM gl2 [2026-09-26, bug-2997 review] 8192 -> 32768 (the gfx tree / flip DLL value, shadow plan P1a). m6l1a peaked
+// at 7,800 per frame (95%) - one pool shared by every view, reset in RE_BeginFrame, overflow skips statics. Pointers,
+// not indices, go into the drawsurf list (the sort key carries the static MODEL index), so nothing encodes this.
+#define MAX_STATIC_MODELS_SURFS    32768
 #define MAX_DISTINCT_STATIC_MODELS 1000
 
 int             g_nStaticSurfaces;
@@ -37,6 +40,63 @@ qboolean        g_bInfostaticmodels = qfalse;
 R_InitStaticModels
 ==============
 */
+/*
+==============
+R_LoadVariantStaticHideList
+
+HZM [bug-2836] When the map is loaded as a VARIANT (cm_variant, e.g. "mp" = a campaign map played as a Push/Arena
+match - the server publishes it in serverinfo and the client adopts it before loading the world), read
+cmpatch/<map>_<variant>_sm.txt: static-model lump indices to NOT draw. The visual half of stripping e3l2's barbed
+wire, whose clip brushes cmpatch/<map>_<variant>.txt removes from collision. Returns the index count.
+==============
+*/
+static int R_LoadVariantStaticHideList(int *out, int maxOut)
+{
+    cvar_t     *variant = ri.Cvar_Get("cm_variant", "", 0);
+    char        base[MAX_QPATH];
+    char        name[MAX_QPATH];
+    char       *buf = NULL;
+    const char *p;
+    int         n = 0;
+    int         len;
+
+    if (!variant || !variant->string[0] || !tr.world) {
+        return 0;
+    }
+    Q_strncpyz(base, tr.world->baseName, sizeof(base));
+    len = strlen(base);
+    if (len > 4 && !Q_stricmp(base + len - 4, "_sml")) {
+        base[len - 4] = 0; // maps/<name>_sml.bsp shares the full map's static-model lump
+    }
+    Com_sprintf(name, sizeof(name), "cmpatch/%s_%s_sm.txt", base, variant->string);
+    if (ri.FS_ReadFile(name, (void **)&buf) <= 0 || !buf) {
+        return 0;
+    }
+    for (p = buf; *p && n < maxOut;) {
+        while (*p && (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n' || *p == ',')) {
+            p++;
+        }
+        if (*p == '#') {
+            while (*p && *p != '\n') {
+                p++;
+            }
+            continue;
+        }
+        if (!*p) {
+            break;
+        }
+        if (*p >= '0' && *p <= '9') {
+            out[n++] = atoi(p);
+        }
+        while (*p && *p != ' ' && *p != '\t' && *p != '\r' && *p != '\n' && *p != ',' && *p != '#') {
+            p++;
+        }
+    }
+    ri.FS_FreeFile(buf);
+    ri.Printf(PRINT_ALL, "^~^~^ CMPATCH %s: %d static models hidden\n", name, n);
+    return n;
+}
+
 void R_InitStaticModels(void)
 {
     cStaticModelUnpacked_t *pSM;
@@ -44,8 +104,12 @@ void R_InitStaticModels(void)
     skelBoneCache_t         bones[128];
     float                   radius;
     int                     i, j, k, l;
+    int                     hideList[512];
+    int                     numHide;
+    int                     h;
 
     g_bInfostaticmodels = qfalse;
+    numHide             = R_LoadVariantStaticHideList(hideList, 512);
 
     if (tr.overbrightShift) {
         for (i = 0; i < tr.world->numStaticModelData; i++) {
@@ -78,6 +142,13 @@ void R_InitStaticModels(void)
 
         pSM->bRendered = qfalse;
         AngleVectorsLeft(pSM->angles, pSM->axis[0], pSM->axis[1], pSM->axis[2]);
+
+        // [bug-2836] variant hide list: never register it -> tiki stays NULL -> every draw/info loop skips it.
+        for (h = 0; h < numHide && hideList[h] != i; h++) {}
+        if (h < numHide) {
+            pSM->tiki = NULL;
+            continue;
+        }
 
         if (!strnicmp(pSM->model, "models", 6)) {
             Q_strncpyz(szTemp, pSM->model, sizeof(szTemp));
@@ -482,6 +553,18 @@ void RB_Static_BuildDLights()
 
         VectorCopy(backEnd.refdef.dlights[i].origin, lightorigin);
         VectorSubtract(lightorigin, backEnd.currentStaticModel->origin, delta);
+        // HZM gl2 [2026-09-26] Phase S1: a spot skips a prop its cone cannot reach (the model's cull sphere against
+        // the cone widened by asin(r/d)); the per-vertex spot law is in tr_shade.c RB_FillModelLightingColors
+        if (backEnd.refdef.dlights[i].hzmSpot == HZM_SPOT_READY
+            && !R_HZM_SpotSphereTouches(
+                backEnd.refdef.dlights[i].origin,
+                backEnd.refdef.dlights[i].hzmAxis,
+                backEnd.refdef.dlights[i].hzmCosOuter,
+                backEnd.currentStaticModel->origin,
+                backEnd.currentStaticModel->cull_radius > 1.0f ? backEnd.currentStaticModel->cull_radius : 64.0f
+            )) {
+            continue;
+        }
         if (backEnd.refdef.dlights[i].radius * 2.0 >= VectorLength(delta)) {
             MatrixTransformVectorRight(
                 backEnd.currentStaticModel->axis,

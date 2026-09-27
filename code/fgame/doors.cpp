@@ -755,6 +755,21 @@ void Door::DoorUse(Event *ev)
     respond =
         (((respondto & TRIGGER_PLAYERS) && other->isClient())
          || ((respondto & TRIGGER_MONSTERS) && other->IsSubclassOfActor()));
+    {
+        // [bot door jam probe] g_doorProbe 1: every Use a door gets (1s apart per door) and what it can do with it
+        static cvar_t *s_dp = NULL;
+        if (!s_dp) {
+            s_dp = gi.Cvar_Get("g_doorProbe", "0", 0);
+        }
+        if (s_dp->integer && other && level.time >= m_fHzmUseLogT) {
+            m_fHzmUseLogT = level.time + 1.0f;
+            gi.Printf(
+                "^~^~^ DOORUSE door=%d model=%s st=%d mst=%d by=%d respond=%d hp=%.0f sf=%d lk=%d\n", entnum,
+                model.c_str(), state, master ? master->state : -1, other->entnum, respond ? 1 : 0, health, spawnflags,
+                locked ? 1 : 0
+            );
+        }
+    }
 
     if (!respond) {
         return;
@@ -843,6 +858,20 @@ void Door::DoorBlocked(Event *ev)
     lastblocktime = level.time + 0.3;
 
     other = ev->GetEntity(1);
+    {
+        // [bot door jam probe] g_doorProbe 1: who blocks a moving door, where, and in which state
+        static cvar_t *s_dp = NULL;
+        if (!s_dp) {
+            s_dp = gi.Cvar_Get("g_doorProbe", "0", 0);
+        }
+        if (s_dp->integer && other) {
+            gi.Printf(
+                "^~^~^ DOORBLK door=%d model=%s st=%d prev=%d by=%d class=%s at=(%.0f %.0f %.0f) dir=%.2f\n", entnum,
+                model.c_str(), state, previous_state, other->entnum, other->getClassname(), other->origin.x, other->origin.y,
+                other->origin.z, diropened
+            );
+        }
+    }
 
     if (other->IsSubclassOfActor()) {
         setContents(CONTENTS_WEAPONCLIP);
@@ -1220,6 +1249,15 @@ void Door::SetState(int newState)
 {
     if (state == newState) {
         return;
+    }
+    {
+        static cvar_t *s_dp = NULL;
+        if (!s_dp) {
+            s_dp = gi.Cvar_Get("g_doorProbe", "0", 0);
+        }
+        if (s_dp->integer) {
+            gi.Printf("^~^~^ DOORSTATE door=%d model=%s %d->%d\n", entnum, model.c_str(), state, newState);
+        }
     }
 
     state = newState;

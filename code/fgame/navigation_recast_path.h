@@ -61,6 +61,15 @@ public:
     virtual Vector  GetDestination() const override;
     virtual bool    HasReachedGoal(const Vector& origin) const override;
     virtual bool    IsQuerying() const override;
+    virtual unsigned char GetTraversingArea() const override; // [HZM bug-2862]
+    virtual unsigned char GetApproachingArea() const override; // [HZM bug-2862]
+    virtual bool          GetCornerAfterNext(Vector& out) const override; // [HZM bot A3]
+    virtual int           GetCorners(Vector *out, int maxCorners) const override;     // [HZM bot breach]
+    virtual bool          GetApproachingLink(Vector& from, Vector& to) const override; // [HZM bot breach]
+    virtual bool          GetElevatorEnd(Vector& out) const override;                  // [HZM bug-2886]
+    virtual bool          GetElevatorLink(Vector& start, Vector& end) const override; // [HZM bug-2912]
+    virtual bool          GetTraversingLink(Vector& start, Vector& end) const override; // [HZM bug-2913]
+    virtual int           GetSteerMode() const override { return steerMode; }            // [HZM bug-2956]
 
 private:
     void ResetPosition(const Vector& origin);
@@ -73,6 +82,19 @@ private:
     Vector      currentNodePos;
     int         lastCheckTime;
     int         traversingOffMeshLink;
+    unsigned char traversingArea; // [HZM bug-2862] area of that link (RECAST_AREA_*), 0 when not traversing
+    unsigned char approachingArea; // [HZM bug-2862] area of the off-mesh link the path reaches within 128u (0 = none)
+    int           elevatorPhase;   // [HZM bug-2862] 1 = walking to the cab centre, 2 = in the cab / heading out
+    Vector        elevatorMid;     // [HZM bug-2862] cab centre (link midpoint, game coords)
+    Vector        elevatorEnd;     // [HZM bug-2862] far landing
+    Vector        elevatorStart;   // [HZM bug-2912] near landing (the lift protocol needs both ends)
+    Vector        linkStart;       // [HZM bug-2913] ends of the off-mesh link being crossed (any kind)
+    Vector        linkEnd;
+    Vector        padCorner;       // [HZM bug-2956] the corner the last turn pad was worked out for, and its inward side
+    Vector        padInward;       //   (kept while the bot closes in on that same corner - the pad used to switch off <24u)
+    Vector        slideTarget;     // [HZM bug-2956] pinned on the way to a corner: slide along the obstacle to here
+    int           slideUntil;
+    int           steerMode;       // [HZM bug-2956] probe (GetSteerMode)
 };
 
 class RecastPathMaster

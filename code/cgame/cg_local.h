@@ -422,6 +422,9 @@ extern "C" {
         // dropping the ADS view on its bits is structurally coop-safe; CG_MpRealismOffActive() adds a
         // coop_isCoopSession backstop as well. A listen host reads THIS serverinfo copy, never cgi.Cvar_Get.
         int        mpRealismOff;
+        // HZM coop - HARDCORE host rule (user 2026-09-25). Serverinfo key g_coopHardcore (fgame/gamecvars.cpp,
+        // CVAR_SERVERINFO|CVAR_ROM), written 0/1 only by coop hardcore.scr and zeroed on every map by the server.
+        int        coopHardcore;
         int        cinematic;
         int        mapChecksum;
         qboolean   useMapChecksum;
@@ -669,6 +672,7 @@ const adsGunTune_t *CG_FindAdsTune(const char *wpn);
     qboolean CG_FrustumCullSphere(const vec3_t vPos, float fRadius);
     void  CG_OffsetFirstPersonView(refEntity_t *pREnt, qboolean bUseWorldPosition);
     qboolean CG_AimingDownSights(void); // HZM coop - RMB-held iron-sight ADS gate (zoom + 3rd->1st person)
+    qboolean CG_CoopHardcoreActive(void); // HZM coop - Hardcore host rule active (serverinfo g_coopHardcore + coop session)
     qboolean CG_MpRealismOffActive(int iBit); // HZM MP - host realism toggle active for this bit (MP only; 0 in coop)
     qboolean CG_AdsForceFirstPerson(void); // HZM coop - staged 3P ADS: "render FIRST person this frame" (camera + own-model draw MUST both use this)
     void  CG_AdsFactorAdvance(void); // HZM coop - advance the ONE ADS ease; called once per frame from CG_DrawActiveFrame BEFORE any consumer
@@ -702,6 +706,43 @@ const adsGunTune_t *CG_FindAdsTune(const char *wpn);
     void  CG_AddCoopDynamicLight(const vec3_t org, float r, float g, float b, float radius, int life_ms); // HZM coop - push a transient dlight (muzzle/explosion)
     void  CG_AddCoopDynamicLights(void); // HZM coop - per-frame: re-add the live transient dlights
     void  CG_UpdateEnvReverb(void); // HZM coop - per-frame: auto reverb from indoor/outdoor up-trace
+    void  CG_CoopHeadlights(void); // HZM coop [2026-09-25] per-frame: vehicle headlight manager (Phase H), after the dlights
+    void  CG_CoopHeadlightsModel(centity_t *cent, refEntity_t *model); // HZM coop [2026-09-25] headlights: CG_ModelAnim hook
+
+    //
+    // cg_hzmspot.c - HZM coop [2026-09-26] Phase S: the SHARED spot / flare facility (headlights now, searchlights
+    // later). Managers request; CG_HZM_FlushSpots emits once per frame after every manager (cg_view.c).
+    //
+#define HZM_SPOTREQ_NOSHADOW 1 // never takes an r_hzmDlightShadows slot
+#define HZM_SPOTREQ_FOGGED   2 // the world pass fogs the pool (additive -> toward black)
+#define HZM_SPOTREQ_FADEOUT  4 // the manager is fading this one out: rides above cg_hzmSpotMax (at most 2)
+    typedef struct {
+        vec3_t origin;   // the apex (lamp)
+        vec3_t axis;     // unit
+        float  range;    // the light radius: attenuation reaches 0 here
+        float  innerDeg; // full strength inside this half-angle
+        float  outerDeg; // 0 outside this half-angle (< 89)
+        vec3_t color;    // already faded by the manager
+        int    flags;    // HZM_SPOTREQ_*
+        int    owner;    // entity carrying the lamp (the soldier/prop pass skips it), -1 = none
+        float  priority; // lower = first (the headlights use the distance to the eye)
+    } hzmSpotReq_t;
+    typedef struct {
+        int    id;         // HZM_FlareIdPack(entnum, lamp)
+        vec3_t origin;     // the lamp
+        vec3_t axis;       // unit, the way the lamp faces
+        float  brightness; // 0..1, the manager's day/dark gate folded in
+        int    cls;        // HZM_FLARE_CLASS_HEADLIGHT / _SEARCHLIGHT
+    } hzmFlareReq_t;
+    qboolean CG_HZM_RendererIsGl2(void);    // cl_renderer names a gl2 build ("opengl2", "opengl2flip")
+    qboolean CG_HZM_ProtocolOk(void);       // + r_hzmSpotProtocol == this cgame's HZM_SPOT_PROTOCOL
+    int      CG_HZM_RendererProtocol(void); // what the loaded renderer published (0 = none)
+    qboolean CG_HZM_SpotsAvailable(void);   // + r_hzmSpot resolved on, not Omaha
+    qboolean CG_HZM_FlaresAvailable(void);  // + r_hzmFlares resolved on, r_flares, not Omaha
+    qboolean CG_HZM_SpotRequest(const hzmSpotReq_t *req);
+    qboolean CG_HZM_FlareRequest(const hzmFlareReq_t *req);
+    void     CG_HZM_FlushSpots(void);       // once per frame, after every manager
+    void     CG_HZM_LastCounts(int *spots, int *flares); // what the last flush emitted
     qboolean CG_GetBreathState(float *outFrac, qboolean *outCooldown); // HZM coop - hold-breath HUD info
     qboolean CG_IsBreathSteady(void); // HZM coop - true while breath is ACTIVELY steadying this frame
     qboolean CG_GetFreeAim(float *outYaw, float *outPitch); // HZM coop - free-aim deadzone offset (degrees)

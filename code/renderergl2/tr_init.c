@@ -152,6 +152,10 @@ cvar_t  *r_cubeMapping;
 cvar_t  *r_cubemapSize;
 cvar_t  *r_hzmAlphaGenCoord;
 cvar_t  *r_hzmFlapDeform;
+cvar_t  *r_hzmLightGlow;          // HZM gl2 [2026-09-25] Phase R - see tr_local.h
+cvar_t  *r_hzmLightGlowNear;
+cvar_t  *r_hzmLightGlowNearRange;
+cvar_t  *r_hzmRgbGenDot;
 cvar_t  *r_cubemapAuto;
 cvar_t  *r_cubemapAutoRadius;
 cvar_t  *r_deluxeSpecular;
@@ -182,6 +186,7 @@ cvar_t  *r_hzmSpecularGloss;
 cvar_t  *r_hzmParallaxDepth;
 cvar_t  *r_hzmParallaxFade;
 cvar_t  *r_hzmNormalStrength;
+cvar_t  *r_hzmTerrainLightGrid;   // HZM [bug-3007]
 cvar_t  *r_forceSun;
 cvar_t  *r_forceSunLightScale;
 cvar_t  *r_forceSunAmbientScale;
@@ -364,6 +369,8 @@ cvar_t* r_globalFogScale;
 cvar_t* r_globalFogStartScale;
 cvar_t* r_globalFogEndScale;
 cvar_t* r_globalFogSky;
+cvar_t* r_skyHD;
+cvar_t* r_skyHDCompare;
 cvar_t* r_globalFogRadial;
 cvar_t* r_globalFogIdentityLight;
 cvar_t* r_globalFogDebug;
@@ -1569,6 +1576,17 @@ void R_Register( void )
 	// is a known crash here (bug-1181).
 	r_hzmAlphaGenCoord = ri.Cvar_Get( "r_hzmAlphaGenCoord", "1", CVAR_ARCHIVE );
 	r_hzmFlapDeform    = ri.Cvar_Get( "r_hzmFlapDeform",    "1", CVAR_ARCHIVE );
+	// HZM gl2 [2026-09-25] RETAIL LIGHT-GLOW PARITY (vehicle headlights, Phase R). Flags 0 on purpose: never saved,
+	// so a later HZM_*_AUTO flip reaches every player (TRAPS T7); not CHEAT (a listen server clamps cheat cvars,
+	// bug-1156); not LATCH (read per draw, and vid_restart is a gl2 crash, bug-1181). "-1" = auto (tr_local.h).
+	// Test binds: coop_mod/cfg/hltest.cfg (M = OLD/NEW). Omaha BSPs are always off (hzm_light_restore.h).
+	r_hzmLightGlow          = ri.Cvar_Get( "r_hzmLightGlow",          "-1", 0 );
+	r_hzmLightGlowNear      = ri.Cvar_Get( "r_hzmLightGlowNear",      "-1", 0 );
+	r_hzmLightGlowNearRange = ri.Cvar_Get( "r_hzmLightGlowNearRange", "2",  0 );
+	r_hzmRgbGenDot          = ri.Cvar_Get( "r_hzmRgbGenDot",          "-1", 0 );
+	// HZM gl2 [2026-09-26] PHASE S spot cones + lamp flares: r_hzmSpot / r_hzmFlares (flags 0, "-1" = auto) and their
+	// tuning, plus the r_hzmSpotProtocol handshake, forced here on every R_Init (tr_hzm_spot_rb.c)
+	R_HZM_SpotRegister();
 
 	// HZM (bug-1237) automatic probe placement from info_pathnode - see R_PlaceCubemapsAuto.
 	// NOT latched on purpose: both are read at map load, so a change applies on the next map
@@ -1695,6 +1713,10 @@ void R_Register( void )
 	// Authored relief multiplier. Defaults slightly above 1 because the synthesised maps this replaces
 	// were being run at 1.5, so honest normals at 1.0 read as a regression even though they are better data.
 	r_hzmNormalStrength = ri.Cvar_Get( "r_hzmNormalStrength", "1.25", CVAR_ARCHIVE );
+
+	// HZM [bug-3007] terrain relief light direction per heightmap vertex (tr_surface.c). flags 0 - never saved, so
+	// the HZM_TERRAINLIGHTGRID_AUTO define in tr_local.h is what a player gets until they force 0/1 (TRAPS T7). Live.
+	r_hzmTerrainLightGrid = ri.Cvar_Get( "r_hzmTerrainLightGrid", "-1", 0 );
 
 	// HZM (bug-1222): these three were CVAR_CHEAT, inherited from upstream rend2. A listen server
 	// clamps cheat cvars (bug-1156), so the host could not set them - which left NO lever for
@@ -2087,6 +2109,7 @@ void R_Register( void )
 	ri.Cmd_AddCommand( "minimize", GLimp_Minimize );
 	ri.Cmd_AddCommand( "gfxmeminfo", GfxMemInfo_f );
 	ri.Cmd_AddCommand( "exportCubemaps", R_ExportCubemaps_f );
+	ri.Cmd_AddCommand( "hzmtlprobe", R_HZM_TerrainLProbe_f ); // HZM [bug-3064] diagnostic, inert unless typed
 
 	//
 	// OPENMOHAA-specific stuff
@@ -2162,6 +2185,15 @@ void R_Register( void )
 	r_globalFogStartScale    = ri.Cvar_Get("r_globalFogStartScale",    "1", CVAR_ARCHIVE);
 	r_globalFogEndScale      = ri.Cvar_Get("r_globalFogEndScale",      "1", CVAR_ARCHIVE);
 	r_globalFogSky           = ri.Cvar_Get("r_globalFogSky",           "1", CVAR_ARCHIVE);
+	// HZM gl2 [2026-09-25] HD SKY BOXES + SKY LAYERS (the moving cloud dome's stage images, env/hzmhd/clouds/).
+	// Read by ParseSkyParms / R_HZM_SkyHDLayers when the map's shaders are parsed, so a change
+	// takes effect on the NEXT map - RE_BeginRegistration rebuilds every shader per map, no vid_restart. Not
+	// CVAR_LATCH (bug-1181: vid_restart crashes gl2), not CVAR_CHEAT (bug-1156: a listen server clamps cheat
+	// cvars). Archived as "-1" = auto (HZM_SKYHD_AUTO, tr_local.h) so the build default can still be flipped.
+	// r_skyHDCompare is test-only and never saved: set before a map loads, it keeps BOTH sets resident for
+	// that map and DrawSkyBox flips between them live (1 = HD, 2 = original). coop_mod/cfg/skytest.cfg.
+	r_skyHD                  = ri.Cvar_Get("r_skyHD",                  "-1", CVAR_ARCHIVE);
+	r_skyHDCompare           = ri.Cvar_Get("r_skyHDCompare",           "0", CVAR_TEMP);
 	r_globalFogRadial        = ri.Cvar_Get("r_globalFogRadial",        "0", CVAR_ARCHIVE);
 	r_globalFogIdentityLight = ri.Cvar_Get("r_globalFogIdentityLight", "0", CVAR_ARCHIVE);
 	// HZM gl2: CVAR_TEMP, not CVAR_CHEAT. A listen server runs with sv_cheats 0, so a
@@ -2243,6 +2275,10 @@ void R_Register( void )
 
 void R_InitQueries(void)
 {
+	// HZM gl2 [2026-09-26] Phase S2 lamp-flare queries: created here UNCONDITIONALLY (never behind a cvar that changes
+	// live - vet F17), names in tr (tr_hzm_spot_rb.c)
+	R_HZM_FlareInitQueries();
+
 	if (!glRefConfig.occlusionQuery)
 		return;
 
@@ -2258,6 +2294,8 @@ void R_ShutDownQueries(void)
 		extern void RB_SkelProbeShutdown(void);
 		RB_SkelProbeShutdown();
 	}
+
+	R_HZM_FlareShutdownQueries();	// HZM gl2 [2026-09-26] Phase S2 (self-checks occlusionQuery)
 
 	if (!glRefConfig.occlusionQuery)
 		return;
@@ -2407,6 +2445,7 @@ void RE_Shutdown( qboolean destroyWindow ) {
 	ri.Cmd_RemoveCommand( "minimize" );
 	ri.Cmd_RemoveCommand( "gfxmeminfo" );
 	ri.Cmd_RemoveCommand( "exportCubemaps" );
+	ri.Cmd_RemoveCommand( "hzmtlprobe" );
 
 
 	if ( tr.registered ) {
@@ -2419,6 +2458,10 @@ void RE_Shutdown( qboolean destroyWindow ) {
 		R_ShutdownVaos();
 		GLSL_ShutdownGPUShaders();
 	}
+
+	// HZM gl2 [2026-09-26] Phase S handshake (vet F3): this gl2 is going away (vid_restart, a renderer switch, quit),
+	// so cgame must stop sending spots/flares until a Phase S gl2 sets it again in R_Init
+	R_HZM_SpotShutdown();
 
 	R_DoneFreeType();
 

@@ -216,6 +216,24 @@ vec4 CalcColor(vec3 position, vec3 normal)
 	
 	vec3 viewer = u_LocalViewOrigin - position;
 
+	// HZM gl2 [2026-09-25] Phase R2: MOHAA 'rgbGen dot min max' / 'rgbGen oneMinusDot min max' - the soft,
+	// volumetric edge of the retail truck beam (opellights: rgbGen dot 0 1.5) and of the coop headlight beam.
+	// Port of renderergl1 RB_CalcRGBFromDot / RB_CalcRGBFromOneMinusDot (tr_shade_calc.c):
+	//   f = (N . V)^2     (oneMinusDot: 1 - that)
+	//   rgb = clamp((max - min) * f + min, 0, 1)      alpha untouched - gl1 writes RGB only
+	// u_AlphaGenParams.xy is (alphaMin, alphaMax), which is where the parser stores the rgbGen pair too.
+	// tr_shade.c uploads CGEN_IDENTITY in place of these while r_hzmRgbGenDot is off, so this never runs then.
+	if (u_ColorGen == CGEN_DOT || u_ColorGen == CGEN_ONE_MINUS_DOT)
+	{
+		float dd = dot(normalize(normal), normalize(viewer));
+		float fd = dd * dd;
+		if (u_ColorGen == CGEN_ONE_MINUS_DOT)
+		{
+			fd = 1.0 - fd;
+		}
+		color.rgb = vec3(clamp((u_AlphaGenParams.y - u_AlphaGenParams.x) * fd + u_AlphaGenParams.x, 0.0, 1.0));
+	}
+
 	if (u_AlphaGen == AGEN_LIGHTING_SPECULAR)
 	{
 		// HZM coop (bug-2508): this used to be the ioquake3 placeholder point
@@ -259,6 +277,9 @@ vec4 CalcColor(vec3 position, vec3 normal)
 		// PARITY NOTE: gl1 writes this value into RGB (colors[0..2]) and leaves alpha alone;
 		// gl2 writes ALPHA, which is what the directive name and every retail author expected.
 		// gl1 is deliberately untouched - A/B the same shader on cl_renderer opengl1 vs opengl2.
+		// EXCEPT an additive GL_ONE GL_ONE stage with no alpha test (searchlights S1, 2026-09-26): that blend
+		// ignores alpha, so tr_shade.c uploads CGEN_DOT + AGEN_IDENTITY for it and the rgbGen dot branch above
+		// writes RGB exactly as gl1 does (R_HZM_AlphaDotToRgb in tr_shade_calc.c, rides r_hzmRgbGenDot).
 		float d = dot(normalize(normal), normalize(viewer));
 		float f = d * d;
 		if (u_AlphaGen == AGEN_ONE_MINUS_DOT)

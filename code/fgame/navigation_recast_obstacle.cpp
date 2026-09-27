@@ -24,11 +24,13 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 
 #include "g_local.h"
 #include "navigation_recast_obstacle.h"
+#include "doors.h" // [HZM bot A4]
 #include "navigation_recast_load.h"
 #include "navigation_recast_config.h"
 #include "navigation_recast_helpers.h"
 #include "entity.h"
 #include "trigger.h"
+#include "navigation_recast_load_ext.h" // [HZM bug-2893] NavEntityBlock_IsBaked
 
 #include "DetourNavMeshQuery.h"
 
@@ -349,6 +351,8 @@ void NavigationObstacleMap::Update()
         return;
     }
 
+    NavEntityBlocks_Update(); // [HZM bug-2901]
+
     for (i = 0; i < MAX_GENTITIES; i++) {
         ent = &g_entities[i];
 
@@ -374,6 +378,16 @@ bool NavigationObstacleMap::IsValidEntity(gentity_t *ent) const
         return false;
     }
 
+    // [HZM bug-2893] already cut out of the mesh at build time and not moved since: carving it again would only
+    // exclude the neighbouring polys too (a gap beside a parked tank closing for no reason)
+    if (NavEntityBlock_IsBaked(ent - g_entities, ent->r.absmin)) {
+        return false;
+    }
+    // [bug-3026] a brush slab lower than a step is floor (NavEntity_IsSlab): carving it would shut the floor it forms
+    if (NavEntity_IsSlab(ent)) {
+        return false;
+    }
+
     if (!IsSpecialEntity(ent)) {
         if (ent->s.solid == SOLID_NOT || ent->s.solid == SOLID_TRIGGER) {
             return false;
@@ -385,14 +399,30 @@ bool NavigationObstacleMap::IsValidEntity(gentity_t *ent) const
         }
     }
 
-    // Ignore other sentients
-    if (ent->entity->IsSubclassOfSentient()) {
+    // Ignore other sentients (moving AI / players are not static navmesh obstacles)...
+    // [user 2026-09-21] ...BUT NOT VEHICLES. A Vehicle is a Sentient (VehicleTank : DrivableVehicle : ... :
+    // Sentient), so this line was silently excluding the parked scenic tanks/turrets on the MP arena maps
+    // from the obstacle map - they were never carved from the bot navmesh, so bots pathed their SHORTEST
+    // route straight into the solid tank and jammed (the user's "stuck on the tank", still happening after
+    // respawn because a fresh bot re-picks that shortest route). Carving the vehicle punches a hole the
+    // pathfinder routes around. This Recast mesh only builds for MP (sv_maxbots>0); coop uses the legacy
+    // navigate.cpp A*, so coop pathing is untouched. A driven vehicle simply moves its hole (the obstacle
+    // system already re-tiles changed entities).
+    if (ent->entity->IsSubclassOfSentient() && !ent->entity->IsSubclassOfVehicle()
+        && !ent->entity->IsSubclassOfVehicleTurretGun()) {
         return false;
     }
 
     // Ignore doors as they can be interacted
     if (ent->entity->IsSubclassOfDoor()) {
-        return false;
+        // [HZM bot A4] ...except a SHUT door no player can open by USE - locked, jammed (health>0), or trigger/auto-only
+        // (spawnflags 64/128, doors.cpp DOOR_AUTO_OPEN/DOOR_TARGETED): for routing that is a wall. Carving it makes A*
+        // go round instead of sending bots to push on it forever. The moment it opens (or unlocks) the carve is released.
+        Door *door = static_cast<Door *>(ent->entity);
+        const bool unusable = !door->CanBeOpenedBy(ent->entity) || door->health > 0 || (door->spawnflags & (64 | 128));
+        if (!unusable || !door->isCompletelyClosed()) {
+            return false;
+        }
     }
 
     return true;
@@ -449,6 +479,21 @@ void NavigationObstacleMap::EntityAdded(gentity_t *ent)
 
     // Mark the poly as occupied
     EngagePolysAt(ent, ent->r.absmin, ent->r.absmax);
+
+    // [user 2026-09-21] CARVE DIAGNOSTIC: bot_navObstDebug 1 logs every entity carved out of the bot navmesh
+    // (class + entnum + solidity + bounds), so a playtest reveals whether the parked tank AND its separate
+    // collision entity are actually being avoided. Fires only on the add edge and only when the cvar is on.
+    {
+        static cvar_t *s_navDbg = NULL;
+        if (!s_navDbg) {
+            s_navDbg = gi.Cvar_Get("bot_navObstDebug", "0", 0);
+        }
+        if (s_navDbg->integer && ent->entity) {
+            gi.Printf("^~^~^ NAVOBST carve ent=%d class=%s solid=%d min=(%.0f %.0f %.0f) max=(%.0f %.0f %.0f)\n",
+                      entnum, ent->entity->getClassID(), ent->solid, ent->r.absmin[0], ent->r.absmin[1],
+                      ent->r.absmin[2], ent->r.absmax[0], ent->r.absmax[1], ent->r.absmax[2]);
+        }
+    }
 }
 
 void NavigationObstacleMap::EntityRemoved(gentity_t *ent)
@@ -492,9 +537,19 @@ void NavigationObstacleMap::EngagePolysAt(gentity_t *ent, const Vector& min, con
     halfExtents = size * 0.5;
 
     radiusSqr = halfExtents.lengthXYSquared();
-    // Minimum size of 100 units (sphere)
-    // So objects like barrels that the bot can get around are ignored.
-    if (radiusSqr < Square(100)) {
+    // [bug-2792] Minimum obstacle size to carve from the bot navmesh, host-tunable (default 55, was hardcoded
+    // 100). At 100 a tank/vehicle WRECK (~60-70u XY half-extent) fell UNDER the gate and was never carved, so
+    // bots had no path around it and piled against it (the user's report). 55 carves medium props like the
+    // tank while still ignoring small barrels/crates a bot walks around. Raise it to ignore more.
+    static cvar_t *s_botObsMin = NULL;
+    if (!s_botObsMin) {
+        s_botObsMin = gi.Cvar_Get("bot_obstacleMinRadius", "55", CVAR_ARCHIVE);
+    }
+    float fMin = s_botObsMin->value;
+    if (fMin < 16.0f) {
+        fMin = 16.0f;
+    }
+    if (radiusSqr < (fMin * fMin)) {
         return;
     }
 
@@ -524,7 +579,15 @@ void NavigationObstacleMap::ReleasePolysAt(gentity_t *ent, const Vector& min, co
     halfExtents = size * 0.5;
 
     radiusSqr = halfExtents.lengthXYSquared();
-    if (radiusSqr < Square(100)) {
+    // [HZM bug-2894] the SAME gate as EngagePolysAt (bot_obstacleMinRadius, 55 since bug-2792): this one was left at the
+    // stock 100, so a prop of radius 55-100 that moved or was removed (a driven vehicle, an opened door, a destroyed
+    // wreck) was carved and never released - its old polys stayed excluded for the rest of the map
+    static cvar_t *s_botObsMinR = NULL;
+    if (!s_botObsMinR) {
+        s_botObsMinR = gi.Cvar_Get("bot_obstacleMinRadius", "55", CVAR_ARCHIVE);
+    }
+    const float fMinR = Q_max(16.0f, s_botObsMinR->value);
+    if (radiusSqr < Square(fMinR)) {
         return;
     }
 

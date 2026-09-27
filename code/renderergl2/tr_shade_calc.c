@@ -687,6 +687,222 @@ static void Autosprite2Deform( void ) {
 
 /*
 =====================
+HZM gl2 [2026-09-25] PHASE R SWITCHES (vehicle-headlight plan, vet_headlights.md section 3)
+
+r_hzmLightGlow / r_hzmLightGlowNear / r_hzmRgbGenDot: -1 = auto (the HZM_*_AUTO define in tr_local.h), 0 = off,
+1 = on. Resolved per call, so each toggles live.
+
+THE OMAHA EXCLUSION lives in exactly one place: renderercommon/hzm_light_restore.h. It is keyed on the LOADED
+BSP (tr.world->baseName), never on a server name or a cvar, so it holds for a listen host, a remote client and a
+demo alike. On a protected BSP both restores are off whatever the switches say, and the map renders exactly as
+it did before this port - lamp coronas, muzzle glows and sparks included.
+=====================
+*/
+qboolean R_HZM_LightRestoreProtectedWorld( void ) {
+	static char		s_name[MAX_QPATH];
+	static qboolean	s_protected = qfalse;
+	const char		*name = ( tr.world && tr.world->baseName[0] ) ? tr.world->baseName : "";
+
+	if ( strcmp( name, s_name ) ) {
+		Q_strncpyz( s_name, name, sizeof( s_name ) );
+		s_protected = HZM_LightRestoreMapProtected( name );
+		if ( s_protected ) {
+			ri.Printf( PRINT_ALL, "HZM light restore: OFF on %s (Omaha protection, renderercommon/hzm_light_restore.h)\n", name );
+		}
+	}
+	return s_protected;
+}
+
+static qboolean R_HZM_ResolveSwitch( const cvar_t *cv, int autoValue ) {
+	return HZM_ResolveAutoSwitch( cv ? cv->integer : -1, autoValue );
+}
+
+qboolean R_HZM_LightGlowOn( void ) {
+	return ( R_HZM_ResolveSwitch( r_hzmLightGlow, HZM_LIGHTGLOW_AUTO ) && !R_HZM_LightRestoreProtectedWorld() ) ? qtrue : qfalse;
+}
+
+qboolean R_HZM_LightGlowNearOn( void ) {
+	return R_HZM_ResolveSwitch( r_hzmLightGlowNear, HZM_LIGHTGLOWNEAR_AUTO );
+}
+
+qboolean R_HZM_RgbGenDotOn( void ) {
+	return ( R_HZM_ResolveSwitch( r_hzmRgbGenDot, HZM_RGBGENDOT_AUTO ) && !R_HZM_LightRestoreProtectedWorld() ) ? qtrue : qfalse;
+}
+
+/*
+=====================
+R_HZM_AlphaDotToRgb
+
+HZM gl2 [2026-09-26] SEARCHLIGHTS S1 (docs/proposals/searchlights_2026-09-26/plan_searchlights.md, user: "make it the
+default for searchlights too"). gl1 writes `alphaGen dot` / `oneMinusDot` into RGB and leaves alpha alone
+(renderergl1 RB_CalcAlphaFromDot, run after the stage's rgbGen - so the dot REPLACES the lit colour). gl2's bug-2508
+port writes ALPHA. On a blended stage that is the better reading, but an ADDITIVE GL_ONE GL_ONE stage ignores alpha,
+so gl2 drew the retail tower searchlight cone - `beam` (scripts/items.shader: airdust x beam.tga, rgbGen
+lightingSpherical, alphaGen dot 0 1, blendfunc add) - as a flat, scene-lit tube with hard sides instead of gl1's soft
+(N.V)^2 cone.
+
+For exactly that shape - alphaGen dot|oneMinusDot, blend ONE ONE, no alpha test - this answers true while
+r_hzmRgbGenDot resolves on (the Omaha exclusion is inside R_HZM_RgbGenDotOn), and the draw then runs R2's rgbGen dot
+branch in generic_vp CalcColor with the stage's alphaMin/alphaMax and an identity alpha: gl1's RGB write.
+
+Keyed on BEHAVIOUR, not a name. Swept 2026-09-26 over every scripts/*.shader in every pak, both homepaths and the mod
+tree (28,400 definitions): the only matches are `beam` (drawn only by models/miscobj/searchlight.tik, the lit tower
+head) and stage 1 of textures/misc_outside/sf_deepbluesea, which no BSP, tik or script references. The blended
+alphaGen dot users (lantern glass, broken window, puddle, sf_ddayocean's SRC_ALPHA ONE stage) and the alpha-tested
+pines never match. ONE predicate for BOTH sites that must agree - the permutation select (tr_glsl.c
+GLSL_GetGenericShaderProgram) and the uniform upload (tr_shade.c RB_IterateStagesGeneric).
+=====================
+*/
+qboolean R_HZM_AlphaDotToRgb( const shaderStage_t *pStage ) {
+	if ( !pStage ) {
+		return qfalse;
+	}
+	if ( pStage->alphaGen != AGEN_DOT && pStage->alphaGen != AGEN_ONE_MINUS_DOT ) {
+		return qfalse;
+	}
+	if ( ( pStage->stateBits & ( GLS_SRCBLEND_BITS | GLS_DSTBLEND_BITS ) ) != ( GLS_SRCBLEND_ONE | GLS_DSTBLEND_ONE ) ) {
+		return qfalse;
+	}
+	if ( pStage->stateBits & GLS_ATEST_BITS ) {
+		return qfalse;
+	}
+	return R_HZM_RgbGenDotOn();
+}
+
+/*
+=====================
+LightGlowDeform
+
+HZM gl2 [2026-09-25] RETAIL LIGHTGLOW PARITY (Phase R1). `deformVertexes lightglow` is what every MOHAA corona is:
+14 live shaders (corona_util, corona_orange, corona_reg ... sharpflame, smoke_ring), ~6,000 static lamp
+placements, every weapon's muzzle glow (corona_util.spr) and the truck headlamp corona (models/fx/searchlight.tik).
+gl2 parsed the token (tr_shader.c ParseDeform) but RB_DeformTessGeometry had no case for it, so the quad drew as
+authored: a flat unitsquare lying in its entity's plane, sliced by whatever it sits in - the "flat squares".
+
+This is renderergl1/tr_shade_calc.c LightGlowDeform with only the plumbing changed (backEnd.ori -> or, gl1's byte
+vertex colours -> gl2's uint16 tess.color, tess.firstIndex reset as AutospriteDeform does). The maths is gl1's on
+purpose, quirks included: the pull toward the eye is computed in WORLD space and added to the LOCAL quad centre,
+and the axis-length compensation MULTIPLIES where AutospriteDeform divides. Both are inert for what exists (corona
+quads are centred on their entity origin; static-model and TIKI axes are unit length) and both are what players
+saw on gl1, so parity wins over tidiness.
+
+The one addition is the NEAR-SHRINK (r_hzmLightGlowNear, user decision: starts ON). gl1 pulls the quad toward the
+eye by its own radius, clamped to 4 u in front of the eye, so from inside about one radius a corona fills the
+screen - a 160 u truck corona whites out the view from ~84 u, and under HDR + bloom that is a white frame. Inside
+r_hzmLightGlowNearRange radii the quad AND its pull shrink by (eyeDist / range)^2: continuous at the boundary,
+zero at the lamp. r_hzmLightGlowNear 0 = gl1 verbatim.
+=====================
+*/
+static void LightGlowDeform( void ) {
+	int			i;
+	int			oldVerts;
+	float		*xyz;
+	vec3_t		mid, delta;
+	float		radius, dist, ofs;
+	vec3_t		forward, left, up;
+	vec3_t		leftDir, upDir;
+	qboolean	nearShrink = R_HZM_LightGlowNearOn();
+	float		nearRange = r_hzmLightGlowNearRange ? r_hzmLightGlowNearRange->value : 2.0f;
+
+	if ( tess.numVertexes & 3 ) {
+		ri.Printf( PRINT_WARNING, "LightGlowDeform shader %s had odd vertex count\n", tess.shader->name );
+	}
+	if ( tess.numIndexes != ( tess.numVertexes >> 2 ) * 6 ) {
+		ri.Printf( PRINT_WARNING, "LightGlowDeform shader %s had odd index count\n", tess.shader->name );
+	}
+
+	oldVerts = tess.numVertexes;
+	tess.numVertexes = 0;
+	tess.numIndexes = 0;
+	tess.firstIndex = 0;
+
+	if ( backEnd.currentEntity == &tr.worldEntity ) {
+		VectorCopy( backEnd.viewParms.or.axis[1], leftDir );
+		VectorCopy( backEnd.viewParms.or.axis[2], upDir );
+	} else {
+		// TIKI entities, and static models (backEnd.currentEntity is NULL for those, tr_backend.c): model space
+		GlobalVectorToLocal( backEnd.viewParms.or.axis[1], leftDir );
+		GlobalVectorToLocal( backEnd.viewParms.or.axis[2], upDir );
+	}
+
+	for ( i = 0 ; i < oldVerts ; i += 4 ) {
+		vec4_t color;
+
+		xyz = tess.xyz[i];
+
+		mid[0] = ( xyz[0] + xyz[4] + xyz[8] + xyz[12] ) * 0.25f;
+		mid[1] = ( xyz[1] + xyz[5] + xyz[9] + xyz[13] ) * 0.25f;
+		mid[2] = ( xyz[2] + xyz[6] + xyz[10] + xyz[14] ) * 0.25f;
+
+		VectorSubtract( xyz, mid, delta );
+
+		radius = VectorLength( delta ) * 0.707f;
+		VectorAdd( mid, backEnd.or.origin, delta );
+		VectorSubtract( backEnd.viewParms.or.origin, delta, forward );
+
+		dist = VectorNormalize( forward ) - 4.0f;
+
+		VectorScale( forward, radius, forward );
+		VectorScale( leftDir, radius, left );
+		VectorScale( upDir, radius, up );
+
+		if ( backEnd.viewParms.isMirror ) {
+			VectorSubtract( vec3_origin, forward, forward );
+			VectorSubtract( vec3_origin, left, left );
+		}
+
+		if ( backEnd.currentStaticModel || ( backEnd.currentEntity && backEnd.currentEntity->e.nonNormalizedAxes ) ) {
+			float axisLength;
+
+			if ( backEnd.currentStaticModel ) {
+				axisLength = VectorLength( backEnd.currentStaticModel->axis[0] );
+			} else {
+				axisLength = VectorLength( backEnd.currentEntity->e.axis[0] );
+			}
+
+			if ( axisLength != 0.0f ) {
+				VectorScale( forward, axisLength, forward );
+				VectorScale( left, axisLength, left );
+				VectorScale( up, axisLength, up );
+			} else {
+				VectorClear( forward );
+				VectorClear( left );
+				VectorClear( up );
+			}
+		}
+
+		// HZM near-shrink (r_hzmLightGlowNear) - the only departure from gl1, see the header
+		if ( nearShrink && nearRange > 0.0f ) {
+			float range   = VectorLength( left ) * nearRange;
+			float eyeDist = dist + 4.0f;
+
+			if ( eyeDist < range ) {
+				float s = ( eyeDist > 0.0f ) ? eyeDist / range : 0.0f;
+
+				s *= s;
+				VectorScale( forward, s, forward );
+				VectorScale( left, s, left );
+				VectorScale( up, s, up );
+			}
+		}
+
+		ofs = VectorLength( forward );
+		if ( ofs > dist ) {
+			VectorNormalizeFast( forward );
+			VectorScale( forward, dist, forward );
+		}
+
+		VectorAdd( mid, forward, mid );
+
+		// read before the stamp: the stamp rewrites vertices i..i+3 in place
+		VectorScale4( tess.color[i], 1.0f / 65535.0f, color );
+		RB_AddQuadStamp( mid, left, up, color );
+	}
+}
+
+
+/*
+=====================
 RB_DeformTessGeometry
 
 =====================
@@ -727,6 +943,13 @@ void RB_DeformTessGeometry( void ) {
 			break;
 		case DEFORM_AUTOSPRITE2:
 			Autosprite2Deform();
+			break;
+		// HZM gl2 [2026-09-25] Phase R1 - see LightGlowDeform. Resolved per draw, so r_hzmLightGlow toggles live;
+		// resolving OFF (the default, and always on an Omaha BSP) this is the pre-port no-op exactly.
+		case DEFORM_LIGHTGLOW:
+			if ( R_HZM_LightGlowOn() ) {
+				LightGlowDeform();
+			}
 			break;
 		case DEFORM_TEXT0:
 		case DEFORM_TEXT1:

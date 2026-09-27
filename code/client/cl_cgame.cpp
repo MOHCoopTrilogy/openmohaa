@@ -1007,6 +1007,10 @@ void CL_InitCGame( void ) {
 	info = cl.gameState.stringData + cl.gameState.stringOffsets[ CS_SERVERINFO ];
 	mapname = Info_ValueForKey( info, "mapname" );
 
+	// HZM [bug-2836] adopt the server's MAP VARIANT before cgame loads collision (CM_LoadMap) and the world
+	// (R_LoadWorldMap -> R_InitStaticModels), so this client strips exactly the brushes / static models the server
+	// did. A server without the key (vanilla / older build) publishes nothing -> "" -> unpatched, matching it.
+	Cvar_Set( "cm_variant", Info_ValueForKey( info, "sv_mapVariant" ) );
 
 	if (CL_UseLargeLightmap(mapname)) {
 		Com_sprintf(cl.mapname, sizeof(cl.mapname), "maps/%s.bsp", mapname);

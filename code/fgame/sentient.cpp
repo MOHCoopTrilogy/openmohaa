@@ -1686,6 +1686,21 @@ static bool CoopMpPlayerHit(Sentient *victim, Sentient *attacker, int meansofdea
     return pAtk->GetDM_Team() != pVic->GetDM_Team() || g_teamdamage->integer != 0;
 }
 
+// HZM-MP-BEGIN(mp_gore)
+// [user 2026-09-21] MP GORE. The coop gore systems (blood-skin tiers, head disfigure, headshot pool/FX) are
+// deliberately OFF for players in coop - bug-792, "blood appearing on my skin" looked wrong on your own body
+// in 3P/freecam. In MP you see ENEMY bodies far more than your own and the user wants full gore there, so this
+// session flag lifts the bug-792 player guards for MP ONLY. It is the level var coop_mpRun, set only on MP
+// arena sessions and wiped by any level load - never present on a coop map. Read by TYPE, never by value
+// (intValue throws on a non-numeric type, and these run inside the damage/gore path). Coop is byte-unchanged:
+// coop_mpRun is absent there, so this returns false and every bug-792 guard still returns for coop players.
+static bool CoopMpGoreSession(void)
+{
+    ScriptVariable *pMpRun = level.vars ? level.vars->GetVariable("coop_mpRun") : NULL;
+    return (pMpRun && pMpRun->GetType() != VARIABLE_NONE);
+}
+// HZM-MP-END(mp_gore)
+
 void Sentient::ArmorDamage(Event *ev)
 {
     Entity   *inflictor;
@@ -2038,8 +2053,23 @@ void Sentient::ArmorDamage(Event *ev)
         }
     }
 
-    if (attacker && attacker->IsSubclassOfPlayer() && !IsSubclassOfPlayer()
-        && attacker->IsSubclassOfSentient() && attacker->m_Team != m_Team) {
+    // Two ways to earn a hit/kill marker + the dm_hit_notify/dm_kill_notify cue on the attacker's client:
+    //   COOP - a player wounds/kills an ENEMY-TEAM AI (the original path);
+    //   MP   - a player wounds/kills an ENEMY player, via CoopMpPlayerHit (the same mp_pvp_campaign predicate
+    //          that lets MP PvP damage through - it already requires two enemy Players and is coop-safe:
+    //          returns false whenever the coop framework is loaded, so this cannot fire on a coop map).
+    // The client half (CG_CoopHitMark draw + PlaySound dm_*_notify) is coop-agnostic, so enabling the send
+    // here is all MP needs. [user 2026-09-21: "make it work just like coop"]
+    // HZM coop - Hardcore (user 2026-09-25): no hit / kill confirmation in coop - neither the marker nor the tick, and
+    // gated HERE so an old client gets it too. The coop-owned serverinfo flag is 0 on every MP map (G_SpawnEntities),
+    // so the MP PvP half below is untouched.
+    static cvar_t *pCoopHc = NULL;
+    if (!pCoopHc) {
+        pCoopHc = gi.Cvar_Get("g_coopHardcore", "0", CVAR_SERVERINFO | CVAR_ROM);
+    }
+    if (attacker && attacker->IsSubclassOfPlayer() && attacker->IsSubclassOfSentient()
+        && ((!IsSubclassOfPlayer() && attacker->m_Team != m_Team && !pCoopHc->integer)
+            || CoopMpPlayerHit(this, attacker, meansofdeath))) {
         Player  *pAtk   = static_cast<Player *>(attacker);
         qboolean bKill  = (fCoopPrevHealth > 0 && health <= 0) ? qtrue : qfalse;
 
@@ -2062,10 +2092,13 @@ void Sentient::ArmorDamage(Event *ev)
     // Engine-side kills (buffer-less sentients, dogs) pass through here too, so this is the single
     // choke point; IsDead() at the top makes any later script overkill on the same corpse a no-op,
     // and the same-team damage filter above means an allied victim never reaches health <= 0.
+    // Headshot KILL "clink": a COOP AI-enemy headshot kill OR an MP PvP headshot kill (CoopMpPlayerHit,
+    // coop-safe). The client plays coop_headshot off the coop_hsCue counter (cg_view.c) - coop-agnostic, so
+    // MP gets the cue for free. [user 2026-09-21]
     if (fCoopPrevHealth > 0 && health <= 0 && attacker && attacker->IsSubclassOfPlayer()
-        && !IsSubclassOfPlayer()
         && (meansofdeath == MOD_BULLET || meansofdeath == MOD_FAST_BULLET || meansofdeath == MOD_SHOTGUN)
-        && (location == HITLOC_HEAD || location == HITLOC_HELMET || location == HITLOC_NECK)) {
+        && (location == HITLOC_HEAD || location == HITLOC_HELMET || location == HITLOC_NECK)
+        && (!IsSubclassOfPlayer() || CoopMpPlayerHit(this, attacker, meansofdeath))) {
         // [found 2026-08-28] THIS WAS NOT SHOOTER-ONLY. Entity::Sound ends in gi.Sound -> SV_Sound,
         // which loops EVERY active client, and CHAN_LOCAL then makes it a 2D listener-positioned sound
         // at full volume with no attenuation - so in 4-player coop all four players heard every headshot
@@ -2078,14 +2111,22 @@ void Sentient::ArmorDamage(Event *ev)
             gi.SendServerCommand(pAtkHs->edict - g_entities,
                                  "stufftext \"set coop_hsCue %d\"", pAtkHs->m_iCoopHsCueSent);
         }
-        CoopHeadshotKillFx(position, direction);
-        CoopGoreDisfigureHead(); // HZM coop [user 2026-08-17] - and leave the face unrecognisable
-        CoopGoreHeadshotExtras(position, direction); // HZM coop [user 2026-08-19] - brain chunks + eyeball
+        // GORE FX: coop AI victims always; [user 2026-09-21 MP gore pass] MP PvP player victims too
+        // (CoopMpPlayerHit). The bug-792 player guards INSIDE these fns are lifted for MP sessions
+        // (CoopMpGoreSession), so an MP headshot kill gets the full face gore. Coop players stay clean.
+        if (!IsSubclassOfPlayer() || CoopMpPlayerHit(this, attacker, meansofdeath)) {
+            CoopHeadshotKillFx(position, direction);
+            CoopGoreDisfigureHead(); // HZM coop [user 2026-08-17] - and leave the face unrecognisable
+            CoopGoreHeadshotExtras(position, direction); // HZM coop [user 2026-08-19] - brain chunks + eyeball
+        }
     }
 
-    // HZM coop [user 2026-08-19] death kinetics: corpse impulse on every kill; explosion kills
-    // spray meat and a slice decapitate (bug-866 safe pattern). Non-players, flesh only.
-    if (fCoopPrevHealth > 0 && health <= 0 && !IsSubclassOfPlayer()) {
+    // HZM coop [user 2026-08-19] death kinetics: corpse impulse on every kill; explosion kills spray meat and
+    // a slice decapitate (bug-866 safe pattern). Coop = AI victims; [user 2026-09-21 MP gore] MP PvP player
+    // victims too - the impulse makes MP deaths read physical, and the chunk/decap half self-gates on a
+    // blood_model + a separately-skinned head surface, so it degrades silently where a model lacks them.
+    if (fCoopPrevHealth > 0 && health <= 0
+        && (!IsSubclassOfPlayer() || CoopMpPlayerHit(this, attacker, meansofdeath))) {
         CoopGoreDeathKinetics(position, direction, damage, meansofdeath, inflictor);
     }
 
@@ -2431,7 +2472,8 @@ void Sentient::DropBloodPool(void)
     // 07-18 log: GOREPOOL reached on officer + ranger + rank-and-file deaths). Players never
     // pool, alive or dead. This also keeps the grow chain off players (only DropBloodPool
     // starts it).
-    if (IsSubclassOfPlayer()) {
+    // [user 2026-09-21 MP gore] MP sessions pool under enemy player bodies too; coop players never pool (bug-792).
+    if (IsSubclassOfPlayer() && !CoopMpGoreSession()) {
         if (pDbg->integer) { gi.Printf("^~^~^ GOREPOOL ent=%d BLOCKED player (no pooling for players)\n", entnum); }
         return;
     }
@@ -2708,7 +2750,9 @@ void Sentient::CoopGoreUpdateSkinTier(void)
     // freecam self-view + what teammates see). Nothing is ever painted/attached ON a player
     // body - this extends the bug-785 no-holes rule. AI on BOTH sides keep every tier;
     // ground pools + blood trails are world decals, not body paint, and stay for players.
-    if (IsSubclassOfPlayer()) {
+    // [user 2026-09-21 MP gore] ...except in an MP session (CoopMpGoreSession): the user wants blood on
+    // enemy player models in MP. Coop players still return here (not an MP session -> false), bug-792 intact.
+    if (IsSubclassOfPlayer() && !CoopMpGoreSession()) {
         return;
     }
 
@@ -2901,7 +2945,8 @@ void Sentient::CoopGoreDisfigureHead(void)
     int            surf;
 
     // HZM coop - nothing is ever painted on a player body (bug-792 standing rule)
-    if (IsSubclassOfPlayer()) {
+    // [user 2026-09-21 MP gore] ...except in an MP session: MP headshot kills disfigure the enemy face.
+    if (IsSubclassOfPlayer() && !CoopMpGoreSession()) {
         return;
     }
     if (!edict->tiki || !com_blood->integer) {
@@ -3146,7 +3191,10 @@ void Sentient::CoopGoreTryWoundProp(int location, int meansofdeath, const Vector
     // and players must never show holes (matches the renderer-side UV-stamp gate in
     // tr_gore.c).  AI / allied AI keep their wound props; players keep blood drips
     // and the gore skin tiers.
-    if (IsSubclassOfPlayer()) {
+    // [user 2026-09-21] ...EXCEPT in an MP session, where the user wants bullet holes on enemy players
+    // exactly like coop AI, living AND dead. CoopMpGoreSession lifts it for MP only; the renderer-side gate
+    // (tr_gore.c RE_GoreKillSplash / R_GoreSkelSurfaceCheck) is lifted in parallel via coop_isCoopSession.
+    if (IsSubclassOfPlayer() && !CoopMpGoreSession()) {
         return;
     }
     if (meansofdeath != MOD_BULLET && meansofdeath != MOD_FAST_BULLET && meansofdeath != MOD_SHOTGUN) {
@@ -3586,10 +3634,14 @@ void Sentient::CoopGoreCorpseDamage(Event *ev)
     float          damage;
     int            meansofdeath, location;
 
-    // NEVER a player body. Nothing is ever painted on or attached to a player (bug-785/792 standing
-    // rule), and a dead player is a DBNO/respawn state rather than scenery. Player::ArmorDamage
-    // chains into Sentient::ArmorDamage, so dead players DO arrive here without this guard.
-    if (IsSubclassOfPlayer()) {
+    // NEVER a player body IN COOP (bug-785/792 standing rule: nothing is painted on/attached to a coop
+    // player, and a downed coop player is a DBNO/respawn state, not scenery). Player::ArmorDamage chains
+    // into Sentient::ArmorDamage, so dead players DO arrive here.
+    // [user 2026-09-21 MP gore] ...but in an MP session the user wants to gib enemy CORPSES like coop does
+    // to AI ("shooting these bots bodies does nothing. In coop it would"). CoopMpGoreSession lifts the guard
+    // for MP only. A DBNO-downed player is still ALIVE (health held up by the absorption pool), so IsDead()
+    // is false for them and they never reach this path - only a truly dead, awaiting-respawn body does.
+    if (IsSubclassOfPlayer() && !CoopMpGoreSession()) {
         return;
     }
     // Coop only, matching the corpse-shootable change this completes. In SP a corpse is SOLID_NOT so

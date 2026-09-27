@@ -112,8 +112,18 @@ static terraInt R_AllocateVert(cTerraPatchUnpacked_t *patch)
 
     g_pVert[iVert].nRef         = 0;
     g_pVert[iVert].uiDistRecalc = 0;
+    // HZM gl2 [bug-3007] no split parents until R_InterpolateVert records them: a patch corner shows its own L
+    g_pVert[iVert].hzmLPar[0] = 0xFF;
+    g_pVert[iVert].hzmLPar[1] = 0xFF;
+    g_pVert[iVert].fHzmMorph  = 1.0f;
 
     return iVert;
+}
+
+// HZM gl2 [bug-3007] heightmap index of a vertex's height pointer in `patch`, 0xFF when it points elsewhere
+static byte R_HZM_HeightmapIndex(const cTerraPatchUnpacked_t *patch, const byte *pHgt)
+{
+    return (pHgt >= patch->heightmap && pHgt <= &patch->heightmap[80]) ? (byte)(pHgt - patch->heightmap) : 0xFF;
 }
 
 /*
@@ -151,6 +161,12 @@ static void R_InterpolateVert(terraTri_t *pTri, terrainVert_t *pVert)
     pVert->xyz[0] = (pVert0->xyz[0] + pVert1->xyz[0]) * 0.5f;
     pVert->xyz[1] = (pVert0->xyz[1] + pVert1->xyz[1]) * 0.5f;
     pVert->xyz[2] = pVert->fHgtAvg;
+
+    // HZM gl2 [bug-3007] the light direction geomorphs from the same two ends, from the same start (xyz[2] is at
+    // their average right now, so L starts at theirs): tr_surface.c R_HZM_TerrainVertLightDir
+    pVert->hzmLPar[0] = R_HZM_HeightmapIndex(pPatch, pVert0->pHgt);
+    pVert->hzmLPar[1] = R_HZM_HeightmapIndex(pPatch, pVert1->pHgt);
+    pVert->fHzmMorph  = 0.0f;
 }
 
 /*
@@ -526,6 +542,7 @@ static void R_ForceSplit(terraInt iTri)
                 pVert->fHgtAvg += pVert->fHgtAdd;
                 pVert->fHgtAdd   = 0.0;
                 pVert->fVariance = 0.0;
+                pVert->hzmLPar[0] = pVert->hzmLPar[1] = 0xFF; // [bug-3007] height snaps here, so does L
                 pVert->xyz[2]    = pVert->fHgtAvg;
             }
         }
@@ -544,6 +561,7 @@ static void R_ForceSplit(terraInt iTri)
         pVert->fHgtAvg += pVert->fHgtAdd;
         pVert->fHgtAdd   = 0.0;
         pVert->fVariance = 0.0;
+        pVert->hzmLPar[0] = pVert->hzmLPar[1] = 0xFF; // [bug-3007] height snaps here, so does L
         pVert->xyz[2]    = pVert->fHgtAvg;
     }
 
@@ -945,6 +963,7 @@ static void R_CalcVertMorphHeight(terrainVert_t *pVert)
     float dot;
 
     pVert->xyz[2]       = pVert->fHgtAvg;
+    pVert->fHzmMorph    = 0.0f; // [bug-3007] mirrors the height geomorph factor below
     pVert->uiDistRecalc = g_uiTerDist + 1;
     dot                 = (pVert->fVariance * g_fCheck)
         - (g_vViewVector[0] * pVert->xyz[0] + g_vViewVector[1] * pVert->xyz[1] + g_vViewVector[2]);
@@ -958,6 +977,7 @@ static void R_CalcVertMorphHeight(terrainVert_t *pVert)
         }
 
         pVert->xyz[2] += pVert->fHgtAdd * calc;
+        pVert->fHzmMorph = calc; // [bug-3007]
     } else {
         pVert->uiDistRecalc = g_uiTerDist - (int)ceil(dot);
     }
@@ -1056,6 +1076,7 @@ static void R_DoGeomorphs()
                 while (g_vert.iCur) {
                     terrainVert_t *pVert = &g_pVert[g_vert.iCur];
                     pVert->xyz[2]        = pVert->fHgtAvg;
+                    pVert->fHzmMorph     = 0.0f; // [bug-3007] L goes back to its ends' average with the height
                     g_vert.iCur          = pVert->iNext;
                 }
             }
@@ -1115,6 +1136,13 @@ static qboolean R_MergeInternalCautious()
     }
 
     if (g_pVert[g_pTris[pTri->iLeftChild].iPt[2]].xyz[2] != g_pVert[g_pTris[pTri->iLeftChild].iPt[2]].fHgtAvg) {
+        return qfalse;
+    }
+
+    // HZM gl2 [bug-3007] with per-vertex terrain L drawn, the apex's L must have morphed back too. Where the midpoint
+    // height equals its ends' average (fHgtAdd 0) the test above passes at ANY morph, so the vertex - and the L it
+    // carries - would vanish mid-blend. Grid off: never true, the merge is exactly as before.
+    if (g_pVert[g_pTris[pTri->iLeftChild].iPt[2]].fHzmMorph > 0.0f && R_HZM_TerrainLightGridActive()) {
         return qfalse;
     }
 

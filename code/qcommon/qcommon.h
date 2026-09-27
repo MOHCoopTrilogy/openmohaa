@@ -1420,6 +1420,7 @@ char	*Sys_GetCurrentUser( void );
 
 void	QDECL Sys_Error( const char *error, ...) __attribute__ ((format (printf, 1, 2)));
 void	Sys_Quit (void);
+qboolean	Sys_OpenURL (const char *url); // HZM coop - fixed-url browser open (main-menu Discord button)
 char	*Sys_GetClipboardData( void );	// note that this isn't journaled...
 
 void	Sys_Print( const char *msg );

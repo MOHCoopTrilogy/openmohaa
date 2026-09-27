@@ -335,6 +335,7 @@ typedef struct {
 
 	// when the server clears the hunk, all of these must be restarted
 	qboolean	rendererRegistered;
+	qboolean	rendererReady;		// HZM bug-2981: TRUE only after re.BeginRegistration returned (R_Init done)
 	qboolean	cgameStarted;
 	qboolean	uiStarted;
 	qboolean	timeScaled;
@@ -460,6 +461,10 @@ extern	cvar_t	*j_yaw_axis;
 extern	cvar_t	*j_forward_axis;
 extern	cvar_t	*j_side_axis;
 extern	cvar_t	*j_up_axis;
+
+extern	cvar_t	*joy_response;        // [controller feel] analog look response curve
+extern	cvar_t	*joy_outerThreshold;  // [controller feel] outer dead-zone
+extern	cvar_t	*coop_padLookScale;   // [controller feel] master stick look-sensitivity
 
 extern	cvar_t	*cl_timedemo;
 extern	cvar_t	*cl_aviFrameRate;

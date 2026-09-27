@@ -34,6 +34,7 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 #define RECOIL_MAX_UNITS 3.0f
 #define RECOIL_MAX_BACK  1.1f
 #include "cg_parsemsg.h"
+#include "../renderercommon/hzm_light_restore.h" // HZM coop [2026-09-25] headlights: AUTO defaults + Omaha list
 
 //============================================================================
 
@@ -5456,6 +5457,1004 @@ static coopPrecipType_t CG_CoopPrecipType(void)
     return (cg.rain.speed > 800.0f) ? PRECIP_RAIN : PRECIP_SNOW;
 }
 
+/*
+=================================================================================================
+HZM coop [user 2026-09-25] VEHICLE HEADLIGHTS - Phase H (scratchpad vet_headlights.md section 3).
+
+WHAT IT REPLACES. A lit retail truck is a pair of `opellights` beam tubes (a surface the vehicle's own anims show)
+plus, when a script calls global/spotlight.scr::corona / deadcorona, a 160 u `fx/searchlight.tik` corona attached to
+each lamp tag, scaled SERVER-side for whichever player is closest. It lights nothing, the tubes show in clear air
+and in daylight, and on gl2 the corona drew as a flat square until Phase R (renderer_opengl2) restored lightglow.
+
+WHAT THIS DOES, per viewer, every frame, entirely client-side (no script, no server change - MP clients without
+this cgame.dll simply keep the retail look):
+  DETECT  a vehicle whose model carries a lamp-tag pair (s_hlTagPairs) is LIT when its own beam surface is visible
+          in its entity state, or a retail corona is attached to one of its lamp tags - whoever turned it on, so
+          idlelights-only trucks (vehicles_thinkers truck_INIT, e1l3, t1l2, m4l3) are covered too. Tagless jeeps
+          keep the retail look. A vehicle the script has hidden is not drawn, so it is never lit (t3l1).
+  REPLACE CG_CoopHeadlightsModel (called from CG_ModelAnim) hides the retail beam surface and the retail corona on
+          a managed vehicle; this function then adds, per lamp, a small warm glow (models/fx/coop_headlamp.tik,
+          lightglow) that fades out as you move to the side, and per vehicle ONE additive omni dlight ahead of the
+          lamps (nearest cg_hzmHeadlightsMax vehicles only, off beyond min(2500, 0.6 x farplane) because dlight
+          pools are never fogged - vet F11), carrying hzm_dlight_noshadow (never steals a shadow slot from a
+          muzzle flash, F9) and hzm_dlight_edgefade (soldiers fade into the pool instead of popping, F10).
+  BEAM    models/fx/coop_headbeam.tik, per lamp, ONLY when the map is dark AND (fogged at 0 < farplane <= 5000 OR
+          raining) - user decision: beams in fog/rain only - and never for the vehicle you ride or stand right
+          behind. It fades in and out over ~1.5 s when the weather gate flips.
+ORDER   called after CG_AddCoopDynamicLights, so muzzle and blast lights keep first claim on the 32 dlight slots
+        (MAX_DLIGHTS is first come, first served - vet F8).
+
+GATES (all live, all flags 0 - never saved, TRAPS T7):
+  cg_hzmHeadlights  -1 = auto (HZM_HEADLIGHTS_AUTO in renderercommon/hzm_light_restore.h, 0 until the user's A/B
+                    passes), 0 off, 1 on.
+  and cl_renderer must name a gl2 build (CG_HZM_RendererIsGl2 - "opengl2", or the gfx test's "opengl2flip", vet F3),
+  and r_hzmLightGlow must resolve ON (the glow is a lightglow quad and would draw flat without it); the beam also
+  needs r_hzmRgbGenDot ON (its soft edge). Never on an Omaha BSP (the same list the renderer uses). Test binds:
+  coop_mod/cfg/hltest.cfg (Test S).
+
+PHASE S [2026-09-26] (docs/proposals/headlights_2026-09-25/plan_phaseS.md, vet_phaseS.md). When the renderer speaks
+this cgame's carrier protocol and r_hzmSpot resolves on (CG_HZM_SpotsAvailable, cg_hzmspot.c), the omni pool is
+REPLACED by a SPOT CONE per vehicle: apex at the lamp midpoint (+cg_hzmHeadlightsSpotUp), axis pitched
+cg_hzmHeadlightsSpotPitch down, cg_hzmHeadlightsSpotRange long, cg_hzmHeadlightsSpotInner/Outer half-angles - it lights
+the ground, walls, soldiers and props IN FRONT of the truck and nothing behind or under it, is fogged by the world pass
+(HZM_SPOTREQ_FOGGED) and never takes a shadow slot. Otherwise (a mismatched DLL pair, r_hzmSpot 0) the Phase H omni
+pool stays as the fallback. Both pools: the nearest cg_hzmHeadlightsMax vehicles, CROSS-FADED over
+cg_hzmHeadlightsPoolFade seconds when that set changes (vet F15 - no convoy popping), still off beyond
+min(2500, 0.6 farplane) as a hard fade (vet F12: the multi-pass world surfaces have no fog), and scaled by
+cg_hzmHeadlightsDay in daylight (0 = none). LENS FLARES per lamp (CG_HZM_FlaresAvailable: + r_hzmFlares, r_flares),
+brightness cg_hzmHeadlightsFlare x the same day gate, never for the vehicle you ride. Spots and flares go through the
+SHARED facility (cg_hzmspot.c: one budget, cg_hzmSpotMax, with the searchlights later), flushed after this function.
+S3a [2026-09-26] (plan_phaseS.md section 6, vet F26) - THE FOG BEAM STOPS AT WALLS: cg_hzmHeadlightsBeamStop (-1 =
+HZM_BEAMSTOP_AUTO) traces each lamp's beam axis and scales the beam UNIFORMLY so its ramp ends on the first hit - see
+CG_HL_BeamStop for why uniform (vet F26: one scaled axis skews rgbGen dot's soft edge).
+=================================================================================================
+*/
+#define HL_MAX_VEHICLES 32
+
+typedef enum {
+    HL_KIND_NONE = 0,
+    HL_KIND_VEHICLE, // carries a lamp-tag pair
+    HL_KIND_CORONA   // models/fx/searchlight.tik - the retail corona
+} hlKind_t;
+
+typedef struct {
+    qhandle_t hModel;   // the cgs.model_draw handle this entry was built for (0 = not built)
+    int       kind;
+    int       tag[2];   // lamp tags (HL_KIND_VEHICLE)
+    int       beamSurf; // the retail beam surface, -1 if the model has none
+} hlModelInfo_t;
+
+typedef struct {
+    int    num;
+    vec3_t lamp[2];
+    vec3_t mid;
+    vec3_t fwd, left, up;
+    float  dist;
+} hlVehicle_t;
+
+// lamp-tag pairs, tried in this order. A model qualifies only if it carries BOTH tags of a pair.
+static const char *const s_hlTagPairs[][2] = {
+    {"light left", "light right"},           // Opel Blitz family: opeltruck*.tik (Opel_Truck_Brown.skd), opel.skd
+    {"left_light", "right_light"},           // AX_V_Opel_Main.tik (opaltruck_mk2.skd) - e1l4's intro truck
+    {"light_frontLeft", "light_frontLight"}, // AB41 (ab_base.skd) - "frontLight" is retail's own spelling
+};
+// the retail beam surfaces (all three use the `opellights` shader)
+static const char *const s_hlBeamSurfs[] = {"opellights", "AX_V_Opal_Beams", "beams"};
+
+static hlModelInfo_t s_hlModels[MAX_MODELS];
+static int           s_hlBeamStamp[MAX_GENTITIES];   // == s_hlFrame: the vehicle's own beam surface was visible
+static int           s_hlCoronaStamp[MAX_GENTITIES]; // == s_hlFrame: a retail corona sat on one of its lamp tags
+static int           s_hlForeignStamp[MAX_GENTITIES]; // == s_hlFrame: a retail corona sat on some OTHER tag of it
+static int           s_hlFrame = 1;
+
+static struct {
+    int      time;       // cg.time this state was computed for
+    qboolean valid;
+    qboolean active;     // the manager runs this frame
+    qboolean beamDot;    // r_hzmRgbGenDot resolves on - the beam's soft edge
+    qboolean beamGate;   // dark AND (fog or rain)
+    float    fogDist;    // live farplane (0 = none)
+    float    fogLum;
+    float    cutoff;     // dlight range
+    float    beamFade;   // 0..1, eases toward beamGate
+    int      lastShown;  // what the ^~^~^ status line last reported (bit mask), -1 = never
+    char     map[MAX_QPATH];
+    // HZM coop [2026-09-26] Phase S (appended: the positional initializer below stays valid)
+    qboolean dark;       // the beam gate's darkness test on its own
+    qboolean spots;      // CG_HZM_SpotsAvailable: the pool is a spot cone
+    qboolean flares;     // CG_HZM_FlaresAvailable: lamp lens flares
+    float    dayScale;   // 1 when dark, else cg_hzmHeadlightsDay (pool + flares)
+} s_hl = {0, qfalse, qfalse, qfalse, qfalse, 0.0f, 0.0f, 2500.0f, 0.0f, -1, ""};
+
+static qhandle_t s_hlGlowModel, s_hlBeamModel;
+static cvar_t   *s_hlOn, *s_hlMax, *s_hlRadius, *s_hlColor, *s_hlFwd, *s_hlUp, *s_hlGlow, *s_hlGlowSize;
+// HZM coop [2026-09-26] Phase S knobs (flags 0) and the per-vehicle pool cross-fade (vet F15), 0..1
+static cvar_t   *s_hlSpotRange, *s_hlSpotInner, *s_hlSpotOuter, *s_hlSpotPitch, *s_hlSpotUp, *s_hlDay, *s_hlFlare;
+static cvar_t   *s_hlPoolFadeTime;
+// HZM coop [2026-09-26] S3a - the fog beam stops at walls (CG_HL_BeamStop). Per vehicle entity, per lamp.
+static cvar_t   *s_hlBeamStop;
+static qboolean  s_hlBeamStopOn;                 // this frame: cg_hzmHeadlightsBeamStop resolves on
+static float     s_hlBeamLen[MAX_GENTITIES][2];  // the eased visible length, u
+static float     s_hlBeamHit[MAX_GENTITIES][2];  // the last traced hit distance, u (HL_BEAM_VISIBLE = nothing hit)
+static int       s_hlBeamTraceTime[MAX_GENTITIES]; // cg.time of that trace
+static int       s_hlBeamSeen[MAX_GENTITIES];    // == s_hlFrame: its beam was placed this frame
+static float     s_hlPoolFade[MAX_GENTITIES];
+static int       s_hlPoolSeen[MAX_GENTITIES];   // == s_hlFrame: its pool fade was stepped this frame
+static qboolean  s_hlPoolLive;                  // some s_hlPoolFade may be non-zero
+static cvar_t   *s_hlBeam, *s_hlPitch, *s_hlDarkFog, *s_hlDebug;
+static cvar_t   *s_hlRenderer, *s_hlLightGlow, *s_hlRgbGenDot, *s_hlDaylight;
+
+// HZM coop [2026-09-26] SEARCHLIGHTS S2 (docs/proposals/searchlights_2026-09-26/plan_searchlights.md). The Normandy
+// (t1l1) sky beams - models/animate/searchlight.tik and searchlight_small.tik, retail shader long_searchlight
+// (blendfunc blend + rgbGen lightingSpherical: a translucent tube with hard sides, on gl2 lit from an origin under the
+// terrain) - draw with coop_searchlight_skybeam (scripts/coop_searchlights.shader: same texture, GL_SRC_ALPHA GL_ONE,
+// rgbGen dot 0 1, nofog) through refEntity.customShader, which gl2 honours on every TIKI surface (tr_model.cpp
+// R_AddSkelSurfaces). Gate: gl2 AND r_hzmRgbGenDot resolves on AND not an Omaha BSP - so M in hltest.cfg flips it, and
+// with the gate off every entity is submitted exactly as before. Independent of cg_hzmHeadlights. Kept apart from
+// CG_HL_ModelInfo on purpose: this runs by default, and the vehicle classifier there has only run under Test B.
+static qboolean  s_hlSkyGate;                // this frame: gl2 && r_hzmRgbGenDot on && !Omaha
+static qhandle_t s_hlSkyModelH[MAX_MODELS];  // the cgs.model_draw handle the verdict below was taken for (0 = none)
+static byte      s_hlSkyModelIs[MAX_MODELS]; // 1 = a sky-beam tik
+static qhandle_t s_hlSkyShader;              // coop_searchlight_skybeam, registered on first sight
+static int       s_hlSkyState;               // 0 = not tried this map, 1 = registered, -1 = missing (no swap)
+
+static void CG_HL_RegisterCvars(void)
+{
+    if (s_hlOn) {
+        return;
+    }
+    // flags 0 throughout: nothing here is ever saved, so a default change always ships (TRAPS T7)
+    s_hlOn        = cgi.Cvar_Get("cg_hzmHeadlights", "-1", 0);            // -1 auto, 0 off, 1 on
+    s_hlMax       = cgi.Cvar_Get("cg_hzmHeadlightsMax", "4", 0);          // vehicles that get a dlight (nearest first)
+    s_hlRadius    = cgi.Cvar_Get("cg_hzmHeadlightsRadius", "400", 0);     // dlight radius, u
+    // [2026-09-26, bug-2999] 0.6 0.46 0.3 -> 2.5x: at .6 the spot lifted the co_lobby8 dock ground only ~23% next to
+    // the pole lamps (r_hzmSpotDebug 2 proved the pool was there) - it read as no light at all
+    s_hlColor     = cgi.Cvar_Get("cg_hzmHeadlightsColor", "1.5 1.15 0.75", 0); // dlight / spot colour
+    s_hlFwd       = cgi.Cvar_Get("cg_hzmHeadlightsFwd", "140", 0);        // dlight: this far ahead of the lamps
+    s_hlUp        = cgi.Cvar_Get("cg_hzmHeadlightsUp", "48", 0);          // dlight: this far above them
+    s_hlGlow      = cgi.Cvar_Get("cg_hzmHeadlightsGlow", "1", 0);         // lamp glow intensity 0..1 (0 = no glow)
+    // [2026-09-26, bug-2999] 1 -> 3: headlamp_glow.tga's hot core is ~2.5 of 32 px, so at 1 the ~23 u quad drew a
+    // 1-2 u dot inside a ~10 u lens; the size sweep (1/1.5/2/3/4) read as a lit lamp from 3
+    s_hlGlowSize  = cgi.Cvar_Get("cg_hzmHeadlightsGlowSize", "3", 0);     // lamp glow size multiplier
+    s_hlBeam      = cgi.Cvar_Get("cg_hzmHeadlightsBeam", "0.35", 0);      // fog beam strength 0..1 (0 = no beams)
+    s_hlPitch     = cgi.Cvar_Get("cg_hzmHeadlightsBeamPitch", "2", 0);    // beam tilt below the vehicle axis, deg
+    s_hlDarkFog   = cgi.Cvar_Get("cg_hzmHeadlightsDarkFog", "0.3", 0);    // fog luminance at/below which a map is dark
+    s_hlDebug     = cgi.Cvar_Get("cg_hzmHeadlightsDebug", "0", 0);        // 1 = a ^~^~^ line per second
+    // HZM coop [2026-09-26] Phase S (plan_phaseS.md section 4 start knobs)
+    s_hlSpotRange = cgi.Cvar_Get("cg_hzmHeadlightsSpotRange", "1100", 0); // spot: light radius (att 0 here), u
+    s_hlSpotInner = cgi.Cvar_Get("cg_hzmHeadlightsSpotInner", "12", 0);   // spot: full strength inside, deg
+    s_hlSpotOuter = cgi.Cvar_Get("cg_hzmHeadlightsSpotOuter", "28", 0);   // spot: 0 outside, deg (< 89)
+    s_hlSpotPitch = cgi.Cvar_Get("cg_hzmHeadlightsSpotPitch", "3", 0);    // spot: axis below the vehicle's, deg
+    s_hlSpotUp    = cgi.Cvar_Get("cg_hzmHeadlightsSpotUp", "16", 0);      // spot: apex above the lamp midpoint, u
+    s_hlDay       = cgi.Cvar_Get("cg_hzmHeadlightsDay", "0", 0);          // pool + flares in daylight, 0..1
+    s_hlFlare     = cgi.Cvar_Get("cg_hzmHeadlightsFlare", "1", 0);        // lamp flare brightness 0..1 (0 = none)
+    s_hlPoolFadeTime = cgi.Cvar_Get("cg_hzmHeadlightsPoolFade", "0.3", 0); // pool cross-fade when the set changes, s
+    // HZM coop [2026-09-26] S3a: -1 auto (HZM_BEAMSTOP_AUTO), 0 = the full 420 u beam as before, 1 = stop at walls
+    s_hlBeamStop  = cgi.Cvar_Get("cg_hzmHeadlightsBeamStop", "-1", 0);
+    s_hlRenderer  = cgi.Cvar_Get("cl_renderer", "opengl1", 0);
+    s_hlLightGlow = cgi.Cvar_Get("r_hzmLightGlow", "-1", 0);              // registered by renderer_opengl2 (Phase R)
+    s_hlRgbGenDot = cgi.Cvar_Get("r_hzmRgbGenDot", "-1", 0);
+    s_hlDaylight  = cgi.Cvar_Get("coop_daylight", "1", 0);                // same registration as the night grade
+}
+
+static qboolean CG_HL_EndsWith(const char *s, const char *suffix)
+{
+    size_t ls = strlen(s), lx = strlen(suffix);
+
+    return (ls >= lx && !Q_stricmp(s + ls - lx, suffix)) ? qtrue : qfalse;
+}
+
+static const hlModelInfo_t *CG_HL_ModelInfo(int modelindex)
+{
+    static const hlModelInfo_t none = {0, HL_KIND_NONE, {-1, -1}, -1};
+    hlModelInfo_t             *mi;
+    qhandle_t                  h;
+    dtiki_t                   *tiki;
+    const char                *name;
+    int                        p, k;
+
+    if (modelindex <= 0 || modelindex >= MAX_MODELS) {
+        return &none;
+    }
+    h = cgs.model_draw[modelindex];
+    if (!h) {
+        return &none;
+    }
+    mi = &s_hlModels[modelindex];
+    if (mi->hModel == h) {
+        return mi;
+    }
+
+    mi->hModel   = h;
+    mi->kind     = HL_KIND_NONE;
+    mi->tag[0]   = -1;
+    mi->tag[1]   = -1;
+    mi->beamSurf = -1;
+
+    tiki = cgi.R_Model_GetHandle(h);
+    if (!tiki) {
+        return mi;
+    }
+    name = cgi.TIKI_Name(tiki);
+    if (name && CG_HL_EndsWith(name, "fx/searchlight.tik")) {
+        mi->kind = HL_KIND_CORONA;
+        return mi;
+    }
+    for (p = 0; p < (int)(sizeof(s_hlTagPairs) / sizeof(s_hlTagPairs[0])); p++) {
+        int t0 = cgi.Tag_NumForName(tiki, s_hlTagPairs[p][0]);
+        int t1 = cgi.Tag_NumForName(tiki, s_hlTagPairs[p][1]);
+
+        if (t0 >= 0 && t1 >= 0) {
+            mi->kind   = HL_KIND_VEHICLE;
+            mi->tag[0] = t0;
+            mi->tag[1] = t1;
+            break;
+        }
+    }
+    if (mi->kind == HL_KIND_VEHICLE) {
+        for (k = 0; k < (int)(sizeof(s_hlBeamSurfs) / sizeof(s_hlBeamSurfs[0])); k++) {
+            int sn = cgi.Surface_NameToNum(tiki, s_hlBeamSurfs[k]);
+
+            if (sn >= 0 && sn < MAX_MODEL_SURFACES) {
+                mi->beamSurf = sn;
+                break;
+            }
+        }
+    }
+    return mi;
+}
+
+// Once per frame (keyed on cg.time): the gates, the fog/weather test, the map-change reset.
+static void CG_HL_UpdateFrame(void)
+{
+    float    fp, lum;
+    qboolean on, gl2, glow, prot, fog, dark, rain;
+
+    if (s_hl.valid && s_hl.time == cg.time) {
+        return;
+    }
+    CG_HL_RegisterCvars();
+
+    // a new map: model handles are per registration, so the classification cache and the stamps start over
+    if (Q_stricmp(s_hl.map, cgs.mapname)) {
+        Q_strncpyz(s_hl.map, cgs.mapname, sizeof(s_hl.map));
+        memset(s_hlModels, 0, sizeof(s_hlModels));
+        memset(s_hlBeamStamp, 0, sizeof(s_hlBeamStamp));
+        memset(s_hlCoronaStamp, 0, sizeof(s_hlCoronaStamp));
+        memset(s_hlForeignStamp, 0, sizeof(s_hlForeignStamp));
+        s_hlGlowModel = 0;
+        s_hlBeamModel = 0;
+        s_hl.beamFade = 0.0f;
+        s_hl.lastShown = -1;
+        memset(s_hlSkyModelH, 0, sizeof(s_hlSkyModelH));
+        memset(s_hlSkyModelIs, 0, sizeof(s_hlSkyModelIs));
+        s_hlSkyShader = 0;
+        s_hlSkyState  = 0;
+        memset(s_hlPoolFade, 0, sizeof(s_hlPoolFade)); // HZM coop [2026-09-26] Phase S
+        memset(s_hlPoolSeen, 0, sizeof(s_hlPoolSeen));
+        memset(s_hlBeamLen, 0, sizeof(s_hlBeamLen)); // HZM coop [2026-09-26] S3a
+        memset(s_hlBeamHit, 0, sizeof(s_hlBeamHit));
+        memset(s_hlBeamTraceTime, 0, sizeof(s_hlBeamTraceTime));
+        memset(s_hlBeamSeen, 0, sizeof(s_hlBeamSeen));
+    }
+
+    on   = HZM_ResolveAutoSwitch(s_hlOn->integer, HZM_HEADLIGHTS_AUTO);
+    // HZM coop [2026-09-26] vet F3: any gl2 build ("opengl2", the gfx test's "opengl2flip") - was an exact
+    // "opengl2" compare, which switched the manager AND the searchlight sky-beam swap off in the flip arm
+    gl2  = CG_HZM_RendererIsGl2();
+    glow = HZM_ResolveAutoSwitch(s_hlLightGlow->integer, HZM_LIGHTGLOW_AUTO);
+    prot = HZM_LightRestoreMapProtected(cgs.mapname);
+
+    s_hl.active  = (on && gl2 && glow && !prot && cg.snap) ? qtrue : qfalse;
+    s_hl.beamDot = HZM_ResolveAutoSwitch(s_hlRgbGenDot->integer, HZM_RGBGENDOT_AUTO);
+    s_hlBeamStopOn = HZM_ResolveAutoSwitch(s_hlBeamStop->integer, HZM_BEAMSTOP_AUTO); // S3a
+    s_hlSkyGate  = (gl2 && s_hl.beamDot && !prot) ? qtrue : qfalse; // searchlights S2
+
+    if (s_hl.active && !s_hlGlowModel) {
+        s_hlGlowModel = cgi.R_RegisterModel("models/fx/coop_headlamp.tik");
+        s_hlBeamModel = cgi.R_RegisterModel("models/fx/coop_headbeam.tik");
+        if (!s_hlGlowModel || !cgi.R_Model_GetHandle(s_hlGlowModel) || !s_hlBeamModel
+            || !cgi.R_Model_GetHandle(s_hlBeamModel)) {
+            cgi.Printf("^~^~^ HEADLIGHTS models missing: coop_headlamp.tik=%d coop_headbeam.tik=%d - is the pk3 current?\n",
+                       s_hlGlowModel && cgi.R_Model_GetHandle(s_hlGlowModel) ? 1 : 0,
+                       s_hlBeamModel && cgi.R_Model_GetHandle(s_hlBeamModel) ? 1 : 0);
+        }
+    }
+
+    // the live fog (the mod's fog profiles override worldspawn and are re-asserted after load - vet F29.5)
+    fp  = cg.farplane_distance;
+    lum = 0.299f * cg.farplane_color[0] + 0.587f * cg.farplane_color[1] + 0.114f * cg.farplane_color[2];
+    fog  = (fp > 0.0f && fp <= 5000.0f) ? qtrue : qfalse;
+    // DARK: a night fog colour (e1l4 0.06, e2l2 0.06, e1l1 dusk 0.26) against a day one (e1l3 0.49, t2l2 0.33),
+    // or the coop day/night cycle below half light. A map with no fog and no cycle is never "dark" - no beam there.
+    dark = ((fp > 0.0f && lum <= s_hlDarkFog->value) || s_hlDaylight->value < 0.5f) ? qtrue : qfalse;
+    rain = (CG_CoopPrecipType() == PRECIP_RAIN) ? qtrue : qfalse;
+
+    s_hl.fogDist  = fp;
+    s_hl.fogLum   = lum;
+    s_hl.beamGate = (dark && (fog || rain)) ? qtrue : qfalse;
+    // HZM coop [2026-09-26] Phase S: the pool and the flares follow the DARK test alone; in daylight both are scaled
+    // by cg_hzmHeadlightsDay (0 = none - hl7 Bizerte Canal must show no ground light and no flare)
+    s_hl.dark     = dark;
+    s_hl.dayScale = dark ? 1.0f : s_hlDay->value;
+    if (s_hl.dayScale < 0.0f) {
+        s_hl.dayScale = 0.0f;
+    } else if (s_hl.dayScale > 1.0f) {
+        s_hl.dayScale = 1.0f;
+    }
+    s_hl.spots    = (s_hl.active && CG_HZM_SpotsAvailable()) ? qtrue : qfalse;
+    s_hl.flares   = (s_hl.active && CG_HZM_FlaresAvailable()) ? qtrue : qfalse;
+    s_hl.cutoff   = (fp > 0.0f && 0.6f * fp < 2500.0f) ? 0.6f * fp : 2500.0f;
+    s_hl.time     = cg.time;
+    s_hl.valid    = qtrue;
+}
+
+// HZM coop [2026-09-26] searchlights S2: is this model index one of the two sky-beam tiks? Name test only, cached per
+// model handle (the cache is cleared on a map change with the rest of this file's per-map state).
+static qboolean CG_HL_IsSkyBeam(int modelindex)
+{
+    qhandle_t   h;
+    dtiki_t    *tiki;
+    const char *name;
+
+    if (modelindex <= 0 || modelindex >= MAX_MODELS) {
+        return qfalse;
+    }
+    h = cgs.model_draw[modelindex];
+    if (!h) {
+        return qfalse;
+    }
+    if (s_hlSkyModelH[modelindex] != h) {
+        s_hlSkyModelH[modelindex]  = h;
+        s_hlSkyModelIs[modelindex] = 0;
+        tiki = cgi.R_Model_GetHandle(h);
+        name = tiki ? cgi.TIKI_Name(tiki) : NULL;
+        if (name
+            && (CG_HL_EndsWith(name, "animate/searchlight.tik") || CG_HL_EndsWith(name, "animate/searchlight_small.tik"))) {
+            s_hlSkyModelIs[modelindex] = 1;
+        }
+    }
+    return s_hlSkyModelIs[modelindex] ? qtrue : qfalse;
+}
+
+// HZM coop [2026-09-26] searchlights S2: swap in the sky-beam shader. Registered lazily, once per map, with ONE ^~^~^
+// line either way; a handle of 0 (the pk3 predates the shader) means no swap - the retail look, never a default shader.
+static void CG_HL_SkyBeamShader(refEntity_t *model)
+{
+    if (!s_hlSkyState) {
+        s_hlSkyShader = cgi.R_RegisterShader("coop_searchlight_skybeam");
+        s_hlSkyState  = s_hlSkyShader ? 1 : -1;
+        if (s_hlSkyShader) {
+            cgi.Printf("^~^~^ SEARCHLIGHT skybeam shader=coop_searchlight_skybeam map=%s\n", cgs.mapname);
+        } else {
+            cgi.Printf("^~^~^ SEARCHLIGHT skybeam shader coop_searchlight_skybeam MISSING map=%s - is the pk3 current? "
+                       "(retail look kept)\n",
+                       cgs.mapname);
+        }
+    }
+    if (s_hlSkyState > 0) {
+        model->customShader = s_hlSkyShader;
+    }
+}
+
+/*
+HZM coop [2026-09-25] headlights - the per-entity hook, called from CG_ModelAnim right after the entity's surface
+flags are copied and before it is submitted. On a managed vehicle it records whether the retail beam is showing and
+hides it (this manager draws its own, fog-only beam); on a retail corona sitting on a managed vehicle's lamp tag it
+records "lights on" for that vehicle and hides the corona. Nothing happens while the manager is inactive, so with
+cg_hzmHeadlights off every entity is submitted exactly as before.
+*/
+void CG_CoopHeadlightsModel(centity_t *cent, refEntity_t *model)
+{
+    const entityState_t *s1 = &cent->currentState;
+    const hlModelInfo_t *mi;
+    int                  i;
+
+    CG_HL_UpdateFrame();
+
+    // HZM coop [2026-09-26] searchlights S2 - deliberately BEFORE the headlight gate: it rides r_hzmRgbGenDot, not
+    // cg_hzmHeadlights (see s_hlSkyGate).
+    if (s_hlSkyGate && CG_HL_IsSkyBeam(s1->modelindex)) {
+        CG_HL_SkyBeamShader(model);
+    }
+
+    if (!s_hl.active) {
+        return;
+    }
+
+    mi = CG_HL_ModelInfo(s1->modelindex);
+    if (mi->kind == HL_KIND_VEHICLE) {
+        if (mi->beamSurf >= 0) {
+            if (!(s1->surfaces[mi->beamSurf] & MDL_SURFACE_NODRAW)) {
+                s_hlBeamStamp[s1->number] = s_hlFrame;
+            }
+            model->surfaces[mi->beamSurf] |= MDL_SURFACE_NODRAW;
+        }
+    } else if (mi->kind == HL_KIND_CORONA && s1->parent >= 0 && s1->parent < ENTITYNUM_NONE) {
+        const hlModelInfo_t *pi  = CG_HL_ModelInfo(cg_entities[s1->parent].currentState.modelindex);
+        int                  tag = s1->tag_num & TAG_MASK;
+
+        if (pi->kind == HL_KIND_VEHICLE && (tag == pi->tag[0] || tag == pi->tag[1])) {
+            s_hlCoronaStamp[s1->parent] = s_hlFrame;
+            for (i = 0; i < MAX_MODEL_SURFACES; i++) {
+                model->surfaces[i] |= MDL_SURFACE_NODRAW;
+            }
+        } else if (pi->kind == HL_KIND_VEHICLE) {
+            // a script placed its corona on another tag (e3l4 starttruck: Box01 + offsets) - that glow stays
+            // retail, so the manager must not add a second one at the lamp tags
+            s_hlForeignStamp[s1->parent] = s_hlFrame;
+        }
+    }
+}
+
+// The local player rides this vehicle: attached to it (directly or through a chain) or standing on it.
+static qboolean CG_HL_ViewerRides(int vehNum)
+{
+    int p, guard;
+
+    if (cg.predicted_player_state.groundEntityNum == vehNum) {
+        return qtrue;
+    }
+    p = cg.snap->ps.clientNum;
+    for (guard = 0; guard < 8 && p >= 0 && p < ENTITYNUM_NONE; guard++) {
+        p = cg_entities[p].currentState.parent;
+        if (p == vehNum) {
+            return qtrue;
+        }
+    }
+    return qfalse;
+}
+
+static void CG_HL_SetFrame(refEntity_t *re)
+{
+    re->frameInfo[0].index  = 0; // the tik's only animation, idle
+    re->frameInfo[0].weight = 1.0f;
+    re->frameInfo[0].time   = 0.0f;
+    re->actionWeight        = 1.0f;
+    re->entityNumber        = ENTITYNUM_NONE;
+}
+
+static void CG_HL_AddGlow(const vec3_t lamp, const vec3_t fwd)
+{
+    refEntity_t re;
+    vec3_t      toEye;
+    float       f1, inten, scale;
+    byte        c;
+
+    VectorSubtract(cg.refdef.vieworg, lamp, toEye);
+    if (VectorNormalize(toEye) <= 0.0f) {
+        return;
+    }
+    // the retail corona's own facing term (spotlight.scr f1), per viewer instead of per closest player
+    f1 = DotProduct(toEye, fwd);
+    if (f1 <= 0.0f) {
+        return;
+    }
+    inten = s_hlGlow->value * f1;
+    if (inten > 1.0f) {
+        inten = 1.0f;
+    }
+    scale = s_hlGlowSize->value * (0.3f + 0.7f * f1 * f1);
+    if (inten <= 0.004f || scale <= 0.0f) {
+        return;
+    }
+
+    memset(&re, 0, sizeof(re));
+    re.reType = RT_MODEL;
+    re.hModel = s_hlGlowModel;
+    re.tiki   = cgi.R_Model_GetHandle(s_hlGlowModel);
+    if (!re.tiki) {
+        return;
+    }
+    VectorCopy(lamp, re.origin);
+    VectorCopy(lamp, re.oldorigin);
+    VectorCopy(lamp, re.lightingOrigin);
+    // IDENTITY axis, deliberately: lightglow (gl1's maths, kept for parity) computes its pull toward the eye in
+    // WORLD space and adds it in MODEL space, which only agree when the model axis is the identity.
+    AxisClear(re.axis);
+    re.scale = scale;
+    c        = (byte)(255.0f * inten);
+    re.shaderRGBA[0] = c;
+    re.shaderRGBA[1] = c;
+    re.shaderRGBA[2] = c;
+    re.shaderRGBA[3] = 255;
+    re.radius        = 16.0f * scale;
+    CG_HL_SetFrame(&re);
+    cgi.R_AddRefEntityToScene(&re, ENTITYNUM_NONE);
+}
+
+// the beam's axes: the cone runs along model +X; pitch it down about the vehicle's left axis
+static void CG_HL_BeamAxis(const hlVehicle_t *v, vec3_t axis[3])
+{
+    float sp, cp;
+    int   i;
+
+    sp = sin(DEG2RAD(s_hlPitch->value));
+    cp = cos(DEG2RAD(s_hlPitch->value));
+    for (i = 0; i < 3; i++) {
+        axis[0][i] = cp * v->fwd[i] - sp * v->up[i];
+        axis[1][i] = v->left[i];
+        axis[2][i] = sp * v->fwd[i] + cp * v->up[i];
+    }
+}
+
+/*
+HZM coop [2026-09-26] S3a - THE FOG BEAM STOPS AT WALLS (plan_phaseS.md section 6; vet_phaseS F26).
+
+The beam's length ramp (gen_coop_headlights.py) is exactly 0 from BEAM_END 0.70 of its 600 u, so an unobstructed beam
+fades out at 420 u. When its axis meets a wall, a brush entity or another vehicle nearer than that, the whole beam is
+SCALED UNIFORMLY (refEntity.scale) so the ramp's zero lands on the hit: no bright band where the cone is cut by the
+wall's depth, and no beam running through the truck parked in front.
+
+Why uniform (vet F26 rejected scaling axis[0] alone): gl2 bakes e.scale into the vertices (tr_model.cpp RB_SkelMesh,
+`scale = tiki->load_scale * e.scale`, then VectorScale into tess.xyz) and leaves the unit normals and or->viewOrigin
+(tr_main.c R_RotateForEntity, unit axes because nonNormalizedAxes is never set) unscaled, so generic_vp CalcColor's
+rgbGen dot N.V - the soft edge - is exact at any scale. A scaled axis[0] would skew both. And a cone scaled about its
+apex keeps its half-angles: the same cone, only shorter, as bright at the lamp as before, with a steeper fall-off.
+
+What stops it: the world (CONTENTS_SOLID only - no clip brushes, no fences, no triggers), brush entities (doors,
+script_objects, the vehicle collision hulls fgame's VehicleCollisionEntity keeps at each vehicle's origin: solid or
+weapon-clip brushes, which is what a bullet stops on) and other vehicles' boxes. Never bodies - a soldier walking
+through the beam must not chop it. The lamp's own vehicle, its own hull (a brush entity at its origin) and anything a
+trace STARTS inside are skipped. One trace per lamp along the beam axis, at most every HL_BEAM_TRACE_MS per vehicle,
+nearest HL_BEAM_TRACE_MAX vehicles per frame; the length eases toward the hit (fast in, slow out) so a post passing
+the lamp never pops the beam. Closer than HL_BEAM_MIN_SCALE of the full length it fades out instead of shrinking.
+Off (cg_hzmHeadlightsBeamStop 0): scale 1, fade 1, no trace - the refEntity is exactly the pre-S3a one.
+*/
+#define HL_BEAM_VISIBLE   420.0f // == BEAM_END (0.70) x BEAM_LEN (600) in docs/tools/gen_coop_headlights.py - change BOTH
+#define HL_BEAM_MIN_SCALE 0.15f  // below this (63 u) the beam fades out instead of shrinking further
+#define HL_BEAM_TRACE_MS  50     // re-trace a vehicle's lamps at most this often (20 Hz); eased in between
+#define HL_BEAM_TRACE_MAX 8      // vehicles traced per frame, nearest first (the rest keep their last hit)
+#define HL_BEAM_SHRINK    1500.0f // u/s the visible length closes on a nearer hit
+#define HL_BEAM_GROW      600.0f  // u/s it opens again once the obstacle is gone
+
+// distance (u) along dir from start to the first thing that should stop the beam, HL_BEAM_VISIBLE if nothing does
+static float CG_HL_BeamHit(const vec3_t start, const vec3_t dir, int vehNum, const vec3_t vehOrigin)
+{
+    trace_t    tr;
+    vec3_t     end, bmins, bmaxs, angles;
+    centity_t *list[32];
+    float      best;
+    int        i, n;
+
+    VectorMA(start, HL_BEAM_VISIBLE, dir, end);
+
+    // the world
+    cgi.CM_BoxTrace(&tr, start, end, vec3_origin, vec3_origin, 0, CONTENTS_SOLID, qfalse);
+    if (tr.startsolid || tr.allsolid) {
+        return 0.0f; // the lamp is inside a wall
+    }
+    best = tr.fraction;
+
+    // brush entities whose bounds touch the segment's box (the cg_marks / cg_ragdoll helper)
+    for (i = 0; i < 3; i++) {
+        bmins[i] = (start[i] < end[i] ? start[i] : end[i]) - 1.0f;
+        bmaxs[i] = (start[i] > end[i] ? start[i] : end[i]) + 1.0f;
+    }
+    n = CG_GetBrushEntitiesInBounds(ARRAY_LEN(list), list, bmins, bmaxs);
+    for (i = 0; i < n; i++) {
+        const centity_t     *c  = list[i];
+        const entityState_t *es = &c->currentState;
+        clipHandle_t         cm;
+
+        if (es->number == vehNum || es->parent == vehNum || (es->renderfx & RF_DONTDRAW)) {
+            continue;
+        }
+        if (Distance(c->lerpOrigin, vehOrigin) < 24.0f) {
+            continue; // the lamp's own vehicle's collision hull (VehicleCollisionEntity sits at the vehicle origin)
+        }
+        cm = cgi.CM_InlineModel(es->modelindex);
+        if (!cm) {
+            continue;
+        }
+        if (es->eFlags & EF_LINKANGLES) {
+            VectorCopy(c->lerpAngles, angles);
+        } else {
+            VectorClear(angles);
+        }
+        cgi.CM_TransformedBoxTrace(&tr, start, end, vec3_origin, vec3_origin, cm, CONTENTS_SOLID | CONTENTS_WEAPONCLIP,
+                                   c->lerpOrigin, angles, qfalse);
+        if (!tr.startsolid && !tr.allsolid && tr.fraction < best) {
+            best = tr.fraction;
+        }
+    }
+
+    // other vehicles with a plain collision box (no hull entity), lit or not
+    for (i = 0; i < cg.snap->numEntities; i++) {
+        const centity_t     *c  = &cg_entities[cg.snap->entities[i].number];
+        const entityState_t *es = &c->currentState;
+        clipHandle_t         cm;
+
+        if (es->number == vehNum || !es->solid || es->solid == SOLID_BMODEL || (es->renderfx & RF_DONTDRAW)) {
+            continue;
+        }
+        if (CG_HL_ModelInfo(es->modelindex)->kind != HL_KIND_VEHICLE
+            || Distance(c->lerpOrigin, start) > HL_BEAM_VISIBLE + 512.0f) {
+            continue;
+        }
+        IntegerToBoundingBox(es->solid, bmins, bmaxs);
+        cm = cgi.CM_TempBoxModel(bmins, bmaxs, CONTENTS_BBOX);
+        if (es->eFlags & EF_LINKANGLES) {
+            VectorCopy(c->lerpAngles, angles);
+        } else {
+            VectorClear(angles);
+        }
+        cgi.CM_TransformedBoxTrace(&tr, start, end, vec3_origin, vec3_origin, cm, CONTENTS_BBOX, c->lerpOrigin, angles,
+                                   qfalse);
+        if (!tr.startsolid && !tr.allsolid && tr.fraction < best) {
+            best = tr.fraction;
+        }
+    }
+
+    return best * HL_BEAM_VISIBLE;
+}
+
+// Per lamp: the uniform scale that puts the beam's ramp zero on the hit, and a fade for a hit nearer than the
+// shortest beam. *nTraced counts the vehicles traced this frame (the budget).
+static void CG_HL_BeamStop(const hlVehicle_t *v, const vec3_t dir, int *nTraced, float scale[2], float fade[2])
+{
+    const int      num      = v->num;
+    const float    minLen   = HL_BEAM_MIN_SCALE * HL_BEAM_VISIBLE;
+    const float    dt       = cg.frametime * 0.001f;
+    const qboolean cont     = (s_hlBeamSeen[num] == s_hlFrame - 1) ? qtrue : qfalse; // placed last frame: ease
+    qboolean       due;
+    int            k;
+
+    s_hlBeamSeen[num] = s_hlFrame;
+    due = (!cont || cg.time - s_hlBeamTraceTime[num] >= HL_BEAM_TRACE_MS || cg.time < s_hlBeamTraceTime[num])
+            ? qtrue
+            : qfalse;
+    if (due && *nTraced < HL_BEAM_TRACE_MAX) {
+        for (k = 0; k < 2; k++) {
+            s_hlBeamHit[num][k] = CG_HL_BeamHit(v->lamp[k], dir, num, cg_entities[num].lerpOrigin);
+        }
+        s_hlBeamTraceTime[num] = cg.time;
+        (*nTraced)++;
+    } else if (!cont) {
+        // new this frame and over the budget: full length until its turn comes (a frame or two)
+        s_hlBeamHit[num][0] = HL_BEAM_VISIBLE;
+        s_hlBeamHit[num][1] = HL_BEAM_VISIBLE;
+        s_hlBeamTraceTime[num] = 0;
+    }
+
+    for (k = 0; k < 2; k++) {
+        float  target = s_hlBeamHit[num][k];
+        float *len    = &s_hlBeamLen[num][k];
+
+        if (!cont) {
+            *len = target;
+        } else if (*len > target) {
+            *len -= HL_BEAM_SHRINK * dt;
+            if (*len < target) {
+                *len = target;
+            }
+        } else if (*len < target) {
+            *len += HL_BEAM_GROW * dt;
+            if (*len > target) {
+                *len = target;
+            }
+        }
+        scale[k] = *len / HL_BEAM_VISIBLE;
+        if (scale[k] < HL_BEAM_MIN_SCALE) {
+            scale[k] = HL_BEAM_MIN_SCALE;
+        } else if (scale[k] > 1.0f) {
+            scale[k] = 1.0f;
+        }
+        // gone at half the shortest beam (a lamp against a wall), full at the shortest beam
+        fade[k] = (*len - 0.5f * minLen) / (0.5f * minLen);
+        if (fade[k] < 0.0f) {
+            fade[k] = 0.0f;
+        } else if (fade[k] > 1.0f) {
+            fade[k] = 1.0f;
+        }
+    }
+}
+
+static void CG_HL_AddBeam(const vec3_t lamp, const hlVehicle_t *v, float alpha, float scale)
+{
+    refEntity_t re;
+
+    memset(&re, 0, sizeof(re));
+    re.reType = RT_MODEL;
+    re.hModel = s_hlBeamModel;
+    re.tiki   = cgi.R_Model_GetHandle(s_hlBeamModel);
+    if (!re.tiki) {
+        return;
+    }
+    CG_HL_BeamAxis(v, re.axis);
+    VectorCopy(lamp, re.origin);
+    VectorCopy(lamp, re.oldorigin);
+    VectorCopy(lamp, re.lightingOrigin);
+    re.scale         = scale; // S3a: 1.0 unless the beam stops at a wall (uniform - see CG_HL_BeamStop)
+    re.shaderRGBA[0] = 255;
+    re.shaderRGBA[1] = 255;
+    re.shaderRGBA[2] = 255;
+    re.shaderRGBA[3] = (byte)(255.0f * alpha);
+    re.radius        = 640.0f * scale; // the mesh's bounding radius is 621 u (gen_coop_headlights.py)
+    CG_HL_SetFrame(&re);
+    cgi.R_AddRefEntityToScene(&re, ENTITYNUM_NONE);
+}
+
+void CG_CoopHeadlights(void)
+{
+    hlVehicle_t veh[HL_MAX_VEHICLES];
+    int         order[HL_MAX_VEHICLES];
+    int         nVeh = 0, nLights = 0, nBeams = 0, nSet = 0, nFlares = 0;
+    int         n, i, j, k, maxLights;
+    int         nBeamTraced = 0;           // HZM coop [2026-09-26] S3a: vehicles whose lamps were traced this frame
+    float       beamShortest = HL_BEAM_VISIBLE; // S3a: the shortest beam placed this frame, u (debug line)
+    float       col[3], beamTarget, beamAlpha, poolStep;
+
+    CG_HL_UpdateFrame();
+
+    // the beam's weather fade eases even while inactive, so re-enabling never starts it at full strength
+    beamTarget = (s_hl.active && s_hl.beamGate) ? 1.0f : 0.0f;
+    if (s_hl.beamFade < beamTarget) {
+        s_hl.beamFade += cg.frametime / 1500.0f;
+        if (s_hl.beamFade > beamTarget) {
+            s_hl.beamFade = beamTarget;
+        }
+    } else if (s_hl.beamFade > beamTarget) {
+        s_hl.beamFade -= cg.frametime / 1500.0f;
+        if (s_hl.beamFade < beamTarget) {
+            s_hl.beamFade = beamTarget;
+        }
+    }
+
+    // one status line per change of state, machine-parseable, so a playtest log shows what the manager decided.
+    // Silent for a player who never touched it while the feature is off by default (auto and inactive).
+    {
+        int shown = (s_hl.active ? 1 : 0) | (s_hl.beamGate ? 2 : 0) | (s_hl.beamDot ? 4 : 0) | (s_hl.spots ? 8 : 0)
+                  | (s_hl.flares ? 16 : 0) | (s_hl.dark ? 32 : 0) | (s_hlBeamStopOn ? 64 : 0);
+
+        if (s_hlOn && shown != s_hl.lastShown && (s_hl.active || s_hlOn->integer >= 0)) {
+            s_hl.lastShown = shown;
+            cgi.Printf("^~^~^ HEADLIGHTS active=%d beamGate=%d beamDot=%d spot=%d flares=%d dark=%d beamStop=%d map=%s "
+                       "fog=%.0f fogLum=%.3f cutoff=%.0f proto=%d/%d (cg_hzmHeadlights %s, r_hzmLightGlow %s, r_hzmSpot %s, "
+                       "r_hzmFlares %s, cl_renderer %s)\n",
+                       s_hl.active ? 1 : 0, s_hl.beamGate ? 1 : 0, s_hl.beamDot ? 1 : 0, s_hl.spots ? 1 : 0,
+                       s_hl.flares ? 1 : 0, s_hl.dark ? 1 : 0, s_hlBeamStopOn ? 1 : 0, cgs.mapname, s_hl.fogDist,
+                       s_hl.fogLum, s_hl.cutoff,
+                       CG_HZM_RendererProtocol(), HZM_SPOT_PROTOCOL, s_hlOn->string, s_hlLightGlow->string,
+                       cgi.Cvar_Get("r_hzmSpot", "-1", 0)->string, cgi.Cvar_Get("r_hzmFlares", "-1", 0)->string,
+                       s_hlRenderer->string);
+        }
+    }
+
+    if (!s_hl.active || !cg.snap) {
+        // HZM coop [2026-09-26] Phase S: switching back on must fade the pools IN, never pop them at full
+        if (s_hlPoolLive) {
+            memset(s_hlPoolFade, 0, sizeof(s_hlPoolFade));
+            s_hlPoolLive = qfalse;
+        }
+        s_hlFrame++;
+        return;
+    }
+
+    // 1. the lit vehicles this frame, with their lamps in world space
+    for (n = 0; n < cg.snap->numEntities && nVeh < HL_MAX_VEHICLES; n++) {
+        int                  num  = cg.snap->entities[n].number;
+        centity_t           *cent = &cg_entities[num];
+        const hlModelInfo_t *mi   = CG_HL_ModelInfo(cent->currentState.modelindex);
+        refEntity_t         *ref;
+        hlVehicle_t         *v;
+        vec3_t               d;
+
+        if (mi->kind != HL_KIND_VEHICLE) {
+            continue;
+        }
+        if (s_hlBeamStamp[num] != s_hlFrame && s_hlCoronaStamp[num] != s_hlFrame) {
+            continue; // lights off
+        }
+        if (cent->currentState.renderfx & RF_DONTDRAW) {
+            continue; // hidden by script: no lit patch where there is no truck
+        }
+        ref = cgi.R_GetRenderEntity(num);
+        if (!ref || !ref->tiki) {
+            continue; // not submitted this frame
+        }
+
+        v      = &veh[nVeh];
+        v->num = num;
+        for (k = 0; k < 2; k++) {
+            orientation_t or = cgi.TIKI_Orientation(ref, mi->tag[k]);
+
+            VectorCopy(ref->origin, v->lamp[k]);
+            for (i = 0; i < 3; i++) {
+                VectorMA(v->lamp[k], or.origin[i], ref->axis[i], v->lamp[k]);
+            }
+        }
+        VectorAdd(v->lamp[0], v->lamp[1], v->mid);
+        VectorScale(v->mid, 0.5f, v->mid);
+        VectorCopy(ref->axis[0], v->fwd);
+        VectorCopy(ref->axis[1], v->left);
+        VectorCopy(ref->axis[2], v->up);
+        VectorNormalize(v->fwd);
+        VectorNormalize(v->left);
+        VectorNormalize(v->up);
+        // which way is the front? The lamps are on it (model conventions differ; the tag axes are unknown)
+        VectorSubtract(v->mid, ref->origin, d);
+        if (DotProduct(d, v->fwd) < 0.0f) {
+            VectorNegate(v->fwd, v->fwd);
+            VectorNegate(v->left, v->left);
+        }
+        VectorSubtract(v->mid, cg.refdef.vieworg, d);
+        v->dist = VectorLength(d);
+        nVeh++;
+    }
+
+    // 2. nearest first (insertion sort - a handful of vehicles)
+    for (i = 0; i < nVeh; i++) {
+        order[i] = i;
+    }
+    for (i = 1; i < nVeh; i++) {
+        int o = order[i];
+
+        for (j = i - 1; j >= 0 && veh[order[j]].dist > veh[o].dist; j--) {
+            order[j + 1] = order[j];
+        }
+        order[j + 1] = o;
+    }
+
+    col[0] = 0.6f;
+    col[1] = 0.46f;
+    col[2] = 0.3f;
+    sscanf(s_hlColor->string, "%f %f %f", &col[0], &col[1], &col[2]);
+    maxLights = s_hlMax->integer;
+    beamAlpha = s_hlBeam->value * s_hl.beamFade;
+    if (beamAlpha > 1.0f) {
+        beamAlpha = 1.0f;
+    }
+
+    // 3. glow per lamp; ONE pool per vehicle for the nearest N (a Phase S spot cone, or the Phase H omni fallback),
+    //    cross-faded as that set changes; lamp flares; beams in fog/rain
+    poolStep = (s_hlPoolFadeTime->value > 0.01f) ? cg.frametime / (1000.0f * s_hlPoolFadeTime->value) : 1.0f;
+    for (i = 0; i < nVeh; i++) {
+        const hlVehicle_t *v     = &veh[order[i]];
+        float             *pf    = &s_hlPoolFade[v->num];
+        qboolean           rides = CG_HL_ViewerRides(v->num);
+        qboolean           inSet;
+
+        s_hlPoolSeen[v->num] = s_hlFrame;
+        s_hlPoolLive         = qtrue;
+
+        if (s_hlForeignStamp[v->num] != s_hlFrame) {
+            for (k = 0; k < 2; k++) {
+                CG_HL_AddGlow(v->lamp[k], v->fwd);
+            }
+        }
+
+        // the pool: in the nearest-N set -> fade in, out of it -> fade out (vet F15), never beyond the cutoff
+        inSet = (nSet < maxLights && v->dist < s_hl.cutoff) ? qtrue : qfalse;
+        if (inSet) {
+            nSet++;
+        }
+        if (inSet) {
+            *pf += poolStep;
+            if (*pf > 1.0f) {
+                *pf = 1.0f;
+            }
+        } else {
+            *pf -= poolStep;
+            if (*pf < 0.0f) {
+                *pf = 0.0f;
+            }
+        }
+        if (*pf > 0.004f && v->dist < s_hl.cutoff && s_hl.dayScale > 0.0f) {
+            // fade over the last 20% of the range instead of switching off at the edge (the hard fog cutoff, F12)
+            float fade = (s_hl.cutoff - v->dist) / (0.2f * s_hl.cutoff);
+
+            if (fade > 1.0f) {
+                fade = 1.0f;
+            }
+            fade *= *pf * s_hl.dayScale;
+            if (fade > 0.0f && s_hl.spots) {
+                // HZM coop [2026-09-26] PHASE S: the spot cone, through the shared facility (cg_hzmspot.c)
+                hzmSpotReq_t req;
+                float        sp = sin(DEG2RAD(s_hlSpotPitch->value));
+                float        cp = cos(DEG2RAD(s_hlSpotPitch->value));
+
+                memset(&req, 0, sizeof(req));
+                VectorMA(v->mid, s_hlSpotUp->value, v->up, req.origin);
+                for (k = 0; k < 3; k++) {
+                    req.axis[k] = cp * v->fwd[k] - sp * v->up[k];
+                }
+                VectorNormalize(req.axis);
+                req.range    = s_hlSpotRange->value;
+                req.innerDeg = s_hlSpotInner->value;
+                req.outerDeg = s_hlSpotOuter->value;
+                VectorScale(col, fade, req.color);
+                req.flags    = HZM_SPOTREQ_NOSHADOW | HZM_SPOTREQ_FOGGED | (inSet ? 0 : HZM_SPOTREQ_FADEOUT);
+                req.owner    = v->num;
+                req.priority = v->dist;
+                if (CG_HZM_SpotRequest(&req)) {
+                    nLights++;
+                }
+            } else if (fade > 0.0f && s_hlRadius->value > 0.0f) {
+                // the Phase H omni pool: the fallback when the renderer does not speak this cgame's protocol
+                vec3_t org;
+
+                VectorMA(v->mid, s_hlFwd->value, v->fwd, org);
+                VectorMA(org, s_hlUp->value, v->up, org);
+                cgi.R_AddLightToScene(org, s_hlRadius->value, col[0] * fade, col[1] * fade, col[2] * fade,
+                                      additive | hzm_dlight_noshadow | hzm_dlight_edgefade);
+                nLights++;
+            }
+        }
+
+        // HZM coop [2026-09-26] PHASE S lamp flares: per lamp, dark (or cg_hzmHeadlightsDay), never your own vehicle,
+        // never where the retail corona was kept (a foreign tag)
+        if (s_hl.flares && s_hlFlare->value > 0.0f && s_hl.dayScale > 0.0f && !rides
+            && s_hlForeignStamp[v->num] != s_hlFrame) {
+            for (k = 0; k < 2; k++) {
+                hzmFlareReq_t fr;
+
+                memset(&fr, 0, sizeof(fr));
+                fr.id = HZM_FlareIdPack(v->num, k);
+                VectorCopy(v->lamp[k], fr.origin);
+                VectorCopy(v->fwd, fr.axis);
+                fr.brightness = s_hlFlare->value * s_hl.dayScale;
+                fr.cls        = HZM_FLARE_CLASS_HEADLIGHT;
+                if (CG_HZM_FlareRequest(&fr)) {
+                    nFlares++;
+                }
+            }
+        }
+
+        if (beamAlpha > 0.004f && s_hl.beamDot && (s_hl.fogDist <= 0.0f || v->dist < s_hl.fogDist + 600.0f)
+            && !rides) {
+            vec3_t d;
+
+            // in the cab, on the bed, or right behind the lamps: the beam would sit in your face
+            VectorSubtract(cg.refdef.vieworg, v->mid, d);
+            if (!(DotProduct(d, v->fwd) < 0.0f && VectorLength(d) < 320.0f)) {
+                // HZM coop [2026-09-26] S3a: shortened to end on the first wall / brush entity / vehicle it meets
+                float bScale[2] = {1.0f, 1.0f}, bFade[2] = {1.0f, 1.0f};
+
+                if (s_hlBeamStopOn) {
+                    vec3_t bAxis[3];
+
+                    CG_HL_BeamAxis(v, bAxis);
+                    CG_HL_BeamStop(v, bAxis[0], &nBeamTraced, bScale, bFade);
+                }
+                for (k = 0; k < 2; k++) {
+                    if (bFade[k] > 0.0f) {
+                        CG_HL_AddBeam(v->lamp[k], v, beamAlpha * bFade[k], bScale[k]);
+                    }
+                    if (s_hlBeamStopOn && s_hlBeamLen[v->num][k] < beamShortest) {
+                        beamShortest = s_hlBeamLen[v->num][k];
+                    }
+                }
+                nBeams++;
+            }
+        }
+    }
+
+    // a vehicle whose lamps went out (or that left the snapshot) starts from 0 when it lights up again - no pop
+    for (n = 0; n < MAX_GENTITIES; n++) {
+        if (s_hlPoolFade[n] > 0.0f && s_hlPoolSeen[n] != s_hlFrame) {
+            s_hlPoolFade[n] = 0.0f;
+        }
+    }
+
+    if (s_hlDebug->integer) {
+        static int s_last = 0;
+
+        if (cg.time - s_last > 1000 || cg.time < s_last) {
+            int sentSpots = 0, sentFlares = 0;
+
+            s_last = cg.time;
+            CG_HZM_LastCounts(&sentSpots, &sentFlares); // the previous flush (this frame's runs after us)
+            cgi.Printf("^~^~^ HEADLIGHTS lit=%d lights=%d beams=%d flareReq=%d beamFade=%.2f nearest=%.0f spot=%d "
+                       "sentSpots=%d sentFlares=%d dayScale=%.2f beamStop=%d traced=%d shortest=%.0f\n", nVeh, nLights,
+                       nBeams, nFlares, s_hl.beamFade, nVeh ? veh[order[0]].dist : -1.0f, s_hl.spots ? 1 : 0, sentSpots,
+                       sentFlares, s_hl.dayScale, s_hlBeamStopOn ? 1 : 0, nBeamTraced, beamShortest);
+        }
+    }
+
+    s_hlFrame++;
+}
+
 // HZM coop [user 2026-09-01] LENS SPLASH - see the block in CG_CalcFov that consumes this.
 //
 // One float, raised by whoever saw the splash and decayed here. Deliberately NOT a cvar internally:
@@ -7858,6 +8857,8 @@ void CG_DrawActiveFrame(int serverTime, int frameTime, stereoFrame_t stereoView,
     CG_AddBulletImpacts();
     CG_AddBeams();
     CG_AddCoopDynamicLights(); // HZM coop - transient muzzle/explosion dlights
+    CG_CoopHeadlights();       // HZM coop [2026-09-25] vehicle headlights (Phase H) - AFTER the muzzle lights (vet F8)
+    CG_HZM_FlushSpots();       // HZM coop [2026-09-26] Phase S: emit every manager's spots + flares (cg_hzmspot.c)
     CG_UpdateEnvReverb();       // HZM coop - auto indoor/outdoor reverb (where the map sets none)
 
     if (cg_acidtrip->integer) {

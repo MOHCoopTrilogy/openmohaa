@@ -95,6 +95,11 @@ public:
 	bool m_bHadPlayerOwner;
     SafePtr<Entity> m_pOwnerPtr;
 
+    // HZM [bot room-clear step 1] grenade telemetry: level.time the posted explode event fires, and the bot throw
+    // id (0 = not a bot grenade). Set by ProjectileAttack / HeavyAttack / Weapon::OnOverCooked. Not archived.
+    float m_fExplodeAt;
+    int   m_iBotNadeId;
+
 	Projectile();
 	void Archive( Archiver &arc ) override;
 	virtual void Touch( Event *ev );
@@ -370,3 +375,9 @@ Entity* FindDefusableObject(const Vector& dir, Entity* owner, float maxdist);
 void DefuseObject(const Vector& dir, Entity* owner, float maxdist);
 qboolean CanPlaceLandmine(const Vector& origin, Entity* owner);
 void PlaceLandmine(const Vector& origin, Entity* owner, const str& model, Weapon* weap);
+
+// HZM [bot room-clear step 1] bot grenade telemetry hooks (playerbot.cpp). Both are no-ops unless bot_probe is set and
+// the owner is a bot; g_iBotNadeDetId is the throw id of the grenade whose ExplosionAttack is running (0 otherwise).
+void       BotNadeOnSpawn(Projectile *proj, Entity *owner, Weapon *weap, float fraction, float life, const char *how);
+void       BotNadeOnExplode(Projectile *proj);
+extern int g_iBotNadeDetId;

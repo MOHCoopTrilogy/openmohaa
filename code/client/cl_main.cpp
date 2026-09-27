@@ -105,6 +105,12 @@ cvar_t	*j_forward_axis;
 cvar_t	*j_side_axis;
 cvar_t	*j_up_axis;
 
+// [controller feel] analog LOOK tuning (right stick). Applied in CL_JoystickMove; neutral defaults = the
+// old linear behaviour, so a keyboard player is unaffected and a controller player can dial these in.
+cvar_t	*joy_response;        // look response-curve exponent (1 = linear, higher = finer near-centre aim)
+cvar_t	*joy_outerThreshold;  // outer dead-zone: saturate to full past (1 - this)
+cvar_t	*coop_padLookScale;   // one master look-sensitivity multiplier for the sticks
+
 cvar_t	*cl_activeAction;
 
 cvar_t	*cl_motdString;
@@ -817,6 +823,7 @@ void CL_ShutdownAll(qboolean shutdownRef) {
 	cls.uiStarted = qfalse;
 	cls.cgameStarted = qfalse;
 	cls.rendererRegistered = qfalse;
+	cls.rendererReady = qfalse;	// HZM bug-2981: re.Shutdown ran - not usable until the next BeginRegistration
 }
 
 /*
@@ -3036,6 +3043,7 @@ CL_ShutdownRef
 ============
 */
 void CL_ShutdownRef( void ) {
+	cls.rendererReady = qfalse;	// HZM bug-2981
 	if ( re.Shutdown ) {
 		re.Shutdown( qtrue );
 	}
@@ -3075,6 +3083,7 @@ void CL_StartHunkUsers( qboolean rendererOnly ) {
 
 	if( !cls.cgameStarted ) {
 		if( clc.state >= CA_LOADING && clc.state != CA_CINEMATIC ) {
+			UI_LoadScreenPrimeMaterials(); // HZM bug-3015: register the loading menu's materials, no draw (cl_ui.cpp)
 			CL_InitCGame();
 		}
 	}
@@ -3317,7 +3326,10 @@ CL_IsRendererLoaded
 ============
 */
 qboolean CL_IsRendererLoaded(void) {
-	return re.Shutdown != NULL;
+	// HZM bug-2981: 'loaded' means usable. A freshly reloaded renderer DLL (vid_restart) has its exports but has not
+	// run R_Init until re.BeginRegistration returns - a UI font loaded in that window got a NULL shader (bug-1181
+	// guard) and, with the sequence already bumped, was never reloaded: every label/console line drew as nothing.
+	return ( re.Shutdown != NULL && cls.rendererReady ) ? qtrue : qfalse;
 }
 
 /*
@@ -3325,6 +3337,7 @@ qboolean CL_IsRendererLoaded(void) {
 CL_InitRef
 ============
 */
+void CL_FillUIImports( void ); // cl_ui.cpp - bug-2975
 void CL_InitRef( void ) {
 	refimport_t	ri;
 	refexport_t	*ret;
@@ -3488,6 +3501,15 @@ void CL_InitRef( void ) {
 	}
 
 	re = *ret;
+
+	// HZM bug-2975: re-point the UI's renderer imports (uii.Rend_*) at the NEW renderer DLL right here. They were
+	// refreshed only by UI_ResolutionChange (CL_StartHunkUsers), which runs AFTER re.BeginRegistration - and the UI
+	// calls through them in between (UIFont::CheckRefreshFont -> uii.Rend_LoadFont). On a vid_restart that call went
+	// into the UNLOADED previous renderer: harmless only while Windows happened to map the new DLL at the same address,
+	// an access violation at R_LoadFont+0 in "renderer_opengl2flip.dll_unloaded" otherwise (2026-09-26 AA test).
+	// Copying function pointers is safe before R_Init; the functions themselves already guard an unready renderer
+	// (bug-1181/1145).
+	CL_FillUIImports();
 
 	// unpause so the cgame definately gets a snapshot and renders a frame
 	Cvar_Set( "cl_paused", "0" );
@@ -4036,6 +4058,30 @@ void CL_PinToggle_f( void )
 }
 
 /*
+==================
+CL_CoopDiscord_f
+
+HZM coop [user 2026-09-25] "a discord icon that actually lets you click that will take you to join the discord
+server". The invite is FIXED here on purpose - no argument, no cvar: a server can stufftext any console command
+to a client, and a url parameter would let it open any page on a player's machine. Rate-limited so a stuffed
+loop cannot spam browser tabs. The invite is the one README.md links.
+==================
+*/
+static void CL_CoopDiscord_f( void )
+{
+    static int s_lastMs = -100000;
+    const int  now      = Sys_Milliseconds();
+
+    if ( now - s_lastMs < 3000 ) {
+        return;
+    }
+    s_lastMs = now;
+    if ( !Sys_OpenURL( "https://discord.gg/cVjMYPBFZ" ) ) {
+        Com_Printf( "coop_discord: could not open a browser - the invite is https://discord.gg/cVjMYPBFZ\n" );
+    }
+}
+
+/*
 ====================
 CL_SendReport_f
 
@@ -4054,14 +4100,17 @@ void CL_SendReport_f( void )
 	char        path[MAX_OSPATH];
 	FILE       *f;
 
-	if ( !webhook || !webhook[0] ) {
-		Com_Printf( "coop report: no webhook configured (coop_reportWebhook is empty)\n" );
-		Cvar_Set( "coop_reportResult", "0" );
-		return;
-	}
+	// [bug-2907] each failure gets its OWN result code (coop_report.urc has a line per code). All three
+	// used to set "0", which the menu shows as "ENTER A DESCRIPTION FIRST" - so a player with a missing
+	// webhook was told to type a description they had already typed. Description is checked first.
 	if ( !text || !text[0] ) {
 		Com_Printf( "coop report: type a description first\n" );
 		Cvar_Set( "coop_reportResult", "0" );
+		return;
+	}
+	if ( !webhook || !webhook[0] ) {
+		Com_Printf( "coop report: no webhook configured (coop_reportWebhook is empty)\n" );
+		Cvar_Set( "coop_reportResult", "2" );
 		return;
 	}
 
@@ -4077,7 +4126,7 @@ void CL_SendReport_f( void )
 	f = fopen( path, "wb" );
 	if ( !f ) {
 		Com_Printf( "coop report: cannot write %s\n", path );
-		Cvar_Set( "coop_reportResult", "0" );
+		Cvar_Set( "coop_reportResult", "3" );
 		return;
 	}
 	fwrite( payload, 1, strlen( payload ), f );
@@ -4185,6 +4234,7 @@ void CL_Init( void ) {
 	Cvar_Get("coop_reportText", "", 0);
 	Cvar_Get("coop_reportResult", "", 0);
 	Cmd_AddCommand("coop_sendreport", CL_SendReport_f);
+	Cmd_AddCommand("coop_discord", CL_CoopDiscord_f); // HZM coop - main-menu Discord button
 
 	// HZM coop [user 08-06] bug-1503 - disconnected-capable Service Record challenge pinning.
 	// Registered unconditionally (like coop_sendreport above) so it works from the cold main menu.
@@ -4213,6 +4263,47 @@ void CL_Init( void ) {
 		Cvar_Get("coop_pinCount", va("%d/%d", initCount, COOP_PIN_MAX), 0);
 	}
 	Cvar_Get("coop_pinResult", "", 0);
+
+	// HZM-MP-BEGIN(mp_persist_userinfo) [2026-09-20 bug-2749]
+	// MP progression / kit / cosmetic carry cvars MUST be registered here at CLIENT LAUNCH (CL_Init),
+	// CVAR_ARCHIVE|CVAR_USERINFO - exactly like coop_pin1..5 above and dm_playermodel below. They were
+	// previously registered only in cgame CG_Init (cg_main.c), which runs at CONNECT time - too late to be
+	// userinfo-flagged when the client first builds its userinfo string, so the server's ensureLoaded read
+	// an EMPTY coop_mpProgBlob on connect (MPPROG load VERIFIED=0 ever) and progression + armory weapon
+	// memory + cosmetics all silently reset every session. Registering at launch means the archived value
+	// is in userinfo from the very first connect and the server reads it back with info_valueforkey.
+	{
+		int i;
+		static const char *const mpUserinfoCvars[] = {
+			"coop_mpProgBlob",
+			"coop_mpa_k1", "coop_mpa_k2", "coop_mpa_k3", "coop_mpa_k4", "coop_mpa_k5", "coop_mpa_k6",
+			"coop_mpx_k1", "coop_mpx_k2", "coop_mpx_k3", "coop_mpx_k4", "coop_mpx_k5", "coop_mpx_k6",
+			"coop_mpa_cosSkin", "coop_mpa_cosHelm", "coop_mpa_cosGlove",
+			"coop_mpx_cosSkin", "coop_mpx_cosHelm", "coop_mpx_cosGlove"
+		};
+		for (i = 0; i < (int)(sizeof(mpUserinfoCvars) / sizeof(mpUserinfoCvars[0])); i++) {
+			Cvar_Get(mpUserinfoCvars[i], "", CVAR_ARCHIVE | CVAR_USERINFO);
+		}
+	}
+	// HZM-MP-END(mp_persist_userinfo)
+
+	// HZM-MP-BEGIN(mp_preview_defaults) [2026-09-20 bug-2777]
+	// The MP armory/appearance 3D mannequin reads coop_mp<side>_Char (body) + coop_mp<side>_Helm (head
+	// attach). A cosmetic pick now setas these (persist), so on re-open the preview shows the SAVED skin/
+	// helmet instead of always reverting to the default body (the "it looked reset" polish item). For a
+	// player who has NEVER picked a cosmetic there is no archived value, so register a sensible DEFAULT
+	// here at launch: Cvar_Get applies a default only to a cvar that does not yet exist (see the pin-shader
+	// note below), so a genuine saved pick on disk is preserved and only a fresh profile gets the default.
+	// CVAR_ARCHIVE, NOT userinfo - these are display-only preview paths; the server dresses the real spawn
+	// from the carried cosSkin/cosHelm IDS, never from these model paths. Defaults MIRROR gen_mp_armory.py
+	// (default_body / nohat_of / SKIN_STD) - keep in sync if the default bodies change (first-open preview
+	// only; a stale value here can never affect what actually spawns).
+	Cvar_Get("coop_mpa_Char", "models/player/american_ranger_nohat.tik", CVAR_ARCHIVE);
+	Cvar_Get("coop_mpa_Helm", "models/coop_helmets/coop_std_us_helmet_private_net.tik", CVAR_ARCHIVE);
+	Cvar_Get("coop_mpx_Char", "models/player/german_wehrmacht_soldier_nohat.tik", CVAR_ARCHIVE);
+	Cvar_Get("coop_mpx_Helm", "models/coop_helmets/coop_helmet_ger_helmet.tik", CVAR_ARCHIVE);
+	// HZM-MP-END(mp_preview_defaults)
+
 	Cmd_AddCommand("coop_pintoggle", CL_PinToggle_f);
 	Cmd_AddCommand("coop_srsync", CL_SyncSR_f);
 
@@ -4223,7 +4314,7 @@ void CL_Init( void ) {
 	// already on disk is preserved.
 
 	cl_altbindings = Cvar_Get( "cl_altbindings", "0", CVAR_ARCHIVE );
-	cl_ctrlbindings = Cvar_Get( "cl_altbindings", "0", CVAR_ARCHIVE );
+	cl_ctrlbindings = Cvar_Get( "cl_ctrlbindings", "0", CVAR_ARCHIVE );   // [fix] was registering "cl_altbindings" twice (copy-paste typo)
 
 	cl_conXOffset = Cvar_Get ("cl_conXOffset", "0", 0);
 #ifdef MACOS_X
@@ -4265,6 +4356,12 @@ void CL_Init( void ) {
 	Cvar_CheckRange(j_forward_axis, 0, MAX_JOYSTICK_AXIS-1, qtrue);
 	Cvar_CheckRange(j_side_axis, 0, MAX_JOYSTICK_AXIS-1, qtrue);
 	Cvar_CheckRange(j_up_axis, 0, MAX_JOYSTICK_AXIS-1, qtrue);
+
+	// [controller feel] analog LOOK tuning (see CL_JoystickMove). Neutral defaults reproduce the old linear
+	// feel; coop_defaults.cfg seeds nicer starting values that a Controls slider can then adjust.
+	joy_response       = Cvar_Get( "joy_response",       "1.0", CVAR_ARCHIVE );
+	joy_outerThreshold = Cvar_Get( "joy_outerThreshold", "0.0", CVAR_ARCHIVE );
+	coop_padLookScale  = Cvar_Get( "coop_padLookScale",  "1.0", CVAR_ARCHIVE );
 
 	cl_motdString = Cvar_Get( "cl_motdString", "", CVAR_ROM );
 

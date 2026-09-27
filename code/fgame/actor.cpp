@@ -2953,6 +2953,13 @@ Actor::Actor()
     m_pFallPath     = NULL;
     m_iOriginTime   = -1;
 
+    // HZM coop [bug-3052] script-holster hold. Seeded ahead of the savegame return: Actor memory is not
+    // zeroed, and these are deliberately not archived (a loaded actor simply starts unheld).
+    m_bCoopScriptHolster      = false;
+    m_bCoopScriptHolsterHad   = false;
+    m_fCoopScriptHolsterTime  = 0;
+    m_iCoopScriptHolsterHeals = 0;
+
     if (LoadingSavegame) {
         return;
     }
@@ -3030,6 +3037,9 @@ Actor::Actor()
     m_fMinDistanceSquared = Square(m_fMinDistance);
     m_fMaxDistance        = 1024;
     m_fMaxDistanceSquared = Square(m_fMaxDistance);
+    m_fMaxDistanceWant    = m_fMaxDistance; // [HZM item 7]
+    m_fMinDistanceFogCut  = 0;
+    m_bEngageLogged       = false;
     m_fLeash              = 512;
     m_fLeashSquared       = Square(m_fLeash);
 
@@ -5444,9 +5454,9 @@ void Actor::EventGiveWeaponInternal(Event *ev)
     // whose current loadout is "none". An unhandled-name "" (whose loadout is a real weapon
     // string) still no-ops, exactly as bug-1959b intended.
     //
-    // NOTE the literal-"none" test below is currently UNREACHABLE: global/weapon.scr maps
-    // case "none" to "" before calling, and no other weapon_internal call site passes "none".
-    // The m_csLoadOut test is therefore the ONLY live path - do not delete it as redundant. It
+    // NOTE the literal-"none" test below is reached ONLY by global/weapon.scr's `holster` / `weaponless`
+    // aliases (bug-3051: retail's `gun holster` driver disarm); `gun "none"` itself maps to "" before
+    // calling. The m_csLoadOut test is the live path for "none" - do not delete either as redundant. It
     // depends on global/weapon.scr reaching `self weapon_internal` with no wait after `gun` is
     // dispatched (verified wait-free 2026-09-04); if a wait is ever added there, this stops
     // firing. m_csLoadOut also persists for the rest of the map, so a LATER empty give on the same
@@ -5550,6 +5560,13 @@ void Actor::EventGiveWeapon(Event *ev)
     // re-draw would then re-give "" forever (see EventGiveWeaponInternal).
     if (!weapName.length()) {
         return;
+    }
+
+    // HZM coop [bug-3052] a gun/weapon/use give issued BY A SCRIPT is a deliberate re-arm (the m1l1
+    // passenger's `.weapon = "colt 45"`, every dismount's `gun "walter p38"`, mg42_hack's re-draw), so it
+    // ends a script holster. A TIKI init `weapon` line or a spawn keyvalue is not from script and does not.
+    if (ev->IsFromScript()) {
+        CoopReleaseScriptHolster("give");
     }
 
     m_csLoadOut = Director.AddString(weapName);
@@ -6946,6 +6963,7 @@ void Actor::EventSetMinDistance(Event *ev)
     }
 
     m_fMinDistanceSquared = Square(m_fMinDistance);
+    m_fMinDistanceFogCut  = 0; // [HZM item 7] the script's mindist from now on
 }
 
 /*
@@ -6979,6 +6997,7 @@ void Actor::EventSetMaxDistance(Event *ev)
     }
 
     m_fMaxDistanceSquared = Square(m_fMaxDistance);
+    m_fMaxDistanceWant    = m_fMaxDistance; // [HZM item 7] what the script asked for (FixAIParameters restores it)
 }
 
 /*
@@ -8152,6 +8171,7 @@ void Actor::Think(void)
     m_bAnimating = false;
 
     TryDropBloodTrail(); // HZM coop - wounded AI leave ground blood trails as they move
+    CoopAuditScriptHolster(); // HZM coop - bug-3052: a script holster holds until a script re-arms him
     CoopAuditHeldWeapon(); // HZM coop - bug-2546: an active weapon must actually be in his hand
 
     // HZM coop bug-949: inside a coop_clipStripZones box, actors ignore MONSTERCLIP so
@@ -9148,6 +9168,38 @@ Fix path related parameters.
 void Actor::FixAIParameters(void)
 {
     float fMinLeash;
+    // [HZM item 7, 2026-09-26] ENGAGE DISTANCE RESTORE. The fog clamp below LOWERS maxdist to 0.828 x farplane (and
+    // mindist under it) and nothing ever raised it again: after a dust storm (duststorm.scr pulls the fog to 1250u)
+    // officer snipers (3500), briefing / scripted long-range AI (2048-4096) stayed at 1035u for the rest of the map
+    // (duststorm vet F9). Now each think gives back the maxdist the script / spawn asked for, as far as the CURRENT fog
+    // allows, and a mindist the fog cut. The leash and mindist+128 rules are untouched. g_aiEngageRestore 1 (default), 0 = stock;
+    // g_aiEngageLog 1 prints each change (and each actor once, the first time it thinks).
+    static cvar_t *s_restore = NULL;
+    static cvar_t *s_log     = NULL;
+    if (!s_restore) {
+        s_restore = gi.Cvar_Get("g_aiEngageRestore", "1", 0);
+        s_log     = gi.Cvar_Get("g_aiEngageLog", "0", 0);
+    }
+    const float fMax0 = m_fMaxDistance;
+    const float fMin0 = m_fMinDistance;
+    bool        bRe   = false;
+    if (s_restore->integer && m_fMaxDistanceWant > 0) {
+        const float fAllow =
+            (world->farplane_distance > 0) ? Q_min(m_fMaxDistanceWant, world->farplane_distance * 0.828f) : m_fMaxDistanceWant;
+        if (m_fMaxDistance < fAllow - 0.5f) {
+            m_fMaxDistance        = fAllow;
+            m_fMaxDistanceSquared = Square(m_fMaxDistance);
+            bRe                   = true;
+        }
+        if (m_fMinDistanceFogCut > 0 && m_fMinDistance < m_fMinDistanceFogCut - 0.5f && m_fMaxDistance - 128 > m_fMinDistance + 0.5f) {
+            m_fMinDistance        = Q_min(m_fMinDistanceFogCut, m_fMaxDistance - 128);
+            m_fMinDistanceSquared = Square(m_fMinDistance);
+            if (m_fMinDistance >= m_fMinDistanceFogCut - 0.5f) {
+                m_fMinDistanceFogCut = 0; // all of it back
+            }
+            bRe = true;
+        }
+    }
 
     if (m_pTetherEnt) {
         fMinLeash = 64;
@@ -9239,6 +9291,9 @@ void Actor::FixAIParameters(void)
         m_fMaxDistanceSquared = Square(m_fMaxDistance);
 
         if (m_fMaxDistance < m_fMinDistance + 128.0 - 1.0) {
+            if (!m_fMinDistanceFogCut) {
+                m_fMinDistanceFogCut = m_fMinDistance; // [HZM item 7] what to give back once the fog allows it
+            }
             if (Actor_LDDebug())
             {
                 Com_Printf(
@@ -9261,6 +9316,16 @@ void Actor::FixAIParameters(void)
             m_fMinDistanceSquared = Square(m_fMinDistance);
         }
     }
+    if (s_log->integer && (!m_bEngageLogged || fabs(m_fMaxDistance - fMax0) > 0.5f || fabs(m_fMinDistance - fMin0) > 0.5f)) {
+        // [HZM item 7] probe: ev=seen the first think, fog = cut by the fog, restore = given back
+        gi.Printf(
+            "^~^~^ AIENGAGE ent=%d tn=%s ev=%s max=%.0f->%.0f min=%.0f->%.0f want=%.0f far=%.0f\n", entnum, TargetName().c_str(),
+            !m_bEngageLogged ? "seen" : (m_fMaxDistance > fMax0 + 0.5f || m_fMinDistance > fMin0 + 0.5f ? "restore" : "fog"), fMax0,
+            m_fMaxDistance, fMin0, m_fMinDistance, m_fMaxDistanceWant, world->farplane_distance
+        );
+        m_bEngageLogged = true;
+    }
+    (void)bRe;
 }
 
 /*
@@ -12203,6 +12268,14 @@ void Actor::EventHolster(Event *ev)
     if (ev->NumArgs() > 0 && ev->GetInteger(1) > 0) {
         HolsterOffHand();
     } else {
+        // HZM coop [bug-3052] remember that a SCRIPT put his gun away - CoopAuditScriptHolster holds it.
+        // A repeat holster (surrender loop, m3l1a's coop_holsterKeep) keeps the first stamp and counter.
+        if (ev->IsFromScript() && !m_bCoopScriptHolster) {
+            m_bCoopScriptHolster      = true;
+            m_bCoopScriptHolsterHad   = GetActiveWeapon(WEAPON_MAIN) != NULL;
+            m_fCoopScriptHolsterTime  = level.time;
+            m_iCoopScriptHolsterHeals = 0;
+        }
         Holster();
     }
 }
@@ -12217,8 +12290,128 @@ void Actor::EventUnholster(Event *ev)
     if (ev->NumArgs() > 0 && ev->GetInteger(1) > 0) {
         UnholsterOffHand();
     } else {
+        CoopReleaseScriptHolster("unholster"); // HZM coop [bug-3052] an explicit unholster ends the hold
         Unholster();
     }
+}
+
+/*
+===============
+Actor::CoopReleaseScriptHolster
+
+HZM coop [bug-3052] end a script-holster hold. Called by a script unholster, a script give, and
+End_MachineGunner. With coop_weapDebug 1 it names the script that released him, so a re-arm that
+comes through a script path is identified by file rather than guessed at.
+===============
+*/
+void Actor::CoopReleaseScriptHolster(const char *why)
+{
+    static cvar_t *pDbg = NULL;
+
+    if (!m_bCoopScriptHolster) {
+        return;
+    }
+    m_bCoopScriptHolster = false;
+
+    if (!pDbg) {
+        pDbg = gi.Cvar_Get("coop_weapDebug", "0", 0);
+    }
+    if (pDbg->integer) {
+        ScriptThread *pThread = Director.CurrentThread();
+
+        gi.Printf(
+            "^~^~^ HOLSTERBREAK actor=%d '%s' by=%s script=%s held=%.1fs t=%.1f\n",
+            entnum,
+            TargetName().c_str(),
+            why ? why : "-",
+            pThread ? pThread->FileName().c_str() : "-",
+            level.time - m_fCoopScriptHolsterTime,
+            level.time
+        );
+    }
+}
+
+/*
+===============
+Actor::CoopAuditScriptHolster
+
+HZM coop [user 2026-09-27, bug-3052] "when there are actors driving vehicles they almost always have
+their rifle in their hand and the steering wheel" (m1l1 truck driver, e2l1 glider mission).
+
+VANILLA'S RECIPE for a driver is to put his gun away the moment he is seated. The engine never touches a
+driver's weapon (vehicle.cpp AttachDriverSlot / UpdateDriverSlot only move him), so the script is all
+there is: `holster` (m1l1.scr, e2l1/gliderride.scr handlePilot, e1l1/scene6.scr, e2l2.scr, e3l2/
+final_section_pows.scr, jeepanim.scr PassengerGetInJeep) or a strip (`gun "none"`, and `gun holster`,
+which global/weapon.scr now maps onto it - bug-3051).
+
+MEASURED: `holster` does not stick on an actor the script spawned in the same block. Headless m1l1 runs of
+2026-09-21 and 2026-09-25 census the intro driver every 10 s from t=10 to t=280 as wp=mauser kar 98k
+wg=rifle anm=opel_driver scene=1 - his ACTIVE main weapon, in his right hand, on the wheel - while the two
+BSP guards the same block holsters read wg=unarmed. bug-2467 measured the same shape on m3l1a (spawn +
+holster in one block). No coop script re-arms him (every generic re-arm path is guarded off a scene actor
+or needs a weapon he no longer holds) and the census runs had no client, so the producer is not a player
+path; it is not isolated.
+
+So hold the invariant instead of chasing a fifth producer (TRAPS T20; bug-2546 did the same for the held
+gun's attachment): a SCRIPT holster holds until a SCRIPT re-arms him - `unholster`, or a gun/weapon/use
+give issued by a script - or End_MachineGunner hands a gunner his gun back. That is retail's contract:
+retail re-arms a holstered actor only through those paths. Engine-internal gives (a TIKI init `weapon`
+line, a spawn keyvalue, weapon_internal) do not release it, which is the point - they are what is left
+for the unidentified producer.
+
+^~^~^ HOLSTERHOLD (first three per actor, then n=10/50/200) names the weapon, how long after the holster
+it came back, and had=: 0 means nothing was in his hand when he was holstered (the give landed after the
+holster), 1 means something re-armed him later. That line isolates the producer on the next playtest.
+
+Skipped while he mans a turret (bug-2976: never disturb a gunner) and when dead. Holster() plays no
+animation and changes no think state, so it cannot release a scripted pose either. One bool test per
+actor per frame when nothing is held. Kill switch: coop_holsterHold 0 (flags 0, like coop_gunNoneStrips,
+so a test toggle cannot persist into a player's config).
+===============
+*/
+void Actor::CoopAuditScriptHolster(void)
+{
+    static cvar_t *pHold = NULL;
+    Weapon        *weap;
+
+    if (!m_bCoopScriptHolster || deadflag) {
+        return;
+    }
+
+    if (!pHold) {
+        pHold = gi.Cvar_Get("coop_holsterHold", "1", 0);
+    }
+    if (!pHold->integer) {
+        return;
+    }
+
+    weap = GetActiveWeapon(WEAPON_MAIN);
+    if (!weap) {
+        return;
+    }
+
+    if (m_pTurret) {
+        return;
+    }
+
+    m_iCoopScriptHolsterHeals++;
+    if (m_iCoopScriptHolsterHeals <= 3 || m_iCoopScriptHolsterHeals == 10 || m_iCoopScriptHolsterHeals == 50
+        || m_iCoopScriptHolsterHeals == 200) {
+        gi.Printf(
+            "^~^~^ HOLSTERHOLD actor=%d '%s' model=%s re-armed with '%s' %.1fs after a script holster (had=%d)"
+            " - put away again n=%d t=%.1f\n",
+            entnum,
+            TargetName().c_str(),
+            model.c_str(),
+            weap->model.c_str(),
+            level.time - m_fCoopScriptHolsterTime,
+            m_bCoopScriptHolsterHad ? 1 : 0,
+            m_iCoopScriptHolsterHeals,
+            level.time
+        );
+    }
+
+    Holster();
 }
 
 /*

@@ -74,6 +74,7 @@ public:
 
     Trigger();
     virtual ~Trigger();
+    bool HZM_IsTriggerable() const { return triggerable != 0; } // [HZM bug-2926] the navmesh hurt-area bake reads it
 
     // override this to allow objects other than players, projectiles, and monsters to activate the trigger
     virtual qboolean respondTo(Entity *other);
@@ -432,7 +433,8 @@ public:
     CLASS_PROTOTYPE(TriggerHurt);
 
     TriggerHurt();
-    void Archive(Archiver& arc) override;
+    void  Archive(Archiver& arc) override;
+    float HZM_GetDamage() const { return damage; } // [HZM bug-2926]
 };
 
 inline void TriggerHurt::Archive(Archiver& arc)

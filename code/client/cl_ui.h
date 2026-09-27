@@ -125,6 +125,11 @@ qboolean UI_IsResourceLoaded(const char *name);
 void     UI_RegisterLoadResource(const char *name);
 void     UI_ClearResource(void);
 void     UI_LoadResource(const char *name);
+// HZM coop [user 2026-09-26] loading screen: SCR_UpdateScreen calls these around each frame it draws
+void     UI_LoadScreenFrameBegin(void);
+void     UI_LoadScreenFramePreDraw(void);
+void     UI_LoadScreenFrameEnd(void);
+void     UI_LoadScreenPrimeMaterials(void); // HZM bug-3015: CL_StartHunkUsers, before CL_InitCGame
 
 //
 // windows

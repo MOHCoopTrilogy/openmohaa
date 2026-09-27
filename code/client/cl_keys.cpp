@@ -1033,6 +1033,10 @@ void CL_InitKeyCommands(void)
     // or the value never reaches the server. Refreshed on demand by coop_objkey; also
     // recomputed after every bind/unbind below, since rebinding is exactly when it changes.
     Cvar_Get("coop_objKey", "", CVAR_USERINFO | CVAR_ARCHIVE);
+    // [user 2026-09-25] Coop Options > HUD & Feedback "Hide Objective Cards": the SERVER draws the NEW OBJECTIVE card
+    // (coop_mod/objectives.scr coop_obj_toast), so a per-player choice must reach it through userinfo - registered here
+    // at CLIENT LAUNCH, not in cgame (connect time: too late for the first userinfo, bug-2749). 1 = hide.
+    Cvar_Get("coop_hideObjCards", "0", CVAR_USERINFO | CVAR_ARCHIVE);
     Cmd_AddCommand("coop_objkey", CL_CoopObjKey_f);
     Cmd_AddCommand("bind", Key_Bind_f);
     Cmd_AddCommand("unbind", Key_Unbind_f);
@@ -1152,7 +1156,10 @@ void CL_KeyEvent(int key, qboolean down, unsigned time)
             return;
         }
 
-        if (Cvar_VariableIntegerValue("ui_console")) {
+        // [user 2026-09-25] developer mode also reaches the full console here, now that it no longer
+        // auto-opens at launch (cl_ui.cpp CL_TryStartIntro) - otherwise a developer-mode player with
+        // ui_console 0 would lose it entirely. fakk_console exists whenever either is set (UI_Init).
+        if (Cvar_VariableIntegerValue("ui_console") || Cvar_VariableIntegerValue("developer")) {
             UI_ToggleConsole();
         } else if (clc.state == CA_ACTIVE) {
             if (cg_gametype->integer) {

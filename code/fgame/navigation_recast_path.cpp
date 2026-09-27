@@ -34,6 +34,7 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 
 #include "DetourPathCorridor.h"
 #include "DetourCommon.h"
+#include "navigation_recast_config_ext.h" // [HZM bug-2862] RECAST_AREA_ELEVATOR
 #include "entity.h"
 #include "bg_local.h"
 
@@ -62,6 +63,12 @@ public:
 RecastPather::RecastPather()
     : lastCheckTime(0)
     , moving(false)
+    , traversingOffMeshLink(0)
+    , traversingArea(0)
+    , approachingArea(0)
+    , elevatorPhase(0)
+    , slideUntil(0)
+    , steerMode(0)
 {
     detourData = new DetourData();
     detourData->corridor.init(MAX_NPOLYS); // [HZM bot nav] match the raised path cap
@@ -314,6 +321,20 @@ void RecastPather::UpdatePos(const Vector& origin)
 
     ConvertGameToRecastCoord(origin, recastOrigin);
 
+    if (traversingOffMeshLink && traversingArea == RECAST_AREA_ELEVATOR && elevatorPhase == 1) {
+        // [bug-2862] boarding: walk to the cab centre; once there (in the cab), aim for the far landing and let
+        // the lift carry us - the far-landing XY is straight through the opposite door
+        Vector d = Vector(elevatorMid.x, elevatorMid.y, origin.z) - origin;
+        // [HZM bug-2912] INSIDE THE CAB, not at its dead centre: only one bot fits within 24u of the centre, so with
+        // two or more riders the rest stayed in phase 1 and kept steering to the centre when the cab reached the far
+        // end - they never headed out and rode back (user: "they kinda walk in the wrong direction" at the top).
+        // 40u each way = inside the 128u cab clear of its 12u corner posts.
+        if (fabs(d.x) < 40.0f && fabs(d.y) < 40.0f) {
+            elevatorPhase  = 2;
+            currentNodePos = elevatorEnd;
+        }
+    }
+
     if (traversingOffMeshLink) {
         Vector agentPos;
         Vector delta;
@@ -323,6 +344,7 @@ void RecastPather::UpdatePos(const Vector& origin)
         if (delta.lengthSquared() < Square(24) + distSqr) {
             // traversed
             traversingOffMeshLink = false;
+            traversingArea        = 0;
         }
     } else if (level.inttime >= lastCheckTime + 2000) {
         vec3_t delta;
@@ -370,12 +392,40 @@ void RecastPather::UpdatePos(const Vector& origin)
             navigationMap.GetNavMeshQuery(),
             filter
         );
+        approachingArea = 0;
         if (detourData->ncorners) {
             dtPolyRef refs[2];
             vec3_t    startOffPos, endOffPos;
+            float     triggerRadius = 16;
+
+            // [HZM bug-2862] which kind of link is the path about to take? An ELEVATOR link starts at a landing where
+            // the bot may be jostled/strafed while it waits; 16u (2D) was never hit - widen it to 48u, and let
+            // BotMovement hold its stuck recovery off while approaching (GetApproachingArea).
+            if (detourData->cornerFlags[detourData->ncorners - 1] & DT_STRAIGHTPATH_OFFMESH_CONNECTION) {
+                const dtMeshTile *atile = NULL;
+                const dtPoly     *apoly = NULL;
+                if (navigationMap.GetNavMesh()->getTileAndPolyByRef(
+                        detourData->cornerPolys[detourData->ncorners - 1], &atile, &apoly
+                    )
+                    == DT_SUCCESS) {
+                    const float d2 =
+                        dtVdist2DSqr(detourData->corners[detourData->ncorners - 1], (const float *)recastOrigin);
+                    if (d2 < Square(128)) {
+                        approachingArea = apoly->getArea();
+                    }
+                    if (apoly->getArea() == RECAST_AREA_ELEVATOR) {
+                        // the whole landing: bots queueing for the lift stalled 50-57u out (soak ELEVDBG)
+                        triggerRadius = 96;
+                    } else if (apoly->getArea() == RECAST_AREA_LADDER) {
+                        // [HZM bug-2871] the link start is 32u out from the ladder face; at 16u a bot bumped the rungs
+                        // before the climb began and the stock stuck logic jump-spammed at the foot
+                        triggerRadius = 32;
+                    }
+                }
+            }
 
             if (overOffmeshConnection(
-                    recastOrigin, detourData->cornerFlags, (const vec_t *)detourData->corners, 16, detourData->ncorners
+                    recastOrigin, detourData->cornerFlags, (const vec_t *)detourData->corners, triggerRadius, detourData->ncorners
                 )
                 && detourData->corridor.moveOverOffmeshConnection(
                     detourData->cornerPolys[detourData->ncorners - 1],
@@ -387,8 +437,182 @@ void RecastPather::UpdatePos(const Vector& origin)
                 ConvertRecastToGameCoord(detourData->corridor.getPos(), currentNodePos);
 
                 traversingOffMeshLink = true;
+                // [HZM bug-2862] remember WHICH kind of link (the elevator ride needs different bot handling)
+                {
+                    const dtMeshTile *otile = NULL;
+                    const dtPoly     *opoly = NULL;
+                    traversingArea          = 0;
+                    if (navigationMap.GetNavMesh()->getTileAndPolyByRef(
+                            detourData->cornerPolys[detourData->ncorners - 1], &otile, &opoly
+                        )
+                        == DT_SUCCESS) {
+                        traversingArea = opoly->getArea();
+                    }
+                    // [HZM bug-2913] the ends of every link crossed (the failed-jump learner needs them)
+                    ConvertRecastToGameCoord(startOffPos, linkStart);
+                    ConvertRecastToGameCoord(endOffPos, linkEnd);
+                    if (traversingArea == RECAST_AREA_ELEVATOR) {
+                        // [bug-2862] steer to the CAB CENTRE (link midpoint) first, then out to the far landing -
+                        // heading straight for the far landing pushed off-centre bots into the cab's door frame
+                        Vector s, e;
+                        ConvertRecastToGameCoord(startOffPos, s);
+                        ConvertRecastToGameCoord(endOffPos, e);
+                        elevatorMid   = (s + e) * 0.5f;
+                        elevatorEnd   = e;
+                        elevatorStart = s; // [HZM bug-2912]
+                        elevatorPhase = 1;
+                        currentNodePos = Vector(elevatorMid.x, elevatorMid.y, s.z);
+                    }
+                }
             } else {
                 ConvertRecastToGameCoord(detourData->corners[0], currentNodePos);
+                // [HZM bug-2914] CORNER ROUNDING. The mesh is eroded by agentRadius 8 (bug-2833: more closed real doors)
+                // but a player is 15u to its edge, so a route turning round a desk / crate / door post put the corner
+                // 7u too tight and the bot's box caught it (user 2026-09-25: "they get caught on dumb objects like
+                // desks still when they could just move around"). At a real TURN, steer to a point pushed OUT from
+                // the inside of the turn by the missing clearance - only if a player box reaches it unobstructed from
+                // here, else the plain corner as before. bot_cornerPad 0 = off.
+                static cvar_t *s_cornerPad = NULL;
+                if (!s_cornerPad) {
+                    s_cornerPad = gi.Cvar_Get("bot_cornerPad", "8", 0);
+                }
+                static cvar_t *s_cornerFix = NULL;
+                if (!s_cornerFix) {
+                    s_cornerFix = gi.Cvar_Get("bot_cornerFix", "0", 0);
+                }
+                if (s_cornerFix->integer && s_cornerPad->value > 0.0f
+                    && !(detourData->cornerFlags[0] & DT_STRAIGHTPATH_OFFMESH_CONNECTION)) {
+                    // [HZM bug-2956] the pad above never ran: MASK_SOLID INCLUDES CONTENTS_BODY, and a trace with no
+                    // entity to skip starts inside the bot's own box, so every pad trace was startsolid (e1l1: a bot
+                    // pushed for 4 minutes into the overhang of a cliff face beside a corner). Now: the world + clips
+                    // only (bodies are the bot-avoidance layer's business); the pad worked out for a corner is KEPT as
+                    // the bot closes in on that same corner (it switched off inside 24u, exactly where the box meets
+                    // the inside of the turn); the full AABB clearance first (16u: a 15u box needs 13u more than the
+                    // 8u erosion diagonally at a square corner), then the old 8u; and a bot already pinned on the way to
+                    // its corner slides along what pins it, toward the next leg, for up to 0.5s.
+                    // bot_cornerFix 1 = on. DEFAULT OFF (2026-09-25): three e1l1 A/B pairs showed no gain (overall
+                    // stuck 3.35% vs 3.47%, the cliff spot 60% vs 65%) - that spot is not a corner problem: its next leg
+                    // runs under a head-height rock overhang (nav_fitprobe: crouch-only) on 45-60 deg ground.
+                    const int    padMask = MASK_PLAYERSOLID & ~CONTENTS_BODY;
+                    // the body from a step up to its real top: the old box also stopped 18u short of the head, so it
+                    // passed under the cliff overhang that the bot's own box (BOTBLOCK 'ahead World at 0') was pinned on
+                    const Vector mins(MINS_X, MINS_Y, STEPSIZE);
+                    const Vector maxs(MAXS_X, MAXS_Y, MAXS_Z);
+                    Vector       c1       = currentNodePos;
+                    const bool   bHaveNext = detourData->ncorners >= 2;
+                    if (bHaveNext) {
+                        ConvertRecastToGameCoord(detourData->corners[1], c1);
+                    }
+                    Vector din  = currentNodePos - origin;
+                    Vector dout = c1 - currentNodePos;
+                    din.z       = 0;
+                    dout.z      = 0;
+                    const float lin     = din.length();
+                    const float lout    = dout.length();
+                    Vector      inward  = vec_zero;
+                    bool        bInward = false;
+                    if (bHaveNext && lin > 24.0f && lout > 8.0f) {
+                        const Vector di = din * (1.0f / lin);
+                        const Vector dd = dout * (1.0f / lout);
+                        if (di * dd < 0.94f) { // a turn of ~20 degrees or more
+                            inward   = dd - di;
+                            inward.z = 0;
+                            if (inward.lengthSquared() > 0.0001f) {
+                                inward.normalize();
+                                bInward   = true;
+                                padCorner = currentNodePos;
+                                padInward = inward;
+                            }
+                        }
+                    } else if (bHaveNext && lout > 8.0f && (padCorner - currentNodePos).lengthSquared() < 1.0f
+                               && padInward.lengthSquared() > 0.5f) {
+                        inward  = padInward; // closing in on the corner the pad was worked out for: keep it
+                        bInward = true;
+                    }
+                    const Vector corner  = currentNodePos;
+                    bool         bPadded = false;
+                    steerMode            = 0;
+                    if (bInward) {
+                        const float pads[2] = {Q_max(16.0f, s_cornerPad->value), s_cornerPad->value};
+                        for (int pi = 0; pi < 2 && !bPadded; pi++) {
+                            const Vector cand = corner - inward * pads[pi];
+                            trace_t tr = G_Trace(origin, mins, maxs, cand, NULL, padMask, qtrue, "BotCornerPad");
+                            if (!tr.startsolid && !tr.allsolid && tr.fraction >= 1.0f) {
+                                currentNodePos = cand;
+                                bPadded        = true;
+                                steerMode      = (pi == 0 ? 1 : 2) + ((lin > 24.0f) ? 0 : 8);
+                            }
+                        }
+                    }
+                    if (!bPadded) {
+                        if (level.inttime < slideUntil && (slideTarget - origin).lengthXYSquared() > Square(6.0f)) {
+                            currentNodePos = slideTarget; // committed slide still under way
+                            steerMode      = 3;
+                        } else if (lin > 1.0f && lin < 48.0f) {
+                            // (only the wedge at the INSIDE of a turn, next to its corner: pinned half-way along a leg is
+                            // an obstacle the mesh ignores, for the stuck recovery - a slide there only swayed the bot)
+                            trace_t tr = G_Trace(origin, mins, maxs, corner, NULL, padMask, qtrue, "BotCornerReach");
+                            if (!tr.startsolid && !tr.allsolid && tr.fraction < 1.0f && tr.fraction * lin < 4.0f) {
+                                // pinned: slide along the blocking face, the way that leads on to the next leg
+                                Vector n = tr.plane.normal;
+                                n.z      = 0;
+                                if (n.lengthSquared() > 0.01f) {
+                                    n.normalize();
+                                    Vector t(-n.y, n.x, 0.0f);
+                                    Vector want = (bHaveNext ? c1 : corner) - origin;
+                                    want.z      = 0;
+                                    if (t * want < 0.0f) {
+                                        t = t * -1.0f;
+                                    }
+                                    const float lens[2] = {24.0f, 12.0f};
+                                    for (int si = 0; si < 2; si++) {
+                                        const Vector cand = origin + t * lens[si];
+                                        trace_t      ts   = G_Trace(origin, mins, maxs, cand, NULL, padMask, qtrue, "BotCornerSlide");
+                                        if (!ts.startsolid && !ts.allsolid && ts.fraction >= 1.0f) {
+                                            slideTarget    = cand;
+                                            slideUntil     = level.inttime + 500;
+                                            currentNodePos = cand;
+                                            steerMode      = 3;
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } else if (s_cornerPad->value > 0.0f && detourData->ncorners >= 2
+                    && !(detourData->cornerFlags[0] & DT_STRAIGHTPATH_OFFMESH_CONNECTION)) {
+                    Vector c1;
+                    ConvertRecastToGameCoord(detourData->corners[1], c1);
+                    Vector din  = currentNodePos - origin;
+                    Vector dout = c1 - currentNodePos;
+                    din.z       = 0;
+                    dout.z      = 0;
+                    const float lin  = din.length();
+                    const float lout = dout.length();
+                    if (lin > 24.0f && lout > 8.0f) {
+                        din  = din * (1.0f / lin);
+                        dout = dout * (1.0f / lout);
+                        if (din * dout < 0.94f) { // a turn of ~20 degrees or more
+                            Vector inward = dout - din;
+                            inward.z      = 0;
+                            if (inward.lengthSquared() > 0.0001f) {
+                                inward.normalize();
+                                const Vector cand = currentNodePos - inward * s_cornerPad->value;
+                                // MASK_SOLID, not PLAYERSOLID: the pather has no entity to skip, and its own
+                                // bot's box (CONTENTS_BODY) would make every trace start solid
+                                const Vector mins(MINS_X, MINS_Y, STEPSIZE);
+                                const Vector maxs(MAXS_X, MAXS_Y, MAXS_Z - STEPSIZE);
+                                trace_t      tr = G_Trace(
+                                    origin, mins, maxs, cand, NULL, MASK_SOLID, qfalse, "BotCornerPad"
+                                );
+                                if (!tr.startsolid && !tr.allsolid && tr.fraction >= 1.0f) {
+                                    currentNodePos = cand;
+                                }
+                            }
+                        }
+                    }
+                }
             }
         } else {
             ConvertRecastToGameCoord(detourData->corridor.getPos(), currentNodePos);
@@ -494,6 +718,89 @@ int RecastPather::GetNodeCount() const
     return detourData->corridor.getPathCount();
 }
 
+bool RecastPather::GetCornerAfterNext(Vector& out) const
+{
+    // [HZM bot A3] corners[0] is being steered to (currentNodePos); corners[1] is the turn after it
+    if (!moving || traversingOffMeshLink || detourData->ncorners < 2) {
+        return false;
+    }
+    ConvertRecastToGameCoord(detourData->corners[1], out);
+    return true;
+}
+
+int RecastPather::GetCorners(Vector *out, int maxCorners) const
+{
+    // [HZM bot breach] the straight-path corners ahead (findCorners stops at an off-mesh link start)
+    if (!moving || traversingOffMeshLink) {
+        return 0;
+    }
+    const int n = Q_min(detourData->ncorners, maxCorners);
+    for (int i = 0; i < n; i++) {
+        ConvertRecastToGameCoord(detourData->corners[i], out[i]);
+    }
+    return n;
+}
+
+bool RecastPather::GetElevatorEnd(Vector& out) const
+{
+    if (!moving || !traversingOffMeshLink || traversingArea != RECAST_AREA_ELEVATOR) {
+        return false;
+    }
+    out = elevatorEnd;
+    return true;
+}
+
+bool RecastPather::GetTraversingLink(Vector& start, Vector& end) const
+{
+    if (!moving || !traversingOffMeshLink) {
+        return false;
+    }
+    start = linkStart;
+    end   = linkEnd;
+    return true;
+}
+
+bool RecastPather::GetElevatorLink(Vector& start, Vector& end) const
+{
+    // [HZM bug-2912] both ends of the elevator link being ridden, oriented by travel direction
+    if (!moving || !traversingOffMeshLink || traversingArea != RECAST_AREA_ELEVATOR) {
+        return false;
+    }
+    start = elevatorStart;
+    end   = elevatorEnd;
+    return true;
+}
+
+bool RecastPather::GetApproachingLink(Vector& from, Vector& to) const
+{
+    // [HZM bot breach] the off-mesh link the path is about to take: its connection's two ends, ordered by which one the
+    // path reaches first (links are bidirectional, so pos[0..2] is not necessarily our side)
+    if (!moving || traversingOffMeshLink || !approachingArea || !detourData->ncorners) {
+        return false;
+    }
+    const int last = detourData->ncorners - 1;
+    if (!(detourData->cornerFlags[last] & DT_STRAIGHTPATH_OFFMESH_CONNECTION)) {
+        return false;
+    }
+    const dtOffMeshConnection *con = navigationMap.GetNavMesh()->getOffMeshConnectionByRef(detourData->cornerPolys[last]);
+    if (!con) {
+        return false;
+    }
+    Vector p0, p1;
+    ConvertRecastToGameCoord(&con->pos[0], p0);
+    ConvertRecastToGameCoord(&con->pos[3], p1);
+    Vector c;
+    ConvertRecastToGameCoord(detourData->corners[last], c);
+    if ((p0 - c).lengthSquared() <= (p1 - c).lengthSquared()) {
+        from = p0;
+        to   = p1;
+    } else {
+        from = p1;
+        to   = p0;
+    }
+    return true;
+}
+
 Vector RecastPather::GetCurrentDelta() const
 {
     Vector delta;
@@ -541,12 +848,23 @@ bool RecastPather::IsQuerying() const
     return false;
 }
 
+unsigned char RecastPather::GetTraversingArea() const
+{
+    return traversingOffMeshLink ? traversingArea : 0;
+}
+
+unsigned char RecastPather::GetApproachingArea() const
+{
+    return traversingOffMeshLink ? 0 : approachingArea;
+}
+
 void RecastPather::ResetPosition(const Vector& origin)
 {
     const dtQueryFilter *filter = navigationMap.GetQueryFilter();
     vec3_t               agentPos;
 
     traversingOffMeshLink = false;
+    traversingArea        = 0;
     lastCheckTime         = level.inttime;
 
     moving = false;

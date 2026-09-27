@@ -385,6 +385,7 @@ public:
     void       SetMinChargeTime(Event *ev);
     float      GetMinChargeTime(firemode_t);
     float      GetMaxChargeTime(firemode_t);
+    const str& GetProjectileModel(firemode_t mode) const { return projectileModel[mode]; } // [HZM bot breach]
     int        AmmoAvailable(firemode_t mode);
     qboolean   UnlimitedAmmo(firemode_t mode);
     qboolean   HasAmmo(firemode_t mode);

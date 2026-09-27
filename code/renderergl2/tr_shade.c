@@ -426,6 +426,11 @@ static void ProjectDlightTexture( void ) {
 		vector[2] = origin[2];
 		vector[3] = scale;
 		GLSL_SetUniformVec4(sp, UNIFORM_DLIGHTINFO, vector);
+
+		// HZM gl2 [2026-09-26] Phase S1: the cone, in the frame of u_DlightInfo (the LOCAL axis R_TransformDlights
+		// keeps beside `transformed`), evaluated PER PIXEL in dlight_fp (vet F11: a per-vertex cone on a 4-vertex quay
+		// face is blotchy). All zero for every omni light, which dlight_fp treats as "no cone".
+		RB_HZM_SpotProjectUniform(sp, dl);
 	  
 		GL_BindToTMU( tr.dlightImage, TB_COLORMAP );
 
@@ -1053,6 +1058,15 @@ static void ForwardDlight( void ) {
 		// per-program persistent state and this permutation is also written by
 		// RB_IterateStagesGeneric, so they MUST be zeroed explicitly here or this pure-additive
 		// pass inherits a stale fog colour and ADDS it onto distant geometry.
+		// HZM gl2 [2026-09-26] Phase S: a spot flagged HZM_DLIGHT_FOGGED (the cgame headlights) IS fogged - as an
+		// additive stage, i.e. toward black: exactly its fog transmittance (plan finding 9; RB_SetGlobalFogUniforms
+		// maps ONE/ONE to a black fog target), so a pool 900 u away no longer glows through fog that hides the truck.
+		// Every other light keeps the zeroing below, byte for byte.
+		if ( ( dl->type & HZM_DLIGHT_FOGGED ) && dl->hzmSpot == HZM_SPOT_READY )
+		{
+			RB_SetGlobalFogUniforms( sp, GLS_SRCBLEND_ONE | GLS_DSTBLEND_ONE, qfalse );
+		}
+		else
 		{
 			vec4_t off = { 0.0f, 0.0f, 0.0f, 0.0f };
 			GLSL_SetUniformVec4( sp, UNIFORM_GLOBALFOGCOLOR,  off );
@@ -1112,6 +1126,10 @@ static void ForwardDlight( void ) {
 		GLSL_SetUniformVec4(sp, UNIFORM_LIGHTORIGIN, vector);
 
 		GLSL_SetUniformFloat(sp, UNIFORM_LIGHTRADIUS, radius);
+
+		// HZM gl2 [2026-09-26] Phase S1: the cone for EVERY light - all zero (= omni) for every light that is not a
+		// ready spot - so this permutation never carries the previous light's cone (plan R1)
+		RB_HZM_SpotForwardUniform(sp, dl);
 
 		// HZM gl2 (r_hzmGenNormals): same resolution as the main pass, so a surface drawn
 		// through both cannot disagree about its own relief depth. No-op unless the stage
@@ -1890,22 +1908,50 @@ static void RB_IterateStagesGeneric( shaderCommands_t *input )
 			GLSL_SetUniformFloat(sp, UNIFORM_LIGHTRADIUS, 0.0f);   // -> attenuation == 1
 		}
 
+		// HZM gl2 [2026-09-26] Phase S1 (plan R1, vet F8): the USE_LIGHT_VECTOR programs serve ForwardDlight AND
+		// character lighting AND rgbGen lightingDiffuse, and ForwardDlight's last light stays set on the program - so
+		// every draw here uploads the inert all-zero cone. Programs without the uniform resolve it to -1 (no-op), and
+		// an unchanged value is skipped, so this costs a compare.
+		RB_HZM_SpotZeroUniform(sp);
+
 		if (pStage->alphaGen == AGEN_PORTAL)
 		{
 			GLSL_SetUniformFloat(sp, UNIFORM_PORTALRANGE, tess.shader->portalRange);
 		}
 
-		GLSL_SetUniformInt(sp, UNIFORM_COLORGEN, pStage->rgbGen);
-
-		// HZM coop (bug-2508): with r_hzmAlphaGenDot 0 the GPU must see exactly what it saw
-		// before the port. CalcColor can still be compiled in by rgbGen lightingDiffuse, so the
-		// dot family is uploaded as AGEN_IDENTITY (inert in CalcColor) while the switch is off.
+		// HZM gl2 [2026-09-26] searchlights S1: an ADDITIVE alphaGen dot stage (the retail tower cone `beam`) takes
+		// the dot in RGB with an identity alpha - gl1's RB_CalcAlphaFromDot - through R2's CGEN_DOT branch, which
+		// reads the same alphaMin/alphaMax from u_AlphaGenParams (uploaded below). R_HZM_AlphaDotToRgb is shared with
+		// the permutation select in tr_glsl.c, so the two cannot disagree; it rides r_hzmRgbGenDot and is off on
+		// Omaha (tr_shade_calc.c). When it answers false, both uploads are exactly what they were before.
 		{
-			int agen = pStage->alphaGen;
+			qboolean dotToRgb = R_HZM_AlphaDotToRgb( pStage );
+			int      cgen     = pStage->rgbGen;
+			int      agen     = pStage->alphaGen;
 
-			if ( ( agen == AGEN_DOT || agen == AGEN_ONE_MINUS_DOT ) && !GLSL_HzmAlphaGenDotEnabled() ) {
+			if ( dotToRgb ) {
+				cgen = ( agen == AGEN_ONE_MINUS_DOT ) ? CGEN_ONE_MINUS_DOT : CGEN_DOT;
 				agen = AGEN_IDENTITY;
+				if ( !tess.shader->hzmDotToRgbNoted ) {
+					tess.shader->hzmDotToRgbNoted = qtrue;
+					ri.Printf( PRINT_ALL, "^~^~^ SEARCHLIGHT dot->rgb shader=%s\n", tess.shader->name );
+				}
+			} else {
+				// HZM gl2 [2026-09-25] Phase R2: while r_hzmRgbGenDot resolves OFF (always on an Omaha BSP)
+				// CalcColor must never run the new dot branch - it can still be compiled in for another reason (an
+				// alphaGen on the same stage) - so the dot family is uploaded as CGEN_IDENTITY, which CalcColor
+				// ignores exactly as it ignored the unported value before.
+				if ( ( cgen == CGEN_DOT || cgen == CGEN_ONE_MINUS_DOT ) && !R_HZM_RgbGenDotOn() ) {
+					cgen = CGEN_IDENTITY;
+				}
+				// HZM coop (bug-2508): with r_hzmAlphaGenDot 0 the GPU must see exactly what it saw
+				// before the port. CalcColor can still be compiled in by rgbGen lightingDiffuse, so the
+				// dot family is uploaded as AGEN_IDENTITY (inert in CalcColor) while the switch is off.
+				if ( ( agen == AGEN_DOT || agen == AGEN_ONE_MINUS_DOT ) && !GLSL_HzmAlphaGenDotEnabled() ) {
+					agen = AGEN_IDENTITY;
+				}
 			}
+			GLSL_SetUniformInt(sp, UNIFORM_COLORGEN, cgen);
 			GLSL_SetUniformInt(sp, UNIFORM_ALPHAGEN, agen);
 		}
 
@@ -2387,9 +2433,26 @@ static void RB_FillModelLightingColors( void )
 
 	if (backEnd.currentStaticModel)
 	{
+		// HZM gl2 [2026-09-26] Phase S1: each spot's axis in THIS static model's frame (the frame of its `transformed`
+		// light origin), rotated once per light per batch, and the one-law scale (R_HZM_SpotEntityK)
+		vec3_t	hzmSpotAxis[MAX_DLIGHTS];
+		float	hzmSpotK = 0.0f;
+
 		if (!tess.shader->needsLSpherical || !r_drawspherelights->integer
 			|| !backEnd.currentStaticModel->useSpecialLighting) {
 			return;
+		}
+
+		for (i = 0; i < backEnd.currentStaticModel->numdlights && i < MAX_DLIGHTS; i++)
+		{
+			const dlight_t *sdl = &backEnd.refdef.dlights[backEnd.currentStaticModel->dlights[i].index];
+
+			if (sdl->hzmSpot == HZM_SPOT_READY)
+			{
+				MatrixTransformVectorRight(backEnd.currentStaticModel->axis, sdl->hzmAxis, hzmSpotAxis[i]);
+				VectorNormalize(hzmSpotAxis[i]);
+				hzmSpotK = R_HZM_SpotEntityK();
+			}
 		}
 
 		for (i = 0; i < tess.numVertexes; i++)
@@ -2420,8 +2483,34 @@ static void RB_FillModelLightingColors( void )
 				{
 					float ooLen;
 
+					// HZM gl2 [2026-09-26] Phase S1 (vet F14): a spot uses THE law - K x attenuation x cone x cos -
+					// instead of the 7500 R cos / d^2 term below, so a prop inside the pool matches the ground at
+					// its foot and nothing behind the lamp is lit. Every other light takes the untouched path.
+					if (dl->hzmSpot == HZM_SPOT_READY)
+					{
+						vec3_t	toVert;
+						float	distSq = VectorLengthSquared(diff);
+						float	spotTerm;
+
+						VectorNegate(diff, toVert);
+						spotTerm = hzmSpotK * R_HZM_SpotAttenuation(distSq, dl->radius)
+						         * R_HZM_SpotConeDir(hzmSpotAxis[j], dl->hzmCosOuter, dl->hzmConeK, toVert)
+						         * dot / (float)sqrt(distSq > 1.0f ? distSq : 1.0f);
+						colorout[0] += dl->color[0] * spotTerm;
+						colorout[1] += dl->color[1] * spotTerm;
+						colorout[2] += dl->color[2] * spotTerm;
+						continue;
+					}
+
 					ooLen = 1.0 / VectorLengthSquared(diff);
 					ooLightDistSquared = dot * (7500.0 * dl->radius * ooLen * sqrt(ooLen));
+					// HZM gl2 [2026-09-25] Phase R3 EDGEFADE: this term never reaches 0 at the radius, so a prop
+					// pops as a moving light passes. Lights flagged hzm_dlight_edgefade (the cgame headlights -
+					// nothing else sets it) fade to 0 at their radius instead.
+					if ( dl->type & hzm_dlight_edgefade )
+					{
+						ooLightDistSquared *= R_HZM_DlightEdgeWindow( (float)( 1.0 / sqrt( ooLen ) ), dl->radius );
+					}
 					// gl1 overbright-multiplies the whole baked+dlight sum in
 					// ComputeColors; gl2 already baked the shift into the
 					// static colors at load (R_LoadStaticModelData), so scale

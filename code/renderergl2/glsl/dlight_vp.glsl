@@ -15,6 +15,8 @@ uniform mat4   u_ModelViewProjectionMatrix;
 
 varying vec2   var_Tex1;
 varying vec4   var_Color;
+// HZM gl2 [2026-09-26] Phase S1: light -> vertex in u_DlightInfo's frame, for the per-pixel cone in dlight_fp
+varying vec3   var_HzmSpotDir;
 
 #if defined(USE_DEFORM_VERTEXES)
 vec3 DeformPosition(const vec3 pos, const vec3 normal, const vec2 st)
@@ -83,6 +85,7 @@ void main()
 	gl_Position = u_ModelViewProjectionMatrix * vec4(position, 1.0);
 		
 	vec3 dist = u_DlightInfo.xyz - position;
+	var_HzmSpotDir = -dist;
 
 	var_Tex1 = dist.xy * u_DlightInfo.a + vec2(0.5);
 	float dlightmod = step(0.0, dot(dist, normal));

@@ -485,10 +485,57 @@ void NavigationBSP::GenerateBrushTriangles(navModel_t& model, const Container<cp
 
 /*
 ============
+NavMarkPatchedBrushes
+
+HZM [bug-2836] Mark the brushes listed in a cmpatch file (the exact format qcommon/cm_load.c applies to collision:
+0-based BSP brush indices, whitespace/comma separated, '#' comments, non-numeric tokens skipped). This builder
+reads the RAW BSP, not the patched collision map, so without this a brush removed from collision (e.g. e3l2's
+barbed-wire clip for Push) stayed in the bot navmesh and bots kept routing around wire that was no longer there.
+============
+*/
+static void NavMarkPatchedBrushes(const char *patchname, char *skip, int numBrushes)
+{
+    char       *buf = NULL;
+    const char *p;
+    int         n = 0;
+
+    if (gi.FS_ReadFile(patchname, (void **)&buf, qtrue) <= 0 || !buf) {
+        return;
+    }
+    for (p = buf; *p;) {
+        while (*p && (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n' || *p == ',')) {
+            p++;
+        }
+        if (*p == '#') {
+            while (*p && *p != '\n') {
+                p++;
+            }
+            continue;
+        }
+        if (!*p) {
+            break;
+        }
+        if (*p >= '0' && *p <= '9') {
+            const int idx = atoi(p);
+            if (idx >= 0 && idx < numBrushes) {
+                skip[idx] = 1;
+                n++;
+            }
+        }
+        while (*p && *p != ' ' && *p != '\t' && *p != '\r' && *p != '\n' && *p != ',' && *p != '#') {
+            p++;
+        }
+    }
+    gi.FS_FreeFile(buf);
+    gi.Printf("  Navmesh: %s -> %d brushes excluded\n", patchname, n);
+}
+
+/*
+============
 NavigationBSP::GenerateVerticesFromHull
 ============
 */
-void NavigationBSP::GenerateVerticesFromHull(bspMap_c& inBspMap, const Container<cshader_t>& shaders)
+void NavigationBSP::GenerateVerticesFromHull(bspMap_c& inBspMap, const Container<cshader_t>& shaders, const char *mapname)
 {
     Container<cplane_t>            planes;
     Container<cbrushside_t>        sides;
@@ -502,9 +549,41 @@ void NavigationBSP::GenerateVerticesFromHull(bspMap_c& inBspMap, const Container
     LoadBrushes(inBspMap.LoadLump(LUMP_BRUSHES), shaders, sides, brushes);
     LoadSubmodels(inBspMap.LoadLump(LUMP_MODELS), submodels);
 
+    // [bug-2836] drop exactly the brushes collision drops: base list, _local overlay, and the map-VARIANT list
+    // (cm_variant, set by the server before the collision map loaded). skip[] is indexed by 0-based BSP brush
+    // index; the Container below is 1-based, so ObjectAt(j) is brush j - 1.
+    const int numBrushes = (int)brushes.NumObjects();
+    char     *skip       = new char[numBrushes > 0 ? numBrushes : 1];
+    memset(skip, 0, numBrushes > 0 ? numBrushes : 1);
+    {
+        char        base[MAX_QPATH];
+        char        patchname[MAX_QPATH];
+        const char *slash   = strrchr(mapname, '/');
+        cvar_t     *variant = gi.Cvar_Get("cm_variant", "", 0);
+        int         blen;
+
+        Q_strncpyz(base, slash ? slash + 1 : mapname, sizeof(base));
+        COM_StripExtension(base, base, sizeof(base));
+        blen = strlen(base);
+        if (blen > 4 && !Q_stricmp(base + blen - 4, "_sml")) {
+            base[blen - 4] = 0;
+        }
+        Com_sprintf(patchname, sizeof(patchname), "cmpatch/%s.txt", base);
+        NavMarkPatchedBrushes(patchname, skip, numBrushes);
+        Com_sprintf(patchname, sizeof(patchname), "cmpatch/%s_local.txt", base);
+        NavMarkPatchedBrushes(patchname, skip, numBrushes);
+        if (variant && variant->string[0]) {
+            Com_sprintf(patchname, sizeof(patchname), "cmpatch/%s_%s.txt", base, variant->string);
+            NavMarkPatchedBrushes(patchname, skip, numBrushes);
+        }
+    }
+
     const cmodel_t& worldModel = submodels.ObjectAt(1);
 
     for (j = worldModel.firstBrush + 1; j <= worldModel.firstBrush + worldModel.numBrushes; j++) {
+        if (skip[j - 1]) {
+            continue;
+        }
         cbrush_t& brush = brushes.ObjectAt(j);
 
         GenerateBrushTriangles(navMap.GetWorldMap(), planes, brush);
@@ -530,11 +609,16 @@ void NavigationBSP::GenerateVerticesFromHull(bspMap_c& inBspMap, const Container
         }
 
         for (j = submodel.firstBrush + 1; j <= submodel.firstBrush + submodel.numBrushes; j++) {
+            if (skip[j - 1]) {
+                continue;
+            }
             cbrush_t& brush = brushes.ObjectAt(j);
 
             GenerateBrushTriangles(navModel, planes, brush);
         }
     }
+
+    delete[] skip;
 }
 
 /*
@@ -1072,7 +1156,7 @@ void NavigationBSP::ProcessBSPForNavigation(const char *mapname)
     // Create all vertices from brushes
     //
 
-    GenerateVerticesFromHull(bspMap, shaders);
+    GenerateVerticesFromHull(bspMap, shaders, mapname);
 
     //
     // Render the whole map terrain

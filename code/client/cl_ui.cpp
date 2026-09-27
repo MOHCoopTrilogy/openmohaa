@@ -118,6 +118,20 @@ cvar_t        *ui_health_start;
 cvar_t        *ui_health_end;
 cvar_t        *ui_gmboxspam;
 cvar_t        *ui_debugload;
+static cvar_t *cl_loadProbe; // HZM coop [user 2026-09-26] loading-screen probe (UI_LoadProbe_*, above UI_TestUpdateScreen)
+static cvar_t *cl_memorial;          // HZM coop [user 2026-09-27] launch memorial - see UI_MemorialStart
+static cvar_t *cl_memorialSkip;
+static cvar_t *cl_memorialSkipAfter;
+static cvar_t *cl_memorialTimes;
+static void    UI_MemorialDraw(void); // defined with the memorial, above CL_FinishedIntro
+#define HZM_MEMORIAL_STAGE_IN   20 // cls.startStage values of the launch memorial (after the retail 1-10)
+#define HZM_MEMORIAL_STAGE_HOLD 21
+#define HZM_MEMORIAL_STAGE_OUT  22
+static cvar_t *ui_loadHints;    // HZM coop [user 2026-09-26] loading-screen hints (UI_LoadHints_*): -1 auto, 0 off, 1 on
+static cvar_t *ui_loadHintSecs; // seconds per hint (3-60)
+static cvar_t *ui_loadRedrawMs; // HZM [2026-09-27] min ms between loading-screen redraws from UI_LoadResource (16-1000)
+static qboolean s_uiNoLoadDraw; // HZM bug-3015: TRUE while the renderer (re)registers or the UI realigns - no loading draw
+static void    UI_LoadHints_SetWidgets(qboolean enable); // defined with UI_LoadHints_*, used by UI_ServerLoaded
 cvar_t        *sound_overlay;
 cvar_t        *ui_compass_scale;
 cvar_t        *coop_compassBarLive; // HZM coop - top compass bar band height (px) published by cgame, 0 = not live
@@ -1792,6 +1806,11 @@ void UI_DrawIntro(void)
     view3d->setShow(false);
     UI_ClearBackground();
 
+    if (cls.startStage >= HZM_MEMORIAL_STAGE_IN) {
+        UI_MemorialDraw(); // HZM launch memorial
+        return;
+    }
+
     if (cls.startStage < 3 || cls.startStage >= 12) {
         return;
     }
@@ -1898,7 +1917,18 @@ static void UI_ApplyHudFadeAlpha(void)
         fHudA = 1.0f;
     }
 
-    UI_SetMenuWidgetsAlpha(hud_health, fHudA);
+    {   // HZM coop - Hardcore host rule: a health-only alpha the cgame publishes (ui_hudHealthAlpha, default 1 = no
+        // effect). The health bar takes the lower of the two, so the calm fade still works when it is 1.
+        static cvar_t *pHealthA = NULL;
+        float          fHealthA = fHudA;
+        if (!pHealthA) {
+            pHealthA = Cvar_Get("ui_hudHealthAlpha", "1", 0);
+        }
+        if (pHealthA->value < fHealthA) {
+            fHealthA = (pHealthA->value < 0.0f) ? 0.0f : pHealthA->value;
+        }
+        UI_SetMenuWidgetsAlpha(hud_health, fHealthA);
+    }
     UI_SetMenuWidgetsAlpha(hud_ammo, fHudA);
     UI_SetMenuWidgetsAlpha(hud_weapons, fHudA);
     UI_SetMenuWidgetsAlpha(hud_items, fHudA); // "available mission gadgets" icons
@@ -3999,9 +4029,15 @@ CL_BeginRegistration
 */
 void CL_BeginRegistration(void)
 {
+    // HZM bug-3015: no loading-screen draw anywhere inside the renderer (re)registration - see UI_TestUpdateScreen
+    const qboolean wasNoLoadDraw = s_uiNoLoadDraw;
+
+    s_uiNoLoadDraw = qtrue;
     // init console stuff
     re.BeginRegistration(&cls.glconfig);
+    cls.rendererReady = qtrue; // HZM bug-2981: R_Init has run - UI fonts may (re)load now
     uWinMan.CleanupShadersFromList();
+    s_uiNoLoadDraw = wasNoLoadDraw;
 }
 
 /*
@@ -4065,9 +4101,25 @@ void UI_CreateDialog(
 /*
 ====================
 UI_ResolutionChange
+
+HZM bug-3015: the body runs with s_uiNoLoadDraw set. MenuManager::RealignMenus re-registers menu materials
+(UIPulldownMenu::getAlignmentRect -> RE_RegisterShaderNoMip -> R_FindImageFile), and on gl2 every image load ticks
+the loading screen; a draw from there re-entered CL_StartHunkUsers and started cgame INSIDE SCR_UpdateScreen, so a
+joiner whose server changed map (into m1l1) froze on the old frame for ~15 s (measured, symbolised stacks).
 ====================
 */
+static void UI_ResolutionChange_Body(void);
+
 void UI_ResolutionChange(void)
+{
+    const qboolean wasNoLoadDraw = s_uiNoLoadDraw;
+
+    s_uiNoLoadDraw = qtrue;
+    UI_ResolutionChange_Body();
+    s_uiNoLoadDraw = wasNoLoadDraw;
+}
+
+static void UI_ResolutionChange_Body(void)
 {
     UIRect2D frame;
 
@@ -4248,6 +4300,8 @@ void UI_ServerLoaded(void)
 
     event = new Event(EV_Widget_Disable);
     ui_pLoadingMenu->PassEventToWidget("loadingbar_border", event);
+
+    UI_LoadHints_SetWidgets(qfalse); // HZM loading screen: the Continue screen is the stock one
 
     event = new Event(EV_Widget_Activate);
     ui_pLoadingMenu->PassEventToWidget("continuebutton", event);
@@ -4946,6 +5000,170 @@ void UI_ClearConsole_f(void)
 
 /*
 ====================
+HZM coop [user 2026-09-27] LAUNCH MEMORIAL
+
+"In Memory of Vince Zampella" on black before the main menu, once per process (not after a vid_restart). It is
+a startup-intro stage (cls.startStage >= HZM_MEMORIAL_STAGE_IN), so while it runs the engine itself holds back
+everything that must come after it: CL_Frame only pushes the main menu and starts the menu music once
+CL_FinishedIntro() (cl_main.cpp), Com_Frame only runs the command buffer then (so the What's New card's
+`wait 300; pushmenu` lands after it), and every key/click goes to UI_StartStageKeyEvent. Independent of
+developer and cl_playintro (the retail EA/legal intro stays off in autoexec.cfg). Never on a dedicated server
+(CL_InitializeUI does not call CL_TryStartIntro there). No art (an older pk3) = no memorial.
+  cl_memorial 1|0            show it at launch
+  cl_memorialSkip 1|0        any key or click skips it (after cl_memorialSkipAfter seconds)
+  cl_memorialTimes "1 4 1"   fade in / hold / fade out, seconds
+All flags 0 (TRAPS T7). Art: scripts/coop_memorial.shader hzmMemorial, docs/tools/gen_memorial.py - drawn
+centred and aspect-correct at 1024/1440 of the screen height (1:1 at 1440p), clamped to 98% of the width.
+====================
+*/
+static int s_memorialSkipAt; // cls.realtime from which a key/click may skip
+static int s_memorialT0;     // cls.realtime when it started (the ^~^~^ MEMORIAL at= offsets)
+
+static void UI_MemorialPhase(int stage, float alphaStart, float alphaEnd, int ms)
+{
+    cls.startStage          = stage;
+    intro_stage.alpha_start = alphaStart;
+    intro_stage.alpha_end   = alphaEnd;
+    intro_stage.fadetime    = (alphaStart != alphaEnd) ? ms : 0;
+    intro_stage.starttime   = cls.realtime;
+    intro_stage.endtime     = cls.realtime + ms;
+}
+
+static void UI_MemorialTimes(float *fin, float *hold, float *fout)
+{
+    *fin = 1.0f;
+    *hold = 4.0f;
+    *fout = 1.0f;
+    if (cl_memorialTimes) {
+        sscanf(cl_memorialTimes->string, "%f %f %f", fin, hold, fout);
+    }
+    *fin  = Q_clamp_float(*fin, 0.0f, 10.0f);
+    *hold = Q_clamp_float(*hold, 0.0f, 30.0f);
+    *fout = Q_clamp_float(*fout, 0.0f, 10.0f);
+}
+
+static float UI_MemorialAlpha(void)
+{
+    float frac;
+
+    if (!intro_stage.fadetime) {
+        return intro_stage.alpha_end;
+    }
+    frac = Q_clamp_float((cls.realtime - intro_stage.starttime) / intro_stage.fadetime, 0, 1);
+    return intro_stage.alpha_start + frac * (intro_stage.alpha_end - intro_stage.alpha_start);
+}
+
+static void UI_MemorialFinish(void)
+{
+    // ^~^~^ markers (TRAPS T14): the smoke test reads the memorial's beats from the log
+    Com_Printf("^~^~^ MEMORIAL end at=%d\n", cls.realtime - s_memorialT0);
+    cls.startStage = 0; // CL_Frame now pushes the main menu and starts its music
+    IN_MouseOn();
+}
+
+// CL_TryStartIntro: returns qtrue when the memorial started (the retail intro is then skipped)
+static qboolean UI_MemorialStart(void)
+{
+    static qboolean shown = qfalse;
+    float           fin, hold, fout;
+
+    if (shown || com_dedicated->integer) {
+        return qfalse;
+    }
+    shown = qtrue; // once per process: CL_InitializeUI runs again after every vid_restart
+
+    if (!cl_memorial || !cl_memorial->integer) {
+        Com_Printf("^~^~^ MEMORIAL off (cl_memorial 0)\n");
+        return qfalse;
+    }
+    intro_stage.material = uWinMan.RegisterShader("hzmMemorial");
+    if (!intro_stage.material || !intro_stage.material->GetMaterial()) {
+        Com_Printf("^~^~^ MEMORIAL none (no hzmMemorial art in this install) - straight to the menu\n");
+        return qfalse;
+    }
+
+    UI_MemorialTimes(&fin, &hold, &fout);
+    IN_MouseOff(); // no GUI pointer on the black screen; clicks still arrive as keys (UI_StartStageKeyEvent)
+    s_memorialT0 = cls.realtime;
+    UI_MemorialPhase(HZM_MEMORIAL_STAGE_IN, 0.0f, 1.0f, (int)(fin * 1000.0f));
+    s_memorialSkipAt = cls.realtime + (int)(Q_clamp_float(cl_memorialSkipAfter->value, 0.0f, 10.0f) * 1000.0f);
+    Com_Printf(
+        "^~^~^ MEMORIAL start in=%.1f hold=%.1f out=%.1f skip=%d after=%.1f\n",
+        fin,
+        hold,
+        fout,
+        cl_memorialSkip ? cl_memorialSkip->integer : 0,
+        cl_memorialSkipAfter->value
+    );
+    return qtrue;
+}
+
+// UI_DrawIntro's end-of-phase callback (via CL_FinishedStartStage)
+static void UI_MemorialAdvance(void)
+{
+    float fin, hold, fout;
+
+    UI_MemorialTimes(&fin, &hold, &fout);
+    switch (cls.startStage) {
+    case HZM_MEMORIAL_STAGE_IN:
+        UI_MemorialPhase(HZM_MEMORIAL_STAGE_HOLD, 1.0f, 1.0f, (int)(hold * 1000.0f));
+        break;
+    case HZM_MEMORIAL_STAGE_HOLD:
+        UI_MemorialPhase(HZM_MEMORIAL_STAGE_OUT, 1.0f, 0.0f, (int)(fout * 1000.0f));
+        break;
+    default:
+        UI_MemorialFinish();
+        break;
+    }
+}
+
+// a key or click during the memorial
+static void UI_MemorialKey(void)
+{
+    float cur;
+
+    if (!cl_memorialSkip || !cl_memorialSkip->integer || cls.realtime < s_memorialSkipAt) {
+        return;
+    }
+    Com_Printf("^~^~^ MEMORIAL skip at=%d stage=%d\n", cls.realtime - s_memorialT0, cls.startStage);
+    if (cls.startStage == HZM_MEMORIAL_STAGE_OUT) {
+        UI_MemorialFinish(); // a second press during the fade-out: straight to the menu
+        return;
+    }
+    cur = UI_MemorialAlpha(); // a short fade-out from wherever it is, never a hard cut
+    UI_MemorialPhase(HZM_MEMORIAL_STAGE_OUT, cur, 0.0f, (int)(350.0f * cur) + 1);
+}
+
+static void UI_MemorialDraw(void)
+{
+    const float swidth  = view3d->getFrame().getMaxX();
+    const float sheight = view3d->getFrame().getMaxY();
+    float       w, h, a;
+    vec4_t      color;
+
+    if (intro_stage.material && intro_stage.material->GetMaterial()) {
+        // the art is 2:1; 1024/1440 of the height keeps it 1:1 at 1440p. Clamp to the width on narrow screens.
+        h = sheight * (1024.0f / 1440.0f);
+        w = h * 2.0f;
+        if (w > swidth * 0.98f) {
+            w = swidth * 0.98f;
+            h = w * 0.5f;
+        }
+        a = UI_MemorialAlpha();
+        VectorSet4(color, a, a, a, 1);
+        re.SetColor(color);
+        re.DrawStretchPic((swidth - w) * 0.5f, (sheight - h) * 0.5f, w, h, 0.0, 0.0, 1.0, 1.0,
+                          intro_stage.material->GetMaterial());
+        re.SetColor(NULL);
+    }
+
+    if (cls.realtime >= intro_stage.endtime) {
+        CL_FinishedStartStage();
+    }
+}
+
+/*
+====================
 CL_FinishedIntro
 ====================
 */
@@ -4962,6 +5180,11 @@ CL_FinishedStartStage
 void CL_FinishedStartStage(void)
 {
     int wait;
+
+    if (cls.startStage >= HZM_MEMORIAL_STAGE_IN) {
+        UI_MemorialAdvance(); // HZM launch memorial
+        return;
+    }
 
     switch (cls.startStage++) {
     case 1:
@@ -5051,6 +5274,11 @@ UI_StartStageKeyEvent
 */
 void UI_StartStageKeyEvent(void)
 {
+    if (cls.startStage >= HZM_MEMORIAL_STAGE_IN) {
+        UI_MemorialKey(); // HZM launch memorial
+        return;
+    }
+
     switch (cls.startStage) {
     case 2:
         if (ui_skip_eamovie->integer) {
@@ -5101,15 +5329,19 @@ CL_TryStartIntro
 */
 void CL_TryStartIntro(void)
 {
+    if (UI_MemorialStart()) {
+        return; // HZM coop launch memorial
+    }
+
     if (developer->integer || !cl_playintro->integer) {
         // No startup intro (developer mode, or the intro is disabled via `cl_playintro 0`).
         // HZM fix: only drop the console when actually in developer mode. Previously this toggled the
         // console whenever the intro was skipped, so setting `cl_playintro 0` to skip the EA logos (our
         // autoexec default) re-opened the console over the main menu at every launch. A plain intro-skip
         // must NOT show the console; the ~ key still toggles it.
-        if (developer->integer) {
-            UI_ToggleConsole();
-        }
+        // [user 2026-09-25] ...and neither does developer mode any more: "Console always launches too" -
+        // PLAY-GL2.bat sets developer 1, so the console dropped over the main menu (and the Field Report
+        // card) on every launch. The ~ key opens it on demand instead (cl_keys.cpp accepts developer too).
     } else {
         // FIXME: no intro from now
         Cvar_Set(cl_playintro->name, "0");
@@ -5513,6 +5745,25 @@ void CL_InitializeUI(void)
     ui_itemsbar        = Cvar_Get("ui_itemsbar", "0", 1);
     sound_overlay      = Cvar_Get("soundoverlay", "0", 0);
     ui_debugload       = Cvar_Get("ui_debugload", "0", 0);
+    // HZM coop [user 2026-09-26] loading-screen probe. flags 0: a diagnostic is never archived (TRAPS T7),
+    // so it can never latch on in a player's saved config.
+    cl_loadProbe       = Cvar_Get("cl_loadProbe", "0", 0);
+    // HZM coop [user 2026-09-27] launch memorial (UI_MemorialStart). flags 0: defaults ship to everyone (TRAPS T7)
+    cl_memorial          = Cvar_Get("cl_memorial", "1", 0);
+    cl_memorialSkip      = Cvar_Get("cl_memorialSkip", "1", 0);
+    cl_memorialSkipAfter = Cvar_Get("cl_memorialSkipAfter", "1", 0);
+    cl_memorialTimes     = Cvar_Get("cl_memorialTimes", "1 4 1", 0);
+    // HZM coop [user 2026-09-26] loading screen (ui/loadingbar.txt, UI_LoadHints_*). All flags 0: session values,
+    // never saved. ui_loadIconScale is the medal's scalecvar and must exist BEFORE the menus below are parsed
+    // (Cvar_Find); it scales position too, so it stays 1. coop_defaults.cfg seeds the same values for old exes.
+    ui_loadHints       = Cvar_Get("ui_loadHints", "-1", 0);
+    ui_loadHintSecs    = Cvar_Get("ui_loadHintSecs", "7", 0);
+    // 100 ms (was a hard-coded 33): the medal animates at 10 frames/s, so faster redraws only cost load time
+    ui_loadRedrawMs    = Cvar_Get("ui_loadRedrawMs", "100", 0);
+    Cvar_Get("ui_loadhint", "", 0);
+    Cvar_Get("ui_loadHintsOn", "1", 0);
+    Cvar_Get("ui_loadClassic", "0", 0);
+    Cvar_Get("ui_loadIconScale", "1", 0);
     Cvar_Get("ui_signshader", "", 0);
     ui_compass             = Cvar_Get("ui_compass", "1", 0);
     // HZM coop [user 2026-09-13] top compass bar - see UI_CompassBarTop. flags 0: a per-session value cgame
@@ -5875,6 +6126,571 @@ void UI_RegisterLoadResource(const char *name)
 
 /*
 ====================
+HZM coop [user 2026-09-26] LOADING-SCREEN PROBE (cl_loadProbe)
+
+docs/proposals/loading_screen_2026-09-26/research.md section 5, "probe first": the baseline every
+loading-screen change is measured against - how many frames the player really sees during a map load,
+and where the screen freezes. cl_loadProbe 1 (flags 0, default 0) prints, once per load:
+  ^~^~^ LOADDRAW  the summary (UI_EndLoad / UI_AbortLoad, or a new UI_BeginLoad mid-load)
+  ^~^~^ LOADGAP   the LOADPROBE_TOPGAPS longest freezes: length, when, and the resource names either side
+Frames are counted in SCR_UpdateScreen (UI_LoadScreenFrame*), so the probe sees EVERY frame of the load -
+the throttled UI_LoadResource ticks and the ordinary CL_Frame redraws between blocking calls - but only
+frames that really drew: the SCR_UpdateScreen recursion guard returns before the hooks, and a tick it
+swallowed is counted as 'supp'. The first gap starts at UI_BeginLoad, so on gl2 it contains the per-map
+R_Init, during which the PREVIOUS frame stays on screen. Read-only: it never draws or loads anything.
+====================
+*/
+#define LOADPROBE_TOPGAPS  5
+#define LOADPROBE_NAMELEN  48
+#define LOADPROBE_FROZENMS 200 // a gap at least this long counts toward 'frozen' / 'n200'
+
+typedef struct {
+    int  ms;
+    int  at;
+    char before[LOADPROBE_NAMELEN];
+    char after[LOADPROBE_NAMELEN];
+} loadProbeGap_t;
+
+static struct {
+    qboolean       active;
+    int            tickDepth;     // > 0 while UI_TestUpdateScreen is inside SCR_UpdateScreen
+    char           map[MAX_QPATH];
+    const char    *path;          // "listen" or "remote"
+    int            startMs;
+    int            firstFrameMs;  // UI_BeginLoad -> end of the first loading frame; -1 until drawn
+    int            lastDrawEnd;
+    int            hunkStart;
+    int            drawStart;
+    int            draws;         // loading frames that really drew
+    int            tickDraws;     // ... of which a UI_LoadResource tick drew
+    int            suppressed;    // ticks past the throttle that the recursion guard swallowed
+    int            pumpOnly;      // ticks that only pumped messages: renderer down or mid-registration (bug-3015)
+    int            drawMsTotal;
+    int            drawMsMax;
+    int            hunkMs;        // CL_StartHunkUsers inside a loading frame (gl2 R_Init, cgame init)
+    int            resources;     // UI_LoadResource calls
+    int            srvDoneMs;     // "*143" = SV_SpawnServer finished; -1 if not seen (remote client)
+    int            frozenMs;      // sum of gaps >= LOADPROBE_FROZENMS
+    int            frozenCount;
+    int            hints;         // hint lines shown (loading-screen hints)
+    char           lastRes[LOADPROBE_NAMELEN];
+    char           resAtLastDraw[LOADPROBE_NAMELEN];
+    loadProbeGap_t top[LOADPROBE_TOPGAPS];
+} s_loadProbe;
+
+static const char *UI_LoadProbe_Class(const char *name)
+{
+    int n;
+
+    switch (name[0]) {
+    case 0:
+        return "none";
+    case 'a':
+    case 'b':
+    case 'c':
+    case 'd':
+    case 'e':
+    case 'h':
+        return "tiki";
+    case 'g':
+        return "anim";
+    case 'l':
+        return "skel";
+    case 'k':
+        return "sound";
+    case 'n':
+        return "image";
+    case 's':
+        return "patch";
+    case 'm':
+    case 'o':
+        return "alias";
+    case 'i':
+        return "entity";
+    case 'B':
+        return "begin";
+    case '*':
+        if (name[1] == 't') {
+            return "aliastick";
+        }
+        if (!strcmp(name, "*end")) {
+            return "end";
+        }
+        n = atoi(name + 1);
+        if (n == 124) {
+            return "rinit";
+        }
+        if (n >= 132 && n <= 143) {
+            return "server";
+        }
+        if (n >= 144 && n <= 150) {
+            return "spawn";
+        }
+        return "mark";
+    default:
+        return "other";
+    }
+}
+
+static void UI_LoadProbe_Report(const char *reason)
+{
+    int i;
+    int now = Sys_Milliseconds();
+
+    if (!s_loadProbe.active) {
+        return;
+    }
+    s_loadProbe.active = qfalse;
+
+    Com_Printf(
+        "^~^~^ LOADDRAW map=%s path=%s end=%s ms=%d first=%d draws=%d tick=%d supp=%d pump=%d redrawms=%d drawms=%d drawmax=%d hunk=%d "
+        "res=%d srv=%d frozen=%d n200=%d hints=%d maxgap=%d phase=%s->%s before=%s after=%s r=%s vsync=%d mode=%s\n",
+        s_loadProbe.map,
+        s_loadProbe.path,
+        reason,
+        now - s_loadProbe.startMs,
+        s_loadProbe.firstFrameMs,
+        s_loadProbe.draws,
+        s_loadProbe.tickDraws,
+        s_loadProbe.suppressed,
+        s_loadProbe.pumpOnly,
+        ui_loadRedrawMs ? ui_loadRedrawMs->integer : -1,
+        s_loadProbe.drawMsTotal,
+        s_loadProbe.drawMsMax,
+        s_loadProbe.hunkMs,
+        s_loadProbe.resources,
+        s_loadProbe.srvDoneMs,
+        s_loadProbe.frozenMs,
+        s_loadProbe.frozenCount,
+        s_loadProbe.hints,
+        s_loadProbe.top[0].ms,
+        UI_LoadProbe_Class(s_loadProbe.top[0].before),
+        UI_LoadProbe_Class(s_loadProbe.top[0].after),
+        s_loadProbe.top[0].before[0] ? s_loadProbe.top[0].before : "-",
+        s_loadProbe.top[0].after[0] ? s_loadProbe.top[0].after : "-",
+        Cvar_VariableString("cl_renderer"),
+        Cvar_VariableIntegerValue("r_swapInterval"),
+        cls.loading == SS_LOADING2 ? "bar" : "flasher"
+    );
+
+    for (i = 0; i < LOADPROBE_TOPGAPS; i++) {
+        if (s_loadProbe.top[i].ms <= 0) {
+            break;
+        }
+        Com_Printf(
+            "^~^~^ LOADGAP map=%s rank=%d ms=%d at=%d phase=%s->%s before=%s after=%s\n",
+            s_loadProbe.map,
+            i + 1,
+            s_loadProbe.top[i].ms,
+            s_loadProbe.top[i].at,
+            UI_LoadProbe_Class(s_loadProbe.top[i].before),
+            UI_LoadProbe_Class(s_loadProbe.top[i].after),
+            s_loadProbe.top[i].before[0] ? s_loadProbe.top[i].before : "-",
+            s_loadProbe.top[i].after[0] ? s_loadProbe.top[i].after : "-"
+        );
+    }
+}
+
+static void UI_LoadProbe_Begin(const char *mapname)
+{
+    // a new gamestate mid-load: close the old record rather than merging two loads into one
+    UI_LoadProbe_Report("restart");
+
+    if (!cl_loadProbe || !cl_loadProbe->integer) {
+        return;
+    }
+
+    {
+        const int tickDepth = s_loadProbe.tickDepth; // survives the reset if a load begins inside a tick
+        Com_Memset(&s_loadProbe, 0, sizeof(s_loadProbe));
+        s_loadProbe.tickDepth = tickDepth;
+    }
+    s_loadProbe.active       = qtrue;
+    s_loadProbe.startMs      = Sys_Milliseconds();
+    s_loadProbe.lastDrawEnd  = s_loadProbe.startMs;
+    s_loadProbe.firstFrameMs = -1;
+    s_loadProbe.srvDoneMs    = -1;
+    s_loadProbe.path         = (com_sv_running && com_sv_running->integer) ? "listen" : "remote";
+    Q_strncpyz(s_loadProbe.map, mapname, sizeof(s_loadProbe.map));
+    Q_strncpyz(s_loadProbe.lastRes, "BEGIN", sizeof(s_loadProbe.lastRes));
+    Q_strncpyz(s_loadProbe.resAtLastDraw, "BEGIN", sizeof(s_loadProbe.resAtLastDraw));
+}
+
+static void UI_LoadProbe_Resource(const char *name)
+{
+    if (!s_loadProbe.active) {
+        return;
+    }
+    s_loadProbe.resources++;
+    Q_strncpyz(s_loadProbe.lastRes, name, sizeof(s_loadProbe.lastRes));
+    if (s_loadProbe.srvDoneMs < 0 && !strcmp(name, "*143")) {
+        s_loadProbe.srvDoneMs = Sys_Milliseconds() - s_loadProbe.startMs;
+    }
+}
+
+static void UI_LoadProbe_Gap(int gap, int at)
+{
+    int i, j;
+
+    if (gap >= LOADPROBE_FROZENMS) {
+        s_loadProbe.frozenMs += gap;
+        s_loadProbe.frozenCount++;
+    }
+
+    for (i = 0; i < LOADPROBE_TOPGAPS; i++) {
+        if (gap > s_loadProbe.top[i].ms) {
+            break;
+        }
+    }
+    if (i >= LOADPROBE_TOPGAPS) {
+        return;
+    }
+    for (j = LOADPROBE_TOPGAPS - 1; j > i; j--) {
+        s_loadProbe.top[j] = s_loadProbe.top[j - 1];
+    }
+    s_loadProbe.top[i].ms = gap;
+    s_loadProbe.top[i].at = at;
+    Q_strncpyz(s_loadProbe.top[i].before, s_loadProbe.resAtLastDraw, sizeof(s_loadProbe.top[i].before));
+    Q_strncpyz(s_loadProbe.top[i].after, s_loadProbe.lastRes, sizeof(s_loadProbe.top[i].after));
+}
+
+/*
+====================
+HZM coop [user 2026-09-26] LOADING-SCREEN HINTS (ui/loadhints.txt -> ui_loadhint)
+
+The hint strip of ui/loadingbar.txt is a linkcvar label on ui_loadhint, re-read on every draw. Nothing else can
+change a cvar during a blocking load - no script, cfg or timer runs - so the exe does it:
+  UI_BeginLoad      reads ui/loadhints.txt (every load: a few KB, and it follows pk3 updates), keeps the lines
+                    whose tag fits this load ([G] always, [C] coop, [M] multiplayer), shuffles them and publishes
+                    the first. Also republishes ui_loadHintsOn and re-enables our widgets (SP Continue hid them).
+  each loading      UI_LoadScreenFramePreDraw advances to the next line every ui_loadHintSecs, JUST BEFORE the
+  frame             frame draws, so a new hint is on screen the moment it changes. The timer starts at the FIRST
+                    drawn frame: gl2's per-map R_Init can hold the previous frame for up to ~15 s, and a hint that
+                    expired unseen would be wasted.
+  UI_EndLoad        stops. UI_ServerLoaded hides our widgets when single player's Continue button appears.
+It only ever writes cvars: it never touches fonts or the renderer (bug-2981), and adds no redraw of its own.
+ui_loadHints: -1 = auto (HZM_LOADHINTS_AUTO), 0 = off (strip and hint hidden), 1 = on. flags 0, never saved, so a
+change of the auto default reaches every player (TRAPS T7). An old exe shows the one hint coop_defaults.cfg seeds;
+a missing or unreadable file (e.g. a pure server without the coop pak) keeps the last good list, or the seed.
+====================
+*/
+#define HZM_LOADHINTS_AUTO 1 // ui_loadHints -1 means this. ON: user decision 2026-09-26 (ship all 60 hints).
+#define LOADHINTS_MAX      128
+#define LOADHINT_LEN       128
+
+static struct {
+    int          count;                        // lines in the last good read of ui/loadhints.txt
+    char         text[LOADHINTS_MAX][LOADHINT_LEN];
+    char         tag[LOADHINTS_MAX];           // 'C', 'M' or 'G'
+    int          order[LOADHINTS_MAX];         // this load's shuffled, mode-filtered line indices
+    int          orderCount;
+    int          pos;
+    int          nextMs;                       // 0 = start the timer at the first drawn frame
+    int          lastShownPlus1;               // survives loads: a load never opens on the hint the last one showed
+    unsigned int rng;
+    qboolean     active;
+} s_loadHints;
+
+// ours in ui/loadingbar.txt; the engine never addresses them otherwise
+static const char *s_loadHintWidgets[] = {"hzm_loadmedal", "hzm_loadhint", "hzm_loadhint_bg", "hzm_loadhint_line"};
+
+static void UI_LoadHints_SetWidgets(qboolean enable)
+{
+    int i;
+
+    if (!ui_pLoadingMenu) {
+        return;
+    }
+    for (i = 0; i < (int)ARRAY_LEN(s_loadHintWidgets); i++) {
+        // Menu::PassEventToWidget leaks the event when no widget has the name, so an older or third-party
+        // loadingbar.txt without our widgets must not be sent one
+        if (ui_pLoadingMenu->GetNamedWidget(s_loadHintWidgets[i])) {
+            ui_pLoadingMenu->PassEventToWidget(
+                s_loadHintWidgets[i], new Event(enable ? EV_Widget_Enable : EV_Widget_Disable)
+            );
+        }
+    }
+}
+
+static void UI_LoadHints_Read(void)
+{
+    char       *buf = NULL;
+    const char *p, *end;
+    long        len;
+    int         n;
+
+    len = FS_ReadFile("ui/loadhints.txt", (void **)&buf);
+    if (len <= 0 || !buf) {
+        return; // keep the last good list
+    }
+
+    n   = 0;
+    p   = buf;
+    end = buf + len;
+    while (p < end && n < LOADHINTS_MAX) {
+        const char *ls = p;
+        const char *le;
+        char        tag = 'G';
+        int         k;
+
+        while (p < end && *p != '\n') {
+            p++;
+        }
+        le = p;
+        if (p < end) {
+            p++;
+        }
+
+        while (ls < le && (*ls == ' ' || *ls == '\t')) {
+            ls++;
+        }
+        while (le > ls && (le[-1] == '\r' || le[-1] == ' ' || le[-1] == '\t')) {
+            le--;
+        }
+        if (le <= ls || *ls == '#' || (le - ls >= 2 && ls[0] == '/' && ls[1] == '/')) {
+            continue;
+        }
+        if (le - ls >= 3 && ls[0] == '[' && ls[2] == ']' && (ls[1] == 'C' || ls[1] == 'M' || ls[1] == 'G')) {
+            tag = ls[1];
+            ls += 3;
+            while (ls < le && (*ls == ' ' || *ls == '\t')) {
+                ls++;
+            }
+        }
+        if (le <= ls) {
+            continue;
+        }
+
+        for (k = 0; ls < le && k < LOADHINT_LEN - 1; ls++) {
+            // the verdana glyph set is ASCII 32-126 (docs/tools/loadscreen_lint.py rejects anything else)
+            s_loadHints.text[n][k++] = (*ls >= 32 && *ls <= 126) ? *ls : '?';
+        }
+        s_loadHints.text[n][k] = 0;
+        s_loadHints.tag[n]     = tag;
+        n++;
+    }
+    FS_FreeFile(buf);
+
+    if (n > 0) {
+        s_loadHints.count = n;
+    }
+}
+
+static qboolean UI_LoadHints_IsMpLoad(const char *mapname)
+{
+    const char *info;
+
+    // stock and custom MP maps
+    if (!Q_stricmpn(mapname, "dm/", 3) || !Q_stricmpn(mapname, "obj/", 4) || !Q_stricmpn(mapname, "lib/", 4)) {
+        return qtrue;
+    }
+    if (com_sv_running && com_sv_running->integer) {
+        // the host: a campaign map played as an MP arena (Push etc.) is launched with the one-shot sv_mpForceArena,
+        // which SV_SpawnServer consumes only AFTER CL_MapLoading has called us (sv_init.c, bug-2836)
+        return Cvar_VariableIntegerValue("sv_mpForceArena") ? qtrue : qfalse;
+    }
+    // a joiner: the server put the arena variant in serverinfo before it sent this gamestate
+    info = cl.gameState.stringData + cl.gameState.stringOffsets[CS_SERVERINFO];
+    return !Q_stricmp(Info_ValueForKey(info, "sv_mapVariant"), "mp") ? qtrue : qfalse;
+}
+
+static void UI_LoadHints_Show(void)
+{
+    const int idx = s_loadHints.order[s_loadHints.pos];
+
+    s_loadHints.lastShownPlus1 = idx + 1;
+    Cvar_Set("ui_loadhint", s_loadHints.text[idx]);
+
+    if (s_loadProbe.active) {
+        s_loadProbe.hints++;
+        Com_Printf(
+            "^~^~^ LOADHINT map=%s n=%d/%d line=%d tag=%c at=%d\n",
+            s_loadProbe.map,
+            s_loadHints.pos + 1,
+            s_loadHints.orderCount,
+            idx + 1,
+            s_loadHints.tag[idx],
+            Sys_Milliseconds() - s_loadProbe.startMs
+        );
+    }
+}
+
+static void UI_LoadHints_Begin(const char *mapname)
+{
+    int      i, j, t;
+    qboolean on, mp;
+
+    s_loadHints.active = qfalse;
+    if (!ui_loadHints) {
+        return; // the UI is not initialised yet
+    }
+
+    if (ui_loadHints->integer < 0) {
+        on = HZM_LOADHINTS_AUTO ? qtrue : qfalse;
+    } else {
+        on = ui_loadHints->integer ? qtrue : qfalse;
+    }
+    Cvar_Set("ui_loadHintsOn", on ? "1" : "0");
+    if (!on) {
+        return;
+    }
+
+    UI_LoadHints_Read();
+    if (!s_loadHints.count) {
+        return; // no hint file on this install: the seeded ui_loadhint stays, exactly as on an old exe
+    }
+
+    mp                     = UI_LoadHints_IsMpLoad(mapname);
+    s_loadHints.orderCount = 0;
+    for (i = 0; i < s_loadHints.count; i++) {
+        t = s_loadHints.tag[i];
+        if (t == 'G' || (t == 'M' && mp) || (t == 'C' && !mp)) {
+            s_loadHints.order[s_loadHints.orderCount++] = i;
+        }
+    }
+    if (!s_loadHints.orderCount) {
+        return;
+    }
+
+    // Fisher-Yates on a private LCG: a fresh order every load, and the game's rand() stream is left alone
+    s_loadHints.rng ^= (unsigned int)Sys_Milliseconds() * 2654435761u;
+    for (i = s_loadHints.orderCount - 1; i > 0; i--) {
+        s_loadHints.rng        = s_loadHints.rng * 1664525u + 1013904223u;
+        j                      = (int)((s_loadHints.rng >> 8) % (unsigned int)(i + 1));
+        t                      = s_loadHints.order[i];
+        s_loadHints.order[i]   = s_loadHints.order[j];
+        s_loadHints.order[j]   = t;
+    }
+    if (s_loadHints.orderCount > 1 && s_loadHints.order[0] + 1 == s_loadHints.lastShownPlus1) {
+        t                    = s_loadHints.order[0];
+        s_loadHints.order[0] = s_loadHints.order[1];
+        s_loadHints.order[1] = t;
+    }
+
+    s_loadHints.pos    = 0;
+    s_loadHints.nextMs = 0;
+    s_loadHints.active = qtrue;
+    UI_LoadHints_Show();
+}
+
+static void UI_LoadHints_Tick(void)
+{
+    int now, secs;
+
+    if (!s_loadHints.active) {
+        return;
+    }
+
+    now  = Sys_Milliseconds();
+    secs = ui_loadHintSecs ? ui_loadHintSecs->integer : 7;
+    if (secs < 3) {
+        secs = 3;
+    } else if (secs > 60) {
+        secs = 60;
+    }
+
+    if (!s_loadHints.nextMs) {
+        // the first drawn frame of this load: the hint published at UI_BeginLoad is only now on screen
+        s_loadHints.nextMs = now + secs * 1000;
+        return;
+    }
+    if (now < s_loadHints.nextMs) {
+        return;
+    }
+    if (s_loadHints.orderCount > 1) {
+        s_loadHints.pos = (s_loadHints.pos + 1) % s_loadHints.orderCount;
+        UI_LoadHints_Show();
+    }
+    s_loadHints.nextMs = now + secs * 1000;
+}
+
+/*
+====================
+UI_LoadScreenFrameBegin / UI_LoadScreenFramePreDraw / UI_LoadScreenFrameEnd
+
+Called by SCR_UpdateScreen (cl_scrn.cpp) around CL_StartHunkUsers and the draw, AFTER its recursion guard,
+so they see exactly the frames that draw. Outside a load they return at the first compare.
+====================
+*/
+/*
+====================
+UI_LoadScreenPrimeMaterials
+
+HZM bug-3015 (P5b): CL_StartHunkUsers calls this right before CL_InitCGame. UI materials register LAZILY on first
+draw (UIReggedMaterial::GetMaterial), and after a gl2 re-init CleanupShadersFromList has marked every one stale - so
+the first loading frame would re-register the whole loading menu. If that frame is drawn from a resource tick fired
+inside a shader parse (gl2 R_FindImageFile ticks), the nested registration clobbers the parse in progress:
+tr_shader.c parses into file-static shader/stages and is not re-entrant. So register them HERE, where nothing is
+mid-registration, with every tick inside pumping only. It must NOT draw: a draw at CA_LOADING before CL_InitCGame
+reaches CL_CGameRendering with no cgame (bug-3035, the crash of the first attempt).
+====================
+*/
+void UI_LoadScreenPrimeMaterials(void)
+{
+    qboolean wasNoLoadDraw;
+    int      i;
+
+    if (!ui_pLoadingMenu || !cls.rendererReady || (cls.loading != SS_LOADING && cls.loading != SS_LOADING2)) {
+        return;
+    }
+
+    wasNoLoadDraw  = s_uiNoLoadDraw;
+    s_uiNoLoadDraw = qtrue;
+    for (i = 1; i <= ui_pLoadingMenu->m_itemlist.NumObjects(); i++) {
+        ui_pLoadingMenu->m_itemlist.ObjectAt(i)->PrimeMaterials();
+    }
+    s_uiNoLoadDraw = wasNoLoadDraw;
+}
+
+void UI_LoadScreenFrameBegin(void)
+{
+    if (!s_loadProbe.active) {
+        return;
+    }
+    s_loadProbe.hunkStart = Sys_Milliseconds();
+}
+
+void UI_LoadScreenFramePreDraw(void)
+{
+    UI_LoadHints_Tick(); // HZM loading-screen hints: a new hint lands on the frame about to draw
+
+    if (!s_loadProbe.active) {
+        return;
+    }
+    s_loadProbe.drawStart = Sys_Milliseconds();
+    s_loadProbe.hunkMs += s_loadProbe.drawStart - s_loadProbe.hunkStart;
+}
+
+void UI_LoadScreenFrameEnd(void)
+{
+    int now, drawMs;
+
+    if (!s_loadProbe.active) {
+        return;
+    }
+
+    now    = Sys_Milliseconds();
+    drawMs = now - s_loadProbe.drawStart;
+
+    UI_LoadProbe_Gap(s_loadProbe.drawStart - s_loadProbe.lastDrawEnd, s_loadProbe.lastDrawEnd - s_loadProbe.startMs);
+
+    s_loadProbe.draws++;
+    if (s_loadProbe.tickDepth > 0) {
+        s_loadProbe.tickDraws++;
+    }
+    s_loadProbe.drawMsTotal += drawMs;
+    if (drawMs > s_loadProbe.drawMsMax) {
+        s_loadProbe.drawMsMax = drawMs;
+    }
+    if (s_loadProbe.firstFrameMs < 0) {
+        s_loadProbe.firstFrameMs = now - s_loadProbe.startMs;
+    }
+    s_loadProbe.lastDrawEnd = now;
+    Q_strncpyz(s_loadProbe.resAtLastDraw, s_loadProbe.lastRes, sizeof(s_loadProbe.resAtLastDraw));
+}
+
+/*
+====================
 UI_TestUpdateScreen
 ====================
 */
@@ -5882,14 +6698,38 @@ void UI_TestUpdateScreen(unsigned int timeout)
 {
     unsigned int newTime = Sys_Milliseconds();
     unsigned int startRenderTime, endRenderTime;
+    int          probeDraws;
 
     if (timeout > 0 && (newTime - lastTime) < (timeout + updateTime)) {
         return;
     }
 
+    // HZM coop [2026-09-27] bug-3015 (P4): never draw from INSIDE a renderer (re)registration, or while the renderer
+    // is down. gl2's R_Init ends with a "*124" UI_LoadResource; drawing from there re-entered CL_StartHunkUsers, which
+    // then ran the WHOLE cgame init inside SCR_UpdateScreen's recursion guard, so every tick of it was swallowed: a
+    // client whose server changed map sat on the previous frame for ~16 s (measured: hunk=16200 supp=200). Pump only -
+    // Windows keeps the window alive - and the OUTER CL_StartHunkUsers runs cgame init after R_Init returns, where its
+    // ticks redraw normally. cls.rendererReady alone is not enough: it stays TRUE across a map change (it is cleared
+    // only when the renderer shuts down), and that is exactly the path that froze.
+    if (!cls.rendererReady || s_uiNoLoadDraw) {
+        Sys_PumpMessageLoop();
+        if (s_loadProbe.active) {
+            s_loadProbe.pumpOnly++;
+        }
+        return;
+    }
+
     startRenderTime = Sys_Milliseconds();
     Sys_PumpMessageLoop();
+    // HZM loading-screen probe: mark this frame as a resource tick, and count a tick that the
+    // SCR_UpdateScreen recursion guard swallows (it fired inside R_Init or a nested cgame init)
+    probeDraws = s_loadProbe.draws;
+    s_loadProbe.tickDepth++;
     SCR_UpdateScreen();
+    s_loadProbe.tickDepth--;
+    if (s_loadProbe.active && s_loadProbe.draws == probeDraws) {
+        s_loadProbe.suppressed++;
+    }
     endRenderTime = Sys_Milliseconds();
 
     updateTime = Q_min(endRenderTime - startRenderTime, 1000);
@@ -5922,6 +6762,8 @@ void UI_LoadResource(const char *name)
         return;
     }
 
+    UI_LoadProbe_Resource(name); // HZM loading-screen probe
+
     if (cls.loading == SS_GAME) {
         UI_EndLoadResource();
         UI_EndLoadResource(name);
@@ -5931,7 +6773,8 @@ void UI_LoadResource(const char *name)
         Cvar_SetValue("loadingbar", (float)currentLoadTime / (float)totalLoadTime);
     }
 
-    UI_TestUpdateScreen(33);
+    // HZM [2026-09-27] was a hard-coded 33 ms; ui_loadRedrawMs (default 100) - see CL_InitializeUI
+    UI_TestUpdateScreen(ui_loadRedrawMs ? (unsigned int)Q_min(Q_max(ui_loadRedrawMs->integer, 16), 1000) : 100);
 }
 
 /*
@@ -6077,6 +6920,9 @@ void UI_BeginLoad(const char *pszMapName)
     server_loading_waiting = qfalse;
     strcpy(server_mapname, pszMapName);
 
+    UI_LoadProbe_Begin(pszMapName); // HZM loading-screen probe
+    UI_LoadHints_Begin(pszMapName); // HZM loading-screen hints (before the first frame below)
+
     if (str::icmp(ui_sCurrentLoadingMenu, server_mapname)) {
         ui_sCurrentLoadingMenu = server_mapname;
         ui_pLoadingMenu        = menuManager.FindMenu(ui_sCurrentLoadingMenu);
@@ -6096,6 +6942,7 @@ void UI_BeginLoad(const char *pszMapName)
         }
 
         ui_pLoadingMenu->PassEventToWidget("continuebutton", new Event(EV_Widget_Disable));
+        UI_LoadHints_SetWidgets(qtrue); // HZM: undo a previous single-player Continue screen's hide
 
         loadName = "maps/";
         loadName += pszMapName;
@@ -6244,6 +7091,9 @@ void UI_EndLoad(void)
         currentLoadTime = totalLoadTime;
     }
 
+    s_loadHints.active = qfalse; // HZM loading-screen hints stop with the load
+    UI_LoadProbe_Report("end"); // HZM loading-screen probe (before SS_DEAD, so 'mode' still reads the load)
+
     UI_FreeLoadStrings();
 
     cls.loading = SS_DEAD;
@@ -6256,6 +7106,9 @@ UI_AbortLoad
 */
 void UI_AbortLoad(void)
 {
+    s_loadHints.active = qfalse; // HZM loading-screen hints
+    UI_LoadProbe_Report("abort"); // HZM loading-screen probe
+
     if (cls.loading) {
         if (cls.loading == SS_GAME) {
             UI_DeleteLoadInfo();

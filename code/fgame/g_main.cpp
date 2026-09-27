@@ -445,6 +445,9 @@ G_SpawnEntities
 */
 void G_SpawnEntities(char *entities, int svsTime)
 {
+    // HZM coop - Hardcore is latched per map by coop hardcore.scr::init; clear it before any script runs so an MP
+    // map (which never runs that init) cannot inherit the last coop map's value. gi.cvar_set forces through ROM.
+    gi.cvar_set("g_coopHardcore", "0");
     level.SpawnEntities(entities, svsTime);
 }
 

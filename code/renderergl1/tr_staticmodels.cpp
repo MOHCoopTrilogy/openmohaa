@@ -37,6 +37,63 @@ qboolean        g_bInfostaticmodels = qfalse;
 R_InitStaticModels
 ==============
 */
+/*
+==============
+R_LoadVariantStaticHideList
+
+HZM [bug-2836] When the map is loaded as a VARIANT (cm_variant, e.g. "mp" = a campaign map played as a Push/Arena
+match - the server publishes it in serverinfo and the client adopts it before loading the world), read
+cmpatch/<map>_<variant>_sm.txt: static-model lump indices to NOT draw. The visual half of stripping e3l2's barbed
+wire, whose clip brushes cmpatch/<map>_<variant>.txt removes from collision. Returns the index count.
+==============
+*/
+static int R_LoadVariantStaticHideList(int *out, int maxOut)
+{
+    cvar_t     *variant = ri.Cvar_Get("cm_variant", "", 0);
+    char        base[MAX_QPATH];
+    char        name[MAX_QPATH];
+    char       *buf = NULL;
+    const char *p;
+    int         n = 0;
+    int         len;
+
+    if (!variant || !variant->string[0] || !tr.world) {
+        return 0;
+    }
+    Q_strncpyz(base, tr.world->baseName, sizeof(base));
+    len = strlen(base);
+    if (len > 4 && !Q_stricmp(base + len - 4, "_sml")) {
+        base[len - 4] = 0; // maps/<name>_sml.bsp shares the full map's static-model lump
+    }
+    Com_sprintf(name, sizeof(name), "cmpatch/%s_%s_sm.txt", base, variant->string);
+    if (ri.FS_ReadFile(name, (void **)&buf) <= 0 || !buf) {
+        return 0;
+    }
+    for (p = buf; *p && n < maxOut;) {
+        while (*p && (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n' || *p == ',')) {
+            p++;
+        }
+        if (*p == '#') {
+            while (*p && *p != '\n') {
+                p++;
+            }
+            continue;
+        }
+        if (!*p) {
+            break;
+        }
+        if (*p >= '0' && *p <= '9') {
+            out[n++] = atoi(p);
+        }
+        while (*p && *p != ' ' && *p != '\t' && *p != '\r' && *p != '\n' && *p != ',' && *p != '#') {
+            p++;
+        }
+    }
+    ri.FS_FreeFile(buf);
+    ri.Printf(PRINT_ALL, "^~^~^ CMPATCH %s: %d static models hidden\n", name, n);
+    return n;
+}
+
 void R_InitStaticModels(void)
 {
     cStaticModelUnpacked_t *pSM;
@@ -44,8 +101,12 @@ void R_InitStaticModels(void)
     skelBoneCache_t         bones[128];
     float                   radius;
     int                     i, j, k, l;
+    int                     hideList[512];
+    int                     numHide;
+    int                     h;
 
     g_bInfostaticmodels = qfalse;
+    numHide             = R_LoadVariantStaticHideList(hideList, 512);
 
     if (tr.overbrightShift) {
         for (i = 0; i < tr.world->numStaticModelData; i++) {
@@ -78,6 +139,13 @@ void R_InitStaticModels(void)
 
         pSM->bRendered = qfalse;
         AngleVectorsLeft(pSM->angles, pSM->axis[0], pSM->axis[1], pSM->axis[2]);
+
+        // [bug-2836] variant hide list: never register it -> tiki stays NULL -> every draw/info loop skips it.
+        for (h = 0; h < numHide && hideList[h] != i; h++) {}
+        if (h < numHide) {
+            pSM->tiki = NULL;
+            continue;
+        }
 
         if (!strnicmp(pSM->model, "models", 6)) {
             Q_strncpyz(szTemp, pSM->model, sizeof(szTemp));

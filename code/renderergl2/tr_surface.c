@@ -1349,6 +1349,409 @@ void RB_SurfaceMarkFragment(srfMarkFragment_t* p) {
 	}
 }
 
+/*
+=============
+HZM coop [bug-2905] LOD-INDEPENDENT terrain shading inputs.
+
+User: "the ground textures ... go from looking like the generic ground texture to a ground that has more depth
+... it basically constantly shifts between the two as you walk". The terrain LOD re-tessellates as the player
+moves, and two per-pixel lighting inputs were derived from whatever the tessellation happened to be:
+  - the patch LIGHT DIRECTION was sampled at g_pVert[iVertHead] - and R_AllocateVert inserts new vertices at
+    the HEAD of that list, so the sample point was whichever vertex split most recently. R_LightDirForPoint
+    traces from it to the SUN: sky -> the sun's grazing direction (relief shows), anything in the way - a tree,
+    a wall, or the trace starting on the ground it sits on - -> straight up (flat). Each split flipped it.
+  - the smooth NORMALS were accumulated from the current LOD triangles, so a coarse mesh shaded flatter than a
+    fine one over the same ground.
+Both now come from data the LOD never touches: the light direction from the patch centre, lifted clear of the
+ground; the normals from the 9x9 heightmap (64u grid, z = h * 2 + z0), stepping into the edge neighbour so the
+normals match across patch seams.
+=============
+*/
+static const cTerraPatchUnpacked_t *R_TerraEdgeNeighbour(const cTerraPatchUnpacked_t *patch, float dx, float dy)
+{
+    const short n[4] = {patch->iNorth, patch->iEast, patch->iSouth, patch->iWest};
+    int         i;
+
+    if (!tr.world) {
+        return NULL;
+    }
+    for (i = 0; i < 4; i++) {
+        const cTerraPatchUnpacked_t *q;
+        if (n[i] < 0 || n[i] >= tr.world->numTerraPatches) {
+            continue;
+        }
+        q = &tr.world->terraPatches[n[i]];
+        // match by position rather than trust which link means which side
+        if (q->x0 == patch->x0 + dx && q->y0 == patch->y0 + dy) {
+            return q;
+        }
+    }
+    return NULL;
+}
+
+// world z at heightmap grid point (gx, gy); one step outside the patch reads the edge neighbour, else clamps.
+// *pOk = 0 when it had to clamp (the caller then shortens the difference span)
+static float R_TerraGridZ(const cTerraPatchUnpacked_t *patch, int gx, int gy, int *pOk)
+{
+    *pOk = 1;
+    if (gx < 0 || gx > 8 || gy < 0 || gy > 8) {
+        const float dx = (gx < 0) ? -512.0f : ((gx > 8) ? 512.0f : 0.0f);
+        const float dy = (gy < 0) ? -512.0f : ((gy > 8) ? 512.0f : 0.0f);
+        const cTerraPatchUnpacked_t *q = (dx == 0.0f || dy == 0.0f) ? R_TerraEdgeNeighbour(patch, dx, dy) : NULL;
+        if (q) {
+            const int nx = (gx < 0) ? gx + 8 : ((gx > 8) ? gx - 8 : gx);
+            const int ny = (gy < 0) ? gy + 8 : ((gy > 8) ? gy - 8 : gy);
+            return (float)(q->heightmap[ny * 9 + nx] * 2) + q->z0;
+        }
+        *pOk = 0;
+        gx = (gx < 0) ? 0 : ((gx > 8) ? 8 : gx);
+        gy = (gy < 0) ? 0 : ((gy > 8) ? 8 : gy);
+    }
+    return (float)(patch->heightmap[gy * 9 + gx] * 2) + patch->z0;
+}
+
+// unit surface normal at the heightmap grid point nearest (x, y) - central differences, one-sided where clamped
+static void R_TerraHeightmapNormal(const cTerraPatchUnpacked_t *patch, float x, float y, vec3_t out)
+{
+    int   gx = (int)floor((x - patch->x0) / 64.0f + 0.5f);
+    int   gy = (int)floor((y - patch->y0) / 64.0f + 0.5f);
+    int   okL, okR, okD, okU;
+    float zL, zR, zD, zU, spanX, spanY;
+
+    gx = (gx < 0) ? 0 : ((gx > 8) ? 8 : gx);
+    gy = (gy < 0) ? 0 : ((gy > 8) ? 8 : gy);
+
+    zL    = R_TerraGridZ(patch, gx - 1, gy, &okL);
+    zR    = R_TerraGridZ(patch, gx + 1, gy, &okR);
+    zD    = R_TerraGridZ(patch, gx, gy - 1, &okD);
+    zU    = R_TerraGridZ(patch, gx, gy + 1, &okU);
+    spanX = 64.0f * (float)(okL + okR);
+    spanY = 64.0f * (float)(okD + okU);
+
+    out[0] = (spanX > 0.0f) ? -(zR - zL) / spanX : 0.0f;
+    out[1] = (spanY > 0.0f) ? -(zU - zD) / spanY : 0.0f;
+    out[2] = 1.0f;
+    VectorNormalize(out);
+}
+
+/*
+=============
+HZM gl2 [bug-3007] CONTINUOUS terrain light direction: one per HEIGHTMAP VERTEX, not one per 512u patch.
+
+bug-2905 moved the patch light direction to the patch CENTRE, 48u up, so the LOD could no longer flip it. That is
+LOD-independent but still ONE L per patch, and R_LightDirForPoint adds the sun only when its trace reaches the sky:
+a patch whose centre stands in a shadow gets straight up while its neighbours get the sun or moon. lightall's
+lightmap branch re-shades the lightmap by max(N.L,0)/max(n.L,0.25), so on the same _nh the relief contrast is about
++-2 % under L = up and +-19 % under the m4l3 moon - a step that sat exactly on the straight 512u patch borders
+(docs/proposals/ground_blend_2026-09-26/diagnosis.md section 3; m4l3 patch 84 against all its moonlit neighbours).
+
+Here L is sampled at every heightmap vertex (64u grid, the same 48u lift) and given to the LOD vertex standing on
+it. Every LOD vertex IS a heightmap vertex (MAX_TERRAIN_LOD 6: splits stop at one 64u cell, R_InterpolateVert
+averages xy exactly), so:
+  - the bug-2905 property is kept: a vertex's L is a function of its ground point, never of which vertex the
+    tessellation split last (the bug-2905 heightmap normals, R_TerraHeightmapNormal, work the same way);
+  - and it GEOMORPHS like the height (R_HZM_TerrainVertLightDir): a vertex a split has just added starts at the
+    average of its two hypotenuse ends - exactly what the unsplit triangle drew at that point - and moves to its own
+    value with the factor R_CalcVertMorphHeight gives its height. A per-vertex L that switched at once would pop
+    wherever L changes (a shadow edge, a lamp coming into view) each time the LOD front crossed it (review of
+    2026-09-27). Morphed, a split or merge moves L no more than it moves the geometry: the start is exact once the
+    two ends have finished their own morph, as it is for the height. A cautious merge also waits for L to morph
+    back (R_MergeInternalCautious): where a midpoint's height equals its ends' average the height test alone passes
+    at any morph and the vertex would vanish mid-blend (~14% of split points on the retail maps). The bug-2905
+    heightmap NORMALS still switch per vertex on a split, grid on or off; morphing them from the same parents is
+    the natural follow-up if the A/B shows it;
+  - neighbours AGREE: a border vertex is one world point. The builder copies an edge-shared row from the neighbour
+    it already built; a corner shared only diagonally is traced again from identical inputs, so it agrees wherever
+    the border heights agree (0 mismatches over ~60k shared border points in 9 sampled terrain BSPs). The GPU
+    interpolates L across each triangle and lightall normalises it per pixel, so the relief term fades over one
+    64u cell at a shadow edge instead of stepping on a 512u line.
+Built ONCE per map, at load, through R_LightDirForPointStatic: the runtime call's sphere-light + sun-visibility sum
+minus its per-view areamask gate, so the cached value cannot depend on where the first view stood. About 64 traced
+points per patch (shared border points are copied); the per-frame, per-patch trace of the centre path goes away.
+The build logs its cost:  ^~^~^ HZM TERRAIN LGRID <map>: ...
+
+OMAHA (user rule - no ground or texture work on Omaha): the m3l1a / m3l1b / e3l1 / e3l2 BSPs, their _sml copies and
+obj_team3 always take the bug-2905 per-patch path, whatever the switch says. This is a look change, not a restore
+of retail (gl1 draws no terrain relief at all), so the rule's correctness exception does not apply. Same map set as
+docs/tools/gen_terrain_pak_v4.py OMAHA_MAPS.
+
+Switch: r_hzmTerrainLightGrid (tr_init.c), flags 0, live. -1 or "" = HZM_TERRAINLIGHTGRID_AUTO (tr_local.h), 0 = the
+bug-2905 per-patch centre (r_hzmTerrainLightCentre still picks centre/head inside it), 1 = per heightmap vertex.
+=============
+*/
+static qboolean R_HZM_TerrainLightMapProtected(const char *baseName)
+{
+    static const char *const omaha[] = {"m3l1a", "m3l1b", "e3l1", "e3l2", "obj_team3"};
+    int                      i;
+
+    if (!baseName || !baseName[0]) {
+        return qfalse;
+    }
+    for (i = 0; i < (int)ARRAY_LEN(omaha); i++) {
+        const size_t n = strlen(omaha[i]);
+        // the BSP itself or a suffixed copy of it (m3l1a_sml): the gen_terrain_pak_v4.py rule
+        if (!Q_stricmpn(baseName, omaha[i], (int)n) && (baseName[n] == 0 || baseName[n] == '_')) {
+            return qtrue;
+        }
+    }
+    return qfalse;
+}
+
+static qboolean R_HZM_TerrainLightSwitch(void)
+{
+    if (!r_hzmTerrainLightGrid || !r_hzmTerrainLightGrid->string[0] || r_hzmTerrainLightGrid->integer < 0) {
+        return HZM_TERRAINLIGHTGRID_AUTO ? qtrue : qfalse;
+    }
+    return r_hzmTerrainLightGrid->integer ? qtrue : qfalse;
+}
+
+// index of the edge neighbour of `patch` at (x0 + dx, y0 + dy) in w->terraPatches, or -1 (R_TerraEdgeNeighbour's
+// position match, on an explicit world: the build runs inside RE_LoadWorldMap, before tr.world is set)
+static int R_HZM_TerraEdgeNeighbourIndex(const world_t *w, const cTerraPatchUnpacked_t *patch, float dx, float dy)
+{
+    const short n[4] = {patch->iNorth, patch->iEast, patch->iSouth, patch->iWest};
+    int         i;
+
+    for (i = 0; i < 4; i++) {
+        const cTerraPatchUnpacked_t *q;
+        if (n[i] < 0 || n[i] >= w->numTerraPatches) {
+            continue;
+        }
+        q = &w->terraPatches[n[i]];
+        if (q->x0 == patch->x0 + dx && q->y0 == patch->y0 + dy) {
+            return n[i];
+        }
+    }
+    return -1;
+}
+
+static void R_HZM_TerrainLightGridBuild(world_t *w)
+{
+    vec3_t up;
+    int    pi, gx, gy, traced = 0, shared = 0, t0;
+
+    if (!w || !w->hzmTerraLightDir || w->hzmTerraLightDirBuilt) {
+        return;
+    }
+    t0 = ri.Milliseconds();
+    VectorSet(up, 0.0f, 0.0f, 1.0f);
+
+    for (pi = 0; pi < w->numTerraPatches; pi++) {
+        const cTerraPatchUnpacked_t *p   = &w->terraPatches[pi];
+        int16_t(*dst)[4]                 = &w->hzmTerraLightDir[pi * 81];
+        // edge neighbours this sweep has already built (lower index): their shared row/column is copied verbatim
+        const int iw = R_HZM_TerraEdgeNeighbourIndex(w, p, -512.0f, 0.0f);
+        const int ie = R_HZM_TerraEdgeNeighbourIndex(w, p, 512.0f, 0.0f);
+        const int is = R_HZM_TerraEdgeNeighbourIndex(w, p, 0.0f, -512.0f);
+        const int in = R_HZM_TerraEdgeNeighbourIndex(w, p, 0.0f, 512.0f);
+
+        for (gy = 0; gy < 9; gy++) {
+            for (gx = 0; gx < 9; gx++) {
+                int src = -1;
+
+                if (gx == 0 && iw >= 0 && iw < pi) {
+                    src = iw * 81 + gy * 9 + 8;
+                } else if (gx == 8 && ie >= 0 && ie < pi) {
+                    src = ie * 81 + gy * 9;
+                } else if (gy == 0 && is >= 0 && is < pi) {
+                    src = is * 81 + 8 * 9 + gx;
+                } else if (gy == 8 && in >= 0 && in < pi) {
+                    src = in * 81 + gx;
+                }
+
+                if (src >= 0) {
+                    VectorCopy4(w->hzmTerraLightDir[src], dst[gy * 9 + gx]);
+                    shared++;
+                } else {
+                    vec3_t at, dir;
+
+                    at[0] = p->x0 + 64.0f * gx;
+                    at[1] = p->y0 + 64.0f * gy;
+                    at[2] = (float)(p->heightmap[gy * 9 + gx] * 2) + p->z0 + 48.0f;
+                    VectorCopy(up, dir);
+                    R_LightDirForPointStatic(at, dir, up, w);
+                    if (VectorLength(dir) < 0.01f) {
+                        VectorCopy(up, dir);
+                    } else {
+                        VectorNormalize(dir);
+                    }
+                    R_VaoPackNormal(dst[gy * 9 + gx], dir);
+                    traced++;
+                }
+            }
+        }
+    }
+
+    w->hzmTerraLightDirBuilt = qtrue;
+    ri.Printf(PRINT_ALL, "^~^~^ HZM TERRAIN LGRID %s: %d patches, %d vertices traced, %d shared, %d ms\n",
+        w->baseName, w->numTerraPatches, traced, shared, ri.Milliseconds() - t0);
+}
+
+// RE_LoadWorldMap (tr_bsp.c): reserve the table on every terrain map outside the Omaha set, so a live switch-on never
+// allocates; build it now if the switch is on. On Omaha no table exists, so the draw path cannot take it.
+void R_HZM_TerrainLightGridLoad(world_t *w)
+{
+    if (!w || w->numTerraPatches <= 0 || !w->terraPatches) {
+        return;
+    }
+    if (R_HZM_TerrainLightMapProtected(w->baseName)) {
+        ri.Printf(PRINT_ALL, "HZM terrain light grid: not on %s (Omaha ground rule, bug-3007)\n", w->baseName);
+        return;
+    }
+    w->hzmTerraLightDir      = ri.Hunk_Alloc(w->numTerraPatches * 81 * (int)sizeof(*w->hzmTerraLightDir), h_low);
+    w->hzmTerraLightDirBuilt = qfalse;
+    if (R_HZM_TerrainLightSwitch()) {
+        R_HZM_TerrainLightGridBuild(w);
+    }
+}
+
+// per terrain draw: qtrue = take L from tr.world->hzmTerraLightDir; qfalse = the bug-2905 per-patch path
+// (the Omaha set never has a table - R_HZM_TerrainLightGridLoad - so no map-name test is needed here)
+static qboolean R_HZM_TerrainLightGridOn(void)
+{
+    if (!tr.world || !tr.world->hzmTerraLightDir || !R_HZM_TerrainLightSwitch()) {
+        return qfalse;
+    }
+    if (!tr.world->hzmTerraLightDirBuilt) {
+        R_HZM_TerrainLightGridBuild(tr.world); // switched on mid-map: one build now, cached for the rest of the map
+    }
+    return tr.world->hzmTerraLightDirBuilt;
+}
+
+// tr_terrain.c R_MergeInternalCautious: is per-vertex L being drawn right now? Never builds (the LOD pass runs
+// before the draw that would build it; a first frame answering qfalse only merges as before).
+qboolean R_HZM_TerrainLightGridActive(void)
+{
+    return (tr.world && tr.world->hzmTerraLightDir && tr.world->hzmTerraLightDirBuilt && R_HZM_TerrainLightSwitch())
+        ? qtrue : qfalse;
+}
+
+// one LOD vertex's light direction. Grid off: the patch value (the bug-2905 path, unchanged). Grid on: the value of the
+// heightmap vertex it stands on, GEOMORPHED like its height (see the banner): from the average of its two hypotenuse
+// ends (hzmLPar, set by R_InterpolateVert) to its own value by fHzmMorph (set by R_CalcVertMorphHeight). A patch
+// corner, an unsplit vertex or a split that snaps its height (tr_terrain.c, varnode flag 8) shows its own value.
+static void R_HZM_TerrainVertLightDir(qboolean bGrid, const cTerraPatchUnpacked_t *patch, const terrainVert_t *pv,
+    const int16_t *patchL, int16_t *out)
+{
+    const int16_t(*tab)[4];
+    int   gx, gy, own, k;
+    float m;
+
+    if (!bGrid) {
+        VectorCopy4(patchL, out);
+        return;
+    }
+    tab = &tr.world->hzmTerraLightDir[(int)(patch - tr.world->terraPatches) * 81];
+    // the grid point this vertex stands on (same rounding as R_TerraHeightmapNormal; exact, every LOD vertex is one)
+    gx  = (int)floor((pv->xyz[0] - patch->x0) / 64.0f + 0.5f);
+    gy  = (int)floor((pv->xyz[1] - patch->y0) / 64.0f + 0.5f);
+    gx  = (gx < 0) ? 0 : ((gx > 8) ? 8 : gx);
+    gy  = (gy < 0) ? 0 : ((gy > 8) ? 8 : gy);
+    own = gy * 9 + gx;
+    m   = pv->fHzmMorph;
+    if (pv->hzmLPar[0] > 80 || pv->hzmLPar[1] > 80 || !(m < 1.0f)) {
+        VectorCopy4(tab[own], out);
+        return;
+    }
+    if (!(m > 0.0f)) {
+        m = 0.0f;
+    }
+    // R_VaoPackNormal is linear in the vector and the attribute is a normalised GL_SHORT, so blending the packed
+    // components is blending the vectors. The blend need not be unit length: lightall normalises L per pixel, and
+    // every stored L has z > 0.2 (R_LightDirForPoint), so no blend of them can vanish.
+    for (k = 0; k < 3; k++) {
+        const float a = 0.5f * ((float)tab[pv->hzmLPar[0]][k] + (float)tab[pv->hzmLPar[1]][k]);
+        out[k]        = (int16_t)floor(a + ((float)tab[own][k] - a) * m + 0.5f);
+    }
+    out[3] = tab[own][3];
+}
+
+/*
+=============
+HZM gl2 [bug-3064] PROBE: the per-patch relief light direction and every input it depends on, printed so that loads
+of the same map can be diffed (menu start vs in-game `map` vs vid_restart). A console command, inert unless typed:
+    hzmtlprobe <tag>
+One header (overbright, sun, sphere-light count, areamask), one line per patch, one footer with hashes.
+  L  = what RB_DrawTerrainTris draws today: centre + 48u, R_LightDirForPoint with the LIVE areamask
+  Ls = the view-independent variant the bug-3061 grid is built from (no areamask gate)
+Per patch: leaf = the point has a lit leaf, sl = its light list starts with the sun, sh = the sun trace reached the sky,
+nl = sphere lights added (live / static), sw = the sun's weight |s_sun.color| when added, lw = |sum of lamp terms|.
+=============
+*/
+static unsigned int R_HZM_Fnv(unsigned int h, const void *data, int n)
+{
+    const byte *b = (const byte *)data;
+
+    while (n-- > 0) {
+        h ^= *b++;
+        h *= 16777619u;
+    }
+    return h;
+}
+
+void R_HZM_TerrainLProbe_f(void)
+{
+    const char   *tag = (ri.Cmd_Argc() > 1) ? ri.Cmd_Argv(1) : "-";
+    world_t      *w   = tr.world;
+    unsigned int  hRT = 2166136261u, hST = 2166136261u, hG = 2166136261u;
+    int           pi, nUp = 0, nSun = 0, nLamp = 0;
+
+    if (!w || !w->terraPatches || w->numTerraPatches <= 0) {
+        ri.Printf(PRINT_ALL, "^~^~^ TLPROBE %s no terrain world\n", tag);
+        return;
+    }
+    ri.Printf(PRINT_ALL,
+        "^~^~^ TLPROBE %s head map=%s obBits=%d obShift=%d obMult=%g idLight=%g mapOBBits=%d mapOBScale=%g sunExists=%d "
+        "sunColor=%g %g %g |sun|=%g sunDir=%.4f %.4f %.4f trSunLight=%g %g %g nSL=%d patches=%d grid=%d/%d amask=%02x%02x%02x%02x "
+        "vis=%d\n",
+        tag, w->baseName, tr.overbrightBits, tr.overbrightShift, tr.overbrightMult, tr.identityLight,
+        r_mapOverBrightBits ? r_mapOverBrightBits->integer : -1, r_mapOverBrightScale ? r_mapOverBrightScale->value : -1.0f,
+        (int)s_sun.exists, s_sun.color[0], s_sun.color[1], s_sun.color[2], VectorLength(s_sun.color),
+        s_sun.direction[0], s_sun.direction[1], s_sun.direction[2], tr.sunLight[0], tr.sunLight[1], tr.sunLight[2],
+        tr.numSLights, w->numTerraPatches, w->hzmTerraLightDir ? 1 : 0, (int)w->hzmTerraLightDirBuilt,
+        backEnd.refdef.areamask[0], backEnd.refdef.areamask[1], backEnd.refdef.areamask[2], backEnd.refdef.areamask[3],
+        w->vis ? 1 : 0);
+
+    for (pi = 0; pi < w->numTerraPatches; pi++) {
+        const cTerraPatchUnpacked_t *p = &w->terraPatches[pi];
+        vec3_t        at, up, L, Ls;
+        hzmLDirInfo_t iRT, iST;
+        int16_t       pk[4];
+
+        VectorSet(up, 0.0f, 0.0f, 1.0f);
+        at[0] = p->x0 + 256.0f;   // exactly RB_DrawTerrainTris's bug-2905 sample point
+        at[1] = p->y0 + 256.0f;
+        at[2] = (float)(p->heightmap[40] * 2) + p->z0 + 48.0f;
+
+        VectorCopy(up, L);
+        R_LightDirForPointInfo(at, L, up, w, qtrue, &iRT);
+        if (VectorLength(L) < 0.01f) { VectorCopy(up, L); } else { VectorNormalize(L); }
+        VectorCopy(up, Ls);
+        R_LightDirForPointInfo(at, Ls, up, w, qfalse, &iST);
+        if (VectorLength(Ls) < 0.01f) { VectorCopy(up, Ls); } else { VectorNormalize(Ls); }
+
+        R_VaoPackNormal(pk, L);
+        hRT = R_HZM_Fnv(hRT, pk, 6);
+        R_VaoPackNormal(pk, Ls);
+        hST = R_HZM_Fnv(hST, pk, 6);
+        if (L[2] > 0.9999f) {
+            nUp++;
+        } else if (iRT.numLights) {
+            nLamp++;
+        } else {
+            nSun++;
+        }
+        ri.Printf(PRINT_ALL, "^~^~^ TLP %s %d leaf=%d sl=%d sh=%d nl=%d/%d sw=%.1f lw=%.0f L=%.4f %.4f %.4f Ls=%.4f %.4f %.4f\n",
+            tag, pi, iRT.leafOk, iRT.sunList, iRT.sunHit, iRT.numLights, iST.numLights, iRT.sunWeight,
+            VectorLength(iRT.lampSum), L[0], L[1], L[2], Ls[0], Ls[1], Ls[2]);
+    }
+    if (w->hzmTerraLightDir && w->hzmTerraLightDirBuilt) {
+        hG = R_HZM_Fnv(hG, w->hzmTerraLightDir, w->numTerraPatches * 81 * (int)sizeof(*w->hzmTerraLightDir));
+    }
+    ri.Printf(PRINT_ALL, "^~^~^ TLPROBE %s end hashL=%08x hashLs=%08x hashGrid=%08x up=%d sun=%d lamp=%d\n",
+        tag, hRT, hST, hG, nUp, nSun, nLamp);
+}
+
 void RB_DrawTerrainTris(srfTerrain_t* p) {
 	int i;
 	terraInt numv;
@@ -1372,6 +1775,7 @@ void RB_DrawTerrainTris(srfTerrain_t* p) {
 	// the mesh/sprite paths do via R_VaoPackNormal / R_VaoPackTangent). Tangent (1,0,0), handedness +1 ->
 	// bitangent (0,1,0): a valid TBN for a flat-up terrain vertex.
 	int16_t iLightDir[4];
+	const qboolean bLightGrid = R_HZM_TerrainLightGridOn(); // [bug-3007] L per heightmap vertex, see the banner above
 
 	VectorSet(vUp, 0.0f, 0.0f, 1.0f);
 	R_VaoPackNormal(iNormal, vUp);
@@ -1405,8 +1809,23 @@ void RB_DrawTerrainTris(srfTerrain_t* p) {
 		vec3_t vLightDir, vNorm;
 		VectorSet(vNorm, 0.0f, 0.0f, 1.0f);
 		VectorSet(vLightDir, 0.0f, 0.0f, 1.0f);
-		if (p->iVertHead && tr.world) {
-			R_LightDirForPoint(g_pVert[p->iVertHead].xyz, vLightDir, vNorm, tr.world);
+		if (tr.world && !bLightGrid) { // [bug-3007] the grid path writes L per vertex below instead
+			// [bug-2905] from the patch CENTRE, 48u up - never from g_pVert[iVertHead], which is whichever
+			// vertex the LOD split last (see R_TerraEdgeNeighbour's header). drawinfo is the patch's first member.
+			const cTerraPatchUnpacked_t *pPatch = (const cTerraPatchUnpacked_t *)p;
+			vec3_t                       vAt;
+			static cvar_t               *s_terraLightCentre = NULL;
+			if (!s_terraLightCentre) {
+				// 0 = the old sample point (the LOD head vertex), kept only to A/B this fix live
+				s_terraLightCentre = ri.Cvar_Get("r_hzmTerrainLightCentre", "1", CVAR_ARCHIVE);
+			}
+			vAt[0] = pPatch->x0 + 256.0f;
+			vAt[1] = pPatch->y0 + 256.0f;
+			vAt[2] = (float)(pPatch->heightmap[40] * 2) + pPatch->z0 + 48.0f;
+			if (!s_terraLightCentre->integer && p->iVertHead) {
+				VectorCopy(g_pVert[p->iVertHead].xyz, vAt);
+			}
+			R_LightDirForPoint(vAt, vLightDir, vNorm, tr.world);
 			if (VectorLength(vLightDir) < 0.01f) {
 				VectorSet(vLightDir, 0.0f, 0.0f, 1.0f);
 			} else {
@@ -1434,7 +1853,7 @@ void RB_DrawTerrainTris(srfTerrain_t* p) {
             tess.lightCoords[tess.numVertexes][1] = g_pVert[i].xyz[1] * lmScale + p->lmapY;
 			VectorCopy4(iNormal, tess.normal[tess.numVertexes]);
 			VectorCopy4(iTangent, tess.tangent[tess.numVertexes]);
-			VectorCopy4(iLightDir, tess.lightdir[tess.numVertexes]);
+			R_HZM_TerrainVertLightDir(bLightGrid, (const cTerraPatchUnpacked_t *)p, &g_pVert[i], iLightDir, tess.lightdir[tess.numVertexes]);
 			tess.color[tess.numVertexes][0] = 0xffff;
 			tess.color[tess.numVertexes][1] = 0xffff;
 			tess.color[tess.numVertexes][2] = 0xffff;
@@ -1457,7 +1876,7 @@ void RB_DrawTerrainTris(srfTerrain_t* p) {
 			//tess.vertexDlightBits[tess.numVertexes] = dlightBits;
 			VectorCopy4(iNormal, tess.normal[tess.numVertexes]);
 			VectorCopy4(iTangent, tess.tangent[tess.numVertexes]);
-			VectorCopy4(iLightDir, tess.lightdir[tess.numVertexes]);
+			R_HZM_TerrainVertLightDir(bLightGrid, (const cTerraPatchUnpacked_t *)p, &g_pVert[i], iLightDir, tess.lightdir[tess.numVertexes]);
             tess.color[tess.numVertexes][0] = 0xffff;
             tess.color[tess.numVertexes][1] = 0xffff;
             tess.color[tess.numVertexes][2] = 0xffff;
@@ -1552,14 +1971,24 @@ void RB_DrawTerrainTris(srfTerrain_t* p) {
 	}
 
 	// HZM coop - normalize + pack the accumulated normals (terrain faces up, so force +Z).
+	// [bug-2905] ...now from the HEIGHTMAP at the vertex's grid point, so a coarser or finer LOD mesh over the same
+	// ground shades the same; the triangle accumulation stays as the fallback (and still feeds the tangent below).
 	for (v = firstVert; v < tess.numVertexes; v++) {
 		vec3_t  n;
 		int16_t pn[4];
-		VectorCopy(s_terraNormAcc[v], n);
-		if (VectorNormalize(n) < 0.001f) {
-			VectorSet(n, 0.0f, 0.0f, 1.0f);
-		} else if (n[2] < 0.0f) {
-			VectorInverse(n);
+		static cvar_t *s_terraHmNormals = NULL;
+		if (!s_terraHmNormals) {
+			s_terraHmNormals = ri.Cvar_Get("r_hzmTerrainHeightNormals", "1", CVAR_ARCHIVE);
+		}
+		if (s_terraHmNormals->integer) {
+			R_TerraHeightmapNormal((const cTerraPatchUnpacked_t *)p, tess.xyz[v][0], tess.xyz[v][1], n);
+		} else {
+			VectorCopy(s_terraNormAcc[v], n);
+			if (VectorNormalize(n) < 0.001f) {
+				VectorSet(n, 0.0f, 0.0f, 1.0f);
+			} else if (n[2] < 0.0f) {
+				VectorInverse(n);
+			}
 		}
 		R_VaoPackNormal(pn, n);
 		VectorCopy4(pn, tess.normal[v]);

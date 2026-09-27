@@ -173,6 +173,7 @@ void CG_ParseServerinfo(void)
     // script on an MP server, so it is absent/0 in coop. Read by CG_MpRealismOffActive (below) to force
     // first person / drop the ADS view. No new server->client shape: it rides the ordinary serverinfo.
     cgs.mpRealismOff = atoi(Info_ValueForKey(info, "g_mpRealismOff"));
+    cgs.coopHardcore = atoi(Info_ValueForKey(info, "g_coopHardcore")); // HZM coop - Hardcore host rule
 
     version = Info_ValueForKey(info, "version");
     if (strstr(version, "Spearhead")) {

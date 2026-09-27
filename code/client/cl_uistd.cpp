@@ -1940,3 +1940,18 @@ void UIFakkLabel::Draw(void)
 
     set2D();
 }
+
+// HZM bug-3015 (P5b): UIWidget::PrimeMaterials plus the statbar materials this label draws (the classic loading bar)
+void UIFakkLabel::PrimeMaterials(void)
+{
+    UILabel::PrimeMaterials();
+    if (m_statbar_material) {
+        m_statbar_material->GetMaterial();
+    }
+    if (m_statbar_material_flash) {
+        m_statbar_material_flash->GetMaterial();
+    }
+    if (m_statbar_material_marker) {
+        m_statbar_material_marker->GetMaterial();
+    }
+}

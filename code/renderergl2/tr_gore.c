@@ -405,6 +405,21 @@ void RE_GoreReset(int entityNumber)
     R_GoreRebuildEntityFlags();
 }
 
+// [user 2026-09-21] MP BULLET HOLES ON PLAYERS. The "no holes on players" gates below (entityNumber <
+// MAX_CLIENTS) are a coop-only rule (bug-785): holes on your OWN body read wrong. In an MP session the user
+// wants coop-style bullet holes on ENEMY players, living AND dead, so those gates are lifted when this is NOT
+// a coop session. coop_isCoopSession is the cgame-published flag (1 in coop, 0 in MP/vanilla) - the client
+// analog of the MP-session level var that CoopMpGoreSession keys the fgame wound-prop gate on. Returns qtrue
+// when player holes should be allowed (i.e. not a coop session).
+static qboolean R_GoreHolesOnPlayers(void)
+{
+    static cvar_t *s_coopSess = NULL;
+    if (!s_coopSess) {
+        s_coopSess = ri.Cvar_Get("coop_isCoopSession", "0", 0);
+    }
+    return (s_coopSess && !s_coopSess->integer) ? qtrue : qfalse;
+}
+
 /*
 ================
 RE_GoreKillSplash
@@ -431,7 +446,8 @@ void RE_GoreKillSplash(int entityNumber)
     // HZM coop - no holes on players: the kill splash writes into the same UV wound
     // textures.  Players never own an instance (see R_GoreSkelSurfaceCheck gate), so
     // the flag would only idle for GORE_KILL_LIFE_MS and expire - skip it cleanly.
-    if (entityNumber < MAX_CLIENTS) {
+    // [user 2026-09-21] ...unless MP, where enemy players DO get holes (R_GoreHolesOnPlayers).
+    if (entityNumber < MAX_CLIENTS && !R_GoreHolesOnPlayers()) {
         return;
     }
 
@@ -729,7 +745,10 @@ void R_GoreSkelSurfaceCheck(int baseVertex, int baseIndex)
     // rides through (a pending can only pick an entity here), so players never
     // acquire a gore instance at all.  AI / allied-AI stamping, players' blood
     // drips (fgame bouncedecals) and the gore skin tiers are all untouched.
-    if (entityNumber < MAX_CLIENTS) {
+    // [user 2026-09-21] ...unless MP: enemy players get coop-style bullet holes, living and dead. This is
+    // the single choke point, so lifting it here (not coop -> R_GoreHolesOnPlayers) is what actually gives
+    // MP players wound stamps; the fgame CoopGoreTryWoundProp gate is lifted in parallel for the 3D props.
+    if (entityNumber < MAX_CLIENTS && !R_GoreHolesOnPlayers()) {
         return;
     }
 

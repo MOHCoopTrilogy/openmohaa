@@ -127,7 +127,8 @@ UIRect2D UIPulldownMenu::getAlignmentRect(UIWidget *parent)
     for (int i = 1; i <= m_desc.NumObjects(); i++) {
         uipull_describe *uipd = m_desc.ObjectAt(i);
         if (uipd && uipd->material) {
-            int h = uii.Rend_GetShaderHeight(uipd->material->GetMaterial());
+            int h = (int)(uii.Rend_GetShaderHeight(uipd->material->GetMaterial())
+                          / UI_HDTexelScale(uipd->material->GetName()));
             if (h > maxheight) {
                 maxheight = h;
             }
@@ -137,11 +138,14 @@ UIRect2D UIPulldownMenu::getAlignmentRect(UIWidget *parent)
     return UIRect2D(parentRect.pos.x, parentRect.pos.y, parentRect.size.width, (maxheight + 4) * m_vVirtualScale[1]);
 }
 
+// HZM bug-2941: a menushader item is sized by its texture's pixel size, so the 4x dropdown knob
+// (textures/menu/pulldownarrow*, 256/128 px vs stock 64/32) drew 4x too big and the widget clipped it to
+// its top-left corner. Divide by the ui/hd_texel_scale.cfg factor: stock layout, HD detail. Unlisted = 1.0.
 float UIPulldownMenu::getDescWidth(uipull_describe *desc)
 {
     UIReggedMaterial *mat = desc->material;
     if (mat) {
-        return uii.Rend_GetShaderWidth(mat->GetMaterial());
+        return uii.Rend_GetShaderWidth(mat->GetMaterial()) / UI_HDTexelScale(mat->GetName());
     }
 
     return m_font->getWidth(desc->title, -1) + 8.0f;
@@ -151,7 +155,7 @@ float UIPulldownMenu::getDescHeight(uipull_describe *desc)
 {
     UIReggedMaterial *mat = desc->material;
     if (mat) {
-        return uii.Rend_GetShaderHeight(mat->GetMaterial());
+        return uii.Rend_GetShaderHeight(mat->GetMaterial()) / UI_HDTexelScale(mat->GetName());
     }
 
     return m_font->getHeight(m_bVirtual ? m_vVirtualScale : NULL);

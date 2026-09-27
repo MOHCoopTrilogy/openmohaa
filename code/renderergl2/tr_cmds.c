@@ -410,6 +410,27 @@ void RE_BeginFrame( stereoFrame_t stereoFrame ) {
 	}
 
 	//
+	// HZM gl2 [2026-09-25] r_skyHDCompare: say which sky is on screen, once per change, so the A/B key needs
+	// no homework (coop_mod/cfg/skytest.cfg binds it). Tracked by value, not ->modified, so registration and
+	// the per-map re-registration never print.
+	//
+	{
+		static int s_skyHDCompareShown = 0;
+		if ( r_skyHDCompare && r_skyHDCompare->integer != s_skyHDCompareShown ) {
+			s_skyHDCompareShown = r_skyHDCompare->integer;
+			if ( !tr.skyHDCompareBoxes && !tr.skyHDCompareLayers && s_skyHDCompareShown ) {
+				ri.Printf( PRINT_ALL, "sky compare: armed - it takes effect when the next map loads\n" );
+			} else if ( s_skyHDCompareShown == 1 ) {
+				ri.Printf( PRINT_ALL, "sky: NEW HD\n" );
+			} else if ( s_skyHDCompareShown == 2 ) {
+				ri.Printf( PRINT_ALL, "sky: ORIGINAL\n" );
+			} else {
+				ri.Printf( PRINT_ALL, "sky compare: off (r_skyHD decides from the next map)\n" );
+			}
+		}
+	}
+
+	//
 	// texturemode stuff
 	//
 	if ( r_textureMode->modified ) {

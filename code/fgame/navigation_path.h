@@ -161,4 +161,38 @@ public:
      * @return false 
      */
     virtual bool IsQuerying() const = 0;
+
+    /**
+     * @brief [HZM bug-2862] Area id of the off-mesh link being traversed right now (0 = none).
+     */
+    virtual unsigned char GetTraversingArea() const { return 0; }
+
+    /**
+     * @brief [HZM bug-2862] Area id of the off-mesh link the path is about to take, when its start is within 128u.
+     */
+    virtual unsigned char GetApproachingArea() const { return 0; }
+
+    /**
+     * @brief [HZM bot A3] The path corner AFTER the one being steered to (to slow for sharp turns). False if none.
+     */
+    virtual bool GetCornerAfterNext(Vector& out) const { return false; }
+
+    /**
+     * @brief [HZM bot breach] The path corners ahead (up to maxCorners, the last may be an off-mesh link start). 0 if none.
+     */
+    virtual int GetCorners(Vector *out, int maxCorners) const { return 0; }
+
+    /**
+     * @brief [HZM bot breach] Both ends of the off-mesh link the path is about to take (GetApproachingArea != 0):
+     * from = the end we walk onto, to = the far end. False when not approaching one.
+     */
+    virtual bool GetApproachingLink(Vector& from, Vector& to) const { return false; }
+
+    /**
+     * @brief [HZM bug-2886] While traversing an ELEVATOR link: its far landing. False otherwise.
+     */
+    virtual bool GetElevatorEnd(Vector& out) const { return false; }
+    virtual bool GetElevatorLink(Vector& start, Vector& end) const { return false; } // [HZM bug-2912]
+    virtual bool GetTraversingLink(Vector& start, Vector& end) const { return false; } // [HZM bug-2913]
+    virtual int  GetSteerMode() const { return 0; } // [HZM bug-2956] probe: 0 raw corner, 1 pad16, 2 pad8, 3 slide, +8 kept pad
 };

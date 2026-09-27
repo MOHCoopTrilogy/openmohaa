@@ -749,6 +749,21 @@ void SV_SpawnServer( const char *server, qboolean loadgame, qboolean restart, qb
 			// Added in 2.0
 			Com_sprintf( filename, sizeof( filename ), "maps/%s_sml.bsp", mapname );
 		}
+
+		// HZM [bug-2836] MAP VARIANT. A campaign map loaded as an MP Push/Arena match gets variant "mp": the map
+		// pickers arm the one-shot sv_mpForceArena gate, which is still set here (ge->SetMap clears it below) and is
+		// always 0 in co-op (which also runs on g_gametype 2 - hence the gate, not the gametype). Set BEFORE
+		// CM_LoadMap so collision applies cmpatch/<map>_mp.txt, and publish it in serverinfo (sent before any client
+		// gets the gamestate) so every client patches collision + hides static models the same way - a server-only
+		// change would leave clients predicting the old geometry and rubber-banding.
+		{
+			const char *variant = "";
+			if ( g_gametype->integer != GT_SINGLE_PLAYER && Cvar_VariableIntegerValue( "sv_mpForceArena" ) ) {
+				variant = "mp";
+			}
+			Cvar_Set( "cm_variant", variant );
+			Cvar_Set( "sv_mapVariant", variant );
+		}
 		CM_LoadMap( filename, qfalse, &checksum );
 
 		// set checksum
@@ -1099,6 +1114,9 @@ void SV_Init (void)
 	Cvar_Get( "sv_keywords", "", CVAR_SERVERINFO );
 	Cvar_Get( "protocol", va( "%i", PROTOCOL_VERSION ), CVAR_SERVERINFO | CVAR_ROM );
 	sv_mapname = Cvar_Get( "mapname", "nomap", CVAR_SERVERINFO | CVAR_ROM );
+	// HZM [bug-2836] map variant ("" / "mp"), published so clients load collision + static models identically.
+	// Deliberately NOT coop_-prefixed: cl_parse drops coop_* keys when copying systeminfo.
+	Cvar_Get( "sv_mapVariant", "", CVAR_SERVERINFO | CVAR_ROM );
 	sv_privateClients = Cvar_Get( "sv_privateClients", "0", CVAR_SERVERINFO );
 	sv_hostname = Cvar_Get( "sv_hostname", "Nameless OpenMoHAA Battle", CVAR_SERVERINFO | CVAR_ARCHIVE );
 	sv_maxclients = Cvar_Get( "sv_maxclients", "1", CVAR_SERVERINFO | CVAR_LATCH );

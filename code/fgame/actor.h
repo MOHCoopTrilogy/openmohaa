@@ -774,6 +774,15 @@ public:
     float m_fDfwTime;
     /* HZM coop - reactive suppression: level.time until incoming near-miss fire degrades this AI's aim. */
     float m_fSuppressTime;
+    /* HZM coop [bug-3052] a SCRIPT `holster` holds until a script re-arms him (retail's contract; drivers
+       were steering with a rifle in hand). See Actor::CoopAuditScriptHolster. */
+    bool  m_bCoopScriptHolster;
+    /* ...and whether a weapon was actually in his hand at that holster (0 = the give landed AFTER it). */
+    bool  m_bCoopScriptHolsterHad;
+    /* level.time of the first script holster of this hold. */
+    float m_fCoopScriptHolsterTime;
+    /* how many times the invariant has had to put the weapon away again (log throttle). */
+    int   m_iCoopScriptHolsterHeals;
     /* last time GunPostiton() was called */
     int m_iGunPositionCheckTime;
     /* gun position */
@@ -959,6 +968,12 @@ public:
     float m_fMaxDistance;
     /* square of maximum distance actor tries to allow between itself and the player */
     float m_fMaxDistanceSquared;
+    // [HZM item 7, 2026-09-26] the maxdist the script / spawn asked for, and the mindist a FOG cut lowered (0 = none):
+    // FixAIParameters gives them back when the fog recedes (a dust storm left snipers short-sighted for the rest of the
+    // map). Not archived - rebuilt from the loaded values (SP saves unchanged).
+    float m_fMaxDistanceWant;
+    float m_fMinDistanceFogCut;
+    bool  m_bEngageLogged;
     /* maximum distance actor will wander from its leash home */
     float m_fLeash;
     /* square of maximum distance actor will wander from its leash home */
@@ -1575,6 +1590,8 @@ public:
     void             UnholsterOffHand(void); // Added in 2.0
     void             EventHolster(Event *ev);
     void             EventUnholster(Event *ev);
+    void             CoopAuditScriptHolster(void);                // HZM coop [bug-3052]
+    void             CoopReleaseScriptHolster(const char *why); // HZM coop [bug-3052]
     void             EventSoundDone(Event *ev);
     void             EventSound(Event *ev);
     void             EventIsEnemyVisible(Event *ev);
@@ -2103,6 +2120,11 @@ inline void Actor::Archive(Archiver& arc)
     arc.ArchiveFloat(&m_fMinDistanceSquared);
     arc.ArchiveFloat(&m_fMaxDistance);
     arc.ArchiveFloat(&m_fMaxDistanceSquared);
+    if (arc.Loading()) {
+        m_fMaxDistanceWant   = m_fMaxDistance; // [HZM item 7] (not archived)
+        m_fMinDistanceFogCut = 0;
+        m_bEngageLogged      = false;
+    }
 
     arc.ArchiveFloat(&m_fLeash);
     arc.ArchiveFloat(&m_fLeashSquared);

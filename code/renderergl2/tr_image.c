@@ -2229,12 +2229,18 @@ image_t *R_CreateImage2( const char *name, byte *pic, int width, int height, GLe
 	}
 
 	if ( tr.numImages == MAX_DRAWIMAGES ) {
-		ri.Error( ERR_DROP, "R_CreateImage: MAX_DRAWIMAGES hit");
+		ri.Error( ERR_DROP, "R_CreateImage: MAX_DRAWIMAGES hit (%d) creating %s", MAX_DRAWIMAGES, name );
 	}
 
 	image = tr.images[tr.numImages] = ri.Hunk_Alloc( sizeof( image_t ), h_low );
 	qglGenTextures(1, &image->texnum);
 	tr.numImages++;
+	// HZM gl2 [bug-2997]: never silent before the cap ERR_DROPs a map (TRAPS T3/T4). tr.numImages restarts at every
+	// registration (R_InitImages), so this prints at most once per map.
+	if ( tr.numImages == ( MAX_DRAWIMAGES * 9 ) / 10 ) {
+		ri.Printf( PRINT_WARNING, "^~^~^ IMAGECAP %d of MAX_DRAWIMAGES %d images registered (90%%) at %s\n",
+		           tr.numImages, MAX_DRAWIMAGES, name );
+	}
 
 	image->type = type;
 	image->flags = flags;
@@ -3180,6 +3186,22 @@ image_t	*R_FindImageFile( const char *name, imgType_t type, imgFlags_t flags )
 	// load the pic from disk
 	//
 	R_LoadImage( name, &pic, &width, &height, &picFormat, &picNumMips );
+
+	// HZM loading-smoothness [user 2026-09-26] (docs/proposals/loading_screen_2026-09-26/research.md 2.4 A).
+	// gl1 parity: renderergl1 R_LoadImage reports every image it reads to the loading screen as "n<name>";
+	// gl2 never did, so its world-texture and model-skin passes were one long frozen loading screen.
+	// - the redraw this MAY trigger is throttled by the exe (UI_TestUpdateScreen: at most one per 33 ms plus
+	//   the last draw's own time), and outside a map load the call returns at once (cls.loading == SS_DEAD);
+	// - here, after the file read and BEFORE the upload, no GL work on this image is in flight;
+	// - tr.registered is false until R_Init's last line, so R_Init itself never ticks.
+	// Self-contained on purpose (graphics-branch merges): delete this block to revert.
+	if ( tr.registered ) {
+		char hzmResName[ MAX_QPATH + 1 ];
+
+		Com_sprintf( hzmResName, sizeof( hzmResName ), "n%s", name );
+		ri.UI_LoadResource( hzmResName );
+	}
+
 	if ( pic == NULL ) {
 		return NULL;
 	}

@@ -2306,6 +2306,25 @@ static void ParseDeform( char **text ) {
 
 /*
 ===============
+R_HZM_SkyHDWanted
+
+HZM gl2 [2026-09-25] the one r_skyHD predicate, shared by the box hook (ParseSkyParms, layers = qfalse) and the
+layer hook (R_HZM_SkyHDLayers, layers = qtrue): -1 = auto (HZM_SKYHD_AUTO for boxes, HZM_SKYHD_LAYERS_AUTO for
+layers - bug-2942 split them so the user-approved clouds ship without the untested boxes), 0 = original, 1 = HD.
+Compare mode loads HD regardless.
+===============
+*/
+static qboolean R_HZM_SkyHDWanted( qboolean layers ) {
+	int autoOn = layers ? HZM_SKYHD_LAYERS_AUTO : HZM_SKYHD_AUTO;
+
+	if ( r_skyHDCompare && r_skyHDCompare->integer ) {
+		return qtrue;
+	}
+	return ( r_skyHD && ( r_skyHD->integer > 0 || ( r_skyHD->integer < 0 && autoOn ) ) ) ? qtrue : qfalse;
+}
+
+/*
+===============
 ParseSkyParms
 
 skyParms <outerbox> <cloudheight> <innerbox>
@@ -2332,14 +2351,71 @@ static void ParseSkyParms( char **text ) {
 		return;
 	}
 	if ( strcmp( token, "-" ) ) {
-		for (i=0 ; i<6 ; i++) {
-			Com_sprintf( pathname, sizeof(pathname), "%s_%s.tga"
-				, token, suf[i] );
-			shader.sky.outerbox[i] = R_FindImageFile( ( char * ) pathname, IMGTYPE_COLORALPHA, imgFlags | IMGFLAG_CLAMPTOEDGE );
+		// HZM gl2 [2026-09-25] r_skyHD - HD replacement boxes under NEW names env/hzmhd/<box minus "env/">_<suf>.tga
+		// (docs/tools/gen_sky_hd.py). New names cannot lose a .dds/.jpg/.tga or pak-order contest (TRAPS T6).
+		// ALL SIX OR NONE: existence is checked for the whole set before anything is loaded, so a partial set
+		// never mixes into a box. Same flags as the original (bug-1295: uncompressed). One log line per box.
+		// r_skyHDCompare (test only): keep BOTH sets for this map - original in outerbox, HD in outerboxAlt.
+		int			compare = r_skyHDCompare ? r_skyHDCompare->integer : 0;
+		qboolean	wantHD = R_HZM_SkyHDWanted( qfalse );
+		char		hdbase[MAX_QPATH];
+		image_t		*hd[6];
+		int			haveHD = 0;
 
-			if ( !shader.sky.outerbox[i] ) {
-				shader.sky.outerbox[i] = tr.defaultImage;
+		Com_Memset( hd, 0, sizeof( hd ) );
+		if ( wantHD ) {
+			Com_sprintf( hdbase, sizeof( hdbase ), "env/hzmhd/%s", Q_stricmpn( token, "env/", 4 ) ? token : token + 4 );
+			for ( i = 0; i < 6; i++ ) {
+				Com_sprintf( pathname, sizeof( pathname ), "%s_%s.tga", hdbase, suf[i] );
+				if ( ri.FS_ReadFileEx( pathname, NULL, qtrue ) > 0 ) {
+					haveHD++;
+				}
 			}
+			if ( haveHD == 6 ) {
+				for ( i = 0; i < 6; i++ ) {
+					Com_sprintf( pathname, sizeof( pathname ), "%s_%s.tga", hdbase, suf[i] );
+					hd[i] = R_FindImageFile( ( char * ) pathname, IMGTYPE_COLORALPHA, imgFlags | IMGFLAG_CLAMPTOEDGE );
+					if ( !hd[i] ) {
+						haveHD = -1;	// present but undecodable: keep the original, say so
+						break;
+					}
+				}
+			}
+		}
+
+		if ( haveHD == 6 && !compare ) {
+			for ( i = 0; i < 6; i++ ) {
+				shader.sky.outerbox[i] = hd[i];
+			}
+		} else {
+			for (i=0 ; i<6 ; i++) {
+				Com_sprintf( pathname, sizeof(pathname), "%s_%s.tga"
+					, token, suf[i] );
+				shader.sky.outerbox[i] = R_FindImageFile( ( char * ) pathname, IMGTYPE_COLORALPHA, imgFlags | IMGFLAG_CLAMPTOEDGE );
+
+				if ( !shader.sky.outerbox[i] ) {
+					shader.sky.outerbox[i] = tr.defaultImage;
+				}
+			}
+			if ( haveHD == 6 ) {
+				for ( i = 0; i < 6; i++ ) {
+					shader.sky.outerboxAlt[i] = hd[i];
+				}
+				tr.skyHDCompareBoxes++;
+			}
+		}
+
+		if ( haveHD == 6 ) {
+			ri.Printf( PRINT_ALL, "HZM skyHD: %s -> HD %s 6/6 %dx%d%s\n", token, hdbase, hd[0]->uploadWidth, hd[0]->uploadHeight,
+				compare ? " + original [compare: r_skyHDCompare 1 = HD, 2 = original]" : "" );
+		} else if ( haveHD < 0 ) {
+			ri.Printf( PRINT_WARNING, "HZM skyHD: %s -> original (HD set %s present but failed to load)\n", token, hdbase );
+		} else if ( wantHD && haveHD ) {
+			ri.Printf( PRINT_WARNING, "HZM skyHD: %s -> original (HD set incomplete %d/6 - all six or none)\n", token, haveHD );
+		} else if ( wantHD ) {
+			ri.Printf( PRINT_ALL, "HZM skyHD: %s -> original (no HD set)\n", token );
+		} else {
+			ri.Printf( PRINT_ALL, "HZM skyHD: %s -> original (r_skyHD %s)\n", token, r_skyHD ? r_skyHD->string : "?" );
 		}
 	}
 
@@ -2951,6 +3027,13 @@ static void ComputeVertexAttribs(void)
 					shader.vertexAttribs |= ATTR_NORMAL | ATTR_COLOR;
 					break;
 
+				// HZM gl2 [2026-09-25] Phase R1: LightGlowDeform stamps quads exactly as AutospriteDeform does
+				// (normal + the source vertex colour), so it needs the same attributes. Load-time and
+				// unconditional; it only widens the upload mask, the image is unchanged while the switch is off.
+				case DEFORM_LIGHTGLOW:
+					shader.vertexAttribs |= ATTR_NORMAL | ATTR_COLOR;
+					break;
+
 				case DEFORM_WAVE:
 				case DEFORM_NORMALS:
 				case DEFORM_TEXT0:
@@ -3302,6 +3385,21 @@ static int CollapseStagesToGLSL(void)
 			{
 				case AGEN_LIGHTING_SPECULAR:
 				case AGEN_PORTAL:
+					skip = qtrue;
+					break;
+				default:
+					break;
+			}
+
+			// HZM gl2 [2026-09-25] Phase R2: rgbGen dot / oneMinusDot live only in generic_vp's CalcColor.
+			// A single-bundle, deform-free dot stage collapsed into LIGHTALL would silently draw flat (the
+			// bug-2486 class). Zero shipped content is affected: the only retail users are opellights, already
+			// generic through its nextbundle, and opellightflare, referenced by no tik, BSP or script
+			// (swept 2026-09-25). The coop headlight beam (coop_headbeam) is the first single-bundle user.
+			switch(pStage->rgbGen)
+			{
+				case CGEN_DOT:
+				case CGEN_ONE_MINUS_DOT:
 					skip = qtrue;
 					break;
 				default:
@@ -4051,6 +4149,86 @@ Returns a freshly allocated shader with all the needed info
 from the current global working shader
 =========================
 */
+/*
+===============
+R_HZM_SkyHDLayers
+
+HZM gl2 [2026-09-25] r_skyHD for sky LAYERS - the stage images a sky shader draws over its box (the moving
+cloud dome, tr_sky.c FillCloudBox; africanight's talonclouds). bug-1295's NO_COMPRESSION covers the box faces
+only, so a stage image is DXT1 (runtime-compressed, or a precompressed .dds - talonclouds.dds from
+zzzzzzz_dds_hdmem.pk3 is 13x20 px tinted blocks at the zenith). The twin lives under a NEW name,
+env/hzmhd/clouds/<image path minus "textures/">.tga (docs/tools/gen_sky_hd.py LAYERS), so no name contest.
+ - Flags are built, never copied: MIPMAP | PICMIP | NO_COMPRESSION, REPEAT wrap. Never CLAMPTOEDGE (a hard
+   line every tile); never orig->flags wholesale (a short-mip DDS has MIPMAP stripped, and it may carry
+   GENNORMALMAP). A stage whose image is clamped is not a tiling layer and is left alone.
+ - r_texturebits 16 would upload NO_COMPRESSION as GL_RGB5 (3-9 levels across this layer): skipped, logged.
+ - Skipped: lightmaps, video maps, animMaps, images outside textures/, missing twins (quiet check, no
+   "could not find" noise). A twin that exists but fails to load keeps the original and warns.
+ - Normal mode: the twin replaces bundle[0].image[0]. Compare mode: the original stays and the twin goes in
+   hzmSkyHDAlt for RB_StageIteratorSky to swap while r_skyHDCompare is 1.
+One line per twin, and one count line per sky shader that has layers.
+===============
+*/
+static void R_HZM_SkyHDLayers( void ) {
+	int			compare = r_skyHDCompare ? r_skyHDCompare->integer : 0;
+	qboolean	wanted = R_HZM_SkyHDWanted( qtrue );
+	int			i, nLayers = 0, nHD = 0;
+	const char	*why = "no HD twin";
+	char		stem[MAX_QPATH], twin[MAX_QPATH];
+
+	for ( i = 0; i < MAX_SHADER_STAGES; i++ ) {
+		shaderStage_t	*pStage = &stages[i];
+		image_t			*orig, *hd;
+
+		if ( !pStage->active ) {
+			break;
+		}
+		orig = pStage->bundle[0].image[0];
+		if ( !orig || pStage->bundle[0].isLightmap || pStage->bundle[0].isVideoMap || pStage->bundle[0].numImageAnimations > 1
+			|| Q_stricmpn( orig->imgName, "textures/", 9 ) ) {
+			continue;
+		}
+		nLayers++;
+		if ( !wanted ) {
+			why = "r_skyHD off";
+			continue;
+		}
+		if ( r_texturebits && r_texturebits->integer == 16 ) {
+			why = "r_texturebits 16 - an uncompressed twin would be RGB5";
+			continue;
+		}
+		if ( orig->flags & ( IMGFLAG_CLAMPTOEDGE | IMGFLAG_CLAMPTOEDGE_X | IMGFLAG_CLAMPTOEDGE_Y ) ) {
+			continue;
+		}
+		COM_StripExtension( orig->imgName + 9, stem, sizeof( stem ) );
+		Com_sprintf( twin, sizeof( twin ), "env/hzmhd/clouds/%s.tga", stem );
+		if ( ri.FS_ReadFileEx( twin, NULL, qtrue ) <= 0 ) {
+			continue;
+		}
+		hd = R_FindImageFile( twin, orig->type, IMGFLAG_MIPMAP | IMGFLAG_PICMIP | IMGFLAG_NO_COMPRESSION );
+		if ( !hd ) {
+			ri.Printf( PRINT_WARNING, "HZM skyHD layer: %s -> %s present but failed to load - original kept\n", orig->imgName, twin );
+			continue;
+		}
+		nHD++;
+		if ( compare ) {
+			pStage->hzmSkyHDAlt = hd;
+			tr.skyHDCompareLayers++;
+		} else {
+			pStage->bundle[0].image[0] = hd;
+		}
+		ri.Printf( PRINT_ALL, "HZM skyHD layer: %s -> %s %dx%d fmt 0x%x%s\n", orig->imgName, twin, hd->uploadWidth,
+			hd->uploadHeight, hd->internalFormat, compare ? " + original [compare: r_skyHDCompare 1 = HD, 2 = original]" : "" );
+	}
+	if ( nLayers ) {
+		if ( nHD ) {
+			ri.Printf( PRINT_ALL, "HZM skyHD: %s layers -> HD %d/%d%s\n", shader.name, nHD, nLayers, compare ? " [compare]" : "" );
+		} else {
+			ri.Printf( PRINT_ALL, "HZM skyHD: %s layers -> original 0/%d (%s)\n", shader.name, nLayers, why );
+		}
+	}
+}
+
 static shader_t *FinishShader( void ) {
 	int stage;
 	qboolean		hasLightmapStage;
@@ -4064,6 +4242,11 @@ static shader_t *FinishShader( void ) {
     //=========================
     CreateMultistageFromBundle();
     //=========================
+
+	// HZM gl2 [2026-09-25] r_skyHD sky layers - after the bundles are final, before any collapse/copy
+	if ( shader.isSky ) {
+		R_HZM_SkyHDLayers();
+	}
 
 	//
 	// set sky stuff appropriate
@@ -5148,6 +5331,27 @@ static void CreateExternalShaders( void ) {
 			tr.flareShader->stages[index]->adjustColorsForFog = ACFF_NONE;
 			tr.flareShader->stages[index]->stateBits |= GLS_DEPTHTEST_DISABLE;
 		}
+	}
+
+	// HZM gl2 [2026-09-26] Phase S2 LAMP FLARES (tr_hzm_spot_rb.c): the mod's own flare shader (scripts/
+	// coop_headlights.shader, textures/coop_fx/lampflare.tga) - never flareShader, which the HD FX pack replaced with a
+	// 2048 starburst (vet F16/F19). Set up like flareShader above: no depth test (occlusion is measured with queries),
+	// no fog colour adjust, and no global fog (it is drawn in 2D; the flare pass multiplies fog transmittance itself).
+	// An older pk3 without it leaves the default shader, and the flare pass then draws nothing (vet F7).
+	tr.hzmLampFlareShader = R_FindShader( "hzmLampFlare", LIGHTMAP_NONE, qtrue );
+	if ( !tr.hzmLampFlareShader->defaultShader )
+	{
+		int index;
+
+		for ( index = 0; index < tr.hzmLampFlareShader->numUnfoggedPasses; index++ )
+		{
+			if ( tr.hzmLampFlareShader->stages[index] )
+			{
+				tr.hzmLampFlareShader->stages[index]->adjustColorsForFog = ACFF_NONE;
+				tr.hzmLampFlareShader->stages[index]->stateBits |= GLS_DEPTHTEST_DISABLE;
+			}
+		}
+		tr.hzmLampFlareShader->noGlobalFog = qtrue;
 	}
 
 	tr.sunShader = R_FindShader( "sun", LIGHTMAP_NONE, qtrue );

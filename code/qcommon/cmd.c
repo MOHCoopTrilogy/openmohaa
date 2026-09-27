@@ -25,7 +25,11 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 #include "qcommon.h"
 #include "cmd_filter.h"
 
-#define	MAX_CMD_BUFFER  128*1024
+// HZM coop [bug-2908] was 128*1024. Cbuf_InsertTextOrigin DROPS a whole exec'd file that does not fit
+// (one "Cbuf_InsertText overflowed" line, printed before qconsole.log opens), and autoexec.cfg passed
+// 131,072 bytes in v1.8.8 - so every install silently lost its binds, one-shots and the Report a Bug
+// webhook. build.ps1 now refuses a cfg that approaches this limit.
+#define	MAX_CMD_BUFFER  1024*1024
 #define	MAX_CMD_LINE	8192 // was increased for testing purposes
 #define MAX_ALIAS_NAME	32
 #define MAX_ALIAS_COUNT	16

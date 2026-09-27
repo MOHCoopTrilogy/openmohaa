@@ -99,6 +99,12 @@ void main()
 	float result;
 
 	float depth = getLinearDepth(u_ScreenDepthMap, var_DepthTex, u_ViewInfo.x);
+	// [user 2026-09-21] REVERTED to stock 0.5. The 3.0 receiver bias pushed the reconstructed receiver so
+	// far along the view ray that the sampled shadow depth became strongly camera-relative: shadows SLID
+	// with the camera and detached from rubble. Screen-space receiver-plane bias is the wrong lever for
+	// shadow-bleed-through-rubble (that is a resolution/self-shadow issue); leave at 0.5.
+	// NOTE: keep this comment quote-free - stringify.cpp wraps each glsl LINE in a C string literal, so an
+	// embedded double quote breaks the generated shadowmask_fp.c (build error C2146, seen 2026-09-21).
 	vec4 biasPos = vec4(u_ViewOrigin + var_ViewDir * (depth - 0.5 / u_ViewInfo.x), 1.0);
 
 	vec4 shadowpos = u_ShadowMvp * biasPos;

@@ -104,6 +104,9 @@ void Actor::Begin_MachineGunner(void)
 
 void Actor::End_MachineGunner(void)
 {
+    // HZM coop [bug-3052] leaving the gun hands him his weapon back on purpose - end any script hold
+    CoopReleaseScriptHolster("mgend");
+
     if (!GetWeapon(WEAPON_MAIN)) {
         giveItem("models/weapons/mp40.tik");
     }

@@ -821,9 +821,15 @@ int UI_FontStringWidth(fontheader_t *pFont, const char *pszString, int iMaxLen)
 
 void UIFont::CheckRefreshFont()
 {
+    // HZM bug-2981: never (re)load while the renderer is down or mid-restart (IsRendererLoaded is FALSE until
+    // re.BeginRegistration has returned). Drop the font and keep the OLD refHandle, so the first call after the
+    // renderer is ready still sees a sequence change and reloads for real. Loading in the window gave a font with a
+    // NULL shader that was never retried (invisible text after a vid_restart).
+    if (!uii.IsRendererLoaded()) {
+        m_font = NULL;
+        return;
+    }
     if (refHandle != uii.GetRefSequence()) {
         setFont(name);
-    } else if (!uii.IsRendererLoaded()) {
-        m_font = NULL;
     }
 }

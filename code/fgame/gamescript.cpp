@@ -697,6 +697,12 @@ void GameScript::Close(void)
         delete m_StateScripts.ObjectAt(i);
     }
 
+    // [HZM bug-2868] empty the list too, as m_CatchBlocks is below. Close() runs TWICE on a script that fails to
+    // compile - once from GameScript::Load, again from ~GameScript at the next map change (the failed script stays
+    // cached) - and the second pass deleted the same StateScripts again: a double free that crashed game.dll in
+    // G_ShutdownGame -> ScriptMaster::Reset on "Launching campaign..." whenever the freed block had been reused.
+    m_StateScripts.FreeObjectList();
+
     m_CatchBlocks.FreeObjectList();
 
     if (m_ProgToSource) {

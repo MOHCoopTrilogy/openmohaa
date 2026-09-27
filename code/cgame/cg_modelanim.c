@@ -2070,6 +2070,7 @@ void CG_ModelAnim(centity_t *cent, qboolean bDoShaderTime)
     qboolean       bThirdPerson = qfalse;
     qboolean       bCoopHideDraw = qfalse; // HZM coop - process commands/sounds but do not render [219]
     qboolean       bCoopFpBody   = qfalse; // HZM coop [bug-2569] full-body first-person copies built this frame
+    qboolean       bCoopDustVeil = qfalse; // HZM coop [bug-2963] dust-storm veil: camera-locked in every view mode
     static refEntity_t s_coopFpBodyDraw;   // static: refEntity_t is large and CG_ModelAnim is not re-entrant
     static refEntity_t s_coopFpBodyShadow;
 
@@ -2365,7 +2366,32 @@ void CG_ModelAnim(centity_t *cent, qboolean bDoShaderTime)
             }
         }
 
-        if (s1->parent != cg.snap->ps.clientNum || bThirdPerson) {
+        // HZM coop [2026-09-26, bug-2963] DUST STORM VEIL (coop_mod/duststorm.scr). The per-player sand sheet
+        // models/emitters/coop_dustveil_*.tik rides the local player's "eyes bone" exactly as retail e1l1's
+        // storm.scr sheet does - but stock code puts an eyes-bone child on the CAMERA only in first person. In
+        // third person, in cover (auto-3P) and under every script camera the branch below glues it to the BODY's
+        // head, so the closed sheet cube became a tan bubble on your own head and no veil at all (the bug-301
+        // turret-viewmodel class). The veil always takes the camera-locked path instead: CG_AttachEyeEntity reads
+        // only cg.refdef (the FINAL camera origin + angles) and never the tag. Keyed on the model NAME so no other
+        // entity can reach it, and only on the eyes bone (resolved against the parent's WORLD model, which is what
+        // the server computed tag_num from - pLastPlayerWorldModel is only filled in first person). Zoom and
+        // cg_drawviewmodel 0 still hide it through the view-model hider further down, exactly like retail (scoped
+        // view = fog only).
+        if (s1->parent == cg.snap->ps.clientNum && model.tiki) {
+            const char *szVeilName = cgi.TIKI_Name(model.tiki);
+            if (szVeilName && strstr(szVeilName, "coop_dustveil")) {
+                dtiki_t    *pVeilTagTiki = cgi.R_Model_GetHandle(cgs.model_draw[cg_entities[s1->parent].currentState.modelindex]);
+                const char *szVeilTag    = pVeilTagTiki ? cgi.Tag_NameForNum(pVeilTagTiki, s1->tag_num & TAG_MASK) : NULL;
+                bCoopDustVeil = qtrue;
+                if (szVeilTag && Q_stricmp(szVeilTag, "eyes bone")) {
+                    bCoopDustVeil = qfalse; // a coop_dustveil model on any other tag keeps the stock handling
+                }
+            }
+        }
+
+        if (bCoopDustVeil) {
+            CG_AttachEyeEntity(&model, parent, cg.pPlayerFPSModel, 0, s1->attach_use_angles, s1->attach_offset);
+        } else if (s1->parent != cg.snap->ps.clientNum || bThirdPerson) {
             // attach the model to the world model
 
             // Fixed in OPM
@@ -2794,6 +2820,14 @@ void CG_ModelAnim(centity_t *cent, qboolean bDoShaderTime)
         // in RF_FLAGS_NOT_INHERITED), so child == parent either way for every entity that exists.
         model.renderfx &= ~(RF_FIRST_PERSON | RF_THIRD_PERSON | RF_DEPTHHACK);
         model.renderfx |= parent->renderfx & (RF_FIRST_PERSON | RF_THIRD_PERSON | RF_DEPTHHACK);
+        // HZM coop [bug-2963] the dust veil sits a few units from the camera in EVERY view mode, so it always
+        // draws as the first-person layer (through the eyes only - never into a mirror, portal or shadow view)
+        // and depth-hacked - exactly the pair it inherits from the arms model in first person. In third person
+        // the parent is the world body, which carries neither, and walls near a chase camera would cut into it.
+        if (bCoopDustVeil) {
+            model.renderfx &= ~RF_THIRD_PERSON;
+            model.renderfx |= RF_FIRST_PERSON | RF_DEPTHHACK;
+        }
     }
 
     for (i = 0; i < 3; i++) {
@@ -2803,6 +2837,10 @@ void CG_ModelAnim(centity_t *cent, qboolean bDoShaderTime)
 
     // set surfaces
     memcpy(model.surfaces, s1->surfaces, MAX_MODEL_SURFACES);
+    // HZM coop [2026-09-25] vehicle headlights (Phase H): on a managed vehicle, hide the retail beam surface and the
+    // retail corona on its lamp tags (cg_view.c CG_CoopHeadlights draws the replacement). Inert while
+    // cg_hzmHeadlights is off - every entity is then submitted exactly as before.
+    CG_CoopHeadlightsModel(cent, &model);
 
     // HZM coop (bug-1208) - THIS IS A VIEW-MODEL HIDER, so it must not run in third person.
     // The stock parenthesisation was `((!cg_drawviewmodel->integer && !bThirdPerson) || STAT_INZOOM)`:

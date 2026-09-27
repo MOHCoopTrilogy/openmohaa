@@ -544,6 +544,14 @@ void R_LoadFontShader(fontheader_sgl_t* font)
     char filename[64];
     shader_t* fontshader;
 
+    // [bug-1181] parity with gl2: refuse a font-shader build while the renderer is torn down
+    // (tr.defaultShader NULL, e.g. a vid_restart mid font-reload). CheckRefreshFont reloads once live.
+    if (!tr.defaultShader) {
+        font->shader = NULL;
+        font->trhandle = -1;
+        return;
+    }
+
     save = r_sequencenumber;
     r_sequencenumber = -1;
     Com_sprintf(filename, sizeof(filename), "gfx/fonts/%s", font->name);
@@ -579,6 +587,9 @@ void R_DrawString_sgl(fontheader_sgl_t* font, const char* text, float x, float y
     float startx, starty;
     int i;
     float fWidthScale, fHeightScale;
+
+    // [bug-1181] parity with gl2: skip drawing a font whose shader was refused during a teardown.
+    if (!font || !font->shader) { return; }
 
     i = 0;
     startx = x;

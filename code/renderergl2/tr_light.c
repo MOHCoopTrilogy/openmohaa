@@ -48,6 +48,17 @@ void R_TransformDlights( int count, dlight_t *dl, orientationr_t *or) {
 		dl->transformed[0] = DotProduct( temp, or->axis[0] );
 		dl->transformed[1] = DotProduct( temp, or->axis[1] );
 		dl->transformed[2] = DotProduct( temp, or->axis[2] );
+		// HZM gl2 [2026-09-26] Phase S1: the cone axis in the same frame (ProjectDlightTexture's u_HzmLightSpot and
+		// the bmodel cull use it beside `transformed`). Re-normalised: a scaled entity axis would otherwise change the
+		// length the shader reads k back from.
+		if ( dl->hzmSpot == HZM_SPOT_READY ) {
+			dl->hzmAxisLocal[0] = DotProduct( dl->hzmAxis, or->axis[0] );
+			dl->hzmAxisLocal[1] = DotProduct( dl->hzmAxis, or->axis[1] );
+			dl->hzmAxisLocal[2] = DotProduct( dl->hzmAxis, or->axis[2] );
+			if ( VectorNormalize( dl->hzmAxisLocal ) <= 0.0f ) {
+				VectorCopy( dl->hzmAxis, dl->hzmAxisLocal );
+			}
+		}
 	}
 }
 
@@ -82,6 +93,19 @@ void R_DlightBmodel( bmodel_t *bmodel ) {
 		}
 		if ( j < 3 ) {
 			continue;
+		}
+
+		// HZM gl2 [2026-09-26] Phase S1: a cone reaches far less than its sphere (a 28 deg / 1100 u cone is ~9% of
+		// the volume) - test the bmodel's bounding sphere against it, in the same local frame. Spots only.
+		if ( dl->hzmSpot == HZM_SPOT_READY ) {
+			vec3_t	bc, bh;
+
+			VectorAdd( bmodel->bounds[0], bmodel->bounds[1], bc );
+			VectorScale( bc, 0.5f, bc );
+			VectorSubtract( bmodel->bounds[1], bc, bh );
+			if ( !R_HZM_SpotSphereTouches( dl->transformed, dl->hzmAxisLocal, dl->hzmCosOuter, bc, VectorLength( bh ) ) ) {
+				continue;
+			}
 		}
 
 		// we need to check this light
@@ -383,6 +407,10 @@ void R_SetupEntityLighting( const trRefdef_t *refdef, trRefEntity_t *ent ) {
 			d = DLIGHT_MINIMUM_RADIUS;
 		}
 		d = power / ( d * d );
+		// HZM gl2 [2026-09-26] Phase S1: a spot adds only inside its cone and range (every other light untouched)
+		if ( dl->hzmSpot == HZM_SPOT_READY ) {
+			d *= R_HZM_DlightFactorAt( dl, lightOrigin, 0.0f );
+		}
 
 		VectorMA( ent->directedLight, d, dl->color, ent->directedLight );
 		VectorMA( lightDir, d, dir, lightDir );
@@ -661,6 +689,10 @@ static int RB_GetEntityGridLighting()
         power = dl->radius * dl->radius;
         if (power >= d) {
             d = dl->radius * 7500.0 / d;
+            // HZM gl2 [2026-09-26] Phase S1: a spot adds only inside its cone and range (others untouched)
+            if (dl->hzmSpot == HZM_SPOT_READY) {
+                d *= R_HZM_DlightFactorAt(dl, lightOrigin, backEnd.currentSphere->radius);
+            }
             VectorMA(vLight, d, dl->color, vLight);
         }
     }
@@ -808,6 +840,10 @@ void RB_SetupStaticModelGridLighting(trRefdef_t *refdef, cStaticModelUnpacked_t 
         power = dl->radius * dl->radius;
         if (power >= d) {
             d = dl->radius * 7500.0 / d;
+            // HZM gl2 [2026-09-26] Phase S1: a spot adds only inside its cone and range (others untouched)
+            if (dl->hzmSpot == HZM_SPOT_READY) {
+                d *= R_HZM_DlightFactorAt(dl, lightOrigin, 0.0f);
+            }
             VectorMA(vLight, d, dl->color, vLight);
         }
     }
@@ -1301,6 +1337,10 @@ void R_GetLightingForSmoke(vec3_t vLight, const vec3_t vOrigin)
         power = dl->radius * dl->radius;
         if (power >= d) {
             d = dl->radius * 7500.0 / d;
+            // HZM gl2 [2026-09-26] Phase S1: a spot lights smoke only inside its cone and range (others untouched)
+            if (dl->hzmSpot == HZM_SPOT_READY) {
+                d *= R_HZM_DlightFactorAt(dl, vOrigin, 0.0f);
+            }
             VectorMA(vLight, d, dl->color, vLight);
         }
     }
@@ -1354,7 +1394,8 @@ qboolean R_FindGridPointForSphere(world_t *world, const vec3_t sphereOrigin, con
 	return qfalse;
 }
 
-int R_LightDirForPoint( vec3_t point, vec3_t lightDir, vec3_t normal, world_t *world )
+static int R_LightDirForPointEx( vec3_t point, vec3_t lightDir, vec3_t normal, world_t *world, qboolean useAreaMask,
+    hzmLDirInfo_t *info ) // HZM [bug-3064] info: optional, NULL on every normal path
 {
     vec3_t vLight;
     vec3_t vEnd;
@@ -1373,6 +1414,9 @@ int R_LightDirForPoint( vec3_t point, vec3_t lightDir, vec3_t normal, world_t *w
     VectorClear(summedDir);
 	leaf = NULL;
 	iNumLights = 0;
+    if (info) {
+        Com_Memset(info, 0, sizeof(*info));
+    }
 
     if (world->vis) {
         leaf = R_FindPoint(world, point);
@@ -1381,15 +1425,19 @@ int R_LightDirForPoint( vec3_t point, vec3_t lightDir, vec3_t normal, world_t *w
         }
     }
 
+    if (info) {
+        info->leafOk  = leaf ? 1 : 0;
+        info->sunList = (leaf && leaf->lights[0] == &tr.sSunLight) ? 1 : 0;
+    }
+
     if (leaf && leaf->numlights) {
         spherel_t* sphere;
 
 		for (i = (leaf->lights[0] == &tr.sSunLight ? 1 : 0); i < leaf->numlights; i++) {
 			sphere = leaf->lights[i];
 			if (sphere->leaf != (mnode_t*)-1) {
-				byte mask = backEnd.refdef.areamask[sphere->leaf->area >> 3];
-
-                if (!(mask & (1 << (sphere->leaf->area & 7)))) {
+                // HZM [bug-3007] the Static variant skips the per-view gate - and the areamask read with it
+                if (!useAreaMask || !(backEnd.refdef.areamask[sphere->leaf->area >> 3] & (1 << (sphere->leaf->area & 7)))) {
 
                     ri.CM_BoxTrace(&trace, point, sphere->origin, vec3_origin, vec3_origin, 0, CONTENTS_SOLID, 0);
 
@@ -1402,6 +1450,10 @@ int R_LightDirForPoint( vec3_t point, vec3_t lightDir, vec3_t normal, world_t *w
                         VectorMA(summedDir, addSize, dir, summedDir);
 
                         iNumLights++;
+                        if (info) {
+                            info->numLights++;
+                            VectorMA(info->lampSum, addSize, dir, info->lampSum);
+                        }
                     }
 				}
 			}
@@ -1423,6 +1475,10 @@ int R_LightDirForPoint( vec3_t point, vec3_t lightDir, vec3_t normal, world_t *w
                 VectorMA(summedDir, addSize, s_sun.direction, summedDir);
 
                 iNumLights++;
+                if (info) {
+                    info->sunHit    = 1;
+                    info->sunWeight = addSize;
+                }
             }
         }
     }
@@ -1435,6 +1491,27 @@ int R_LightDirForPoint( vec3_t point, vec3_t lightDir, vec3_t normal, world_t *w
         VectorCopy(normal, lightDir);
 
 	return qtrue;
+}
+
+int R_LightDirForPoint( vec3_t point, vec3_t lightDir, vec3_t normal, world_t *world )
+{
+	return R_LightDirForPointEx( point, lightDir, normal, world, qtrue, NULL );
+}
+
+/*
+HZM gl2 [bug-3007] the VIEW-INDEPENDENT variant, for values cached once per map (the terrain light grid,
+tr_surface.c R_HZM_TerrainLightGridBuild). Identical sum, minus the per-view gate that drops a sphere light whose
+area is not in backEnd.refdef.areamask: at load that mask is whatever the last view left, so a cached value would
+depend on where some earlier frame stood. The lightmap it re-shades has no such gate either.
+*/
+int R_LightDirForPointStatic( vec3_t point, vec3_t lightDir, vec3_t normal, world_t *world )
+{
+	return R_LightDirForPointEx( point, lightDir, normal, world, qfalse, NULL );
+}
+
+int R_LightDirForPointInfo( vec3_t point, vec3_t lightDir, vec3_t normal, world_t *world, qboolean useAreaMask, hzmLDirInfo_t *info )
+{
+	return R_LightDirForPointEx( point, lightDir, normal, world, useAreaMask, info );
 }
 
 static void R_SetupEntityLightingGrid(trRefEntity_t* ent, world_t* world)

@@ -533,8 +533,13 @@ void SCR_UpdateScreen( void ) {
 
 	screen_recursive = qtrue;
 	
+	// HZM coop [user 2026-09-26] loading screen (cl_ui.cpp UI_LoadScreenFrame*): the probe times the
+	// hunk users (gl2 R_Init, cgame init) and the draw separately. No-ops outside a map load.
+	UI_LoadScreenFrameBegin();
 	CL_StartHunkUsers(qfalse);
+	UI_LoadScreenFramePreDraw();
 	SCR_SimpleUpdateScreen();
+	UI_LoadScreenFrameEnd();
 
 	// set the fps value
 	if( fps->integer && clc.state == CA_ACTIVE ) {

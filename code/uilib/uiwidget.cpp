@@ -1697,21 +1697,81 @@ bool UIWidget::isEnabled(void)
     if (!strcmp(m_enabledCvar.c_str(), "")) {
         return m_enabled;
     }
-
-    if (m_enabledCvar[0] == '!') {
-        //
-        // Added in 2.30
-        //  True if the cvar is 0
-        if (m_enabled) {
-            return !UI_GetCvarInt(m_enabledCvar.c_str() + 1, 0);
-        }
-    } else {
-        if (m_enabled) {
-            return UI_GetCvarInt(m_enabledCvar.c_str(), 0) != 0;
-        }
+    if (!m_enabled) {
+        return false;
     }
 
-    return false;
+    // [HZM] enabledcvar accepts MULTIPLE space-separated conditions, ALL of which must hold (logical AND).
+    // Each condition is one of:
+    //     cvar            true when the cvar is non-zero        (original 2.30 form)
+    //     !cvar           true when the cvar is 0               (original 2.30 form)
+    //     cvar<N  cvar>N  cvar<=N  cvar>=N  cvar==N  cvar!=N     integer comparison against a literal
+    // A single bare/!'d token behaves exactly as the original code, so this is fully backward-compatible -
+    // no existing widget puts a space or an operator in its enabledcvar. This lets one widget gate on two
+    // conditions at once, e.g. a page flag AND a numeric threshold: "ui_pageFlag ui_score<350" (shown only
+    // when ui_pageFlag is set AND ui_score is under 350). The parser is generic - it hardcodes no cvar name.
+    const char *s = m_enabledCvar.c_str();
+    char        token[128];
+    while (*s) {
+        while (*s == ' ' || *s == '\t') {
+            s++;
+        }
+        if (!*s) {
+            break;
+        }
+        int ti = 0;
+        while (*s && *s != ' ' && *s != '\t' && ti < (int)sizeof(token) - 1) {
+            token[ti++] = *s++;
+        }
+        token[ti] = '\0';
+        if (ti == 0) {
+            continue;
+        }
+
+        // Locate a comparison operator that is NOT the leading '!' (that leading '!' is the inverse form).
+        char *op    = NULL;
+        int   oplen = 0;
+        for (char *c = token; *c; c++) {
+            if (c == token) {
+                continue; // a '!' or '<'/'>' in column 0 is not a comparison operator here
+            }
+            if (*c == '<' || *c == '>' || *c == '=' || *c == '!') {
+                op    = c;
+                oplen = (c[1] == '=') ? 2 : 1;
+                break;
+            }
+        }
+
+        bool ok;
+        if (op) {
+            char name[128];
+            int  nl = (int)(op - token);
+            if (nl > (int)sizeof(name) - 1) {
+                nl = (int)sizeof(name) - 1;
+            }
+            memcpy(name, token, nl);
+            name[nl]  = '\0';
+            int lhs   = UI_GetCvarInt(name, 0);
+            int rhs   = atoi(op + oplen);
+            if (op[0] == '<') {
+                ok = (oplen == 2) ? (lhs <= rhs) : (lhs < rhs);
+            } else if (op[0] == '>') {
+                ok = (oplen == 2) ? (lhs >= rhs) : (lhs > rhs);
+            } else if (op[0] == '!') {
+                ok = (lhs != rhs);
+            } else { // '='
+                ok = (lhs == rhs);
+            }
+        } else if (token[0] == '!') {
+            ok = (UI_GetCvarInt(token + 1, 0) == 0);
+        } else {
+            ok = (UI_GetCvarInt(token, 0) != 0);
+        }
+        if (!ok) {
+            return false; // any unmet condition disables the widget
+        }
+    }
+    return true;
 }
 
 bool UIWidget::IsDying(void)
@@ -2314,6 +2374,23 @@ void UIWidget::Realign(void)
     if ((m_align & WA_FULL) || (m_flags & (WF_STRETCH_HORIZONTAL | WF_STRETCH_VERTICAL)) || bScaled) {
         setFrame(m_frame);
         m_startingpos = m_frame.pos;
+    }
+}
+
+void UIWidget::PrimeMaterials(void)
+{
+    // HZM bug-3015 - see uiwidget.h and cl_ui.cpp UI_LoadScreenPrimeMaterials
+    if (m_material) {
+        m_material->GetMaterial();
+    }
+    if (m_hovermaterial) {
+        m_hovermaterial->GetMaterial();
+    }
+    if (m_pressedmaterial) {
+        m_pressedmaterial->GetMaterial();
+    }
+    for (int i = 1; i <= m_children.NumObjects(); i++) {
+        m_children.ObjectAt(i)->PrimeMaterials();
     }
 }
 

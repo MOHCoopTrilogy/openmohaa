@@ -32,6 +32,7 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 #include "worldspawn.h"
 #include "weapon.h"
 #include "trigger.h"
+#include "g_bot.h" // [bot door jam] G_IsBot
 #include "scriptmaster.h"
 #include "scriptexception.h"
 #include "navigate.h"
@@ -2224,6 +2225,8 @@ Player::Player()
     mCurTrailOrigin   = 0;
     mLastTrailTime    = 0;
     m_pLastSpawnpoint = NULL;
+    m_fCoopWaveAt     = 0;  // HZM coop - Hardcore respawn waves (before any LoadingSavegame return)
+    m_iCoopWaveShown  = -1;
 
     voted                      = false;
     m_fInvulnerableTimeElapsed = 0;
@@ -2633,6 +2636,19 @@ void Player::Init(void)
 
     if (g_gametype->integer != GT_SINGLE_PLAYER) {
         InitDeathmatch();
+
+        // [HZM bug-2958] InitEdict (above) picks the movetype from m_bSpectator - NOCLIP for a spectator - and only
+        // THEN does InitDeathmatch end the spectating (EndSpectator). Every engine respawn path calls EndSpectator
+        // before it posts EV_Player_Respawn, so it never showed; the script 'respawn' command does not. Push's round
+        // reset respawns every team player that way, and a player dead and death-spectating for the
+        // sv_team_spawn_interval wave (BT default 15) came back alive, not spectating - and still noclip: flying
+        // level at spawn height, through walls, at noclip speed (soaks: 2-7 such spawns per 15 min; m4l2 bot
+        // circled the Axis spawn house for 5 min unable to fly down its ramp). Resolve the movetype again for
+        // what the player IS after InitDeathmatch. (The coop lobby deploy had the same cause - CoopLobbyPose.)
+        static cvar_t *s_spawnMoveFix = gi.Cvar_Get("g_spawnMoveFix", "1", 0);
+        if (s_spawnMoveFix->integer && !IsSpectator() && getMoveType() == MOVETYPE_NOCLIP) {
+            setMoveType(MOVETYPE_WALK);
+        }
     } else if (!LoadingSavegame) {
         ChooseSpawnPoint();
         JoinNearbySquads();
@@ -3489,6 +3505,28 @@ void Player::Dead(Event *ev)
         } else {
             respawn_time = level.time + 2.0f;
         }
+
+        // HZM coop - HARDCORE respawn waves (user 2026-09-25). The dead wait for the next SHARED 20s wave (so deaths
+        // regroup), never less than 5s. Only the click / g_forcerespawn path below is held: a corpse revive inside the
+        // DBNO window and a joiner's first deploy use the script respawn command and are never held. Keyed on the
+        // coop-owned serverinfo flag, which the server zeroes on every map, so MP never sees it; no archived cvar.
+        // (sv_team_spawn_interval was rejected: it forces death-spectator, gates first spawns and joins, and it is
+        // archived, so a coop value would leak into the next MP session.)
+        m_fCoopWaveAt    = 0;
+        m_iCoopWaveShown = -1;
+        {
+            static cvar_t *pHcWave = NULL;
+            if (!pHcWave) {
+                pHcWave = gi.Cvar_Get("g_coopHardcore", "0", CVAR_SERVERINFO | CVAR_ROM);
+            }
+            if (pHcWave->integer) {
+                float fWave = (floor(level.time / 20.0f) + 1.0f) * 20.0f;
+                if (fWave - level.time < 5.0f) {
+                    fWave += 20.0f;
+                }
+                m_fCoopWaveAt = fWave;
+            }
+        }
     } else if (level.current_map && *level.current_map) {
         G_BeginIntermission(level.current_map, TRANS_LEVEL);
     } else {
@@ -3609,6 +3647,30 @@ void Player::Killed(Event *ev)
     setContents(CONTENTS_CORPSE);
     setSolidType(SOLID_NOT);
     setMoveType(MOVETYPE_TOSS);
+
+    // HZM-MP-BEGIN(mp_corpse_shootable)
+    // [user 2026-09-21] SHOOTABLE DEAD BODIES IN MP. Vanilla leaves the corpse SOLID_NOT, so every trace skips
+    // it (sv_world) and shooting a body does nothing - coop makes AI corpses shootable (Actor::BecomeCorpse,
+    // bug-1321) and the user wants the same for MP players ("I want dead bodies to be shootable"). Same recipe:
+    // CONTENTS_WEAPONCLIP is the only MASK_SHOT flag absent from MASK_PLAYERSOLID/MASK_MONSTERSOLID, so it stops
+    // bullets WITHOUT body-blocking players or AI; the flattened ground-slab bbox keeps the invisible clip out of
+    // eye-lines (WEAPONCLIP is in MASK_CANSEE, so a man-high box would blind bots through it). Damage then flows
+    // Player::ArmorDamage -> IsDead() -> Sentient::CoopGoreCorpseDamage (its player guard is lifted for MP), so
+    // the body gibs like a coop corpse. MP ONLY: gated on the level var coop_mpRun (read by type, never value),
+    // set only on MP sessions and wiped by any level load - so coop/SP corpses are byte-unchanged.
+    {
+        ScriptVariable *pMpRun = level.vars ? level.vars->GetVariable("coop_mpRun") : NULL;
+        static cvar_t  *pShoot = NULL;
+        if (!pShoot) {
+            pShoot = gi.Cvar_Get("coop_corpseShootable", "1", CVAR_ARCHIVE);
+        }
+        if (pMpRun && pMpRun->GetType() != VARIABLE_NONE && pShoot->integer) {
+            setSize(Vector(-32.0f, -32.0f, 0.0f), Vector(32.0f, 32.0f, 16.0f));
+            setContents(CONTENTS_WEAPONCLIP);
+            setSolidType(SOLID_BBOX);
+        }
+    }
+    // HZM-MP-END(mp_corpse_shootable)
 
     angles.x = 0;
     angles.z = 0;
@@ -5679,6 +5741,109 @@ void Player::CoopBotDrive(usercmd_t *ucmd)
     ucmd->rightmove = ((level.inttime % 3000) < 1500) ? (signed char)90 : (signed char)-90;
 }
 
+// HZM coop - AIM ASSIST (coop-only, opt-in). A gentle magnetism that nudges the player's aim a FRACTION
+// toward the nearest visible enemy inside a tight cone of where they are already looking. It never snaps,
+// and it can NEVER work in multiplayer/PvP: it is OFF by default (coop_aimAssist 0) AND hard-gated to a
+// loaded coop map with no MP session running (tested by TYPE, exactly like CoopMpRealismOff), so forcing
+// the cvar on in PvP still does nothing. The MP-session check lives in a declared HZM-MP hook. Tunables:
+// coop_aimAssistFov (cone half-angle deg), coop_aimAssistRange (max units), coop_aimAssistPull (0..1/frame).
+void Player::CoopAimAssist(usercmd_t *ucmd)
+{
+    static cvar_t  *pOn = NULL, *pFov = NULL, *pRange = NULL, *pPull = NULL;
+    ScriptVariable *pCoop, *pMpRun;
+
+    if (!pOn) {
+        pOn    = gi.Cvar_Get("coop_aimAssist",      "0",    CVAR_ARCHIVE);
+        pFov   = gi.Cvar_Get("coop_aimAssistFov",   "8",    CVAR_ARCHIVE);
+        pRange = gi.Cvar_Get("coop_aimAssistRange", "2048", CVAR_ARCHIVE);
+        pPull  = gi.Cvar_Get("coop_aimAssistPull",  "0.15", CVAR_ARCHIVE);
+    }
+    if (!pOn->integer) {
+        return; // OFF by default - completely inert (no scan, no allocation, nothing)
+    }
+    {   // HZM coop - Hardcore removes aim assist (the coop-owned serverinfo flag, set only by coop hardcore.scr)
+        static cvar_t *pHc = NULL;
+        if (!pHc) {
+            pHc = gi.Cvar_Get("g_coopHardcore", "0", CVAR_SERVERINFO | CVAR_ROM);
+        }
+        if (pHc->integer) {
+            return;
+        }
+    }
+
+    // COOP-ONLY GATE (bulletproof, same idiom as CoopMpRealismOff): coop loaded AND no MP session.
+    pCoop  = level.vars ? level.vars->GetVariable("coop_mainScriptLoaded") : NULL;
+    if (!pCoop || pCoop->GetType() == VARIABLE_NONE) {
+        return; // coop framework not loaded on this map - refuse
+    }
+    // HZM-MP-BEGIN(mp_aimassist_gate)
+    pMpRun = level.vars ? level.vars->GetVariable("coop_mpRun") : NULL;
+    if (pMpRun && pMpRun->GetType() != VARIABLE_NONE) {
+        return; // an MP session is running - NEVER assist in PvP
+    }
+    // HZM-MP-END(mp_aimassist_gate)
+
+    if (IsDead() || IsSpectator() || m_pVehicle || m_pTurret) {
+        return;
+    }
+
+    float fov   = pFov->value;
+    float range = pRange->value;
+    float pull  = pPull->value;
+    if (fov <= 0.0f || range <= 0.0f || pull <= 0.0f) {
+        return;
+    }
+    if (pull > 1.0f) {
+        pull = 1.0f;
+    }
+
+    Vector eye = EyePosition();
+
+    // current aim world-angles = ucmd->angles + delta_angles (pmove's own composition)
+    Vector curAng;
+    curAng[0] = SHORT2ANGLE((short)(ucmd->angles[0] + client->ps.delta_angles[0]));
+    curAng[1] = SHORT2ANGLE((short)(ucmd->angles[1] + client->ps.delta_angles[1]));
+    curAng[2] = 0.0f;
+
+    // pick the enemy CLOSEST TO THE CROSSHAIR (smallest angular offset) within the cone, range and LOS
+    Sentient *best        = NULL;
+    float     bestConeAng = fov;
+    float     rangeSq     = range * range;
+    for (Sentient *obj = level.m_HeadSentient[TEAM_GERMAN]; obj != NULL; obj = obj->m_NextSentient) {
+        if (obj == this || obj->health <= 0 || obj->deadflag) {
+            continue;
+        }
+        Vector to  = obj->centroid - eye;
+        float  dSq = to.lengthSquared();
+        if (dSq > rangeSq || dSq < 1.0f) {
+            continue;
+        }
+        Vector tAng    = to.toAngles();
+        float  dyaw    = AngleSubtract(tAng[1], curAng[1]);
+        float  dpitch  = AngleSubtract(tAng[0], curAng[0]);
+        float  coneAng = (float)sqrt(dyaw * dyaw + dpitch * dpitch);
+        if (coneAng >= bestConeAng) {
+            continue;
+        }
+        if (!CanSee(obj, 360.0f, range, false)) {
+            continue; // LOS only (the cone test above already bounds the angle)
+        }
+        best        = obj;
+        bestConeAng = coneAng;
+    }
+    if (!best) {
+        return;
+    }
+
+    // fractional PULL toward the target (magnetism) - never a snap
+    Vector to      = best->centroid - eye;
+    Vector wantAng = to.toAngles();
+    float  newYaw   = curAng[1] + AngleSubtract(wantAng[1], curAng[1]) * pull;
+    float  newPitch = curAng[0] + AngleSubtract(wantAng[0], curAng[0]) * pull;
+    ucmd->angles[1] = (short)(ANGLE2SHORT(newYaw)   - client->ps.delta_angles[1]);
+    ucmd->angles[0] = (short)(ANGLE2SHORT(newPitch) - client->ps.delta_angles[0]);
+}
+
 /*
 ==============
 ClientThink
@@ -5700,6 +5865,13 @@ void Player::ClientThink(void)
         if (pCoopBotInput->integer && current_ucmd) {
             CoopBotDrive(current_ucmd);
         }
+    }
+
+    // HZM coop - AIM ASSIST (coop-only, opt-in). Runs on the player's OWN command before it is consumed,
+    // so the gentle pull flows through the whole input pipeline like real stick input. Self-gates: inert
+    // unless coop_aimAssist is on, and hard-refused in PvP (see CoopAimAssist). Distinct from coop_botInput.
+    if (current_ucmd) {
+        CoopAimAssist(current_ucmd);
     }
 
     // sanity check the command time to prevent speedup cheating
@@ -6207,7 +6379,20 @@ void Player::Think(void)
         TickInvulnerable();
         TickTeamSpawn();
 
-        if (deadflag == DEAD_DEAD && level.time > respawn_time) {
+        // HZM coop - Hardcore respawn wave: hold the dead until it (see Player::Dead), with a countdown once a second
+        const bool bCoopWaveHold = deadflag == DEAD_DEAD && m_fCoopWaveAt > 0.0f && level.time < m_fCoopWaveAt;
+        if (bCoopWaveHold) {
+            const int iLeft = (int)ceil(m_fCoopWaveAt - level.time);
+            if (iLeft != m_iCoopWaveShown) {
+                m_iCoopWaveShown = iLeft;
+                gi.centerprintf(edict, "Reinforcements in %i", iLeft);
+            }
+        } else if (m_iCoopWaveShown > 0) {
+            m_iCoopWaveShown = 0;
+            gi.centerprintf(edict, " "); // clear the countdown
+        }
+
+        if (deadflag == DEAD_DEAD && level.time > respawn_time && !bCoopWaveHold) {
             if (dmManager.AllowRespawn() && AllowTeamRespawn()) {
                 if (((server_new_buttons & BUTTON_ATTACKLEFT) || (server_new_buttons & BUTTON_ATTACKRIGHT))
                     || (g_forcerespawn->integer > 0 && level.time > g_forcerespawn->integer + respawn_time)) {
@@ -15138,6 +15323,59 @@ if (!pSupOn)  { pSupOn  = gi.Cvar_Get("coop_supine", "0", CVAR_ARCHIVE); }
 // Generosity is deliberate. The most-praised part of RS2's resting is that it is pure geometry with
 // no eligibility list; the most-complained-about part of Sandstorm's and Hell Let Loose's is that
 // theirs is strict. The anti-camping price here is the stillness gate, not a stingy trigger.
+// [user 2026-09-27] USE FIRST, BRACE SECOND: "That's fine on the bracing idea". A Use press made while something usable is
+// in front (what DoUse's own view query finds: a door, a ladder, a trigger_use switch, a use object) works that thing and
+// does NOT take the brace mount - standing still at a door with walls near, the press used to mount the weapon, the next
+// unmounted it, and the door only opened on a press made while moving. Bracing anywhere with nothing usable in view is
+// unchanged. coop_braceUseFirst: -1 = AUTO (HZM_BRACE_USEFIRST_AUTO), 0 = off (the old rule), 1 = on. Flags 0 (T7).
+#define HZM_BRACE_USEFIRST_AUTO 1
+
+static bool s_hzmIsUseTarget(Entity *e)
+{
+    return e && (e->IsSubclassOfDoor() || e->isSubclassOf(FuncLadder) || e->isSubclassOf(TriggerUse)
+                 || e->isSubclassOf(UseObject) || e->isSubclassOf(UseAnim));
+}
+
+// [bot door jam] bot_noBrace (see TickCoopBrace)
+static bool s_hzmNoBotBrace(void)
+{
+    static cvar_t *s_on = NULL;
+    if (!s_on) {
+        s_on = gi.Cvar_Get("bot_noBrace", "1", 0);
+    }
+    return s_on->integer != 0;
+}
+
+// [user 2026-09-27] is there something USE would work in front? The same query DoUse makes (view trace, 64u, then the
+// entities in a 32u box at its end), filtered to things that are meant to be used (s_hzmIsUseTarget).
+bool Player::CoopBraceUseTargetInView()
+{
+    static cvar_t *s_on = NULL, *s_dbg = NULL;
+    if (!s_on) {
+        s_on  = gi.Cvar_Get("coop_braceUseFirst", "-1", 0);
+        s_dbg = gi.Cvar_Get("coop_braceProbe", "0", 0); // low-volume: one line per decision (coop_braceDebug is per frame)
+    }
+    const bool bOn = s_on->integer < 0 ? (HZM_BRACE_USEFIRST_AUTO != 0) : (s_on->integer != 0);
+    if (!bOn) {
+        return false;
+    }
+    int       touch[MAX_GENTITIES];
+    const int num = getUseableEntities(touch, MAX_GENTITIES, true);
+    for (int i = 0; i < num; i++) {
+        gentity_t *hit = &g_entities[touch[i]];
+        if (hit->inuse && hit->entity && hit->entity != this && s_hzmIsUseTarget(hit->entity)) {
+            if (s_dbg->integer) {
+                gi.Printf(
+                    "^~^~^ BRACEUSE e=%d target=%d class=%s model=%s -> use, no mount\n", entnum, hit->entity->entnum,
+                    hit->entity->getClassname(), hit->entity->model.c_str()
+                );
+            }
+            return true;
+        }
+    }
+    return false;
+}
+
 void Player::TickCoopBrace()
 {
     // [vet] elapsed time, for the same reason as the stress envelope above.
@@ -15171,12 +15409,19 @@ void Player::TickCoopBrace()
         // [bug-2133] DBNO was missing: going down clears m_bCoopProne and keeps deadflag false, so a
         // downed player could mount and crawl around with forced ADS and the full buff.
         || m_bCoopDbno
+        // [bot door jam] a BOT never takes the mount. Its USE is pressed only for doors, ladders and bandaging, and a
+        // bot standing at a shut door is still with the frame's walls within the side probe's reach - so each press
+        // mounted or unmounted the brace and was consumed here, DoUse never ran and the door never opened (e1l1 *303,
+        // m2l1 *25: BOTDOOR wait -> giveup with the door shut, unlocked, and in USE reach; one bot pinned 90s).
+        // bot_noBrace 1 (default) / 0 = bots brace like players (the old behaviour).
+        || (s_hzmNoBotBrace() && G_IsBot(edict)) // (SVF_BOT is never set on this fork's bots: G_IsBot asks the bot manager)
         || (client->ps.pm_flags & (PMF_SPECTATING | PMF_INTERMISSION | PMF_FROZEN | PMF_NO_MOVE))
-        // [user 2026-08-27] FIRST PERSON ONLY. Mounting forces ADS, clamps the aim to a cone and
-        // plants the viewmodel on the surface - three things that only mean anything down the sights.
-        // In third person it would be a silent stat buff with a camera that ignores all of it.
-        // m_bCoopView3p is the cgame's own final view mode, mirrored through the u_view3p userinfo.
-        || m_bCoopView3p /*[user 08-27] brace is a first-person mechanic*/) {
+        // [user 2026-09-25] THIRD PERSON TOO (reverses 08-27's "first person only"): "Bracing weapons should work in
+        // third person like first person ... it should brace and put you over the shoulder just like it would if you
+        // were using cover in third person". The mount forces ADS (coop_braceMounted -> CG_AimingDownSights), and a
+        // third-person ADS already eases the camera over the shoulder (CG_UpdateAdsStage, the path cover uses), so
+        // lifting the m_bCoopView3p gate is all it takes: the aim cone and the stats apply, the camera follows.
+        ) {
         m_fCoopBraceDwell = 0.0f;
         m_fCoopBraceHold  = 0.0f;
         m_bCoopBraceStill = false;
@@ -15274,7 +15519,11 @@ void Player::TickCoopBrace()
                 int            iSide, iSh;
                 float          kSideZ[3];
 
-                if (!pSide) { pSide = gi.Cvar_Get("coop_braceSideDist", "44", CVAR_ARCHIVE); }
+                // [user 2026-09-21] tightened 44 -> 24. At 44 the side probe reached a doorway jamb from the
+                // MIDDLE of a 64-72u opening, so just standing in a doorway offered a mount ("should be only
+                // when I am right against a door edge"). The player half-width is 16, so 24 means the jamb must
+                // be within ~8u of the shoulder - you actually have to be against the edge. Still a cvar.
+                if (!pSide) { pSide = gi.Cvar_Get("coop_braceSideDist", "24", CVAR_ARCHIVE); }
                 fSideLen = (pSide->value > 8.0f) ? pSide->value : 8.0f;
                 if (m_iMovePosFlags & MPF_POSITION_CROUCHING) {
                     kSideZ[0] = 44.0f; kSideZ[1] = 36.0f; kSideZ[2] = 26.0f;
@@ -15359,8 +15608,20 @@ void Player::TickCoopBrace()
                 m_fCoopCoverAutoDwell = 0.0f;
                 m_fCoopCoverAutoRetry = level.time + 0.6f;
                 if (current_ucmd) { current_ucmd->buttons &= ~BUTTON_USE; }
-            } else if (m_bCoopBraceAvail && !m_pLadder && !m_pTurret && !m_pVehicle) {
+            } else if (m_bCoopBraceAvail && !m_pLadder && !m_pTurret && !m_pVehicle && !CoopBraceUseTargetInView()) {
                 m_bCoopBraceMounted = true;
+                {
+                    static cvar_t *s_probe = NULL;
+                    if (!s_probe) {
+                        s_probe = gi.Cvar_Get("coop_braceProbe", "0", 0);
+                    }
+                    if (s_probe->integer) {
+                        gi.Printf(
+                            "^~^~^ BRACEMOUNT e=%d at=(%.0f %.0f %.0f) yaw=%.0f bot=%d\n", entnum, origin.x, origin.y,
+                            origin.z, client->cmd_angles[YAW], G_IsBot(edict) ? 1 : 0
+                        );
+                    }
+                }
                 if (current_ucmd) { current_ucmd->buttons &= ~BUTTON_USE; }
                 // [user 2026-08-27] latch the direction the weapon was set down facing. The client
                 // clamps the aim to a cone around it - you pivot ON the rest instead of turning

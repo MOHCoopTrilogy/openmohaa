@@ -799,6 +799,99 @@ void CG_ServerRestarted(void)
 
 /*
 =================
+HZM coop [bug-3048] THE PER-MAP GRADE SURVIVES A CGAME RELOAD THAT KEEPS THE LEVEL
+
+vid_restart - and the graphics "Apply now" button, which runs one - unloads and reloads this DLL while the client
+keeps its gamestate and stays on the same level. CG_Shutdown and CG_Init both clear coop_mapGrade, which is right
+for a level change or an MP server and wrong here, and the coop server sends the grade ONCE per player
+(coop_mod/mapgrade.scr coop_mapgrade_publish, flags["coop_mgSent"]). So after every vid_restart the layer sat at
+identity until the next map: contrast 1.08 -> 1, saturation 0.88 -> 1, lifted shadows (gfx harness, bug-3048).
+
+Fix, client-only, nothing on the wire changes: CG_Shutdown parks the live grade in cg_hzmGradeKept, keyed on the
+LEVEL INSTANCE "<sv_serverid>.<level start time>@<serverinfo mapname>". CG_Init, once the gamestate is parsed, hands
+it back only if the key still matches. sv_serverid (the server's frame time at SV_SpawnServer) is re-rolled by every
+map load and map restart and is untouched by a vid_restart (cl.gameState survives it), so a parked grade does not
+cross into another level; reaching another server's level would need the same map AND the same millisecond ids, and
+even then it is only a clamped colour grade for that one level. The serverinfo mapname is used rather than
+cgs.mapname, which carries the client's own _sml / r_largemap choice. The first CG_CoopMapGradeThink after the reload
+re-applies it: its statics start at "\x01" in the freshly loaded DLL (CL_ShutdownCGame -> Sys_UnloadCGame; where a
+platform kept the DLL mapped, the restore would simply not show - the old behaviour, never a wrong grade). The park is
+one-shot - the next CG_Init consumes it whether it matches or not.
+
+Switch: cg_hzmGradeKeep, flags 0 (never saved - TRAPS T7). -1 or "" = HZM_GRADEKEEP_AUTO, 0 = the old behaviour
+(cleared on every reload), 1 = keep. Both cvars are registered in CG_Init before any server command is processed,
+so the SEC2 set filter refuses a server set of either (they are registered, non-coop_, not user-created).
+=================
+*/
+#define HZM_GRADEKEEP_AUTO 1
+
+static qboolean CG_HZM_GradeKeepOn(void)
+{
+    const cvar_t *cv = cgi.Cvar_Get("cg_hzmGradeKeep", "-1", 0);
+
+    if (!cv->string[0] || cv->integer < 0) {
+        return HZM_GRADEKEEP_AUTO ? qtrue : qfalse;
+    }
+    return cv->integer ? qtrue : qfalse;
+}
+
+// the level instance the loaded gamestate belongs to; "" when there is none (no gamestate, no serverid, no map)
+static void CG_HZM_GradeKeepKey(char *out, int size)
+{
+    char sid[64];
+    char map[MAX_QPATH];
+
+    // copied out at once: Info_ValueForKey hands back one of two rotating static buffers
+    Q_strncpyz(sid, Info_ValueForKey(CG_ConfigString(CS_SYSTEMINFO), "sv_serverid"), sizeof(sid));
+    Q_strncpyz(map, Info_ValueForKey(CG_ConfigString(CS_SERVERINFO), "mapname"), sizeof(map));
+    out[0] = 0;
+    if (sid[0] && map[0]) {
+        Com_sprintf(out, size, "%s.%s@%s", sid, CG_ConfigString(CS_LEVEL_START_TIME), map);
+    }
+}
+
+// CG_Shutdown: park the live grade before the identity reset clears it
+static void CG_HZM_GradeKeepPark(void)
+{
+    char        key[MAX_QPATH + 96];
+    const char *grade = cgi.Cvar_Get("coop_mapGrade", "", 0)->string;
+
+    CG_HZM_GradeKeepKey(key, sizeof(key));
+    if (CG_HZM_GradeKeepOn() && key[0] && grade[0]) {
+        cgi.Cvar_Set("cg_hzmGradeKept", va("%s|%s", key, grade));
+    } else {
+        cgi.Cvar_Set("cg_hzmGradeKept", "");
+    }
+}
+
+// CG_Init, after CG_GameStateReceived: hand the parked grade back if this reload kept the level
+static void CG_HZM_GradeKeepRestore(void)
+{
+    char        key[MAX_QPATH + 96];
+    char        kept[MAX_STRING_CHARS];
+    const char *grade;
+    size_t      keyLen;
+
+    Q_strncpyz(kept, cgi.Cvar_Get("cg_hzmGradeKept", "", 0)->string, sizeof(kept));
+    if (!kept[0]) {
+        return;
+    }
+    cgi.Cvar_Set("cg_hzmGradeKept", ""); // one-shot
+
+    CG_HZM_GradeKeepKey(key, sizeof(key));
+    keyLen = strlen(key);
+    // an exact key prefix, then '|', then a non-empty grade (no scan for '|', so a '|' anywhere cannot mis-split it)
+    if (!CG_HZM_GradeKeepOn() || !keyLen || strncmp(kept, key, keyLen) || kept[keyLen] != '|' || !kept[keyLen + 1]) {
+        cgi.Printf("^~^~^ HZM MAPGRADE keep: parked grade dropped (level changed) now=%s\n", keyLen ? key : "-");
+        return;
+    }
+    grade = kept + keyLen + 1;
+    cgi.Cvar_Set("coop_mapGrade", grade);
+    cgi.Printf("^~^~^ HZM MAPGRADE keep: restored after cgame reload %s grade=%s\n", key, grade);
+}
+
+/*
+=================
 CG_Init
 
 Called after every level change or subsystem restart
@@ -901,6 +994,10 @@ void CG_Init(clientGameImport_t *imported, int serverMessageNum, int serverComma
     cgi.Cvar_Set("r_ppMapTemp",       "0");
     cgi.Cvar_Set("coop_mapGrade",     "");
     cgi.Cvar_Get("r_ppMapGradeOn",    "1", CVAR_ARCHIVE);
+    // HZM coop [bug-3048] register the grade-keep switch and its park slot (see CG_HZM_GradeKeepOn). Cvar_Get only:
+    // cg_hzmGradeKept must NOT be cleared here - it carries a vid_restart's grade into this very CG_Init.
+    cgi.Cvar_Get("cg_hzmGradeKeep",   "-1", 0);
+    cgi.Cvar_Get("cg_hzmGradeKept",   "", 0);
 
     // HZM-MP-BEGIN(mp_armory_session)
     // E2 session flag: zeroed on every cgame init so an MP session from a previous connection never
@@ -967,6 +1064,10 @@ void CG_Init(clientGameImport_t *imported, int serverMessageNum, int serverComma
 
     CG_GameStateReceived();
 
+    // HZM coop [bug-3048] a vid_restart keeps the level: hand back the grade CG_Shutdown parked (needs the parsed
+    // gamestate for its key, hence after CG_GameStateReceived). CG_CoopMapGradeThink applies it on the first frame.
+    CG_HZM_GradeKeepRestore();
+
     CG_InitConsoleCommands();
 
     cg.vEyeOffsetMax[0]         = 40.0f;
@@ -1013,6 +1114,10 @@ void CG_Shutdown(void)
     // HZM coop - free cam: release the mouse capture so the client input layer can never be left
     // orbiting (viewangles frozen) across a level change / cgame reload
     cgi.Cvar_Set("cg_freecamCapture", "0");
+
+    // HZM coop [bug-3048] park the live grade, keyed on this level instance, before the reset below clears it.
+    // CG_Init hands it back only when the reload kept the level (vid_restart); any other load discards it.
+    CG_HZM_GradeKeepPark();
 
     // HZM coop [per-map grade] the per-map grade LAYER never outlives the level: reset to identity
     // and clear the packed input, so whatever loads next - an MP map included - starts ungraded

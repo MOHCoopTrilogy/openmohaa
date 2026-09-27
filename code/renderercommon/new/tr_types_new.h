@@ -82,7 +82,12 @@ typedef struct fontheader_s {
 typedef enum {
     lensflare = (1 << 0),
     viewlensflare = (1 << 1),
-    additive = (1 << 2)
+    additive = (1 << 2),
+    // HZM coop [2026-09-25] vehicle headlights (Phase R3). Bits the cgame headlight manager sets on its own lights;
+    // nothing else in the game sets them, so every existing light is untouched. renderergl2 honours both, gl1
+    // ignores them (it only tests lensflare/additive) and the manager never runs on gl1 anyway.
+    hzm_dlight_noshadow = (1 << 3),  // never takes an r_hzmDlightShadows slot (tr_main.c R_RenderDlightShadowMaps)
+    hzm_dlight_edgefade = (1 << 4)   // per-vertex (sphere + static model) light fades to 0 at the radius: no pop
 } dlighttype_t;
 
 #if !defined _WIN32

@@ -315,6 +315,32 @@ float CalcLightAttenuation(float point, float normDist)
 	return attenuation;
 }
 
+#if defined(USE_LIGHT_VECTOR) && !defined(USE_FAST_LIGHT)
+// HZM gl2 [2026-09-26] Phase S1 SPOT CONE (renderergl2/tr_hzm_spot.c). u_HzmLightSpot = (cone axis * k, cosOuter),
+// k = 1 / (cosInner - cosOuter); cosOuter + 4 = the r_hzmSpotDebug 2 magenta tint. ALL ZERO = an omni light, which is
+// what every other draw of this program carries (GPU uniforms start at 0): the cone is then exactly 1.0 and the tint
+// exactly vec3(1.0). The same two helpers are in lightall_vp, lightall_fp and dlight_fp - each file is stringified on
+// its own (no includes), and none of them may contain a double quote.
+uniform vec4      u_HzmLightSpot;
+
+float HzmSpotCone(vec3 toSurf)
+{
+	float k = length(u_HzmLightSpot.xyz);
+	if (k <= 0.0)
+		return 1.0;
+	float cosOuter = u_HzmLightSpot.w;
+	if (cosOuter > 2.0)
+		cosOuter -= 4.0;
+	float t = clamp((dot(toSurf, u_HzmLightSpot.xyz) / k - cosOuter) * k, 0.0, 1.0);
+	return t * t * (3.0 - 2.0 * t);
+}
+
+vec3 HzmSpotTint()
+{
+	return (u_HzmLightSpot.w > 2.0) ? vec3(1.0, 0.15, 1.0) : vec3(1.0);
+}
+#endif
+
 #if defined(USE_BOX_CUBEMAP_PARALLAX)
 vec4 hitCube(vec3 ray, vec3 pos, vec3 invSize, float lod, samplerCube tex)
 {
@@ -432,6 +458,9 @@ void main()
 
   #if defined(USE_LIGHT_VECTOR)
 	attenuation  = CalcLightAttenuation(float(var_LightDir.w > 0.0), var_LightDir.w / sqrLightDist);
+	// HZM gl2 [2026-09-26] Phase S1: the spot cone per pixel (L is the unit vector to the light here)
+	attenuation *= HzmSpotCone(-L);
+	lightColor  *= HzmSpotTint();
   #else
 	attenuation  = 1.0;
   #endif
@@ -464,7 +493,10 @@ void main()
   #endif
 
   #if defined(USE_PARALLAXMAP) && defined(USE_PARALLAXMAP_SHADOWS)
-	offsetDir = L * tangentToWorld;
+	// HZM [2026-09-26] DECLARED here: the parallax distance fade above keeps its own offsetDir in a nested block, so
+	// this path (and the primary-light copy below, only ever active with this one) used an undeclared name - a
+	// fatal compile with r_parallaxMapping + r_parallaxMapShadows. Found by docs/tools/glsl_variant_lint.py.
+	vec3 offsetDir = L * tangentToWorld;
 	offsetDir.xy *= u_NormalScale.a / offsetDir.z;
 	lightColor *= LightRay(texCoords, offsetDir.xy, u_NormalMap);
   #endif

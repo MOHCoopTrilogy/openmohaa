@@ -3792,6 +3792,10 @@ void RE_LoadWorldMap( const char *name ) {
 	// determine vertex light directions
 	R_CalcVertexLightDirs();
 
+	// HZM gl2 [bug-3007] terrain light direction per heightmap vertex (tr_surface.c R_HZM_TerrainLightGridLoad).
+	// Needs what R_CalcVertexLightDirs needs - light grid, nodes, sphere-light lists, s_sun - and the terrain lump.
+	R_HZM_TerrainLightGridLoad(&s_worldData);
+
 	// determine which parts of the map are in sunlight
 	if (0)
 	{

@@ -61,6 +61,7 @@ protected:
     float   diropened;
     int     state;
     int     previous_state;
+    float   m_fHzmUseLogT = 0.0f; // [bot door jam probe] g_doorProbe DOORUSE throttle (not archived)
     int     trigger;
     int     nextdoor;
     DoorPtr master;

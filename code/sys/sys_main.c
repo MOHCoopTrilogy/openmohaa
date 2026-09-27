@@ -301,6 +301,26 @@ void Sys_Quit( void )
 
 /*
 =================
+Sys_OpenURL
+
+HZM coop [user 2026-09-25] open a web page in the default browser (the main-menu Discord button). Callers pass
+a FIXED url only - never one taken from a console argument or a cvar, because a server can stufftext any
+command to a client.
+=================
+*/
+qboolean Sys_OpenURL( const char *url )
+{
+#if SDL_VERSION_ATLEAST(2, 0, 14)
+	if ( SDL_OpenURL( url ) == 0 ) {
+		return qtrue;
+	}
+	Com_Printf( "Sys_OpenURL: %s\n", SDL_GetError() );
+#endif
+	return qfalse;
+}
+
+/*
+=================
 Sys_GetProcessorFeatures
 =================
 */

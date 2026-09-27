@@ -93,6 +93,7 @@ public:
     void LayoutStatbar(Event *ev);
     void LayoutStatbarShader(Event *ev);
     void LayoutStatbarTileShader(Event *ev);
+    void PrimeMaterials(void) override; // HZM bug-3015: + the statbar materials
     void LayoutStatbarShader_Flash(Event *ev);
     void LayoutStatbarShader_Marker(Event *ev); // Added in 2.0
     void LayoutStatbarEndAngles(Event *ev);

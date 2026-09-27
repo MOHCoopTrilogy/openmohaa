@@ -208,6 +208,39 @@ static int R_DlightSurface( msurface_t *surf, int dlightBits ) {
 		}
 	}
 
+	// HZM gl2 [2026-09-26] Phase S1: a spot cone reaches a small part of its sphere - drop surfaces whose bound it
+	// cannot touch (bound sphere vs the cone widened by asin(r/d); a lamp inside the bound counts as a hit, vet F27).
+	// Spots only: every other light keeps exactly the culls above. A plane-only surface is left to the sphere tests.
+	if ( surf->cullinfo.type & ( CULLINFO_SPHERE | CULLINFO_BOX ) )
+	{
+		for ( i = 0 ; i < tr.refdef.num_dlights ; i++ ) {
+			vec3_t	center;
+			float	rad;
+
+			if ( ! ( dlightBits & ( 1 << i ) ) ) {
+				continue;
+			}
+			dl = &tr.refdef.dlights[i];
+			if ( dl->hzmSpot != HZM_SPOT_READY ) {
+				continue;
+			}
+			if ( surf->cullinfo.type & CULLINFO_SPHERE ) {
+				VectorCopy( surf->cullinfo.localOrigin, center );
+				rad = surf->cullinfo.radius;
+			} else {
+				vec3_t half;
+
+				VectorAdd( surf->cullinfo.bounds[0], surf->cullinfo.bounds[1], center );
+				VectorScale( center, 0.5f, center );
+				VectorSubtract( surf->cullinfo.bounds[1], center, half );
+				rad = VectorLength( half );
+			}
+			if ( !R_HZM_SpotSphereTouches( dl->origin, dl->hzmAxis, dl->hzmCosOuter, center, rad ) ) {
+				dlightBits &= ~( 1 << i );
+			}
+		}
+	}
+
 	switch(*surf->data)
 	{
 		case SF_FACE:
@@ -983,6 +1016,19 @@ static int R_FastDlightTerrain(cTerraPatchUnpacked_t* srf, int dlightBits) {
             ) {
             // dlight doesn't reach the bounds
             dlightBits &= ~(1 << i);
+        } else if (dl->hzmSpot == HZM_SPOT_READY && (dlightBits & (1 << i))) {
+            // HZM gl2 [2026-09-26] Phase S1: the terrain patch's box (x0..x0+512, y0..y0+512, z0..z0+zmax, as the
+            // test above reads it) as a sphere, against the cone in WORLD space. Spots only.
+            vec3_t center;
+            float  rad;
+
+            center[0] = srf->x0 + 256.0f;
+            center[1] = srf->y0 + 256.0f;
+            center[2] = srf->z0 + 0.5f * srf->zmax;
+            rad = (float)sqrt(2.0f * 256.0f * 256.0f + 0.25f * srf->zmax * srf->zmax);
+            if (!R_HZM_SpotSphereTouches(dl->origin, dl->hzmAxis, dl->hzmCosOuter, center, rad)) {
+                dlightBits &= ~(1 << i);
+            }
         }
     }
 

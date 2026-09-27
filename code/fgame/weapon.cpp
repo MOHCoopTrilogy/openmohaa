@@ -3518,6 +3518,10 @@ void Weapon::OnOverCooked(Event *ev)
                 owner->m_bOvercookDied = true;
             }
 
+            // HZM [bot room-clear step 1] a bot that held a cook to 5.5s: log it (the grenade goes off in its hand)
+            proj->m_fExplodeAt = level.time;
+            BotNadeOnSpawn(proj, owner, this, 1.0f, 0.0f, "overcook");
+
             proj->ProcessEvent(newev);
         }
     }

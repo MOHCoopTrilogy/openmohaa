@@ -199,6 +199,8 @@ protected:
     void         Unlink();
 
 public:
+    // HZM [bot room-clear step 2] read-only: when the current weapon charge (a cooking grenade) began, 0 = not charging
+    float GetChargeStartTime() const { return charge_start_time; }
     Vector            mTargetPos;
     float             mAccuracy;
     SafePtr<Sentient> m_pNextSquadMate;

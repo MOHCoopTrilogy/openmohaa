@@ -499,6 +499,12 @@ void RB_RenderFlares (void) {
 
 //	RB_AddDlightFlares();
 
+	// HZM gl2 [2026-09-26] Phase S2 LAMP FLARES (tr_hzm_spot_rb.c): cgame's own flare list, GPU occlusion queries
+	// instead of this file's glReadPixels depth test, its own shader. Main world view only, and it returns before any
+	// GL call when there is nothing to draw. The retail path below is untouched (and still has nothing to draw: no
+	// MST_FLARE surfaces, RB_AddDlightFlares commented out).
+	RB_HZM_SpotFlares();
+
 	// perform z buffer readback on each flare in this view
 	draw = qfalse;
 	prev = &r_activeFlares;

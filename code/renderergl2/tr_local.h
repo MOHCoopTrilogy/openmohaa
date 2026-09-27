@@ -119,6 +119,16 @@ typedef struct cubemap_s {
 	image_t *image;
 } cubemap_t;
 
+// HZM gl2 [2026-09-26] Phase S (tr_hzm_spot.c / tr_hzm_spot_rb.c) needs the carrier bit layout here already; the
+// header is include-guarded, so the Phase R include further down stays a no-op.
+#include "../renderercommon/hzm_light_restore.h"
+
+#define HZM_SPOT_NONE			0		// an omni light - every light but a Phase S headlight/searchlight cone
+#define HZM_SPOT_PENDING		1		// a spot whose carrier has not arrived (removed at RE_BeginScene if it never does)
+#define HZM_SPOT_READY			2		// a cone
+#define HZM_SPOT_MIN_COS_OUTER	0.02f	// outer half-angle < ~89 deg: the cone is exactly 0 behind the lamp
+#define HZM_SPOT_DEBUG_OFFSET	4.0f	// u_HzmLightSpot.w += this = r_hzmSpotDebug 2's magenta tint
+
 typedef struct dlight_s {
 	vec3_t	origin;
 	vec3_t	color;				// range from 0.0 to 1.0, should be color normalized
@@ -132,7 +142,63 @@ typedef struct dlight_s {
 	//
 
     dlighttype_t type;
+
+	// HZM gl2 [2026-09-26] Phase S1 spot cone (tr_hzm_spot.c). ZEROED ON EVERY ADD (R_HZM_SpotBeginLight): the 32
+	// slots are reused every frame, and a muzzle flash must never inherit last frame's cone.
+	int		hzmSpot;			// HZM_SPOT_NONE / _PENDING / _READY
+	int		hzmTag;				// the carrier tag this light waits for (HZM_SPOT_PENDING)
+	vec3_t	hzmAxis;			// world, unit
+	vec3_t	hzmAxisLocal;		// in R_TransformDlights' frame - the frame of `transformed`
+	float	hzmCosOuter;
+	float	hzmConeK;			// 1 / (cosInner - cosOuter)
+	int		hzmOwner;			// the entity the sphere pass skips (the vehicle carrying the lamp), -1 = none
 } dlight_t;
+
+// HZM gl2 [2026-09-26] Phase S2: one lens flare cgame asked for this scene (decoded from a carrier)
+typedef struct hzmFlare_s {
+	vec3_t	origin;
+	vec3_t	facing;				// unit, the lamp's forward
+	float	brightness;			// > 0; cgame folds its day/dark gate in here
+	int		id;					// HZM_FlareIdPack(entnum, lamp)
+	int		flareClass;			// HZM_FLARE_CLASS_*
+} hzmFlare_t;
+
+// HZM gl2 [2026-09-26] Phase S: what one R_AddLightToScene call is (R_HZM_SpotClassify)
+typedef enum {
+	HZM_ADD_LIGHT,				// an ordinary light (the Phase S fields are zeroed)
+	HZM_ADD_SPOT,				// a spot light: takes a slot, pending until its carrier arrives
+	HZM_ADD_DROP_SPOT,			// a spot light while spots are off / on Omaha: dropped, never an omni light
+	HZM_ADD_SPOT_CARRIER,		// the parameters of a pending spot
+	HZM_ADD_FLARE,				// a lens flare
+	HZM_ADD_DISCARD				// a carrier that cannot be used (feature off, malformed)
+} hzmAdd_t;
+
+// HZM gl2 [2026-09-26] Phase S: what the intake had to throw away (the ^~^~^ HZMSPOT line)
+typedef struct {
+	int		spotOff;			// a spot light while spots are off / on Omaha: dropped (spot-or-nothing)
+	int		orphan;				// a spot carrier that matched no pending light (its light hit the 32-slot cap)
+	int		discarded;			// a carrier that could not be used (feature off, malformed)
+	int		flareFull;			// more flares than the list holds
+} hzmSpotStats_t;
+
+// HZM gl2 [2026-09-26] Phase S2: per-flare occlusion + fade state, kept across frames (in tr - vet F17)
+#define HZM_FLARE_SLOTS		32		// == HZM_FLARE_MAX (checked below)
+#define HZM_FLARE_RING		3		// query pairs in flight per flare (vet F19)
+#if HZM_FLARE_SLOTS != HZM_FLARE_MAX
+#error "tr_local.h: HZM_FLARE_SLOTS must equal HZM_FLARE_MAX (renderercommon/hzm_light_restore.h)"
+#endif
+typedef struct {
+	qboolean	inUse;
+	hzmFlare_t	req;				// the latest request for this id
+	int			lastSeen;			// backEnd.refdef.time of that request
+	int			lastUpdate;			// backEnd.refdef.time of the last fade step
+	float		target;				// the latest measured visible fraction (a / b)
+	float		vis;				// smoothed visibility 0..1
+	float		presence;			// smoothed presence 0..1 (fades in / out as the id comes and goes)
+	qboolean	measured;			// a result has been read
+	int			nextRing;			// the ring slot the next query pair goes into
+	qboolean	pending[HZM_FLARE_RING];	// that pair was issued and its result is not read yet
+} hzmFlareState_t;
 
 
 // a trRefEntity_t has all the information passed in by
@@ -575,6 +641,11 @@ typedef struct {
 	// exactly these stages - a global r_baseSpecular is the bug-801 "white sheen on everything"
 	// class of regression, which is why that cvar defaults to 0 in this fork.
 	qboolean		hzmGenNormal;
+
+	// HZM gl2 [2026-09-25] r_skyHD sky LAYERS: in r_skyHDCompare mode the HD twin of this sky stage's image
+	// (env/hzmhd/clouds/...), swapped in by RB_StageIteratorSky while compare is 1. NULL otherwise - in normal
+	// HD mode the twin simply replaces bundle[0].image[0] (tr_shader.c R_HZM_SkyHDLayers).
+	image_t			*hzmSkyHDAlt;
 } shaderStage_t;
 
 struct shaderCommands_s;
@@ -594,6 +665,10 @@ typedef enum {
 typedef struct {
 	float		cloudHeight;
 	image_t		*outerbox[6], *innerbox[6];
+	// HZM gl2 [2026-09-25] r_skyHD: the HD box (env/hzmhd/...), kept here ONLY in r_skyHDCompare mode, where
+	// outerbox holds the original and DrawSkyBox picks per frame. Otherwise NULL: in normal HD mode the HD set
+	// replaces outerbox outright and the original is never loaded (no doubled VRAM).
+	image_t		*outerboxAlt[6];
 } skyParms_t;
 
 typedef struct {
@@ -711,6 +786,8 @@ typedef struct shader_s {
     // Latch so the unimplemented-alphaGen warning in ComputeShaderColors prints
     // once per shader instead of once per batch per frame.
     qboolean alphaGenWarned;
+    // HZM gl2 [2026-09-26] searchlights S1: latch for the one-per-shader ^~^~^ SEARCHLIGHT line (tr_shade.c).
+    qboolean hzmDotToRgbNoted;
 } shader_t;
 
 enum
@@ -976,6 +1053,12 @@ typedef enum
 	//   mode 0 off, 1 fade alpha, 2 fade rgb (additive), 3 lerp toward white (modulate), 4 debug
 	UNIFORM_SOFTPARTICLE,
 
+	// HZM gl2 [2026-09-26] Phase S1 spot cone (tr_hzm_spot.c). Appended LAST, per the rule above; the gfx P2/P4
+	// uniforms append AFTER this one (plan_phaseS.md section 14), and tr_glsl.c checks the table length at compile time.
+	//   u_HzmLightSpot = (cone axis * k, cosOuter [+4 = the r_hzmSpotDebug 2 tint]); ALL ZERO = an omni light. GPU
+	//   uniforms start at 0 and GLSL_SetUniformVec4 caches from 0, so zero MUST be the inert value (plan finding 5).
+	UNIFORM_HZMLIGHTSPOT,
+
 	UNIFORM_COUNT
 } uniform_t;
 
@@ -1070,6 +1153,10 @@ typedef struct {
     vec3_t sky_axis[3];
     qboolean skybox_farplane;
     qboolean render_terrain;
+
+    // HZM gl2 [2026-09-26] Phase S2: this scene's lamp flares (tr_hzm_spot_rb.c R_HZM_SpotFinishScene)
+    int numHzmFlares;
+    struct hzmFlare_s *hzmFlares;
 } trRefdef_t;
 
 
@@ -1519,6 +1606,11 @@ typedef struct terrainVert_s {
     byte* pHgt;
     terraInt iNext;
     terraInt iPrev;
+    // HZM gl2 [bug-3007] light-direction GEOMORPH (tr_surface.c R_HZM_TerrainVertLightDir): heightmap indices
+    // (gy * 9 + gx, 0xFF = none) of the two hypotenuse ends this vertex was split from, and the geomorph factor
+    // R_CalcVertMorphHeight gave its height (0 = at the ends' average, 1 = its own value).
+    byte hzmLPar[2];
+    float fHzmMorph;
 } terrainVert_t;
 
 typedef struct terraTri_s {
@@ -1817,6 +1909,12 @@ typedef struct {
 
     int numVisStaticModels;
     cStaticModelUnpacked_t** visStaticModels;
+
+    // HZM gl2 [bug-3007] terrain light direction per HEIGHTMAP VERTEX, packed exactly like tess.lightdir, indexed
+    // [patch index * 81 + gy * 9 + gx]. Hunk-allocated at load on every terrain map, filled by
+    // R_HZM_TerrainLightGridBuild (tr_surface.c): at load when r_hzmTerrainLightGrid resolves on, else on first use.
+    int16_t (*hzmTerraLightDir)[4];
+    qboolean hzmTerraLightDirBuilt;
 } world_t;
 
 //
@@ -1954,7 +2052,11 @@ void		R_Modellist_f (void);
 
 //====================================================
 
-#define	MAX_DRAWIMAGES			2048
+// HZM gl2 [2026-09-26, bug-2997] 2048 -> 4096 (gl1 parity, renderergl1/tr_local.h). e1l4 alone registers 1,923
+// images and the shipped r_hzmGenNormals 1 adds generated normal maps on top, so the map ERR_DROPped to the menu
+// ("R_CreateImage: MAX_DRAWIMAGES hit"). Only pointer arrays are sized by it (tr.images, hzm_genNormalImages in
+// tr_image.c); no image index is packed into a sort key or any other bit field. R_CreateImage warns at 90%.
+#define	MAX_DRAWIMAGES			4096
 #define	MAX_SKINS				1024
 
 
@@ -2471,6 +2573,17 @@ typedef struct {
     int skel_index[MAX_GENTITIES]; // HZM (bug-gl2-invisible-friendly-actor): ported gl1 bug-932 fix - was a bare [1024] indexed by model->entityNumber. Since the GENTITYNUM_BITS 11 op (2048-entity pool) any skeletal actor on entityNumber >= 1024 OOB-accessed adjacent globals here; in gl2 the OOB read in R_UpdatePoseInternal can spuriously equal frame_skel_index and skip TIKI_SetPoseInternal, so a high-entnum character (allied squadmates/escort NPCs) never gets posed = invisible (enemies on low entnums render fine). Sizing to MAX_GENTITIES matches gl1.
     fontheader_t* pFontDebugStrings;
     int farclip;
+    int skyHDCompareBoxes;	// HZM r_skyHD: sky boxes loaded with BOTH sets this map (compare mode); R_Init zeroes it
+    int skyHDCompareLayers;	// HZM r_skyHD: sky layers (moving clouds) loaded with BOTH images this map (compare mode)
+
+    // HZM gl2 [2026-09-26] Phase S2 lamp flares (tr_hzm_spot_rb.c). In tr ON PURPOSE (vet F17): R_Init's memset clears
+    // it, and R_InitQueries / R_ShutDownQueries own the query names unconditionally - a query name cached OUTSIDE tr
+    // crashed the first draw after a resolution-change vid_restart on 07-27.
+    shader_t *hzmLampFlareShader;		// scripts/coop_headlights.shader; the default shader = draw no flares (vet F7)
+    GLuint hzmFlareQuery[HZM_FLARE_SLOTS][HZM_FLARE_RING][2];	// [flare][ring][0 depth-tested, 1 total]
+    qboolean hzmFlareQueriesValid;
+    hzmFlareState_t hzmFlareState[HZM_FLARE_SLOTS];
+    int hzmFlareFrame;					// the viewParms.frameCount the flare pass last ran for (once per frame)
 } trGlobals_t;
 
 extern backEndState_t	backEnd;
@@ -2605,6 +2718,90 @@ extern  cvar_t  *r_cubeMapping;
 extern  cvar_t  *r_cubemapSize;
 extern  cvar_t  *r_hzmAlphaGenCoord;   // HZM bug-1249: alphaGen sCoord/tCoord parity
 extern  cvar_t  *r_hzmFlapDeform;      // HZM diagnostic: kill switch for deformVertexes flap
+// HZM gl2 [2026-09-25] RETAIL LIGHT-GLOW PARITY (vehicle-headlight plan, Phase R). gl2 parsed `deformVertexes
+// lightglow` and `rgbGen dot` and then drew neither. All four switches are flags 0 (never saved - TRAPS T7) and
+// are read per draw, so they toggle live. -1 = auto = the HZM_*_AUTO define in the shared header below; 0 / 1
+// force it. On the Omaha BSPs both restores are OFF whatever these say. The AUTO defaults AND the Omaha list
+// live in ONE header shared with cgame (the headlight manager), because the two DLLs ship as a pair.
+#include "../renderercommon/hzm_light_restore.h"
+extern  cvar_t  *r_hzmLightGlow;          // deformVertexes lightglow: 0 = today (flat quad), 1 = gl1 billboard + pull
+extern  cvar_t  *r_hzmLightGlowNear;      // 0 = gl1 verbatim, 1 = shrink a glow the eye is right at (no white-out)
+extern  cvar_t  *r_hzmLightGlowNearRange; // tuning: the near-shrink starts inside this many glow radii (default 2)
+extern  cvar_t  *r_hzmRgbGenDot;          // rgbGen dot / oneMinusDot: 0 = today (flat 1.0), 1 = gl1 (N.V)^2 fade
+// What -1 means: HZM_LIGHTGLOW_AUTO / HZM_LIGHTGLOWNEAR_AUTO / HZM_RGBGENDOT_AUTO in hzm_light_restore.h.
+qboolean R_HZM_LightGlowOn( void );                  // r_hzmLightGlow resolved, Omaha exclusion applied
+qboolean R_HZM_LightGlowNearOn( void );              // r_hzmLightGlowNear resolved
+qboolean R_HZM_RgbGenDotOn( void );                  // r_hzmRgbGenDot resolved, Omaha exclusion applied
+qboolean R_HZM_AlphaDotToRgb( const shaderStage_t *pStage ); // searchlights S1: additive alphaGen dot -> RGB (gl1)
+qboolean R_HZM_LightRestoreProtectedWorld( void );   // the loaded BSP is on the Omaha protection list
+// HZM gl2 [2026-09-25] Phase R3 EDGEFADE window: 1 at the light, 0 at `radius`, smooth (saturate(1 - t^4)^2).
+// Used ONLY for lights carrying hzm_dlight_edgefade (tr_types_new.h), so every other light is byte-identical.
+static ID_INLINE float R_HZM_DlightEdgeWindow( float dist, float radius ) {
+	float t, w;
+
+	if ( radius <= 0.0f ) {
+		return 0.0f;
+	}
+	t = dist / radius;
+	t *= t;
+	t *= t;
+	w = 1.0f - t;
+	if ( w <= 0.0f ) {
+		return 0.0f;
+	}
+	return w * w;
+}
+// HZM gl2 [2026-09-26] PHASE S spot cones + lamp flares (docs/proposals/headlights_2026-09-25/plan_phaseS.md and
+// vet_phaseS.md). Pure maths in tr_hzm_spot.c (compiled unchanged into docs/tools/hzm_spot_selftest), renderer glue in
+// tr_hzm_spot_rb.c. Carrier protocol, bit layout, AUTO defines and the Omaha list: renderercommon/hzm_light_restore.h.
+extern  cvar_t  *r_hzmSpot;             // -1 auto (HZM_SPOT_AUTO), 0/1: spot lights + carriers honoured
+extern  cvar_t  *r_hzmFlares;           // -1 auto (HZM_FLARES_AUTO), 0/1: lamp flares (also r_flares)
+extern  cvar_t  *r_hzmSpotProtocol;     // CVAR_ROM handshake, forced to HZM_SPOT_PROTOCOL at R_Init, 0 at RE_Shutdown
+extern  cvar_t  *r_hzmSpotDebug;        // 1 = ^~^~^ HZMSPOT line a second, 2 = + magenta tint on spot-lit pixels
+extern  cvar_t  *r_hzmSpotEntScale;     // soldiers / props / statics: the one knob on the one law
+extern  cvar_t  *r_hzmFlareSize, *r_hzmFlareIntensity, *r_hzmFlareSize1, *r_hzmFlareIntensity1;
+extern  cvar_t  *r_hzmFlareNear, *r_hzmFlareFade, *r_hzmFlareBudget;
+// tr_hzm_spot.c - pure
+void     R_HZM_SpotClearLight( dlight_t *dl );
+hzmAdd_t R_HZM_SpotClassify( float intensity, int type, qboolean spotsOn, qboolean flaresOn );
+void     R_HZM_SpotBeginLight( dlight_t *dl, int type, qboolean isSpot );
+int      R_HZM_SpotAttachCarrier( dlight_t *dlights, int first, int num, int tag, const vec3_t axis, float cosInner,
+                                  float cosOuter, float owner );
+int      R_HZM_SpotCompact( dlight_t *dlights, int first, int num, int *dropped );
+qboolean R_HZM_SpotIntakeCore( dlight_t *dlights, int first, int num, hzmFlare_t *flares, int *numFlares, int maxFlares,
+                               const vec3_t org, float intensity, float r, float g, float b, int type,
+                               qboolean spotsOn, qboolean flaresOn, hzmSpotStats_t *stats, hzmAdd_t *verdict );
+float    R_HZM_SpotAttenuation( float distSq, float radius );
+float    R_HZM_SpotConeDir( const vec3_t axis, float cosOuter, float coneK, const vec3_t toPoint );
+float    R_HZM_SpotConeSphere( const vec3_t apex, const vec3_t axis, float cosOuter, float coneK, const vec3_t center,
+                               float radius );
+qboolean R_HZM_SpotSphereTouches( const vec3_t apex, const vec3_t axis, float cosOuter, const vec3_t center,
+                                  float radius );
+float    R_HZM_DlightFactorAt( const dlight_t *dl, const vec3_t point, float radius );   // exactly 1.0f unless a cone
+void     R_HZM_SpotUniformVec( const dlight_t *dl, const vec3_t axis, qboolean debugTint, vec4_t out );
+qboolean R_HZM_FlareFromCarrier( const vec3_t org, float intensity, float r, float g, float b, int type,
+                                 hzmFlare_t *out );
+void     R_HZM_FlareShape( const hzmFlare_t *f, const vec3_t eye, float viewportHeight, float size, float intensity,
+                           float nearDist, float lobe, float *outHalfPx, float *outIntensity, float *outDist );
+// tr_hzm_spot_rb.c - glue
+void     R_HZM_SpotRegister( void );
+void     R_HZM_SpotShutdown( void );
+qboolean R_HZM_SpotsOn( void );
+qboolean R_HZM_FlaresOn( void );
+float    R_HZM_SpotEntityK( void );
+qboolean R_HZM_SpotIntake( const vec3_t org, float intensity, float r, float g, float b, int type, hzmAdd_t *verdict );
+void     R_HZM_SpotNextFrame( void );
+void     R_HZM_SpotClearScene( void );
+void     R_HZM_SpotEndScene( void );
+void     R_HZM_SpotFinishScene( void );
+void     RB_HZM_SpotForwardUniform( shaderProgram_t *sp, const dlight_t *dl );
+void     RB_HZM_SpotProjectUniform( shaderProgram_t *sp, const dlight_t *dl );
+void     RB_HZM_SpotZeroUniform( shaderProgram_t *sp );
+qboolean RB_HZM_SpotSphereLight( const dlight_t *dl, const sphereor_t *sph, const trRefEntity_t *ent,
+                                 reallightinfo_t *out );
+void     R_HZM_FlareInitQueries( void );
+void     R_HZM_FlareShutdownQueries( void );
+void     RB_HZM_SpotFlares( void );
 extern  cvar_t  *r_cubemapAuto;        // HZM bug-1237: auto probe budget (info_pathnode placement)
 extern  cvar_t  *r_cubemapAutoRadius;  // HZM bug-1237: parallax radius for auto-placed probes
 
@@ -2643,6 +2840,12 @@ extern  cvar_t  *r_hzmSpecularGloss;
 extern  cvar_t  *r_hzmParallaxDepth;   // LIVE parallax depth (r_baseParallax is CVAR_LATCH)
 extern  cvar_t  *r_hzmParallaxFade;    // world units at which parallax has faded to nothing
 extern  cvar_t  *r_hzmNormalStrength;  // relief multiplier for AUTHORED _n/_nh maps (not synthesised)
+// HZM gl2 [bug-3007] terrain relief light direction per heightmap vertex instead of one per 512u patch (tr_surface.c
+// R_HZM_TerrainLightGridBuild). flags 0, live: -1 or "" = HZM_TERRAINLIGHTGRID_AUTO, 0 = the bug-2905 per-patch
+// centre, 1 = per vertex. The Omaha ground set always keeps the per-patch path (user rule). Flipping the define here
+// reaches every player who never touched the cvar (TRAPS T7); a saved value never could.
+extern  cvar_t  *r_hzmTerrainLightGrid;
+#define HZM_TERRAINLIGHTGRID_AUTO 0
 
 extern  cvar_t  *r_forceSun;
 extern  cvar_t  *r_forceSunLightScale;
@@ -2795,6 +2998,16 @@ extern cvar_t* r_globalFogScale;		// multiplies the computed fog fraction
 extern cvar_t* r_globalFogStartScale;	// multiplies farplane_bias  (fog START)
 extern cvar_t* r_globalFogEndScale;		// multiplies farplane_distance (fog END)
 extern cvar_t* r_globalFogSky;			// 1 = fog sky pixels too (gl1 "nofog" sky = 0)
+// HZM gl2 [2026-09-25] HD sky boxes (docs/tools/gen_sky_hd.py -> zzzzzzzzzz_coop_hd_skies.pk3, env/hzmhd/).
+extern cvar_t* r_skyHD;				// -1 auto (boxes HZM_SKYHD_AUTO, layers HZM_SKYHD_LAYERS_AUTO), 0 original, 1 HD - both. Next map.
+extern cvar_t* r_skyHDCompare;		// TEST ONLY, CVAR_TEMP: 0 normal, 1 show HD, 2 show original (live A/B, boxes + layers)
+// What r_skyHD -1 means for the sky BOXES. ON since 2026-09-26: the user liked the HD boxes ("they look way better")
+// on the condition that the faint face seams be hidden - the bug-2987 seam pass removed the shared dark edge row.
+// Flipping here reaches every player who never touched the cvar (saved value "-1"), unlike an archived default (T7).
+#define HZM_SKYHD_AUTO 1
+// The same, for the sky LAYERS (moving clouds, env/hzmhd/clouds/). User A/B on m1l1 2026-09-25: "new clouds look
+// way better go with them" -> auto ON (bug-2942). The boxes above stay auto OFF until their own A/B (sky1-sky3).
+#define HZM_SKYHD_LAYERS_AUTO 1
 extern cvar_t* r_globalFogRadial;		// 0 = planar eye Z (gl1), 1 = radial distance
 extern cvar_t* r_globalFogIdentityLight;// 1 = scale the fog colour by tr.identityLight
 extern cvar_t* r_globalFogDebug;		// 1 = log values, 2 = show fraction, 3 = show distance
@@ -3337,6 +3550,11 @@ void R_SetupEntityLighting( const trRefdef_t *refdef, trRefEntity_t *ent );
 void R_TransformDlights( int count, dlight_t *dl, orientationr_t *or );
 int R_LightForPoint( vec3_t point, vec3_t ambientLight, vec3_t directedLight, vec3_t lightDir );
 int R_LightDirForPoint( vec3_t point, vec3_t lightDir, vec3_t normal, world_t *world );
+// HZM [bug-3064] what R_LightDirForPoint summed (tr_light.c), for the hzmtlprobe console command
+typedef struct { int leafOk, sunList, sunHit, numLights; float sunWeight; vec3_t lampSum; } hzmLDirInfo_t;
+int R_LightDirForPointInfo( vec3_t point, vec3_t lightDir, vec3_t normal, world_t *world, qboolean useAreaMask, hzmLDirInfo_t *info );
+void R_HZM_TerrainLProbe_f( void ); // HZM [bug-3064] tr_surface.c: `hzmtlprobe <tag>`
+int R_LightDirForPointStatic( vec3_t point, vec3_t lightDir, vec3_t normal, world_t *world ); // HZM [bug-3007] no areamask gate
 int R_CubemapForPoint( vec3_t point );
 
 /*
@@ -3704,6 +3922,8 @@ void R_MarkTerrainPatch(cTerraPatchUnpacked_t* pPatch);
 void R_AddTerrainSurfaces();
 void R_AddTerrainMarkSurfaces();
 void R_InitTerrain();
+void R_HZM_TerrainLightGridLoad( world_t *w ); // HZM [bug-3007] tr_surface.c: reserve (+ build) the terrain light grid
+qboolean R_HZM_TerrainLightGridActive( void ); // HZM [bug-3007] tr_surface.c: per-vertex terrain L drawn now (never builds)
 void R_ShutdownTerrain();
 void R_TerrainFree();
 void R_TerrainPrepareFrame();

@@ -543,6 +543,20 @@ void R_LoadFontShader(fontheader_sgl_t* font)
     char filename[64];
     shader_t* fontshader;
 
+    // [bug-1181] gl2 vid_restart teardown guard. The UI font path (UIFont::CheckRefreshFont ->
+    // R_LoadFont -> here) can run while the renderer DLL is mid-reload (tr.defaultShader == NULL),
+    // where R_FindShader -> InitShaderEx dereferences a NULL cvar_t and crashes with an ACCESS_VIOLATION
+    // - the exact fault in the "crash after briefing on full campaign start" reports, triggered when a
+    // Parsec virtual-display / overlay-driven vid_restart fires on the campaign-load screen. Mirror the
+    // R_ShaderSystemReady guard the RE_Register* entry points use (bug-1145): refuse now, leave the shader
+    // unloaded, and let CheckRefreshFont reload the font for real a few ms later once the renderer is live.
+    // Safe: R_DrawString_sgl below no-ops on a NULL shader, so nothing draws with the half-built font.
+    if (!tr.defaultShader) {
+        font->shader = NULL;
+        font->trhandle = -1;
+        return;
+    }
+
     save = r_sequencenumber;
     r_sequencenumber = -1;
     Com_sprintf(filename, sizeof(filename), "gfx/fonts/%s", font->name);
@@ -578,6 +592,10 @@ void R_DrawString_sgl(fontheader_sgl_t* font, const char* text, float x, float y
     float startx, starty;
     int i;
     float fWidthScale, fHeightScale;
+
+    // [bug-1181] a font whose shader was refused during a vid_restart teardown (R_LoadFontShader guard
+    // above) carries a NULL shader until CheckRefreshFont reloads it. Never draw with it - just skip.
+    if (!font || !font->shader) { return; }
 
     i = 0;
     startx = x;

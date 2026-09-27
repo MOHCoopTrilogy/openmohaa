@@ -29,6 +29,9 @@ BotRotation::BotRotation()
     m_vAngSpeed   = vec_zero;
     m_vTargetAng  = vec_zero;
     m_vCurrentAng = vec_zero;
+    m_bCombatTurn = false;
+    m_fTurnMul    = 1.0f;
+    m_bPrecise    = false;
 }
 
 void BotRotation::SetControlledEntity(Player *newEntity)
@@ -69,6 +72,41 @@ void BotRotation::TurnThink(usercmd_t& botcmd, usereyes_t& eyeinfo)
     maxChange   = 360;
     minChange   = 20;
     changeSpeed = 15.0;
+    if (m_bPrecise) {
+        // [HZM bot breach] a clearing throw needs the view ON the solved arc: the stock ramp stops turning inside 20
+        // deg of the target (m_vAngSpeed decays to 0 there), so the view settled several degrees off and never met it
+        minChange = 0;
+    }
+
+    // [HZM 2026-09-23] While aiming at an enemy the stock turn (close 10x the gap per second, up to 360 deg/s)
+    // landed dead on target within ~0.3s - "they snap on to enemies too quickly" (user). Combat turns use a lower
+    // gain and rate cap, so the crosshair visibly swings onto a target and trails a strafing one. Walking/looking
+    // around keeps the stock turn. Not CVAR_ARCHIVE: an archived default freezes in omconfig.cfg.
+    if (!m_bCombatTurn) {
+        // [HZM bot A3] walking/looking-around turns: a touch softer than stock (360 deg/s, 10x gap/s) so heads don't
+        // whip round at every path corner. bot_lookTurnMax 360 / bot_lookTurnGain 10 = stock.
+        static cvar_t *s_botLookTurnGain = NULL;
+        static cvar_t *s_botLookTurnMax  = NULL;
+        if (!s_botLookTurnGain) {
+            s_botLookTurnGain = gi.Cvar_Get("bot_lookTurnGain", "8", 0);
+            s_botLookTurnMax  = gi.Cvar_Get("bot_lookTurnMax", "300", 0);
+        }
+        factor    = Q_clamp_float(s_botLookTurnGain->value, 1.0f, 10.0f) / 10.0f;
+        maxChange = Q_clamp_float(s_botLookTurnMax->value, 90.0f, 360.0f);
+    }
+    if (m_bCombatTurn) {
+        static cvar_t *s_botAimTurnGain = NULL;
+        static cvar_t *s_botAimTurnMax  = NULL;
+        if (!s_botAimTurnGain) {
+            s_botAimTurnGain = gi.Cvar_Get("bot_aimTurnGain", "5", 0);
+            s_botAimTurnMax  = gi.Cvar_Get("bot_aimTurnMax", "200", 0);
+        }
+        factor    = Q_clamp_float(s_botAimTurnGain->value, 1.0f, 10.0f) / 10.0f;
+        maxChange = Q_clamp_float(s_botAimTurnMax->value, 45.0f, 360.0f);
+        // [HZM bot D1] per-bot turn speed (0.85x..1.15x): some soldiers are simply quicker on the swing
+        factor    = Q_clamp_float(factor * m_fTurnMul, 0.1f, 1.0f);
+        maxChange = Q_clamp_float(maxChange * m_fTurnMul, 45.0f, 360.0f);
+    }
 
     if (m_vTargetAng[PITCH] > 180) {
         m_vTargetAng[PITCH] -= 360;

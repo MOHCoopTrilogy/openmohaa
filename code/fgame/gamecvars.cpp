@@ -354,6 +354,13 @@ void CVAR_Init(void)
     // game reads it through the helper, the script sets it, the cgame reads it off the wire.
     gi.Cvar_Get("g_mpRealismOff", "0", CVAR_SERVERINFO | CVAR_ROM);
 
+    // HZM coop - HARDCORE host rule (user 2026-09-25). Coop-owned serverinfo flag: coop_mod/hardcore.scr::init writes
+    // 0/1 on every coop map (script setcvar forces through ROM); the cgame reads it (cgs.coopHardcore) and
+    // Player::CoopAimAssist / the hit confirmation refuse while it is set. ROM: a client or console cannot flip it, and
+    // ROM keys are packed into serverinfo first. G_SpawnEntities zeroes it on every map so a non-coop map never
+    // inherits it. Registered here - before any script - so a script setcvar cannot create it flag-less (TRAPS T7).
+    gi.Cvar_Get("g_coopHardcore", "0", CVAR_SERVERINFO | CVAR_ROM);
+
     flood_msgs      = gi.Cvar_Get("flood_msgs", "4", 0);
     flood_persecond = gi.Cvar_Get("flood_persecond", "4", 0);
     flood_waitdelay = gi.Cvar_Get("flood_waitdelay", "10", 0);

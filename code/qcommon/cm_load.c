@@ -66,6 +66,12 @@ cvar_t		*cm_playerCurveClip;
 cvar_t		*cm_FCMcacheall;
 cvar_t		*cm_FCMdebug;
 cvar_t		*cm_ter_usesphere;
+// HZM [bug-2836] MAP VARIANT - "" normally, "mp" when a campaign map is played as an MP Push/Arena match (set by the
+// server from sv_mpForceArena right before CM_LoadMap, and by the client from serverinfo sv_mapVariant before cgame
+// loads the map). Selects cmpatch/<map>_<variant>.txt on top of the base patch - e.g. strip Monte Battaglia's
+// barbed-wire clip for Push without touching co-op. Collision, both renderers and the bot navmesh read the same lists.
+cvar_t		*cm_variant;
+static char	cm_loadedVariant[MAX_QPATH];
 #endif
 
 cmodel_t	box_model;
@@ -1046,6 +1052,51 @@ static void CM_RestoreBrush_f( void ) {
 	            n, cm.brushes[n].contents );
 }
 
+/*
+==================
+CM_ApplyBrushPatch
+
+HZM [bug-2836] Zero the contents of every brush listed in a cmpatch file: brush indices separated by whitespace or
+commas, '#' starts a comment. Shared by the base list, the _local overlay and the map-variant list (was copied
+inline twice). Non-numeric tokens are SKIPPED - atoi() used to turn them into brush 0 (e.g. a stray `S <shader>`
+line from cm_killshader would silently neutralize brush 0, which on e3l2 is a barbed-wire post).
+==================
+*/
+static void CM_ApplyBrushPatch( const char *patchname, const char *label ) {
+	char       *buf;
+	int         len;
+	int         applied = 0, skipped = 0;
+	const char *p;
+
+	len = FS_ReadFile( patchname, (void **)&buf );
+	if ( len <= 0 || !buf ) {
+		return;
+	}
+	p = buf;
+	while ( *p ) {
+		while ( *p && ( *p == ' ' || *p == '\t' || *p == '\r' || *p == '\n' || *p == ',' ) ) p++;
+		if ( *p == '#' ) {
+			while ( *p && *p != '\n' ) p++;
+			continue;
+		}
+		if ( !*p ) break;
+		if ( *p >= '0' && *p <= '9' ) {
+			int idx = atoi( p );
+			if ( idx >= 0 && idx < cm.numBrushes ) {
+				cm.brushes[idx].contents = 0;
+				applied++;
+			} else {
+				skipped++;
+			}
+		} else {
+			skipped++;
+		}
+		while ( *p && *p != ' ' && *p != '\t' && *p != '\r' && *p != '\n' && *p != ',' && *p != '#' ) p++;
+	}
+	Com_Printf( "^~^~^ CMPATCH %s%s: %d brushes neutralized, %d out-of-range\n", patchname, label, applied, skipped );
+	FS_FreeFile( buf );
+}
+
 void CM_LoadMap( const char *name, qboolean clientload, int *checksum ) {
 	{
 		static qboolean cmCmdsRegistered = qfalse;
@@ -1075,13 +1126,17 @@ void CM_LoadMap( const char *name, qboolean clientload, int *checksum ) {
 	cm_FCMcacheall = Cvar_Get( "cm_FCMcacheall", "0", CVAR_CHEAT );
 	cm_FCMdebug = Cvar_Get( "cm_FCMdebug", "0", CVAR_CHEAT );
 	cm_ter_usesphere = Cvar_Get( "cm_ter_usesphere", "1", CVAR_CHEAT );
+	cm_variant = Cvar_Get( "cm_variant", "", 0 );
 #endif
 	Com_DPrintf( "CM_LoadMap( %s, %i )\n", name, clientload );
 
-	if ( !strcmp( cm.name, name ) && clientload ) {
+	// [bug-2836] reuse only when the VARIANT matches too - a client that last loaded this map in co-op must not keep
+	// that collision when it joins the same map as a Push match (or vice versa).
+	if ( !strcmp( cm.name, name ) && clientload && !Q_stricmp( cm_loadedVariant, cm_variant->string ) ) {
 		*checksum = last_checksum;
 		return;
 	}
+	Q_strncpyz( cm_loadedVariant, cm_variant->string, sizeof( cm_loadedVariant ) );
 
 	// free old stuff
 	Com_Memset( &cm, 0, sizeof( cm ) );
@@ -1246,8 +1301,6 @@ void CM_LoadMap( const char *name, qboolean clientload, int *checksum ) {
 		char        patchname[MAX_QPATH];
 		char        base[MAX_QPATH];
 		const char *slash;
-		char       *buf;
-		int         len;
 
 		slash = strrchr( name, '/' );
 		Q_strncpyz( base, slash ? slash + 1 : name, sizeof( base ) );
@@ -1261,62 +1314,20 @@ void CM_LoadMap( const char *name, qboolean clientload, int *checksum ) {
 			}
 		}
 		Com_sprintf( patchname, sizeof( patchname ), "cmpatch/%s.txt", base );
-
-		len = FS_ReadFile( patchname, (void **)&buf );
-		if ( len > 0 && buf ) {
-			int         applied = 0, skipped = 0;
-			const char *p = buf;
-			while ( *p ) {
-				while ( *p && ( *p == ' ' || *p == '\t' || *p == '\r' || *p == '\n' || *p == ',' ) ) p++;
-				if ( *p == '#' ) {
-					while ( *p && *p != '\n' ) p++;
-					continue;
-				}
-				if ( !*p ) break;
-				{
-					int idx = atoi( p );
-					if ( idx >= 0 && idx < cm.numBrushes ) {
-						cm.brushes[idx].contents = 0;
-						applied++;
-					} else {
-						skipped++;
-					}
-				}
-				while ( *p && *p != ' ' && *p != '\t' && *p != '\r' && *p != '\n' && *p != ',' && *p != '#' ) p++;
-			}
-			Com_Printf( "^~^~^ CMPATCH %s: %d brushes neutralized, %d out-of-range\n", patchname, applied, skipped );
-			FS_FreeFile( buf );
-		}
+		CM_ApplyBrushPatch( patchname, "" );
 
 		// bug-960: the LIVE overlay written by cm_killbrush. Same-name loose files are
 		// shadowed by pk3 copies on this engine, so in-game kills persist to a separate
 		// _local file no pk3 ships, applied ON TOP of the shipped list at load. Promote
 		// proven ids into the pk3 copy for distribution.
 		Com_sprintf( patchname, sizeof( patchname ), "cmpatch/%s_local.txt", base );
-		len = FS_ReadFile( patchname, (void **)&buf );
-		if ( len > 0 && buf ) {
-			int         applied = 0, skipped = 0;
-			const char *p = buf;
-			while ( *p ) {
-				while ( *p && ( *p == ' ' || *p == '\t' || *p == '\r' || *p == '\n' || *p == ',' ) ) p++;
-				if ( *p == '#' ) {
-					while ( *p && *p != '\n' ) p++;
-					continue;
-				}
-				if ( !*p ) break;
-				{
-					int idx = atoi( p );
-					if ( idx >= 0 && idx < cm.numBrushes ) {
-						cm.brushes[idx].contents = 0;
-						applied++;
-					} else {
-						skipped++;
-					}
-				}
-				while ( *p && *p != ' ' && *p != '\t' && *p != '\r' && *p != '\n' && *p != ',' && *p != '#' ) p++;
-			}
-			Com_Printf( "^~^~^ CMPATCH %s (local overlay): %d brushes neutralized, %d out-of-range\n", patchname, applied, skipped );
-			FS_FreeFile( buf );
+		CM_ApplyBrushPatch( patchname, " (local overlay)" );
+
+		// [bug-2836] MAP-VARIANT list, only when this load is a variant (e.g. "mp" = campaign map as a Push/Arena
+		// match). The server and every client set cm_variant before loading, so all sides patch identically.
+		if ( cm_variant->string[0] ) {
+			Com_sprintf( patchname, sizeof( patchname ), "cmpatch/%s_%s.txt", base, cm_variant->string );
+			CM_ApplyBrushPatch( patchname, " (variant)" );
 		}
 	}
 

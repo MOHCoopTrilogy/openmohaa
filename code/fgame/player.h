@@ -186,6 +186,10 @@ private:
     int server_new_buttons;
 
     float respawn_time;
+    // HZM coop - Hardcore respawn waves (user 2026-09-25): a dead player respawns on the next shared 20s wave, never
+    // sooner than 5s. 0 = no hold. Seeded in the constructor (player memory is not zeroed); not archived.
+    float m_fCoopWaveAt;
+    int   m_iCoopWaveShown;
     int   last_attack_button;
 
     // damage blend
@@ -1231,6 +1235,7 @@ public:
     // fire + advance on the nearest visible German) so a connected client fights unattended. No-op
     // unless coop_botInput is set; never enabled in shipped cfgs.
     void  CoopBotDrive(usercmd_t *ucmd);
+    void  CoopAimAssist(usercmd_t *ucmd);   // coop-only opt-in aim magnetism (never PvP)
     // HZM coop - read by Weapon::Shoot (blind-fire spread penalty) and Weapon::GetMuzzlePosition
     // (raise the fire origin over low cover while blind-firing)
     bool  IsCoopBlindfiring() const { return m_bCoopBlindfire; }
@@ -1305,6 +1310,9 @@ public:
     void GetLegsState(Event *ev);
     void GetStateFile(Event *ev);
     void GetTorsoState(Event *ev);
+    // HZM [user 2026-09-25] the state NAMES, for the bots (BotController::HealThink watches the script's COOP_SELFHEAL)
+    const char *GetTorsoStateName() const { return currentState_Torso ? currentState_Torso->getName() : ""; }
+    const char *GetLegsStateName() const { return currentState_Legs ? currentState_Legs->getName() : ""; }
     void GetUserInfo(Event *ev);
     void Inventory(Event *ev);
     void InventorySet(Event *ev);
@@ -1347,6 +1355,7 @@ public:
     qboolean canUse();
     qboolean canUse(Entity *entity, bool requiresLookAt);
     int      getUseableEntities(int *touch, int maxcount, bool requiresLookAt = true);
+    bool     CoopBraceUseTargetInView(); // [user 2026-09-27] USE first, brace second (TickCoopBrace)
 };
 
 inline void Player::Archive(Archiver& arc)

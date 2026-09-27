@@ -1485,6 +1485,27 @@ static qboolean CG_MpHardcoreActive(void)
     }
     return qtrue;
 }
+// HZM coop - HARDCORE host rule (user 2026-09-25). True only when the server published g_coopHardcore AND this client
+// is in a coop session (coop_isCoopSession, set by coop player.scr, reset per map). Fail-open: an old server or a
+// lost session stufftext leaves the classic HUD.
+qboolean CG_CoopHardcoreActive(void)
+{
+    static cvar_t *pSess = NULL;
+    if (!cgs.coopHardcore) {
+        return qfalse;
+    }
+    if (!pSess) {
+        pSess = cgi.Cvar_Get("coop_isCoopSession", "0", 0);
+    }
+    return (pSess && pSess->integer) ? qtrue : qfalse;
+}
+
+// Either Hardcore - the MP modifier or the coop host rule: the shared "no crosshair, no stamina, MAGS only on a reload"
+// rules. CG_MpHardcoreActive itself is unchanged (it stays false in every coop session).
+static qboolean CG_HardcoreHudActive(void)
+{
+    return (CG_MpHardcoreActive() || CG_CoopHardcoreActive()) ? qtrue : qfalse;
+}
 
 void CG_DrawCrosshair()
 {
@@ -1499,8 +1520,8 @@ void CG_DrawCrosshair()
 
     shader = (qhandle_t)0;
 
-    // HZM MP - Hardcore removes the crosshair (MP only; inert in coop - see CG_MpHardcoreActive).
-    if (CG_MpHardcoreActive()) {
+    // HZM MP / coop - Hardcore removes the crosshair (the MP modifier or the coop host rule).
+    if (CG_HardcoreHudActive()) {
         return;
     }
 
@@ -1803,8 +1824,8 @@ static void CG_DrawStaminaArc(void)
     if (!cg.snap) {
         return;
     }
-    // HZM MP - Hardcore removes the stamina indicator (MP only; inert in coop - see CG_MpHardcoreActive).
-    if (CG_MpHardcoreActive()) {
+    // HZM MP / coop - Hardcore removes the stamina indicator (the MP modifier or the coop host rule).
+    if (CG_HardcoreHudActive()) {
         return;
     }
     if (!pOn) {
@@ -2197,6 +2218,21 @@ static void CG_DrawMagazines(void)
     if (cg.snap->ps.activeItems[1] < 0) {
         return; // no weapon equipped
     }
+    // HZM MP / coop - Hardcore (user 2026-09-25): the magazine count only while reloading and ~2s after. The trigger is
+    // the SERVER's reload state (ps.iViewModelAnim); the client idle flourish only ever injects RECHAMBER.
+    if (CG_HardcoreHudActive()) {
+        static int s_hcMagUntil = 0;
+        const int  va           = cg.snap->ps.iViewModelAnim;
+        if (s_hcMagUntil - cg.time > 2000) {
+            s_hcMagUntil = 0; // cg.time restarted with a new map
+        }
+        if (va == VM_ANIM_RELOAD || va == VM_ANIM_RELOAD_SINGLE || va == VM_ANIM_RELOAD_END) {
+            s_hcMagUntil = cg.time + 2000;
+        }
+        if (cg.time >= s_hcMagUntil) {
+            return;
+        }
+    }
 
     reserve  = cg.snap->ps.stats[STAT_AMMO];
     clipsize = cg.snap->ps.stats[STAT_MAXCLIPAMMO];
@@ -2217,6 +2253,9 @@ static void CG_DrawMagazines(void)
     col[1] = 0.72f;
     col[2] = 0.35f;
     col[3] = 1.0f * s_hudFadeAlpha; // muted gold, matching the old ammo text; follows the HUD fade
+    if (CG_HardcoreHudActive()) {
+        col[3] = 1.0f; // Hardcore shows it only around a reload (above) - the calm fade must not hide that too
+    }
     if (col[3] <= 0.02f) {
         return;
     }
@@ -2405,6 +2444,19 @@ static void CG_UpdateHudFade(void)
     } else {
         s_hudFadeAlpha -= step;
         if (s_hudFadeAlpha < 0.0f) { s_hudFadeAlpha = 0.0f; }
+    }
+
+    // HZM coop - HARDCORE host rule hides ONLY the health bar, through the client's health-only alpha (cl_ui.cpp
+    // UI_ApplyHudFadeAlpha reads ui_hudHealthAlpha). The shared ui_hudAlpha lever the MP branch below uses would also
+    // blank the objectives panel, the bomb / fuse stopwatches and every ui_addhud panel - coop needs those. Published
+    // on change only; an old exe ignores it and keeps its health bar (fail-open).
+    {
+        static int s_lastHcHealth = -1;
+        const int  hcHealth       = CG_CoopHardcoreActive() ? 1 : 0;
+        if (hcHealth != s_lastHcHealth) {
+            cgi.Cvar_Set("ui_hudHealthAlpha", hcHealth ? "0" : "1");
+            s_lastHcHealth = hcHealth;
+        }
     }
 
     // HZM MP - HARDCORE hides the persistent health/ammo chrome by forcing the PUBLISHED alpha to 0.
@@ -3778,69 +3830,68 @@ static void CG_DrawHitMarker(void)
 
 static void CG_DrawBracePip(void)
 {
-    extern float CG_CoopBrace(void);
-    float  env = CG_CoopBrace();
-    float  cx, cy, len, thick, gap, a;
-    vec4_t col;
-
+    // [user 2026-09-21] MOVED OFF THE CROSSHAIR. The centre bracket was obnoxious; the mount state now shows
+    // as a small icon low on the right, above the ammo, with the bound Use key beside it. OFFERED = warm amber
+    // pulse; MOUNTED = solid cool white-blue. Icon art: textures/mohmenu/coop_brace_mount.tga (MG on a bipod).
+    extern float    CG_CoopBrace(void);
+    static qhandle_t s_mountShader = 0;
+    static int       s_regTried    = 0;
+    float    env   = CG_CoopBrace();
     qboolean avail = CG_CoopBraceAvail();
+    float    sc, sz, px, py, a;
+    vec4_t   col;
+    int      iKey1 = 0, iKey2 = 0;
+    const char *pszKey, *pszLabel;
+    float    tw, tx, ty;
 
     if (env <= 0.004f && !avail) {
         return;
     }
 
-    // [user 2026-08-27] THE MOUNT PROMPT - a warm bracket that pulses while a surface is on offer,
-    // replaced by the cool solid mark once Use commits. This is the half that was missing: with
-    // nothing on screen there was no way to know a mount was even available, which is most of why
-    // the automatic version read as invisible - "its hard to really tell youre actually braced".
-    if (avail && env <= 0.5f) {
-        float pcx   = cgs.glconfig.vidWidth * 0.5f;
-        float pcy   = cgs.glconfig.vidHeight * 0.5f;
-        float plen  = cgs.glconfig.vidHeight * 0.020f;
-        float pth   = cgs.glconfig.vidHeight * 0.0026f;
-        float pgap  = cgs.glconfig.vidHeight * 0.034f;
-        float pulse = 0.45f + 0.28f * (float)sin((double)cg.time * 0.006);
-        vec4_t pc;
-        if (pth < 1.0f) { pth = 1.0f; }
-        pth = (float)(int)(pth + 0.5f);
-        pc[0] = 1.0f; pc[1] = 0.90f; pc[2] = 0.55f; pc[3] = pulse;
-        cgi.R_SetColor(pc);
-        cgi.R_DrawBox(pcx - pgap,        pcy - pgap,        plen, pth);
-        cgi.R_DrawBox(pcx - pgap,        pcy - pgap,        pth,  plen);
-        cgi.R_DrawBox(pcx + pgap - plen, pcy - pgap,        plen, pth);
-        cgi.R_DrawBox(pcx + pgap - pth,  pcy - pgap,        pth,  plen);
-        cgi.R_DrawBox(pcx - pgap,        pcy + pgap - pth,  plen, pth);
-        cgi.R_DrawBox(pcx - pgap,        pcy + pgap - plen, pth,  plen);
-        cgi.R_DrawBox(pcx + pgap - plen, pcy + pgap - pth,  plen, pth);
-        cgi.R_DrawBox(pcx + pgap - pth,  pcy + pgap - plen, pth,  plen);
-        cgi.R_SetColor(NULL);
+    if (!s_regTried) {
+        s_regTried    = 1;
+        s_mountShader = cgi.R_RegisterShader("textures/mohmenu/coop_brace_mount.tga");
     }
-
-    if (env <= 0.004f) {
+    if (!s_mountShader) {
         return;
     }
 
-    cx    = cgs.glconfig.vidWidth  * 0.5f;
-    cy    = cgs.glconfig.vidHeight * 0.5f;
-    len   = cgs.glconfig.vidHeight * 0.020f;   // ~23px at 1440p, scales with the display
-    thick = cgs.glconfig.vidHeight * 0.0030f;  // ~3px at 1440p
-    if (thick < 1.0f) { thick = 1.0f; }
-    thick = (float)(int)(thick + 0.5f);        // whole pixels only - a half-covered edge reads grey
-    if (len < 4.0f) { len = 4.0f; }
+    sc = cgs.glconfig.vidHeight / 480.0f;          // virtual(480h) -> pixel scale
+    sz = 23.0f * sc;                               // [user 2026-09-21] slightly smaller (30 -> 23)
+    // [user 2026-09-21] sit the icon just LEFT of the MAGS ammo readout so the two read as one HUD group.
+    // CG_DrawMagazines draws its number at actual pixel (vidWidth-170, vidHeight-80) on ANY aspect; anchor
+    // to the same point and centre the 23-unit icon vertically on that caption+number block.
+    {
+        float magsX = cgs.glconfig.vidWidth  - 170.0f;
+        float magsY = cgs.glconfig.vidHeight -  80.0f;
+        px = magsX - sz - 12.0f * sc;              // gap to the left of the MAGS text
+        py = magsY - 9.0f * sc;                    // centre the icon on the MAGS caption+number
+    }
 
-    // the ticks slide outward as the brace takes hold, so the motion itself carries the state
-    gap = cgs.glconfig.vidHeight * (0.020f + 0.008f * env);
-    a   = 0.45f + 0.50f * env;
-
-    // cool + solid, so MOUNTED can never be mistaken for the warm pulsing offer
-    col[0] = 0.72f; col[1] = 0.94f; col[2] = 1.0f; col[3] = a;
+    if (env > 0.004f) {
+        // MOUNTED - solid, bright, cool
+        a = 0.65f + 0.35f * env;
+        col[0] = 0.72f; col[1] = 0.94f; col[2] = 1.0f; col[3] = (a > 1.0f) ? 1.0f : a;
+    } else {
+        // OFFERED - warm amber, gentle pulse
+        col[0] = 1.0f; col[1] = 0.86f; col[2] = 0.45f;
+        col[3] = 0.55f + 0.30f * (float)sin((double)cg.time * 0.006);
+    }
     cgi.R_SetColor(col);
-    // left / right verticals
-    cgi.R_DrawBox(cx - gap - thick, cy - len * 0.5f, thick, len);
-    cgi.R_DrawBox(cx + gap,         cy - len * 0.5f, thick, len);
-    // top / bottom horizontals
-    cgi.R_DrawBox(cx - len * 0.5f, cy - gap - thick, len, thick);
-    cgi.R_DrawBox(cx - len * 0.5f, cy + gap,         len, thick);
+    cgi.R_DrawStretchPic(px, py, sz, sz, 0.0f, 0.0f, 1.0f, 1.0f, s_mountShader);
+    cgi.R_SetColor(NULL);
+
+    // the bound Use key under the icon: "MOUNT (F)"
+    cgi.Key_GetKeysForCommand("+use", &iKey1, &iKey2);
+    pszKey   = cgi.Key_KeynumToBindString(iKey1);
+    pszLabel = (pszKey && pszKey[0] && pszKey[0] != '?') ? va("MOUNT %s", pszKey) : "MOUNT";
+    tw = cgi.UI_FontStringWidth(cgs.media.hudDrawFont, pszLabel, -1) * cgs.uiHiResScale[0];
+    tx = px + sz * 0.5f - tw * 0.5f;
+    ty = py - 14.0f * sc;   // [user 2026-09-21] label ABOVE the icon now it sits at the bottom, so it can't clip off-screen
+    cgi.R_SetColor(col);
+    cgi.R_DrawString(
+        cgs.media.hudDrawFont, pszLabel, tx / cgs.uiHiResScale[0], ty / cgs.uiHiResScale[1], -1, cgs.uiHiResScale
+    );
     cgi.R_SetColor(NULL);
 }
 

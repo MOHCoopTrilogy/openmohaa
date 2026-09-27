@@ -212,7 +212,16 @@ static uniformInfo_t uniformsInfo[] =
 
 	// HZM gl2 soft particles - see UNIFORM_SOFTPARTICLE. Kept LAST, in enum order.
 	{ "u_SoftParticle",    GLSL_VEC4 },
+
+	// HZM gl2 [2026-09-26] Phase S1 spot cone - see UNIFORM_HZMLIGHTSPOT. Kept LAST, in enum order.
+	{ "u_HzmLightSpot",    GLSL_VEC4 },
 };
+
+// HZM gl2 [2026-09-26] vet_phaseS F10: this table is indexed by uniform_t and GLSL_InitUniforms walks it to
+// UNIFORM_COUNT unguarded, and Phase S and the gfx P2/P4 work all append to both. A row count that disagrees with the
+// enum is now a COMPILE error, instead of every later uniform silently resolving to the wrong name at run time.
+// (docs/tools/glsl_variant_lint.py also checks the rows against the enum names, in order.)
+typedef char hzm_uniformsInfo_rows_match_uniform_t[ ( sizeof( uniformsInfo ) / sizeof( uniformsInfo[0] ) == UNIFORM_COUNT ) ? 1 : -1 ];
 
 typedef enum
 {
@@ -421,12 +430,17 @@ static void GLSL_GetShaderHeader( GLenum shaderType, const GLchar *extra, char *
 						TCGEN_FOG,
 						TCGEN_VECTOR));
 
+	// HZM gl2 [2026-09-25] Phase R2: CGEN_DOT / CGEN_ONE_MINUS_DOT for generic_vp CalcColor (rgbGen dot port)
 	Q_strcat(dest, size,
 					 va("#ifndef colorGen_t\n"
 						"#define colorGen_t\n"
 						"#define CGEN_LIGHTING_DIFFUSE %i\n"
+						"#define CGEN_DOT %i\n"
+						"#define CGEN_ONE_MINUS_DOT %i\n"
 						"#endif\n",
-						CGEN_LIGHTING_DIFFUSE));
+						CGEN_LIGHTING_DIFFUSE,
+						CGEN_DOT,
+						CGEN_ONE_MINUS_DOT));
 
 	Q_strcat(dest, size,
 							 va("#ifndef alphaGen_t\n"
@@ -2101,6 +2115,15 @@ shaderProgram_t *GLSL_GetGenericShaderProgram(int stage)
 		case CGEN_LIGHTING_DIFFUSE:
 			shaderAttribs |= GENERICDEF_USE_RGBAGEN;
 			break;
+		// HZM gl2 [2026-09-25] Phase R2: rgbGen dot / oneMinusDot. The branch lives in CalcColor, which only
+		// exists under USE_RGBAGEN, so this select is what makes the port exist at all (the bug-2508 recipe).
+		// Off (the default, and always on an Omaha BSP) the permutation is exactly the pre-port one.
+		case CGEN_DOT:
+		case CGEN_ONE_MINUS_DOT:
+			if (R_HZM_RgbGenDotOn()) {
+				shaderAttribs |= GENERICDEF_USE_RGBAGEN;
+			}
+			break;
 		default:
 			break;
 	}
@@ -2134,7 +2157,10 @@ shaderProgram_t *GLSL_GetGenericShaderProgram(int stage)
 		// CollapseStagesToGLSL skips only LIGHTING_SPECULAR/PORTAL), the bug-2486 gap.
 		case AGEN_DOT:
 		case AGEN_ONE_MINUS_DOT:
-			if (GLSL_HzmAlphaGenDotEnabled()) {
+			// HZM gl2 [2026-09-26] searchlights S1: an additive dot stage takes the dot in RGB (gl1) through the
+			// same CalcColor, so it needs this permutation even if r_hzmAlphaGenDot was saved 0. R_HZM_AlphaDotToRgb
+			// (tr_shade_calc.c) is the ONE predicate shared with the uniform upload in tr_shade.c.
+			if (GLSL_HzmAlphaGenDotEnabled() || R_HZM_AlphaDotToRgb(pStage)) {
 				shaderAttribs |= GENERICDEF_USE_RGBAGEN;
 			}
 			break;

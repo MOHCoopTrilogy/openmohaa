@@ -2994,6 +2994,12 @@ void R_RenderDlightShadowMaps(const refdef_t *fd)
 		vec3_t          diff;
 		float           dist, bright, score;
 
+		// HZM gl2 [2026-09-25] Phase R3 NOSHADOW: a light flagged hzm_dlight_noshadow (the cgame headlights - no
+		// shipped light sets it) never takes a shadow slot, so a headlight cannot steal one from a muzzle flash.
+		if ( dl->type & hzm_dlight_noshadow ) {
+			continue;
+		}
+
 		if ( dl->radius < minRadius ) {
 			continue;
 		}

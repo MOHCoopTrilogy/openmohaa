@@ -1205,8 +1205,31 @@ void RB_Sphere_BuildDLights()
             continue;
         }
 
+        // HZM gl2 [2026-09-26] Phase S1 SPOT CONE (tr_hzm_spot_rb.c RB_HZM_SpotSphereLight): judged once at this sphere
+        // (attenuation x the sphere-dilated cone - nothing behind the lamp, a soft edge as he walks in) and emitted as a
+        // DIRECTIONAL light toward the lamp, which per vertex cannot saturate the way a point light does at close range
+        // (vet F13) and which r_charLighting's fold takes as is. The vehicle carrying the lamp is skipped. Every other
+        // light continues below exactly as before.
+        if (backEnd.refdef.dlights[i].hzmSpot == HZM_SPOT_READY) {
+            if (RB_HZM_SpotSphereLight(
+                    &backEnd.refdef.dlights[i], pSphere, backEnd.currentEntity, &pSphere->light[pSphere->numRealLights]
+                )) {
+                backEnd.currentSphere->numRealLights++;
+            }
+            continue;
+        }
+
         VectorSubtract(backEnd.refdef.dlights[i].origin, backEnd.currentEntity->e.origin, lightorigin);
         scale  = r_entlight_scale->value * tr.overbrightMult * 7500.0 * backEnd.refdef.dlights[i].radius / length;
+        // HZM gl2 [2026-09-25] Phase R3 EDGEFADE: the sphere is lit while it overlaps the light (the cull above) and
+        // this term never falls to 0 at that edge, so a soldier POPS into a moving headlight. A light flagged
+        // hzm_dlight_edgefade (the cgame headlights - no shipped light sets it) fades to 0 at radius + sphere radius.
+        if (backEnd.refdef.dlights[i].type & hzm_dlight_edgefade) {
+            scale *= R_HZM_DlightEdgeWindow(length, fRadius);
+            if (scale <= 0.0f) {
+                continue;   // do not spend a MAX_REAL_LIGHTS slot on a light that contributes nothing
+            }
+        }
         pLight = &pSphere->light[pSphere->numRealLights];
         pLight->color[0] = scale * backEnd.refdef.dlights[i].color[0];
         pLight->color[1] = scale * backEnd.refdef.dlights[i].color[1];

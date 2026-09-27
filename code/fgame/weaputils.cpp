@@ -598,6 +598,8 @@ Projectile::Projectile()
     entflags |= ECF_PROJECTILE;
 
     m_fCoopKickOk = 0; // HZM coop: grenade kick gate
+    m_fExplodeAt  = 0; // HZM bot telemetry - before the savegame return: not archived
+    m_iBotNadeId  = 0;
 
     if (LoadingSavegame) {
         // Archive function will setup all necessary data
@@ -895,6 +897,13 @@ void Projectile::Explode(Event *ev)
     deadflag   = DEAD_DEAD;
     takedamage = DAMAGE_NO;
 
+    // HZM [bot room-clear step 1] a bot grenade going off: log where (BOTNADEDET) and tag the damage it does, so a
+    // self-hit (BOTFFHARM) names its throw. ExplosionAttack reaches Pain synchronously.
+    if (m_iBotNadeId) {
+        BotNadeOnExplode(this);
+        g_iBotNadeDetId = m_iBotNadeId;
+    }
+
     // Spawn an explosion model
     if (explosionmodel.length()) {
         // Move the projectile back off the surface a bit so we can see
@@ -910,6 +919,7 @@ void Projectile::Explode(Event *ev)
 
         ExplosionAttack(v, owner, explosionmodel, dir, ignoreEnt, 1.0f, weap, m_bHurtOwnerOnly);
     }
+    g_iBotNadeDetId = 0;
 
     CancelEventsOfType(EV_Projectile_UpdateBeam);
 
@@ -2007,6 +2017,8 @@ Projectile *ProjectileAttack(
     // Remove the projectile after it's life expires
     ev = new Event(EV_Projectile_Explode);
     proj->PostEvent(ev, newlife);
+    proj->m_fExplodeAt = level.time + newlife;
+    BotNadeOnSpawn(proj, owner, weap, fraction, newlife, "throw"); // HZM bot telemetry (the ACT)
 
     proj->NewAnim("idle");
 
@@ -3512,6 +3524,7 @@ Projectile *HeavyAttack(Vector start, Vector dir, str projectileModel, float rea
     // Remove the projectile after it's life expires
     ev = new Event(EV_Projectile_Explode);
     proj->PostEvent(ev, newlife);
+    proj->m_fExplodeAt = level.time + newlife; // HZM bot telemetry
 
     proj->NewAnim("idle");
 

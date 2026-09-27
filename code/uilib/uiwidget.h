@@ -50,6 +50,10 @@ public:
     str        GetName(void);
 };
 
+// HZM coop - HD UI SCALE: the upscale factor ui/hd_texel_scale.cfg lists for this material (1.0 = stock).
+// Widgets that size themselves by the shader's pixel size divide by it, so a 4x texture keeps the stock layout.
+float UI_HDTexelScale(str name);
+
 // widget flags
 #define WF_STRETCH_VERTICAL   (1 << 0)
 #define WF_STRETCH_HORIZONTAL (1 << 1)
@@ -335,6 +339,9 @@ public:
     class UIWidget    *FindWidget(str name);
     void               ResetMotion(motion_t type);
     virtual void       Realign(void);
+    // HZM bug-3015: register every material this widget and its children draw, without drawing (UIReggedMaterial
+    // registers lazily on first draw otherwise - see cl_ui.cpp UI_LoadScreenPrimeMaterials)
+    virtual void       PrimeMaterials(void);
     void               BringToFrontPropogated(void);
     class UIWidget    *IsThisOrChildActive(void);
     class UIPoint2D    MouseEventToClientPoint(Event *ev);

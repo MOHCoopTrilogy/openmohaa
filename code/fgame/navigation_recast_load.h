@@ -122,6 +122,19 @@ private:
         rcPolyMesh       *&       outPolyMesh,
         rcPolyMeshDetail *& outPolyMeshDetail
     );
+    // [bug-2831] Per-tile variant: builds one navmesh tile from explicit bounds + a border margin so tiles link.
+    bool GeneratePolyMeshTile(
+        RecastBuildContext& buildContext,
+        float              *vertsBuffer,
+        int                 numVertices,
+        int                *indexesBuffer,
+        int                 numIndexes,
+        const float         tileBmin[3],
+        const float         tileBmax[3],
+        int                 borderSize,
+        rcPolyMesh       *&       outPolyMesh,
+        rcPolyMeshDetail *& outPolyMeshDetail
+    );
 
     void InitializeExtensions();
     void ClearExtensions();
@@ -129,11 +142,13 @@ private:
     void InitializeNavMesh(RecastBuildContext& buildContext, const navMap_t& navMap);
     void InitializeFilter();
 
-    void BuildDetourData(
+    bool BuildDetourData( // [bug-2861] false = the tile could not be created (e3l2 solo build at cs8)
         RecastBuildContext&                      buildContext,
         rcPolyMesh                              *polyMesh,
         rcPolyMeshDetail                        *polyMeshDetail,
-        int                                      index,
+        int                                      tileX,
+        int                                      tileY,
+        int                                      layer,
         const Container<offMeshNavigationPoint>& points
     );
 
@@ -149,12 +164,20 @@ private:
 
     void BuildWorldMesh(RecastBuildContext& buildContext, const navMap_t& navigationMap);
     void BuildMeshesForEntities(RecastBuildContext& buildContext, const navMap_t& navigationMap);
+    void DumpNavMesh(const char *mapname); // [HZM bug-2860] nav_dump 1: polys + links to navdump/<map>.txt
+
+public:
+    void DumpNavMeshNow() { DumpNavMesh(currentMap.c_str()); } // [HZM bug-2901] after a runtime prop release (same file)
+
+private:
 
 private:
     dtNavMesh      *navMeshDt;
     dtNavMeshQuery *navMeshQuery;
     dtQueryFilter  *queryFilter;
     NavigationBSP   navigationData;
+    bool            m_bTiledFallback; // [bug-2861] this map's solo build failed: InitializeNavMesh/BuildWorldMesh go tiled
+    bool            m_bSoloFailed;    // [bug-2861] set by BuildWorldMesh's solo branch when BuildDetourData fails
 
 public:
     float          *offMeshConVerts;

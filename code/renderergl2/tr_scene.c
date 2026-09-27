@@ -82,6 +82,8 @@ void R_InitNextFrame( void ) {
 
 	r_numtermarks = 0;
 	r_firstSceneTerMark = 0;
+
+	R_HZM_SpotNextFrame();	// HZM gl2 [2026-09-26] Phase S2: this frame's lamp-flare list starts empty
 }
 
 
@@ -95,6 +97,7 @@ void RE_ClearScene( void ) {
 	r_firstSceneDlight = r_numdlights;
 	r_firstSceneEntity = r_numentities;
 	r_firstScenePoly = r_numpolys;
+	R_HZM_SpotClearScene();	// HZM gl2 [2026-09-26] Phase S2: the flare list is scene-relative like the dlights
 }
 
 /*
@@ -309,8 +312,16 @@ set from one source, so they cannot disagree.
 */
 static void R_AddDynamicLightTyped( const vec3_t org, float intensity, float r, float g, float b, int type ) {
 	dlight_t	*dl;
+	hzmAdd_t	hzmVerdict;
 
 	if ( !tr.registered ) {
+		return;
+	}
+	// HZM gl2 [2026-09-26] PHASE S intake (tr_hzm_spot_rb.c), deliberately BEFORE the 32-slot cap and the intensity
+	// test: a carrier (intensity < 0, HZM_DLIGHT_CARRIER) never takes a slot - it fills the pending spot with its tag,
+	// or becomes a lamp flare, or is discarded - and a spot light while r_hzmSpot is off (always on Omaha) is DROPPED
+	// rather than lit as an omni light behind the truck. Every other light pays one bit test and carries on below.
+	if ( R_HZM_SpotIntake( org, intensity, r, g, b, type, &hzmVerdict ) ) {
 		return;
 	}
 	if ( r_numdlights >= MAX_DLIGHTS ) {
@@ -333,6 +344,9 @@ static void R_AddDynamicLightTyped( const vec3_t org, float intensity, float r, 
 	// parameter is called `type` and the boolean wrapper's is called `bAdditive`.
 	dl->additive = ( type & additive ) ? qtrue : qfalse;
 	dl->type = (dlighttype_t)type;
+	// HZM gl2 [2026-09-26] Phase S: zero every spot field on EVERY add (the slots are reused each frame), and mark a
+	// spot light pending until its carrier arrives (spot-or-nothing, R_HZM_SpotFinishScene)
+	R_HZM_SpotBeginLight( dl, type, hzmVerdict == HZM_ADD_SPOT ? qtrue : qfalse );
 }
 
 /*
@@ -499,6 +513,10 @@ void RE_BeginScene(const refdef_t *fd)
 	tr.refdef.num_entities = r_numentities - r_firstSceneEntity;
 	tr.refdef.entities = &backEndData->entities[r_firstSceneEntity];
 
+	// HZM gl2 [2026-09-26] Phase S: remove every spot whose carrier never came (spot-or-nothing) and hand this
+	// scene its lamp flares - BEFORE the count below is taken
+	R_HZM_SpotFinishScene();
+
 	tr.refdef.num_dlights = r_numdlights - r_firstSceneDlight;
 	tr.refdef.dlights = &backEndData->dlights[r_firstSceneDlight];
 
@@ -570,6 +588,7 @@ void RE_EndScene(void)
     r_firstSceneSpriteSurf = tr.refdef.numSpriteSurfs;
     r_firstSceneSprite = r_numsprites;
     r_firstSceneTerMark = r_numtermarks;
+    R_HZM_SpotEndScene();	// HZM gl2 [2026-09-26] Phase S2
 }
 
 /*

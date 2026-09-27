@@ -4635,7 +4635,11 @@ void ClientGameCommandManager::DynamicLight(Event *ev)
     m_spawnthing->dcolor[2]          = ev->GetFloat(3);
     m_spawnthing->cgd.lightIntensity = ev->GetFloat(4);
     if (ev->NumArgs() > 4) {
-        m_spawnthing->cgd.lightType |= (dlighttype_t)ev->GetInteger(5);
+        // HZM coop [2026-09-26] Phase S hardening (vet_phaseS F1, plan R4): the author's raw integer used to reach the
+        // renderer whole, and bits 5-24 are now the spot / carrier protocol (renderercommon/hzm_light_restore.h). Keep
+        // only what retail defines - lensflare 1, viewlensflare 2, additive 4. Scanned 2026-09-26: 16 `dlight` lines in
+        // main/mainta/maintt/mod, none numeric, so nothing shipped changes.
+        m_spawnthing->cgd.lightType |= (dlighttype_t)(ev->GetInteger(5) & (lensflare | viewlensflare | additive));
         if (ev->NumArgs() > 5) {
             m_spawnthing->cgd.lightType |= DLightNameToNum(ev->GetString(6));
         }
@@ -5546,8 +5550,18 @@ qboolean CG_Command_ProcessFile(const char *filename, qboolean quiet, dtiki_t *c
 
     bufstart = buffer;
 
+    // HZM loading-smoothness [user 2026-09-26] (docs/proposals/loading_screen_2026-09-26/research.md 2.4 B): the
+    // loading screen only redraws on a LoadResource call, and this loop made one per FILE - ubersound.scr and
+    // uberdialog.scr alone parse for ~4-5 s. Tick every 64 aliases; the exe throttles the redraw (at most one
+    // per 33 ms + draw time) and ignores the call outside a load. "*t" is no resource: it only asks for a frame.
+    int hzmAliasCount = 0;
+
     while (1) {
         Event *ev;
+
+        if (!(++hzmAliasCount & 63)) {
+            cgi.LoadResource("*t");
+        }
 
         // grab each line as we go
         Q_strncpyz(com_token, COM_ParseExt(&buffer, qtrue), sizeof(com_token));

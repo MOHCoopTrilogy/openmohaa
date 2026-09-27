@@ -503,13 +503,45 @@ void CL_UpdateMouse() {
 CL_JoystickMove
 =================
 */
+// [controller feel] shape a raw analog LOOK axis. cl.joystickAxis is the dead-zone-ramped value in
+// [-32767,32767]. Apply an outer dead-zone (saturate near max) then a response-curve exponent, keeping the
+// sign. joy_response 1.0 + joy_outerThreshold 0.0 = the old linear passthrough, so nothing changes unless
+// the player tunes it. A curve (>1) gives finer control near centre and full speed at the edge.
+static float CL_PadLookCurve( float v ) {
+	float mag = ( v < 0 ? -v : v ) / 32767.0f;   // 0..1
+	if ( mag <= 0.0f ) {
+		return 0.0f;
+	}
+	if ( mag > 1.0f ) {
+		mag = 1.0f;
+	}
+	if ( joy_outerThreshold ) {
+		float o = joy_outerThreshold->value;
+		if ( o > 0.0f && o < 0.9f && mag > ( 1.0f - o ) ) {
+			mag = 1.0f;
+		}
+	}
+	if ( joy_response && joy_response->value > 1.0f ) {
+		mag = powf( mag, joy_response->value );
+	}
+	return ( v < 0 ? -mag : mag ) * 32767.0f;
+}
+
 void CL_JoystickMove( usercmd_t *cmd ) {
 	float	anglespeed;
 
-	float yaw     = j_yaw->value     * cl.joystickAxis[j_yaw_axis->integer];
+	// [controller feel] LOOK axes (yaw/pitch) get the response curve + a look-sensitivity scale, including the
+	// cgame ADS/zoom slowdown (mirrors CL_MouseMove so aiming down sights slows the stick too). MOVE axes
+	// (side/forward/up) stay linear so movement is unaffected.
+	float lookScale = ( coop_padLookScale && coop_padLookScale->value > 0.0f ) ? coop_padLookScale->value : 1.0f;
+	if ( cge && !UI_MenuActive() && cge->CG_SensitivityScale() >= 0.0 ) {
+		lookScale *= cge->CG_SensitivityScale();
+	}
+
+	float yaw     = j_yaw->value     * CL_PadLookCurve( cl.joystickAxis[j_yaw_axis->integer] )   * lookScale;
 	float right   = j_side->value    * cl.joystickAxis[j_side_axis->integer];
 	float forward = j_forward->value * cl.joystickAxis[j_forward_axis->integer];
-	float pitch   = j_pitch->value   * cl.joystickAxis[j_pitch_axis->integer];
+	float pitch   = j_pitch->value   * CL_PadLookCurve( cl.joystickAxis[j_pitch_axis->integer] ) * lookScale;
 	float up      = j_up->value      * cl.joystickAxis[j_up_axis->integer];
 
 	if ( in_speed.active ^ cl_run->integer ) {
