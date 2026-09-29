@@ -23,6 +23,7 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 // tr_map.c
 
 #include "tr_local.h"
+#include "../renderercommon/hzm_lmpatch.h"
 #include "tr_vis.h"
 
 /*
@@ -206,6 +207,8 @@ static	void R_LoadLightmaps(gamelump_t* l) {
         return;
     }
     buf = l->buffer;
+    // HZM foliage shadows (docs/proposals/foliage_shadows_2026-09-28): same texels as gl2.
+    HZM_ApplyLightmapPatch( s_worldData.baseName, buf, len, NULL, 0, NULL, NULL, 0, NULL );
 
     // we are about to upload textures
     R_IssuePendingRenderCommands();

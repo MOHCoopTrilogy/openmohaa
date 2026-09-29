@@ -135,6 +135,16 @@ void R_InitStaticModels(void)
         }
     }
 
+    // HZM foliage shadows: the static models the lightmap patch baked (canopy + trunk)
+    for (i = 0; i < tr.world->numStaticModels; i++) {
+        tr.world->staticModels[i].hzmFoliage = qfalse;
+    }
+    for (i = 0; tr.hzmFoliageLmApplied && i < tr.hzmFoliageNumBaked; i++) {
+        if (tr.hzmFoliageBaked[i] >= 0 && tr.hzmFoliageBaked[i] < tr.world->numStaticModels) {
+            tr.world->staticModels[tr.hzmFoliageBaked[i]].hzmFoliage = qtrue;
+        }
+    }
+
     for (i = 0; i < tr.world->numStaticModels; i++) {
         vec3_t mins, maxs;
 
@@ -391,6 +401,12 @@ void R_AddStaticModelSurfaces(void)
         tiki = SM->tiki;
 
         if (!tiki) {
+            continue;
+        }
+        // HZM foliage shadows: this model's shadow (canopy + trunk) is baked into the lightmap - keep it out of the
+        // per-frame sun cascades / dlight shadow maps, or its trunk casts twice and the hard trunk/branch bars (the
+        // leaves never cast at r_shadowCastFoliage 0) come back: the user's "square shadows" on m3l3.
+        if (SM->hzmFoliage && (tr.viewParms.flags & VPF_DEPTHSHADOW)) {
             continue;
         }
 

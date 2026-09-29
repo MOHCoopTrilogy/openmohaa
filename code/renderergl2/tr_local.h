@@ -1757,7 +1757,11 @@ typedef struct cStaticModelUnpacked_s {
     float cull_radius;
     int iGridLighting;
     float lodpercentage[2];
+    qboolean hzmFoliage;   // HZM: its shadow is baked by maps/<map>.hzmlm - never cast per frame
 } cStaticModelUnpacked_t;
+
+#define HZM_FOLIAGE_MAX_BAKED 4096   // m6l1a bakes 2603
+#define HZM_FOLIAGE_MAX_ENTS 256     // m3l3 bakes 50 build-mode bushes
 
 typedef struct refSprite_s {
     surfaceType_t surftype;
@@ -2392,6 +2396,11 @@ typedef struct {
 
 	qboolean				worldMapLoaded;
 	qboolean				worldDeluxeMapping;
+	qboolean				hzmFoliageLmApplied;	// HZM: maps/<map>.hzmlm re-baked this world's foliage shadows (hzm_lmpatch.h)
+	int				hzmFoliageBaked[HZM_FOLIAGE_MAX_BAKED];	// static-model lump indices it baked (kept out of the per-frame shadow maps)
+	int				hzmFoliageNumBaked;
+	float				hzmFoliageBakedEnt[HZM_FOLIAGE_MAX_ENTS][3];	// origins of the scripted (build-mode) foliage entities it baked
+	int				hzmFoliageNumEnts;
 	vec2_t                  autoExposureMinMax;
 	vec3_t                  toneMinAvgMaxLevel;
 	world_t					*world;

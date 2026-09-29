@@ -22,6 +22,7 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 // tr_map.c
 
 #include "tr_local.h"
+#include "../renderercommon/hzm_lmpatch.h"
 
 #define JSON_IMPLEMENTATION
 #include "../qcommon/json.h"
@@ -259,12 +260,20 @@ static	void R_LoadLightmaps( lump_t *l, lump_t *surfs ) {
 	double sumIntensity = 0;
 
 	tr.numLightmaps = 0;
+	tr.hzmFoliageLmApplied = qfalse;
+	tr.hzmFoliageNumBaked = 0;
+	tr.hzmFoliageNumEnts = 0;
 
 	len = l->filelen;
 	if ( !len ) {
 		return;
 	}
 	buf = fileBase + l->fileofs;
+	// HZM foliage shadows (docs/proposals/foliage_shadows_2026-09-28): re-bake the static-model foliage and
+	// hedgerow-patch shadows from maps/<map>.hzmlm BEFORE anything reads the texels. No file / no match = untouched.
+	tr.hzmFoliageLmApplied = (qboolean)( HZM_ApplyLightmapPatch( s_worldData.baseName, buf, len, tr.hzmFoliageBaked,
+	                                                            HZM_FOLIAGE_MAX_BAKED, &tr.hzmFoliageNumBaked, tr.hzmFoliageBakedEnt,
+	                                                            HZM_FOLIAGE_MAX_ENTS, &tr.hzmFoliageNumEnts ) > 0 );
 
 	// we are about to upload textures
 	R_IssuePendingRenderCommands();

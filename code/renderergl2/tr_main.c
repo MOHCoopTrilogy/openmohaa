@@ -1754,6 +1754,20 @@ static void R_AddEntitySurface (int entityNum)
 		return;
 	}
 
+	// HZM foliage shadows: a scripted (build-mode) foliage script_model whose shadow maps/<map>.hzmlm baked into the
+	// lightmap (matched by its spawn origin) stays out of the per-frame shadow maps, like the baked static models.
+	if ( ( tr.viewParms.flags & VPF_DEPTHSHADOW ) && tr.hzmFoliageNumEnts > 0 && ent->e.reType == RT_MODEL ) {
+		int hzmE;
+
+		for ( hzmE = 0; hzmE < tr.hzmFoliageNumEnts; hzmE++ ) {
+			if ( fabs( ent->e.origin[0] - tr.hzmFoliageBakedEnt[hzmE][0] ) < 2.0f
+			     && fabs( ent->e.origin[1] - tr.hzmFoliageBakedEnt[hzmE][1] ) < 2.0f
+			     && fabs( ent->e.origin[2] - tr.hzmFoliageBakedEnt[hzmE][2] ) < 2.0f ) {
+				return;
+			}
+		}
+	}
+
 	// HZM gl2 re-port (bug-gl2-portalsky): sky-room entities (RF_SKYENTITY)
 	// only draw inside the portal sky view and normal entities never do,
 	// mirroring gl1 R_AddEntitySurfaces (gl1 tr_main.c:1469-1478).
