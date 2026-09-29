@@ -914,6 +914,14 @@ void CG_CalcViewModelMovement(float fViewBobPhase, float fViewBobAmp, vec_t *vVe
         vTargOfs[2] = vm_offset_air_up->value;
     }
 
+    // HZM coop [ironsights 2026-09-28] the stock crouch / in-air viewmodel offset (vm_offset_crouch_side 2.25:
+    // the whole gun steps 2.25u LEFT when you crouch) is a hip-fire pose. Under ADS it knocked the sights off
+    // the line - the reason the crouch rows of s_adsGunTune needed up to 38.5 deg of yaw. It eases out with the
+    // rig weight (same eased curve; back in during a reload while aimed) for guns the rig solve aligns.
+    if (CG_AdsRigSolveOwns()) {
+        VectorScale(vTargOfs, 1.0f - CG_AdsRigWeight(), vTargOfs);
+    }
+
     if (cg.predicted_player_state.walking) {
         fDelta = VectorLength(vVelocity) - vm_offset_vel_base->value;
         if (fDelta > 0.0) {

@@ -211,6 +211,23 @@ static vec3_t   s_vTraceBone[8] = {{0,0,0},{0,0,0},{0,0,0},{0,0,0},
                                    {0,0,0},{0,0,0},{0,0,0},{0,0,0}}; // eyes/spine/hand/gun/LClav/LArm/RClav/RArm
 static qboolean s_bTraceBone = qfalse;
 static qboolean s_bFeelBase = qfalse;
+// HZM coop [ironsights 2026-09-28] CLEAN RIG for the per-frame sight solve (cg_modelanim.c CG_AdsSightSolve).
+// Captured beside s_vFeelBase, i.e. the rig exactly where the camera put it and before every feel layer; the
+// one deterministic in-ADS layer after that point (the brace rest) is added back via s_vAdsCleanExtra.
+static vec3_t   s_vAdsCleanOrg   = {0, 0, 0};
+static vec3_t   s_vAdsCleanExtra = {0, 0, 0};
+static vec3_t   s_mAdsCleanAxis[3];
+static int      s_iAdsCleanTime  = -1;
+float           cg_fAdsWeaponFov = 80.0f;
+qboolean CG_AdsCleanRig(vec3_t org, vec3_t axis[3])
+{
+    if (s_iAdsCleanTime != cg.time) {
+        return qfalse;
+    }
+    VectorAdd(s_vAdsCleanOrg, s_vAdsCleanExtra, org);
+    AxisCopy(s_mAdsCleanAxis, axis);
+    return qtrue;
+}
 // HZM coop [user 2026-08-21] "slight fov snap when shooting". A small, fast fov widening on
 // discharge. Set by the shot detector, consumed in CG_CalcFov. Kept SMALL and SHORT: fov is the
 // most sickness-prone channel there is, and a slow fov move reads as a zoom rather than a kick.
@@ -1807,6 +1824,429 @@ CG_OffsetFirstPersonView
 
 ===============
 */
+#include "cg_adssights.h"
+
+/*
+=================================================================================================
+HZM coop [ironsights 2026-09-28] RIG-LEVEL IRON-SIGHT SOLVE - the sights ON the optical axis.
+
+Why not the per-gun table: s_adsGunTune rotates the GUN ALONE about the grip (the hands never move -
+up to 38.5 degrees crouched, so the gun leaves the support hand: "offsets make the animations janky")
+and slides the image with an NDC projection shift, which puts the sights OFF the optical axis. An
+off-axis picture is only centred at the one aspect ratio + FOV it was dialled at, and any camera
+roll (lean) swings it about the screen centre. Measured: 22-52 px median, 395 px worst (README s6).
+
+What this does, every first-person frame, BEFORE the view-bob and every feel layer (so bob, sway,
+breathing, recoil, lag and flinch all still move the picture exactly as designed):
+  1. F (aim feature) and R (rear feature) are fixed points on the weapon mesh (cg_adssights.h, one
+     row per weapon name, derived from the shipped mesh - variant meshes get their own rows).
+  2. They are carried through tag_weapon_right of the posed first-person rig (the same transform
+     CG_AttachEntity gives the gun) and the rigid correction that puts R->F on the view axis (delta
+     below it for no-post sights) and F ON the axis is computed: a rotation about the eye + a move.
+  3. The WHOLE rig (arms + gun) gets that correction. No projection shift, no gun-only rotation.
+On axis = exact at every FOV, aspect ratio and camera roll (lean).
+
+SMOOTHNESS [user 2026-09-28: "will this make the animations smoother too ... going in and out of
+ads?"]. Nothing here is ever a step:
+  * the applied weight is (ADS blend) x (animation gate), each a CRITICALLY DAMPED follower -
+    the ADS blend of smoothstep(CG_AdsPoseFactor()), so cancelling ADS mid-way, re-aiming, or any
+    reversal is continuous in position AND velocity;
+  * the correction itself (6 numbers, in the camera frame) follows its target through a critically
+    damped spring, so a stance change, a lean or a crossblend while aimed eases instead of tracking
+    the pose's kinks.
+ANIMATION GATE [user 2026-09-28: "does that mean reloading etc when in ads won't be weird?"]. Today a
+reload / weapon switch while RMB is held plays the HIP animation with the ADS zoom AND the full
+per-gun table rotation + screen shift on it. Here:
+  * aim poses (idle*, charge) - the target follows the pose;
+  * fire / rechamber - the target is HELD: the authored kick plays on top of the aligned pose and
+    settles back to exact (the correction never cancels or doubles a kick);
+  * reload, pull-out, put-away, secondary (bash), ladder - the weight eases OUT on the same curve and
+    back in 0.3 s after aiming resumes. CG_AdsAnimGate() also gates the legacy table path, so guns
+    without sight geometry stop twisting their reload animations too.
+cg_adsRigSolve 1 (default) / 0 (shipped) / 2 (own the gun but leave the rig: authored-pose tests).
+cg_adsSightDebug 1 prints ^~^~^ ADSRIG every 200 ms, 2 every frame.
+=================================================================================================
+*/
+static const adsSight_t *CG_FindAdsSightByName(const char *wpn)
+{
+    int i;
+
+    if (!wpn || !*wpn) {
+        return NULL;
+    }
+    // EXACT name only. Every skin TIKI that shares a solved mesh has its own generated row, and a variant
+    // with a DIFFERENT mesh ("BAR (Pacific)") never falls back to the base gun's geometry by stripping its
+    // suffix - that fallback is exactly how CG_FindAdsTune hands those variants the wrong sight picture.
+    for (i = 0; i < (int)(sizeof(s_adsSights) / sizeof(s_adsSights[0])); i++) {
+        if (s_adsSights[i].name && !Q_stricmp(wpn, s_adsSights[i].name)) {
+            return &s_adsSights[i];
+        }
+    }
+    return NULL;
+}
+
+qboolean CG_AdsRigSolveOwns(void)
+{
+    const char *wpn;
+    cvar_t     *p = cgi.Cvar_Get("cg_adsRigSolve", "1", CVAR_ARCHIVE);
+
+    if (!p->integer || !cg.snap || cg.snap->ps.activeItems[1] < 0) {
+        return qfalse;
+    }
+    wpn = CG_ConfigString(CS_WEAPONS + cg.snap->ps.activeItems[1]);
+    return CG_FindAdsSightByName(wpn) ? qtrue : qfalse;
+}
+
+// ---------------------------------------------------------------------------------------- smoothing state
+static float s_rigGate = 1.0f, s_rigGateV = 0.0f;   // animation gate follower (1 = aim pose, 0 = reload etc.)
+static float s_rigBlend = 0.0f, s_rigBlendV = 0.0f; // ADS blend follower of smoothstep(pose factor)
+static float s_rigW = 0.0f;                         // applied weight = gate * blend
+static int   s_rigHoldUntil = 0;                    // target frozen until (after fire/reload crossblends back)
+static int   s_rigAnimCls = 0;
+static float s_rigTgt[8], s_rigCur[8]; // rotvec (rad) + move (u), camera frame; cant roll (rad); eye-relief move (u)
+// v4 INERTIALIZATION (sweepD 2026-09-29): v3 followed the target through a critically damped spring, which LAGS a
+// target that moves - on ADS-in the aim pose is still being raised, the target shrinks as it rises, and the lagging
+// correction carried the sight ~50 px past the axis (Garand/Kar98/Thompson), plus ~30% extra jitter while strafing.
+// Now the applied correction is target + offset: the target is tracked EXACTLY while it is computed every frame, and
+// only a DISCONTINUITY (the target resuming after a fire/reload freeze or a non-aim-pose skip) is absorbed into the
+// offset, which then decays to 0 through the same critically damped spring - continuous, never lagging.
+static float s_rigOff[8], s_rigOffV[8];
+static qboolean s_rigTgtOk = qfalse, s_rigTgtLive = qfalse;
+static int   s_rigLastWpn = -2, s_rigLastRun = 0;
+
+// 0 = aim pose, 1 = hold (fire / rechamber: authored motion plays over the aligned pose), 2 = ease out
+static int CG_AdsAnimClass(void)
+{
+    int a;
+
+    if (!cg.snap) {
+        return 2;
+    }
+    a = cg.snap->ps.iViewModelAnim;
+    switch (a) {
+    case VM_ANIM_IDLE:
+    case VM_ANIM_IDLE_0:
+    case VM_ANIM_IDLE_1:
+    case VM_ANIM_IDLE_2:
+    case VM_ANIM_CHARGE:
+        return 0;
+    case VM_ANIM_FIRE:
+    case VM_ANIM_RECHAMBER:
+        return 1;
+    default:
+        return 2;
+    }
+}
+
+// critically damped follower x -> tgt, angular frequency w, fixed substeps (exact enough, never overshoots a step)
+static void AdsCritFollow(float *x, float *v, float tgt, float w, float dt)
+{
+    while (dt > 0.0f) {
+        float h = dt > 0.004f ? 0.004f : dt;
+        *v += (w * w * (tgt - *x) - 2.0f * w * *v) * h;
+        *x += *v * h;
+        dt -= h;
+    }
+}
+
+// advanced ONCE per frame from CG_AdsFactorAdvance (so it runs in 3P, cutscenes and death too)
+void CG_AdsRigAdvance(void)
+{
+    static cvar_t *pWg = NULL, *pWb = NULL;
+    float          dt, p, sp;
+    int            cls;
+
+    if (!pWg) {
+        pWg = cgi.Cvar_Get("cg_adsRigGateRate", "14", CVAR_ARCHIVE);  // rad/s: ~0.35 s settle
+        pWb = cgi.Cvar_Get("cg_adsRigBlendRate", "22", CVAR_ARCHIVE); // rad/s: ~0.2 s behind the pose factor
+    }
+    dt = (cg.frametime > 0) ? cg.frametime / 1000.0f : 0.0f;
+    if (dt > 0.1f) {
+        dt = 0.1f;
+    }
+    cls = CG_AdsAnimClass();
+    s_rigAnimCls = cls;
+    if (cls != 0) {
+        s_rigHoldUntil = cg.time + 300; // outlast the crossblend back to the aim pose
+    }
+    AdsCritFollow(&s_rigGate, &s_rigGateV, cls == 2 ? 0.0f : 1.0f, pWg->value, dt);
+    p  = CG_AdsPoseFactor();
+    sp = p * p * (3.0f - 2.0f * p);
+    AdsCritFollow(&s_rigBlend, &s_rigBlendV, sp, pWb->value, dt);
+    if (s_rigGate < 0.0f) { s_rigGate = 0.0f; s_rigGateV = 0.0f; } else if (s_rigGate > 1.0f) { s_rigGate = 1.0f; s_rigGateV = 0.0f; }
+    if (s_rigBlend < 0.0f) { s_rigBlend = 0.0f; s_rigBlendV = 0.0f; } else if (s_rigBlend > 1.0f) { s_rigBlend = 1.0f; s_rigBlendV = 0.0f; }
+    s_rigW = s_rigGate * s_rigBlend;
+}
+
+float CG_AdsAnimGate(void) { return s_rigGate; }
+float CG_AdsRigWeight(void) { return s_rigW; }
+
+static void CG_AdsRigSolve(refEntity_t *pREnt)
+{
+    static cvar_t    *pDbg = NULL, *pWc = NULL, *pMode = NULL;
+    static int        s_iLast = 0, s_iTag = -2, s_iTagTiki = 0;
+    const adsSight_t *s;
+    const char       *wpn;
+    orientation_t     or;
+    vec3_t            cam[3], E, G, A[3], F, R, d, t, ax, v, o, wax, Tw;
+    float             sn, ang, rF, rR, slope, dt, rv[3], ra, w, prevCur[8];
+    int               i, k, wpnIdx;
+    qboolean          updated = qfalse, reseeded = qfalse;
+
+    if (!pDbg) {
+        pDbg  = cgi.Cvar_Get("cg_adsSightDebug", "0", 0);
+        pWc   = cgi.Cvar_Get("cg_adsRigFollowRate", "16", CVAR_ARCHIVE); // rad/s, correction follower
+        pMode = cgi.Cvar_Get("cg_adsRigSolve", "1", CVAR_ARCHIVE);
+    }
+    if (!CG_AdsRigSolveOwns() || !pREnt || !pREnt->tiki) {
+        s_rigTgtOk = qfalse;
+        return;
+    }
+    if (pMode->integer == 2) {
+        return; // own the gun (table/shift/crouch offset off) but leave the rig where the animation put it
+    }
+    wpnIdx = cg.snap->ps.activeItems[1];
+    if (wpnIdx != s_rigLastWpn || cg.time - s_rigLastRun > 250 || cg.time < s_rigLastRun) {
+        s_rigTgtOk = qfalse; // new gun, or this path has not run for a while (3P, cutscene): re-seed
+    }
+    s_rigLastWpn = wpnIdx;
+    dt = (s_rigLastRun > 0 && cg.time > s_rigLastRun) ? (cg.time - s_rigLastRun) / 1000.0f : 0.0f;
+    if (dt > 0.1f) {
+        dt = 0.1f;
+    }
+    s_rigLastRun = cg.time;
+    wpn = CG_ConfigString(CS_WEAPONS + wpnIdx);
+    s   = CG_FindAdsSightByName(wpn);
+    if (s_iTagTiki != (int)(size_t)pREnt->tiki) {
+        s_iTag     = cgi.Tag_NumForName(pREnt->tiki, "tag_weapon_right");
+        s_iTagTiki = (int)(size_t)pREnt->tiki;
+    }
+    if (!s || s_iTag < 0) {
+        return;
+    }
+    AnglesToAxis(cg.refdefViewAngles, cam);
+    VectorCopy(cg.refdef.vieworg, E);
+    for (k = 0; k < 8; k++) {
+        prevCur[k] = s_rigCur[k]; // the correction applied last frame (valid only while s_rigTgtOk)
+    }
+
+    // ---- target: only from an AIM pose, and not while a fire/reload crossblend is still settling
+    if (!s_rigTgtOk || (s_rigAnimCls == 0 && cg.time >= s_rigHoldUntil)) {
+        or = cgi.TIKI_Orientation(pREnt, s_iTag);
+        VectorCopy(pREnt->origin, G);
+        for (i = 0; i < 3; i++) {
+            VectorMA(G, or.origin[i], pREnt->axis[i], G);
+        }
+        MatrixMultiply(or.axis, pREnt->axis, A);
+        VectorCopy(G, F);
+        VectorCopy(G, R);
+        for (i = 0; i < 3; i++) {
+            VectorMA(F, s->F[i], A[i], F);
+            VectorMA(R, s->R[i], A[i], R);
+        }
+        VectorSubtract(F, E, v);
+        rF = DotProduct(v, cam[0]);
+        VectorSubtract(R, E, v);
+        rR = DotProduct(v, cam[0]);
+        slope = (rF - rR > 0.5f) ? (rR * s->delta / (rF - rR)) : 0.0f;
+        VectorMA(cam[0], slope, cam[2], t);
+        VectorNormalize(t);
+        VectorSubtract(F, R, d);
+        VectorNormalize(d);
+        CrossProduct(d, t, ax);
+        sn  = VectorNormalize(ax);
+        ang = (sn > 1e-7f) ? RAD2DEG(asin(sn > 1.0f ? 1.0f : sn)) : 0.0f;
+        if (DotProduct(d, t) > 0.0f && ang <= 30.0f) { // otherwise not an aim pose: keep the old target
+            vec3_t dp;
+            if (ang > 0.0f) {
+                RotatePointAroundVector(dp, ax, d, ang);
+                if (DotProduct(dp, t) < DotProduct(d, t)) {
+                    ang = -ang; // RotatePointAroundVector's handedness decides: check, never assume
+                }
+                VectorSubtract(F, E, o);
+                RotatePointAroundVector(v, ax, o, ang);
+            } else {
+                VectorSubtract(F, E, v);
+            }
+            VectorMA(v, -DotProduct(v, cam[0]), cam[0], Tw);
+            VectorScale(Tw, -1.0f, Tw);
+            for (k = 0; k < 3; k++) {
+                s_rigTgt[k]     = DotProduct(ax, cam[k]) * DEG2RAD(ang);
+                s_rigTgt[3 + k] = DotProduct(Tw, cam[k]);
+            }
+            // CANT [user 2026-09-28: "some guns look like they aim to the left or right"]: after the sight line is
+            // on the axis, roll about the VIEW AXIS (through the eye) until the gun's up is screen-up. A roll about
+            // the axis cannot move F or R off it, so this costs nothing in alignment.
+            {
+                vec3_t upW, upR, pr;
+                float  cant, test;
+                VectorClear(upW);
+                for (i = 0; i < 3; i++) {
+                    VectorMA(upW, s->U[i], A[i], upW);
+                }
+                if (ang != 0.0f) {
+                    RotatePointAroundVector(upR, ax, upW, ang);
+                } else {
+                    VectorCopy(upW, upR);
+                }
+                VectorMA(upR, -DotProduct(upR, cam[0]), cam[0], pr);
+                cant = (float)atan2(DotProduct(pr, cam[1]), DotProduct(pr, cam[2])); // + = gun up leans LEFT
+                RotatePointAroundVector(v, cam[0], upR, RAD2DEG(cant));
+                test = DotProduct(v, cam[1]);
+                s_rigTgt[6] = (fabs(test) < fabs(DotProduct(upR, cam[1]))) ? cant : -cant; // sign by test, never assumed
+                if (s_rigTgt[6] > 0.35f) { s_rigTgt[6] = 0.35f; } else if (s_rigTgt[6] < -0.35f) { s_rigTgt[6] = -0.35f; }
+            }
+            // EYE RELIEF [user 2026-09-28: "a clear sight thru the ironsights"]: optional per-gun distance from the
+            // eye to the rear sight along the view (cg_adssights.h relief; 0 = the animation's own cheek weld).
+            // A move ALONG the axis keeps F and R on it; clamped to +-4 u so the arms never reach the near plane.
+            s_rigTgt[7] = 0.0f;
+            if (s->relief > 0.0f) {
+                vec3_t R2;
+                float  rR2;
+                if (ang != 0.0f) {
+                    VectorSubtract(R, E, o);
+                    RotatePointAroundVector(R2, ax, o, ang);
+                } else {
+                    VectorSubtract(R, E, R2);
+                }
+                VectorAdd(R2, Tw, R2);
+                rR2         = DotProduct(R2, cam[0]);
+                s_rigTgt[7] = s->relief - rR2;
+            }
+            // cg_adsRigReliefBias: a live offset on top (units, + = eye further back from the rear sight) - used by the
+            // harness to measure the sight-window clutter at several eye reliefs in-engine, hands included
+            s_rigTgt[7] += cgi.Cvar_Get("cg_adsRigReliefBias", "0", 0)->value;
+            if (s_rigTgt[7] > 4.0f) { s_rigTgt[7] = 4.0f; } else if (s_rigTgt[7] < -4.0f) { s_rigTgt[7] = -4.0f; }
+            if (!s_rigTgtOk || s_rigW < 0.001f) { // invisible (weight ~0): no history to keep continuous
+                for (k = 0; k < 8; k++) {
+                    s_rigOff[k]  = 0.0f;
+                    s_rigOffV[k] = 0.0f;
+                }
+                reseeded = qtrue;
+            } else if (!s_rigTgtLive) {           // resuming after a freeze / skip: absorb the jump
+                for (k = 0; k < 8; k++) {
+                    s_rigOff[k] = prevCur[k] - s_rigTgt[k];
+                }
+                reseeded = qtrue;
+            }
+            s_rigTgtOk = qtrue;
+            updated    = qtrue;
+        }
+    }
+    s_rigTgtLive = updated;
+    if (!s_rigTgtOk) {
+        return;
+    }
+    // v5 (2026-09-29), OPTIONAL - cg_adsRigSmooth 1: a one-euro filter on the TARGET with ONE cutoff for all 8
+    // components (rotation and translation must stay coherent or F leaves the axis while it moves). The cutoff rises
+    // with the square of the normalised joint target speed: a slow small wobble (strafe/walk cycle) sees the low
+    // cutoff, a real pose change (ADS in/out, stance, lean) a high one. Offline replay of the sweepD2 v4 targets
+    // (tools/sim_v5_filter.py) at min 3 Hz / beta 1000: in/out lag <= 0.33 px, fire <= 1.0 px, cancel <= 3.4 px
+    // (upper bound). Default 0 = v4 exact tracking; the interleaved today / v4 / v5 strafe repeats decide.
+    {
+        static cvar_t  *pSm = NULL, *pSmMin = NULL, *pSmBeta = NULL;
+        static float    s_filt[8], s_filtSp[4];
+        static qboolean s_filtOk = qfalse;
+        float          *use = s_rigTgt;
+
+        if (!pSm) {
+            pSm     = cgi.Cvar_Get("cg_adsRigSmooth", "0", CVAR_ARCHIVE);
+            pSmMin  = cgi.Cvar_Get("cg_adsRigSmoothMin", "3", CVAR_ARCHIVE);     // Hz, cutoff at rest
+            pSmBeta = cgi.Cvar_Get("cg_adsRigSmoothBeta", "1000", CVAR_ARCHIVE); // Hz per (normalised speed)^2
+        }
+        if (pSm->integer && dt > 0.0f) {
+            if (!s_filtOk || reseeded) {
+                for (k = 0; k < 8; k++) {
+                    s_filt[k] = s_rigTgt[k];
+                }
+                for (k = 0; k < 4; k++) {
+                    s_filtSp[k] = 0.0f;
+                }
+                s_filtOk = qtrue;
+            } else {
+                float sp[4], ad, al, fc, sn, e[8];
+                for (k = 0; k < 8; k++) {
+                    e[k] = s_rigTgt[k] - s_filt[k];
+                }
+                sp[0] = (float)sqrt(e[0] * e[0] + e[1] * e[1] + e[2] * e[2]) / dt;
+                sp[1] = (float)sqrt(e[3] * e[3] + e[4] * e[4] + e[5] * e[5]) / dt;
+                sp[2] = (float)fabs(e[6]) / dt;
+                sp[3] = (float)fabs(e[7]) / dt;
+                ad    = 1.0f / (1.0f + 1.0f / (2.0f * (float)M_PI * 4.0f * dt)); // derivative low-pass, 4 Hz
+                for (k = 0; k < 4; k++) {
+                    s_filtSp[k] += ad * (sp[k] - s_filtSp[k]);
+                }
+                // normalised by typical ADS-in speeds: 0.5 rad/s, 3 u/s, 0.5 rad/s, 3 u/s
+                sn = s_filtSp[0] / 0.5f + s_filtSp[1] / 3.0f + s_filtSp[2] / 0.5f + s_filtSp[3] / 3.0f;
+                fc = pSmMin->value + pSmBeta->value * sn * sn;
+                al = 1.0f / (1.0f + 1.0f / (2.0f * (float)M_PI * fc * dt));
+                for (k = 0; k < 8; k++) {
+                    s_filt[k] += al * e[k];
+                }
+            }
+            use = s_filt;
+        } else {
+            s_filtOk = qfalse;
+        }
+        for (k = 0; k < 8; k++) {
+            AdsCritFollow(&s_rigOff[k], &s_rigOffV[k], 0.0f, pWc->value, dt);
+            s_rigCur[k] = use[k] + s_rigOff[k];
+        }
+    }
+
+    // ---- apply the followed correction, weighted
+    w = s_rigW;
+    if (w <= 0.0005f) {
+        return;
+    }
+    for (k = 0; k < 3; k++) {
+        rv[k] = s_rigCur[k] * w;
+    }
+    ra = (float)sqrt(rv[0] * rv[0] + rv[1] * rv[1] + rv[2] * rv[2]);
+    if (ra > 1e-7f) {
+        for (k = 0; k < 3; k++) {
+            wax[k] = (rv[0] * cam[0][k] + rv[1] * cam[1][k] + rv[2] * cam[2][k]) / ra;
+        }
+        VectorSubtract(pREnt->origin, E, o);
+        RotatePointAroundVector(v, wax, o, RAD2DEG(ra));
+        VectorAdd(E, v, pREnt->origin);
+        for (k = 0; k < 3; k++) {
+            RotatePointAroundVector(v, wax, pREnt->axis[k], RAD2DEG(ra));
+            VectorCopy(v, pREnt->axis[k]);
+        }
+    }
+    for (k = 0; k < 3; k++) {
+        VectorMA(pREnt->origin, s_rigCur[3 + k] * w, cam[k], pREnt->origin);
+    }
+    if (s_rigCur[6] * w > 1e-6f || s_rigCur[6] * w < -1e-6f) {       // cant roll about the view axis, through the eye
+        float rd = RAD2DEG(s_rigCur[6] * w);
+        VectorSubtract(pREnt->origin, E, o);
+        RotatePointAroundVector(v, cam[0], o, rd);
+        VectorAdd(E, v, pREnt->origin);
+        for (k = 0; k < 3; k++) {
+            RotatePointAroundVector(v, cam[0], pREnt->axis[k], rd);
+            VectorCopy(v, pREnt->axis[k]);
+        }
+    }
+    VectorMA(pREnt->origin, s_rigCur[7] * w, cam[0], pREnt->origin); // eye relief
+
+    if (pDbg->integer && (pDbg->integer >= 2 || cg.time - s_iLast >= 200)) {
+        s_iLast = cg.time;
+        cgi.Printf("^~^~^ ADSRIG wpn='%s' pose=%.3f pmf=0x%x lean=%.1f pitch=%.2f roll=%.2f rot=%.3fdeg "
+                   "move=(%.3f %.3f %.3f)u cant=%.3fdeg relief=%.3fu w=%.4f gate=%.4f blend=%.4f cls=%d anim=%d res=%dx%d "
+                   "rv=(%.6f %.6f %.6f) tg=(%.6f %.6f %.6f %.4f %.4f %.4f %.6f %.4f)\n",
+                   wpn, CG_AdsPoseFactor(), cg.predicted_player_state.pm_flags, cg.predicted_player_state.fLeanAngle,
+                   cg.refdefViewAngles[PITCH], cg.refdefViewAngles[ROLL], RAD2DEG(ra),
+                   s_rigCur[3] * w, s_rigCur[4] * w, s_rigCur[5] * w, RAD2DEG(s_rigCur[6] * w), s_rigCur[7] * w,
+                   w, s_rigGate, s_rigBlend, s_rigAnimCls,
+                   cg.snap->ps.iViewModelAnim, cg.refdef.width, cg.refdef.height,
+                   rv[0], rv[1], rv[2], s_rigTgt[0], s_rigTgt[1], s_rigTgt[2], s_rigTgt[3], s_rigTgt[4], s_rigTgt[5],
+                   s_rigTgt[6], s_rigTgt[7]);
+    }
+}
+
+static const adsGunTune_t s_adsZeroTuneV = {"", 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}; // HZM coop [ironsights 2026-09-28]
+
 void CG_OffsetFirstPersonView(refEntity_t *pREnt, qboolean bUseWorldPosition)
 {
     // HZM coop [user 2026-08-02] bug-1291 - eased 0..1 low-health limp envelope, driven by the
@@ -2255,6 +2695,8 @@ void CG_OffsetFirstPersonView(refEntity_t *pREnt, qboolean bUseWorldPosition)
     VectorAdd(pREnt->origin, vDelta, pREnt->origin);
 
     if (!bUseWorldPosition) {
+        // HZM coop [ironsights 2026-09-28] rig-level sight solve, before bob and feel (see CG_AdsRigSolve)
+        CG_AdsRigSolve(pREnt);
         VectorCopy(cg.refdefViewAngles, vDelta);
         vDelta[0] *= 0.5;
         vDelta[2] *= 0.75;
@@ -2279,6 +2721,11 @@ void CG_OffsetFirstPersonView(refEntity_t *pREnt, qboolean bUseWorldPosition)
         s_fRollBase   = cg.refdefViewAngles[2];
         s_fRollExempt = 0.0f;
         s_bRollBase   = qtrue;
+        // HZM coop [ironsights 2026-09-28] the clean rig for the sight solve (see s_vAdsCleanOrg)
+        VectorCopy(pREnt->origin, s_vAdsCleanOrg);
+        AxisCopy(pREnt->axis, s_mAdsCleanAxis);
+        VectorClear(s_vAdsCleanExtra);
+        s_iAdsCleanTime = cg.time;
 
         // HZM coop - ADS SWAY + RECOIL. Both are applied to the view weapon (hands + gun) ONLY - they move
         // the weapon model in view space, NOT the actual aim/bullet direction, so they're immersion-only and
@@ -2553,6 +3000,10 @@ void CG_OffsetFirstPersonView(refEntity_t *pREnt, qboolean bUseWorldPosition)
                 if (pMax && fReach > pMax->value) { fReach = pMax->value; }
                 VectorMA(pREnt->origin, fBrace * fReach, mat[0], pREnt->origin);
                 VectorMA(pREnt->origin, -fBrace * (pDn ? pDn->value : 1.2f),  mat[2], pREnt->origin);
+                // HZM coop [ironsights 2026-09-28] the brace REST is a deterministic ADS pose, not feel:
+                // the sight solve must see it (the settle kick below stays feel)
+                VectorMA(s_vAdsCleanExtra, fBrace * fReach, mat[0], s_vAdsCleanExtra);
+                VectorMA(s_vAdsCleanExtra, -fBrace * (pDn ? pDn->value : 1.2f), mat[2], s_vAdsCleanExtra);
                 // the settle: the weapon drops onto the surface and rebounds
                 if (fKick > 0.0f) {
                     VectorMA(pREnt->origin, -fKick * 3.4f, mat[2], pREnt->origin);
@@ -6708,6 +7159,7 @@ static int CG_CalcFov(void)
 
         // tell the renderer the weapon fov (== world fov when not aiming, so it uses one projection)
         cgi.Cvar_Set("r_weaponfovx", va("%g", fWeaponFov));
+        cg_fAdsWeaponFov = fWeaponFov; // HZM coop [ironsights 2026-09-28] the sight solve converts slope -> shift with it
 
         // HZM coop - drive the renderer's ADS screen-shift from the cgame tune cvars. Standing uses
         // cg_adsShiftX/Y; while crouched ADD cg_adsCrouchShiftX/Y so the whole weapon view (hands + gun)
@@ -6729,6 +7181,10 @@ static int CG_CalcFov(void)
                 float fAdsF = CG_AdsPoseFactor();
                 float fCrB  = CG_AdsCrouchBlend();
                 adsT    = (cg_adsTune && cg_adsTune->integer) ? NULL : CG_FindAdsTune(adsWpn);
+                if (CG_AdsRigSolveOwns()) { adsT = &s_adsZeroTuneV; } // HZM coop [ironsights 2026-09-28] sights on axis: no NDC shift
+                if (cgi.Cvar_Get("cg_adsAnimGateTable", "1", CVAR_ARCHIVE)->integer) {
+                    fAdsF *= CG_AdsAnimGate(); // HZM coop [ironsights 2026-09-28] a reload/switch while aimed eases the table shift out
+                }
                 fShiftX = adsT ? adsT->sShiftX : (cg_adsShiftX ? cg_adsShiftX->value : 0.0f);
                 fShiftY = adsT ? adsT->sShiftY : (cg_adsShiftY ? cg_adsShiftY->value : 0.0f);
                 fShiftX += (adsT ? adsT->cShiftX : (cg_adsCrouchShiftX ? cg_adsCrouchShiftX->value : 0.0f)) * fCrB;
@@ -6739,6 +7195,35 @@ static int CG_CalcFov(void)
                 // still read as a non-zero shift to anything testing the cvar.
                 if (fabs(fShiftX) < 0.0001f) { fShiftX = 0.0f; }
                 if (fabs(fShiftY) < 0.0001f) { fShiftY = 0.0f; }
+                // HZM coop [ironsights 2026-09-28] ASPECT/FOV-INVARIANT TABLE SHIFT. r_weaponshiftx/y are an
+                // NDC offset of the weapon projection, so a row dialled at one aspect ratio + FOV points
+                // somewhere else at every other (NDC = slope / tan(half weapon fov)). The table values are
+                // kept exactly as dialled and re-expressed as the SLOPE they had at the setup they were
+                // dialled at (cg_adsRef*: 3440x1440, fov 80, cg_adsZoom 0.5, cg_adsGunZoom 0.3), then turned
+                // back into NDC for the current setup. Identical at the reference setup by construction.
+                // Guns with a sight row (cg_adssights.h) overwrite the shift later this frame anyway.
+                {
+                    static cvar_t *pInv = NULL, *pRA = NULL, *pRF = NULL, *pRZ = NULL, *pRG = NULL;
+                    if (!pInv) {
+                        pInv = cgi.Cvar_Get("cg_adsShiftInvariant", "1", CVAR_ARCHIVE);
+                        pRA  = cgi.Cvar_Get("cg_adsRefAspect", "2.388889", 0);
+                        pRF  = cgi.Cvar_Get("cg_adsRefFov", "80", 0);
+                        pRZ  = cgi.Cvar_Get("cg_adsRefZoom", "0.5", 0);
+                        pRG  = cgi.Cvar_Get("cg_adsRefGunZoom", "0.3", 0);
+                    }
+                    if (pInv->integer && fWeaponFov > 1.0f && cg.refdef.width > 0 && cg.refdef.height > 0) {
+                        float fRefX  = 2.0f * RAD2DEG(atan(tan(DEG2RAD(pRF->value * 0.5f)) * pRA->value * 0.75f));
+                        float fRefW  = fRefX * (1.0f - (1.0f - pRZ->value) * pRG->value);
+                        float tRefX  = tan(DEG2RAD(fRefW * 0.5f));
+                        float tRefY  = tRefX / pRA->value;
+                        float tCurX  = tan(DEG2RAD(fWeaponFov * 0.5f));
+                        float tCurY  = tCurX * (float)cg.refdef.height / (float)cg.refdef.width;
+                        if (tCurX > 0.01f && tCurY > 0.01f) {
+                            fShiftX *= tRefX / tCurX;
+                            fShiftY *= tRefY / tCurY;
+                        }
+                    }
+                }
                 cgi.Cvar_Set("r_weaponshiftx", va("%g", fShiftX));
                 cgi.Cvar_Set("r_weaponshifty", va("%g", fShiftY));
             }
@@ -8597,6 +9082,7 @@ void CG_AdsFactorAdvance(void)
     if (fabs(s_adsCrouchCur - tgt) < 0.002f) {
         s_adsCrouchCur = tgt;
     }
+    CG_AdsRigAdvance(); // HZM coop [ironsights 2026-09-28] rig blend + animation gate followers
 }
 
 // HZM coop [user 2026-08-27] PER-GUN HANDLING, WITHOUT INVENTING A SINGLE NUMBER.

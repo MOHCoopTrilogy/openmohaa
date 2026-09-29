@@ -1663,6 +1663,366 @@ const adsGunTune_t *CG_FindAdsTune(const char *wpn)
     return NULL;
 }
 
+
+/*
+=================================================================================================
+HZM coop [ironsights 2026-09-28] PER-FRAME IRON-SIGHT SOLVE.
+
+"Are you capable of getting all guns perfectly aligned to their iron sights when in crouch, stand,
+lean (left and right) and prone?"
+
+The bullet leaves along the camera's final ray (Weapon::GetMuzzlePosition uses the eye position and
+pitch/yaw the client sends each packet, which are cg.playerHeadPos / cg.refdefViewAngles), so the
+point of impact is the SCREEN CENTRE in every stance. The sights are aligned when the AIM feature F
+(front post tip / hood centre) projects to the centre and the REAR feature R projects onto it
+(delta below it for the few guns with no post/notch pair).
+
+The hand-dialled s_adsGunTune rows got there by eye, one stance at a time, and they paid for it
+twice: prone and lean had no rows at all, and the screen shift is an NDC offset, so a row dialled
+at 3440x1440 / fov 80 is off at any other aspect ratio or FOV slider value (a 16:9 player with the
+Garand crouched was ~200 px off, predicted and measured - docs/proposals/ironsights_2026-09-28).
+
+This solves it instead of dialling it, every frame, from the gun's own geometry:
+  1. F and R are fixed points in weapon model space, extracted from the shipped mesh (generated
+     table cg_adssights.h, one row per weapon TIKI, so variant meshes get their own geometry).
+  2. The gun is taken in its CLEAN pose: the rig exactly as the camera placed it, before any feel
+     layer (CG_AdsCleanRig, cg_view.c). Sway, recoil, bob, lag, tremor and flinch are applied
+     AFTER, so they still move the picture exactly as designed - the solve never fights them.
+  3. Starting from the hand-tuned table rotation (so the user's cant and framing are kept), a 2x2
+     Newton solve finds the extra pitch/yaw about the GRIP (model.origin, the same pivot the table
+     uses) that makes R land on F in the camera's own left/up frame - which is roll-aware, so a
+     leaning camera needs nothing special.
+  4. The screen shift is then COMPUTED, not tuned: shift = slope / tan(current weapon fov), so the
+     aligned F lands on the centre at any aspect ratio and any FOV.
+cg_adsSightSolve: 0 off (table as before), 1 solve, 2 PROBE ONLY (compute + print, change nothing -
+reproduces the shipped picture and reports its error). cg_adsSightDebug 1 prints ^~^~^ ADSSIGHT.
+=================================================================================================
+*/
+#include "cg_adssights.h"
+
+static const adsSight_t *CG_FindAdsSight(const char *tikiName)
+{
+    int i;
+
+    if (!tikiName || !*tikiName) {
+        return NULL;
+    }
+    for (i = 0; i < (int)(sizeof(s_adsSights) / sizeof(s_adsSights[0])); i++) {
+        if (!Q_stricmp(tikiName, s_adsSights[i].tiki)) {
+            return &s_adsSights[i];
+        }
+    }
+    return NULL;
+}
+
+static void AdsSightWorld(const float *p, float scale, const vec3_t org, vec3_t axis[3], vec3_t out)
+{
+    int i;
+
+    VectorCopy(org, out);
+    for (i = 0; i < 3; i++) {
+        VectorMA(out, p[i] * scale, axis[i], out);
+    }
+}
+
+// rotate v (a direction) by pitch a about cam[1] (left) then yaw b about cam[2] (up), degrees
+static void AdsSightRotDir(const vec3_t in, vec3_t cam[3], float a, float b, vec3_t out)
+{
+    vec3_t t;
+
+    if (a != 0.0f) {
+        RotatePointAroundVector(t, cam[1], in, a);
+    } else {
+        VectorCopy(in, t);
+    }
+    if (b != 0.0f) {
+        RotatePointAroundVector(out, cam[2], t, b);
+    } else {
+        VectorCopy(t, out);
+    }
+}
+
+static void AdsSightRotPoint(const vec3_t P, const vec3_t G, vec3_t cam[3], float a, float b, vec3_t out)
+{
+    vec3_t d, r;
+
+    VectorSubtract(P, G, d);
+    AdsSightRotDir(d, cam, a, b, r);
+    VectorAdd(G, r, out);
+}
+
+// tangent-plane coordinates of a point: (left/forward, up/forward)
+static void AdsSightProj(const vec3_t P, const vec3_t E, vec3_t cam[3], float *pl, float *pu)
+{
+    vec3_t d;
+    float  f;
+
+    VectorSubtract(P, E, d);
+    f = DotProduct(d, cam[0]);
+    if (f < 0.05f) {
+        f = 0.05f;
+    }
+    *pl = DotProduct(d, cam[1]) / f;
+    *pu = DotProduct(d, cam[2]) / f;
+}
+
+static void AdsSightResid(
+    const vec3_t Fw, const vec3_t Rw, const vec3_t G, const vec3_t E, vec3_t cam[3], float a, float b, float delta,
+    float *r0, float *r1
+)
+{
+    vec3_t F2, R2;
+    float  fl, fu, rl, ru;
+
+    AdsSightRotPoint(Fw, G, cam, a, b, F2);
+    AdsSightRotPoint(Rw, G, cam, a, b, R2);
+    AdsSightProj(F2, E, cam, &fl, &fu);
+    AdsSightProj(R2, E, cam, &rl, &ru);
+    *r0 = rl - fl;
+    *r1 = (ru - fu) + delta;
+}
+
+static void CG_AdsSightSolve(refEntity_t *model, refEntity_t *parent, float fPose, const char *wpn)
+{
+    static cvar_t *pSolve = NULL, *pDbg = NULL, *pSx = NULL, *pSy = NULL;
+    static int     s_iLastPrint = 0;
+    const adsSight_t *s;
+    const char       *tikiName;
+    vec3_t            cam[3], E, cOrg, cAxis[3], G, Fw, Rw, Fs;
+    vec3_t            rigAxis[3], lo;
+    float             lax[3][3];
+    float             a = 0.0f, b = 0.0f, r0, r1, r00, r10, scale;
+    float             tanWx, tanWy, kl, ku, shx = 0.0f, shy = 0.0f;
+    int               it, i, k;
+    qboolean          bClean;
+
+    if (!pSolve) {
+        pSolve = cgi.Cvar_Get("cg_adsSightSolve", "1", CVAR_ARCHIVE);
+        pDbg   = cgi.Cvar_Get("cg_adsSightDebug", "0", 0);
+        pSx    = cgi.Cvar_Get("cg_adsSightSignX", "-1", 0); // +1 if a positive r_weaponshiftx moves the gun RIGHT. gl2: x_clip = m0*right + m8*z_eye, z_eye = -fwd -> +shift moves LEFT
+        pSy    = cgi.Cvar_Get("cg_adsSightSignY", "1", 0);  // +1 if a positive r_weaponshifty moves the gun DOWN (matches the renderer comment)
+    }
+    if (!pSolve->integer || !model->tiki || fPose <= 0.001f) {
+        return;
+    }
+    tikiName = cgi.TIKI_Name(model->tiki);
+    s        = CG_FindAdsSight(tikiName);
+    if (!s) {
+        static int s_iMissPrint = 0;
+        if (pDbg->integer && cg.time - s_iMissPrint >= 1000) {
+            s_iMissPrint = cg.time;
+            cgi.Printf("^~^~^ ADSSIGHT norow wpn='%s' tiki='%s'\n", wpn ? wpn : "", tikiName ? tikiName : "");
+        }
+        return;
+    }
+
+    AnglesToAxis(cg.refdefViewAngles, cam);
+    VectorCopy(cg.refdef.vieworg, E);
+    scale = (model->scale > 0.0f) ? model->scale : 1.0f;
+
+    // the gun in its CLEAN pose: re-express the attached gun in its rig's frame, then place that on
+    // the clean rig. Falls back to the drawn pose when no clean rig was captured this frame.
+    bClean = CG_AdsCleanRig(cOrg, rigAxis);
+    if (bClean && parent) {
+        vec3_t d;
+        VectorSubtract(model->origin, parent->origin, d);
+        for (i = 0; i < 3; i++) {
+            lo[i] = DotProduct(d, parent->axis[i]);
+        }
+        for (k = 0; k < 3; k++) {
+            for (i = 0; i < 3; i++) {
+                lax[k][i] = DotProduct(model->axis[k], parent->axis[i]);
+            }
+        }
+        VectorCopy(cOrg, G);
+        for (i = 0; i < 3; i++) {
+            VectorMA(G, lo[i], rigAxis[i], G);
+        }
+        for (k = 0; k < 3; k++) {
+            VectorClear(cAxis[k]);
+            for (i = 0; i < 3; i++) {
+                VectorMA(cAxis[k], lax[k][i], rigAxis[i], cAxis[k]);
+            }
+        }
+    } else {
+        VectorCopy(model->origin, G);
+        AxisCopy(model->axis, cAxis);
+    }
+    AdsSightWorld(s->F, scale, G, cAxis, Fw);
+    AdsSightWorld(s->R, scale, G, cAxis, Rw);
+
+    // Newton on (pitch, yaw) about the grip, from the current (hand-tuned) orientation
+    AdsSightResid(Fw, Rw, G, E, cam, 0, 0, s->delta, &r00, &r10);
+    r0 = r00;
+    r1 = r10;
+    for (it = 0; it < 8 && (fabs(r0) > 1e-7f || fabs(r1) > 1e-7f); it++) {
+        const float h = 0.05f;
+        float       j00, j01, j10, j11, e0, e1, det, da, db;
+        AdsSightResid(Fw, Rw, G, E, cam, a + h, b, s->delta, &e0, &e1);
+        j00 = (e0 - r0) / h;
+        j10 = (e1 - r1) / h;
+        AdsSightResid(Fw, Rw, G, E, cam, a, b + h, s->delta, &e0, &e1);
+        j01 = (e0 - r0) / h;
+        j11 = (e1 - r1) / h;
+        det = j00 * j11 - j01 * j10;
+        if (fabs(det) < 1e-12f) {
+            break;
+        }
+        da = (-r0 * j11 + r1 * j01) / det;
+        db = (-r1 * j00 + r0 * j10) / det;
+        if (da > 10.0f) { da = 10.0f; } else if (da < -10.0f) { da = -10.0f; }
+        if (db > 10.0f) { db = 10.0f; } else if (db < -10.0f) { db = -10.0f; }
+        a += da;
+        b += db;
+        AdsSightResid(Fw, Rw, G, E, cam, a, b, s->delta, &r0, &r1);
+    }
+    if (a > 45.0f || a < -45.0f || b > 45.0f || b < -45.0f) {
+        return; // a pathological pose (the gun is not in front of the eye): leave the table alone
+    }
+
+    // the screen shift that puts the aligned aim point on the centre, from the CURRENT weapon fov
+    AdsSightRotPoint(Fw, G, cam, a, b, Fs);
+    AdsSightProj(Fs, E, cam, &kl, &ku);
+    tanWx = (float)tan(DEG2RAD(cg_fAdsWeaponFov * 0.5f));
+    tanWy = tanWx * (float)cg.refdef.height / (float)(cg.refdef.width > 0 ? cg.refdef.width : 1);
+    if (tanWx > 0.01f && tanWy > 0.01f) {
+        shx = pSx->value * kl / tanWx;
+        shy = pSy->value * ku / tanWy;
+    }
+
+    if (pSolve->integer == 1) {
+        vec3_t v;
+        for (k = 0; k < 3; k++) {
+            AdsSightRotDir(model->axis[k], cam, a * fPose, b * fPose, v);
+            VectorCopy(v, model->axis[k]);
+        }
+        cgi.Cvar_Set("r_weaponshiftx", va("%g", shx * fPose));
+        cgi.Cvar_Set("r_weaponshifty", va("%g", shy * fPose));
+    }
+
+    if (pDbg->integer && cg.time - s_iLastPrint >= 200) {
+        // predicted screen position (pixels from centre, +right +down) of F and R in the picture that is
+        // actually drawn this frame: mode 1 = after the solve, mode 2 = the shipped picture untouched
+        float  fl, fu, rl, ru, curSx, curSy, fpx, fpy, rpx, rpy, hw, hh;
+        vec3_t F2, R2;
+        s_iLastPrint = cg.time;
+        if (pSolve->integer == 1) {
+            AdsSightRotPoint(Fw, G, cam, a * fPose, b * fPose, F2);
+            AdsSightRotPoint(Rw, G, cam, a * fPose, b * fPose, R2);
+            curSx = shx * fPose;
+            curSy = shy * fPose;
+        } else {
+            // the picture actually drawn: the gun where CG_AttachEntity (and any table rotation) left it
+            AdsSightWorld(s->F, scale, model->origin, model->axis, F2);
+            AdsSightWorld(s->R, scale, model->origin, model->axis, R2);
+            curSx = cgi.Cvar_Get("r_weaponshiftx", "0", 0)->value;
+            curSy = cgi.Cvar_Get("r_weaponshifty", "0", 0)->value;
+        }
+        AdsSightProj(F2, E, cam, &fl, &fu);
+        AdsSightProj(R2, E, cam, &rl, &ru);
+        hw  = cg.refdef.width * 0.5f;
+        hh  = cg.refdef.height * 0.5f;
+        fpx = (-fl / tanWx + pSx->value * curSx) * hw;
+        fpy = (-fu / tanWy + pSy->value * curSy) * hh;
+        rpx = (-rl / tanWx + pSx->value * curSx) * hw;
+        rpy = (-ru / tanWy + pSy->value * curSy) * hh;
+        cgi.Printf(
+            "^~^~^ ADSSIGHT mode=%d wpn='%s' tiki='%s' clean=%d pose=%.3f pmf=0x%x lean=%.1f pitch=%.2f "
+            "res0=(%.3f %.3f)mrad res=(%.4f %.4f)mrad d=(%.3f %.3f)deg shift=(%.4f %.4f) wfov=%.2f "
+            "F=(%.2f %.2f)px R=(%.2f %.2f)px res=%dx%d\n",
+            pSolve->integer, wpn ? wpn : "", tikiName, (int)bClean, fPose, cg.predicted_player_state.pm_flags,
+            cg.predicted_player_state.fLeanAngle, cg.refdefViewAngles[PITCH], r00 * 1000.0f, r10 * 1000.0f,
+            r0 * 1000.0f, r1 * 1000.0f, a, b, shx, shy, cg_fAdsWeaponFov, fpx, fpy, rpx, rpy, cg.refdef.width,
+            cg.refdef.height
+        );
+    }
+}
+
+// HZM coop [ironsights 2026-09-28] PER-FRAME TRACE of the DRAWN gun (cg_adsSightDebug 2), in every state - hip, the
+// transitions, fire, reload - and in both modes, so smoothness can be measured frame by frame: screen position (px
+// from the centre, +right +down) of the aim feature F, the rear feature R and the grip G, as the renderer draws them
+// (weapon fov + the NDC shift in force this frame). Called after every gun-level rotation (droop, lag, inspect).
+static void CG_AdsSightTrace(refEntity_t *model)
+{
+    static cvar_t    *pDbg = NULL, *pSx = NULL, *pSy = NULL, *pShx = NULL, *pShy = NULL;
+    const adsSight_t *s;
+    vec3_t            cam[3], E, P[3], d;
+    float             scale, tanWx, tanWy, hw, hh, px[3], py[3], shx, shy, f;
+    int               i, k;
+
+    if (!pDbg) {
+        pDbg = cgi.Cvar_Get("cg_adsSightDebug", "0", 0);
+        pSx  = cgi.Cvar_Get("cg_adsSightSignX", "-1", 0);
+        pSy  = cgi.Cvar_Get("cg_adsSightSignY", "1", 0);
+        pShx = cgi.Cvar_Get("r_weaponshiftx", "0", 0);
+        pShy = cgi.Cvar_Get("r_weaponshifty", "0", 0);
+    }
+    if (pDbg->integer < 1 || !model->tiki) {
+        return;
+    }
+    if (pDbg->integer == 1) {           // static sweeps: one line per 200 ms is enough
+        static int s_iLastT = 0;
+        if (cg.time - s_iLastT < 200 && cg.time >= s_iLastT) {
+            return;
+        }
+        s_iLastT = cg.time;
+    }
+    s = CG_FindAdsSight(cgi.TIKI_Name(model->tiki));
+    if (!s) {
+        return;
+    }
+    AnglesToAxis(cg.refdefViewAngles, cam);
+    VectorCopy(cg.refdef.vieworg, E);
+    scale = (model->scale > 0.0f) ? model->scale : 1.0f;
+    AdsSightWorld(s->F, scale, model->origin, model->axis, P[0]);
+    AdsSightWorld(s->R, scale, model->origin, model->axis, P[1]);
+    VectorCopy(model->origin, P[2]);
+    tanWx = (float)tan(DEG2RAD(cg_fAdsWeaponFov * 0.5f));
+    tanWy = tanWx * (float)cg.refdef.height / (float)(cg.refdef.width > 0 ? cg.refdef.width : 1);
+    hw    = cg.refdef.width * 0.5f;
+    hh    = cg.refdef.height * 0.5f;
+    shx   = pShx->value;
+    shy   = pShy->value;
+    for (i = 0; i < 3; i++) {
+        VectorSubtract(P[i], E, d);
+        f = DotProduct(d, cam[0]);
+        if (f < 0.05f) {
+            f = 0.05f;
+        }
+        px[i] = (-DotProduct(d, cam[1]) / f / tanWx + pSx->value * shx) * hw;
+        py[i] = (-DotProduct(d, cam[2]) / f / tanWy + pSy->value * shy) * hh;
+    }
+    // ANGLES of the drawn gun vs the view (degrees): sight line R->F, bore (model +X), cant (gun up vs screen up),
+    // and eye relief (eye -> rear sight along the view, units) [user 2026-09-28: no visible yaw or cant]
+    {
+        vec3_t sl, bo, up, pr;
+        float  sy, sp, by, bp, ct, rel;
+        VectorSubtract(P[0], P[1], sl);
+        VectorNormalize(sl);
+        VectorCopy(model->axis[0], bo);
+        VectorNormalize(bo);
+        VectorClear(up);
+        for (k = 0; k < 3; k++) {
+            VectorMA(up, s->U[k], model->axis[k], up);
+        }
+        VectorMA(up, -DotProduct(up, cam[0]), cam[0], pr);
+        sy  = RAD2DEG(atan2(DotProduct(sl, cam[1]), DotProduct(sl, cam[0])));
+        sp  = RAD2DEG(atan2(DotProduct(sl, cam[2]), DotProduct(sl, cam[0])));
+        by  = RAD2DEG(atan2(DotProduct(bo, cam[1]), DotProduct(bo, cam[0])));
+        bp  = RAD2DEG(atan2(DotProduct(bo, cam[2]), DotProduct(bo, cam[0])));
+        ct  = RAD2DEG(atan2(DotProduct(pr, cam[1]), DotProduct(pr, cam[2])));
+        VectorSubtract(P[1], E, d);
+        rel = DotProduct(d, cam[0]);
+        cgi.Printf("^~^~^ ADSFRAME t=%d ft=%d pose=%.4f w=%.4f gate=%.4f anim=%d pmf=0x%x lean=%.2f "
+                   "F=(%.3f %.3f) R=(%.3f %.3f) G=(%.3f %.3f) wfov=%.3f sh=(%.4f %.4f) "
+                   "sight=(%.3f %.3f) bore=(%.3f %.3f) cant=%.3f relief=%.3f\n",
+                   cg.time, cg.frametime, CG_AdsPoseFactor(), CG_AdsRigWeight(), CG_AdsAnimGate(),
+                   cg.snap ? cg.snap->ps.iViewModelAnim : -1, cg.predicted_player_state.pm_flags,
+                   cg.predicted_player_state.fLeanAngle, px[0], py[0], px[1], py[1], px[2], py[2], cg_fAdsWeaponFov,
+                   shx, shy, sy, sp, by, bp, ct, rel);
+    }
+}
+
 /*
 ===============
 CG_ModelAnim
@@ -2561,6 +2921,9 @@ void CG_ModelAnim(centity_t *cent, qboolean bDoShaderTime)
                 // s1->parent);` guard (:2847) already honours - never on "the tag is not
                 // tag_weapon_right".
                 s_fAdsPose = CG_AdsPoseFactor();
+                if (cgi.Cvar_Get("cg_adsAnimGateTable", "1", CVAR_ARCHIVE)->integer) {
+                    s_fAdsPose *= CG_AdsAnimGate(); // HZM coop [ironsights 2026-09-28] reload/switch while aimed: ease the table rotation out
+                }
                 {
                     static cvar_t *pCoopQDrawOn = NULL;
 
@@ -2586,6 +2949,12 @@ void CG_ModelAnim(centity_t *cent, qboolean bDoShaderTime)
                     // (cg_adsTune 1) ignores the table and uses the global cg_ads* cvars so the held gun can
                     // be dialled live; any gun NOT in the table also falls back to those globals.
                     adsT      = tune ? NULL : CG_FindAdsTune(adsWpn);
+                    // HZM coop [ironsights 2026-09-28] the rig solve moved hands AND gun onto the sight line;
+                    // a gun-only rotation on top would pull the gun out of the support hand again
+                    if (CG_AdsRigSolveOwns()) {
+                        static const adsGunTune_t s_adsZeroTuneM = {"", 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+                        adsT = &s_adsZeroTuneM;
+                    }
                     fAdsPitch = adsT ? adsT->sPitch : (cg_adsPitch ? cg_adsPitch->value : 0.0f);
                     fAdsYaw   = adsT ? adsT->sYaw   : (cg_adsYaw   ? cg_adsYaw->value   : 0.0f);
                     fAdsRoll  = adsT ? adsT->sRoll  : (cg_adsRoll  ? cg_adsRoll->value  : 0.0f);
@@ -2665,6 +3034,9 @@ void CG_ModelAnim(centity_t *cent, qboolean bDoShaderTime)
                             VectorCopy(vAdsB, model.axis[2]);
                         }
                     }
+                    // HZM coop [ironsights 2026-09-28] exact per-frame sight alignment on top of the
+                    // hand-tuned rotation above (which stays the starting pose); see CG_AdsSightSolve
+                    CG_AdsSightSolve(&model, parent, s_fAdsPose, adsWpn);
                 }
 
                 // [weight 6, user 2026-09-04, bug-2458] MUZZLE DROOP - NOW GENUINELY OUTSIDE THE ADS GATE.
@@ -2777,6 +3149,10 @@ void CG_ModelAnim(centity_t *cent, qboolean bDoShaderTime)
                         VectorCopy(vInA, model.axis[1]);
                         VectorCopy(vInB, model.axis[2]);
                     }
+                }
+
+                if (!Q_stricmp(szTagName, "tag_weapon_right")) {
+                    CG_AdsSightTrace(&model); // HZM coop [ironsights 2026-09-28] cg_adsSightDebug 2: per-frame drawn-sight trace
                 }
 
                 // HZM coop [user 2026-09-05] THE PARKED PRIMARY. Last statement in the branch on
@@ -3315,7 +3691,8 @@ void CG_ModelAnim(centity_t *cent, qboolean bDoShaderTime)
                                         ? qtrue : qfalse;
                     }
                     if (pHideOff && pHideOff->integer && !bSkipThisGun && s_bOffHandHidden
-                        && !bHandBusy) {
+                        && !bHandBusy
+                        && !(CG_AdsRigSolveOwns() && !cgi.Cvar_Get("cg_adsHideOffHandRig", "0", CVAR_ARCHIVE)->integer)) {
                         iSurfaceNum = cgi.Surface_NameToNum(model.tiki, "lefthand");
                         if (iSurfaceNum >= 0) {
                             model.surfaces[iSurfaceNum] |= MDL_SURFACE_NODRAW;

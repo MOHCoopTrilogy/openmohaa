@@ -676,6 +676,15 @@ const adsGunTune_t *CG_FindAdsTune(const char *wpn);
     qboolean CG_MpRealismOffActive(int iBit); // HZM MP - host realism toggle active for this bit (MP only; 0 in coop)
     qboolean CG_AdsForceFirstPerson(void); // HZM coop - staged 3P ADS: "render FIRST person this frame" (camera + own-model draw MUST both use this)
     void  CG_AdsFactorAdvance(void); // HZM coop - advance the ONE ADS ease; called once per frame from CG_DrawActiveFrame BEFORE any consumer
+    // HZM coop [ironsights 2026-09-28] clean first-person rig (before any feel layer) for the per-frame
+    // sight solve, and the weapon fov the renderer is using this frame (published by CG_CalcFov).
+    qboolean CG_AdsCleanRig(vec3_t org, vec3_t axis[3]);
+    // HZM coop [ironsights 2026-09-28] rig-level sight solve: owns this gun / per-frame smoothing / weights
+    qboolean CG_AdsRigSolveOwns(void);
+    void     CG_AdsRigAdvance(void);
+    float    CG_AdsAnimGate(void);   // 1 = aim pose (idle/charge/fire/rechamber), eases to 0 for reload/switch/ladder
+    float    CG_AdsRigWeight(void);  // applied rig-correction weight = eased ADS blend * animation gate
+    extern float cg_fAdsWeaponFov;
     float CG_AdsPoseFactor(void);    // HZM coop - 0 = hip, 1 = full sight alignment. The only ADS ease; rotation, shift and zoom all read it
     float CG_AdsCrouchBlend(void);   // HZM coop - 0 = standing, 1 = crouched, eased (PMF_DUCKED is binary and the crouch tune is up to 43 deg)
     void  CG_FeelStressAdvance(void); // HZM coop - advance the shared feel-context scalar; once per frame, before consumers
