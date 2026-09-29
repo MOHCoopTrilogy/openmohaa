@@ -20,6 +20,31 @@ varying vec4      var_Color;
 uniform vec4      u_GlobalFogColor;
 uniform vec4      u_GlobalFogParams;
 
+// HZM coop [2026-09-27] realistic lightning: fog IN-SCATTER toward the strike (tr_hzm_lightning.c). The lit cloud
+// region lights the haze between it and the eye, so fogged distance in the strike's direction brightens in a 35-degree
+// lobe - never a flat band. u_HzmLtFog = (strike direction in EYE space, energy); w 0 = inert (the default: every
+// uniform starts at 0), so with lightning off the fog colour below is exactly u_GlobalFogColor.rgb.
+uniform vec4      u_HzmLtFog;
+uniform vec4      u_HzmLtView;
+uniform vec4      u_HzmLtProj;
+
+vec3 HzmLtFogColor()
+{
+	vec3 fogCol = u_GlobalFogColor.rgb;
+
+	if (u_HzmLtFog.w > 0.0)
+	{
+		vec2  ndc = (gl_FragCoord.xy - u_HzmLtView.xy) * u_HzmLtView.zw * 2.0 - 1.0;
+		vec3  ray = normalize(vec3(ndc.x * u_HzmLtProj.x, ndc.y * u_HzmLtProj.y, -1.0));
+		float ang = acos(clamp(dot(ray, u_HzmLtFog.xyz), -1.0, 1.0));
+		float lob = exp(-0.5 * ang * ang / (0.611 * 0.611));
+
+		fogCol += vec3(0.86, 0.90, 1.0) * (u_HzmLtFog.w * (lob + 0.10));
+	}
+
+	return fogCol;
+}
+
 vec3 ApplyGlobalFog(vec3 color)
 {
 	if (u_GlobalFogColor.a <= 0.0)
@@ -35,7 +60,7 @@ vec3 ApplyGlobalFog(vec3 color)
 
 	vec3 operand = (frac > 0.0) ? clamp(color, 0.0, 1.0) : color;
 
-	return mix(operand, u_GlobalFogColor.rgb, frac);
+	return mix(operand, HzmLtFogColor(), frac);
 }
 
 // HZM gl2 soft particles (r_softParticles). u_ScreenDepthMap is the scene-depth snapshot bound on

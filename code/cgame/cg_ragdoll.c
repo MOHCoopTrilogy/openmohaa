@@ -52,6 +52,7 @@ typedef struct ragSim_s ragSim_t;
 typedef struct ragPend_s ragPend_t;
 static void RagPendingThink(ragPend_t *p);
 static ragSim_t *RagAllocSlot(int entnum);
+static qboolean RagServerParked(const entityState_t *es);
 
 #define RAG_MAX_SIMS   16
 #define RAG_MAX_CH     128
@@ -267,6 +268,16 @@ struct ragSim_s {
 
     byte     freezePose;           // coop_ragdollTest 2: push the capture verbatim, no sim -
                                    // a pure space/round-trip test (any warp = render defect)
+
+    // ragdoll_2026-09-27 latches (set once in RagCapture, never re-read from the cvars during this life)
+    byte     fxCarry;              // coop_ragdollCarryWake
+    byte     fxRest;               // coop_ragdollRestFix (only with fxCarry: a sleeping body must still ride tosses)
+    byte     fxFace;               // coop_ragdollFaceFix actually applied (human rig)
+    byte     fxCap;                // coop_ragdollKeepCap
+    float    faceDot[2];           // the entity-forward dots the old faceSign test used (diagnostic)
+    vec3_t   restRef[RAG_PTS];     // windowed-rest reference cloud
+    int      restRefMs;            // lifeMs when restRef was taken
+    byte     restRefValid;
 };
 
 // A pending record: a corpse whose authored death animation is still playing. Kept OUT of the sim
@@ -352,6 +363,16 @@ static cvar_t  *rag_buriedmax = NULL;
 static cvar_t  *rag_feet     = NULL;
 static cvar_t  *rag_limits   = NULL;
 static cvar_t  *rag_self     = NULL;
+// ragdoll_2026-09-27 Phase 0.5 + Phase 1 (docs/proposals/ragdoll_2026-09-27/plan.md). Every one is flags 0 (never
+// archived, TRAPS T7), so a default change reaches every player with no migration. Default ON since v1.10.3: the
+// in-engine A/B on the candidate set passed (plan.md s6.7; median corpse sleep 6013 -> 816 ms, fx latched on 10/10
+// corpses, 0 blowups / Script Errors). Setting one to 0 restores the v1.4.1 behaviour of that piece. They are LATCHED
+// per corpse at capture, so a toggle applies to bodies that die after it (vet V17).
+static cvar_t  *rag_rearmgate = NULL; // bug-3132: re-arm-on-impact obeys the settle hand-off (parked, no pending)
+static cvar_t  *rag_carrywake = NULL; // bug-3133: toss carry + wake run BEFORE the sleep early-out
+static cvar_t  *rag_facefix   = NULL; // bug-3127: faceSign = +1 on human rigs (the entity-forward test is noise lying)
+static cvar_t  *rag_keepcap   = NULL; // bug-3129: keep the capture-widened limit range for the corpse's life
+static cvar_t  *rag_restfix   = NULL; // bug-3128: windowed sleep (0.5u / 300 ms) - needs coop_ragdollCarryWake
 
 static void RagCvars(void)
 {
@@ -418,6 +439,11 @@ static void RagCvars(void)
         // already tied together. 0 = off, 1 = full anatomical radii, 0.85 leaves a little
         // slack so a corpse can still lie with its arm against its chest.
         rag_self = cgi.Cvar_Get("coop_ragdollSelf", "0.85", CVAR_TEMP);
+        rag_rearmgate = cgi.Cvar_Get("coop_ragdollRearmGate", "1", 0);
+        rag_carrywake = cgi.Cvar_Get("coop_ragdollCarryWake", "1", 0);
+        rag_facefix   = cgi.Cvar_Get("coop_ragdollFaceFix", "1", 0);
+        rag_keepcap   = cgi.Cvar_Get("coop_ragdollKeepCap", "1", 0);
+        rag_restfix   = cgi.Cvar_Get("coop_ragdollRestFix", "1", 0);
     }
 }
 
@@ -820,6 +846,15 @@ static void RagLimitFrames(ragSim_t *s, float T0[3][3], float T2[3][3], qboolean
 
 
 
+// The anatomical limit table and the faceSign = +1 derivation are for the Bip01 HUMAN rig. Other rigs that happen to
+// carry all 17 Bip01 names (models/animal/dog/german_shepherd.skd - vet V13) keep today's behaviour exactly.
+// Actor tikis are composite names ("weapon|L|headmodel|...|models/human/...tik", bug-1880), hence a substring test.
+static qboolean RagIsHumanRig(dtiki_t *tiki)
+{
+    const char *nm = (tiki && cgi.TIKI_Name) ? cgi.TIKI_Name(tiki) : NULL;
+    return (nm && Q_stristr(nm, "models/human/")) ? qtrue : qfalse;
+}
+
 static qboolean RagCapture(centity_t *cent, entityState_t *ns, ragSim_t *s)
 {
     refEntity_t   model;
@@ -859,6 +894,12 @@ static qboolean RagCapture(centity_t *cent, entityState_t *ns, ragSim_t *s)
 
     s->tiki  = model.tiki;
     s->scale = model.scale;
+    // latch the A/B switches for this corpse's whole life (vet V17)
+    s->fxCarry      = rag_carrywake->integer ? 1 : 0;
+    s->fxRest       = (rag_restfix->integer && s->fxCarry) ? 1 : 0;
+    s->fxCap        = rag_keepcap->integer ? 1 : 0;
+    s->fxFace       = 0;
+    s->restRefValid = 0;
     VectorCopy(cent->lerpOrigin, s->entOrigin);
     AnglesToAxis(cent->lerpAngles, s->entAxis);
 
@@ -1074,9 +1115,19 @@ static qboolean RagCapture(centity_t *cent, entityState_t *ns, ragSim_t *s)
         // corpse's facing at death
         s->faceSign[0] = s->faceSign[1] = 1.0f;
         RagBodyTriad(s->pt[1], s->pt[0], s->pt[13], s->pt[11], 1.0f, T[0]);
-        s->faceSign[0] = (DotProduct(T[0][0], s->entAxis[0]) >= 0.0f) ? 1.0f : -1.0f;
+        s->faceDot[0]  = DotProduct(T[0][0], s->entAxis[0]);
+        s->faceSign[0] = (s->faceDot[0] >= 0.0f) ? 1.0f : -1.0f;
         RagBodyTriad(s->pt[3], s->pt[2], s->pt[8], s->pt[5], 1.0f, T[1]);
-        s->faceSign[1] = (DotProduct(T[1][0], s->entAxis[0]) >= 0.0f) ? 1.0f : -1.0f;
+        s->faceDot[1]  = DotProduct(T[1][0], s->entAxis[0]);
+        s->faceSign[1] = (s->faceDot[1] >= 0.0f) ? 1.0f : -1.0f;
+        // [bug-3127] The dot above was written for mode 3, which captured a STANDING soldier. The settle branch
+        // captures a LYING one: F points at the sky or the floor, |dot| is ~0 and the sign follows the animator's
+        // tilt - 25 of 33 retail death anims get a mirrored triad and the limits then fight the shape-match
+        // forever. L comes from the L/R socket LABELS, so +1 is the anatomically right sign in every orientation.
+        if (rag_facefix->integer && RagIsHumanRig(s->tiki)) {
+            s->faceSign[0] = s->faceSign[1] = 1.0f;
+            s->fxFace = 1;
+        }
         RagLimitFrames(s, T[0], T[1], tok);
 
         for (k = 0; k < RAG_LIMITS; k++) {
@@ -1136,6 +1187,13 @@ static qboolean RagCapture(centity_t *cent, entityState_t *ns, ragSim_t *s)
             // frame 1 is a visible pop, so start wide enough to admit it and close over 300ms
             s->limLo0[k] = (capPhi - DEG2RAD(5.0f) < J->lo) ? capPhi - DEG2RAD(5.0f) : J->lo;
             s->limHi0[k] = (capPhi + DEG2RAD(5.0f) > J->hi) ? capPhi + DEG2RAD(5.0f) : J->hi;
+            // [bug-3129] 28 of 33 retail death poses sit outside this anatomical table somewhere; closing onto it
+            // over 300 ms makes the limit and the shape-match pull the joint to two targets forever. The authored
+            // pose is legal for THIS corpse by definition - keep the widened range; new motion stays bounded.
+            if (s->fxCap) {
+                s->limLo[k] = s->limLo0[k];
+                s->limHi[k] = s->limHi0[k];
+            }
             // failsafe: a capture far outside the range means the derivation is suspect
             if (capPhi < J->lo - DEG2RAD(30.0f) || capPhi > J->hi + DEG2RAD(30.0f)) {
                 s->limDisabled[k] = 1;
@@ -2036,6 +2094,32 @@ void CG_RagdollImpulse(const vec3_t pos, const vec3_t dir, float force, float ra
             if (es->number < cgs.maxclients || RagSimFor(es->number) || s_ragNeverArm[es->number]) {
                 continue;
             }
+            // [bug-3132, user decision U8] this path never looked at coop_ragdoll, so the menu's "0 = retail death
+            // animations only" was not true (corpses near any hit still armed - MP bodies included). Unconditional:
+            // with coop_ragdoll 1 (the default) it changes nothing.
+            if (!coop_ragdoll->integer) {
+                continue;
+            }
+            // [bug-3132] EF_DEAD rises when the death STARTS (actor.cpp:5753), so without this a second burst into a
+            // man still playing his authored death - or a hit on anyone within 96u of him - captured the mid-fall
+            // frame and dropped a physics mannequin: the rounds 1-8 failure the settle branch exists to prevent.
+            // Gated: re-arm only a body the SERVER has parked, in settle mode, with no pending record of its own.
+            if (rag_rearmgate->integer) {
+                int      pk;
+                qboolean pend = qfalse;
+                if (rag_mode->integer != 1 || !RagServerParked(es)) {
+                    continue;
+                }
+                for (pk = 0; pk < RAG_MAX_PEND; pk++) {
+                    if (s_ragPend[pk].active && s_ragPend[pk].entnum == es->number) {
+                        pend = qtrue;
+                        break;
+                    }
+                }
+                if (pend) {
+                    continue;
+                }
+            }
             ce = &cg_entities[es->number];
             VectorSubtract(ce->lerpOrigin, pos, dd);
             if (VectorLengthSquared(dd) > 96.0f * 96.0f) {
@@ -2062,7 +2146,8 @@ void CG_RagdollImpulse(const vec3_t pos, const vec3_t dir, float force, float ra
                 VectorCopy(ns->pt[i], ns->goal0[i]);
             }
             if (rag_debug->integer) {
-                cgi.Printf("^~^~^ RAGDOLL re-armed ent=%d (shot after eviction)\n", es->number);
+                cgi.Printf("^~^~^ RAGDOLL re-armed ent=%d (shot after eviction) parked=%d gate=%d\n", es->number,
+                           (int)RagServerParked(es), rag_rearmgate->integer);
             }
         }
     }
@@ -2274,6 +2359,55 @@ void CG_RagdollImpulse(const vec3_t pos, const vec3_t dir, float force, float ra
     }
 }
 
+// RIDE THE SERVER'S CORPSE TOSS. A blast gives the corpse ENTITY real velocity (measured
+// 121-441u of travel), but our points are world-anchored and RagPush converts world->model
+// against the CURRENT placement while the renderer recomposes with that same placement -
+// the two cancel exactly, so the mesh renders where the SIM is, not where the entity went.
+// The body stayed behind, and the pelvis leash then measured the gap and permanently
+// retired the corpse. Carry the whole sim - including goal[], or the shape-match instantly
+// drags the body back to where the entity used to be.
+// [bug-3133] Moved out of CG_RagdollFrame unchanged. Called from its old place (after the sleep early-out) unless the
+// corpse latched coop_ragdollCarryWake; then it runs BEFORE the early-out, so a SLEEPING body the server tosses is
+// carried and woken instead of being left behind (the old "being thrown wakes it" branch could never run: a sleeping
+// sim had already 'continue'd). One exception under CarryWake: a slow, purely downward move of a sleeping body is the
+// MP body-queue sink (MpBodySinkNow, 0.2u a frame) - ride it without waking, so MP bodies still sink out of view.
+static void RagTossCarry(ragSim_t *s)
+{
+    centity_t *ce = &cg_entities[s->entnum];
+    vec3_t     ed;
+    if (!s->entOriginValid) {
+        VectorCopy(ce->lerpOrigin, s->entOriginLast);
+        s->entOriginValid = 1;
+    }
+    VectorSubtract(ce->lerpOrigin, s->entOriginLast, ed);
+    if (VectorLengthSquared(ed) > 0.0001f) {
+        if (VectorLengthSquared(ed) < 32.0f * 32.0f) { // a teleport is not a toss
+            int      q;
+            qboolean sink = (s->fxCarry && s->state == 2 && ed[0] * ed[0] + ed[1] * ed[1] < 0.0001f && ed[2] < 0.0f
+                             && ed[2] > -1.0f)
+                              ? qtrue
+                              : qfalse;
+            for (q = 0; q < RAG_PTS; q++) {
+                VectorAdd(s->pt[q], ed, s->pt[q]);
+                VectorAdd(s->ptPrev[q], ed, s->ptPrev[q]);
+                VectorAdd(s->goal[q], ed, s->goal[q]);
+                VectorAdd(s->goal0[q], ed, s->goal0[q]);
+            }
+            if (s->state == 2 && !sink) { // being thrown wakes it, same as a mover
+                s->state     = 1;
+                s->sleepMs   = 0;
+                s->lifeMs    = 0;
+                s->accumMs   = 0;
+                s->rotLocked = 0;
+                if (rag_debug->integer) {
+                    cgi.Printf("^~^~^ RAGDOLL toss-wake ent=%d d=(%.1f %.1f %.1f)\n", s->entnum, ed[0], ed[1], ed[2]);
+                }
+            }
+        }
+        VectorCopy(ce->lerpOrigin, s->entOriginLast);
+    }
+}
+
 void CG_RagdollFrame(void)
 {
     int i;
@@ -2317,6 +2451,9 @@ void CG_RagdollFrame(void)
                 continue;
             }
         }
+        if (s->fxCarry) {
+            RagTossCarry(s); // [bug-3133] before the sleep early-out: a tossed sleeping body wakes and rides
+        }
         if (s->state == 2) {
             // sleeping: last pushed pose stands - unless a bmodel under/over it moved
             if (RagMoverHash(s) != s->moverHash) {
@@ -2335,40 +2472,8 @@ void CG_RagdollFrame(void)
                 continue;
             }
         }
-        // RIDE THE SERVER'S CORPSE TOSS. A blast gives the corpse ENTITY real velocity (measured
-        // 121-441u of travel), but our points are world-anchored and RagPush converts world->model
-        // against the CURRENT placement while the renderer recomposes with that same placement -
-        // the two cancel exactly, so the mesh renders where the SIM is, not where the entity went.
-        // The body stayed behind, and the pelvis leash then measured the gap and permanently
-        // retired the corpse. Carry the whole sim - including goal[], or the shape-match instantly
-        // drags the body back to where the entity used to be.
-        {
-            centity_t *ce = &cg_entities[s->entnum];
-            vec3_t     ed;
-            if (!s->entOriginValid) {
-                VectorCopy(ce->lerpOrigin, s->entOriginLast);
-                s->entOriginValid = 1;
-            }
-            VectorSubtract(ce->lerpOrigin, s->entOriginLast, ed);
-            if (VectorLengthSquared(ed) > 0.0001f) {
-                if (VectorLengthSquared(ed) < 32.0f * 32.0f) { // a teleport is not a toss
-                    int q;
-                    for (q = 0; q < RAG_PTS; q++) {
-                        VectorAdd(s->pt[q], ed, s->pt[q]);
-                        VectorAdd(s->ptPrev[q], ed, s->ptPrev[q]);
-                        VectorAdd(s->goal[q], ed, s->goal[q]);
-                        VectorAdd(s->goal0[q], ed, s->goal0[q]);
-                    }
-                    if (s->state == 2) { // being thrown wakes it, same as a mover
-                        s->state     = 1;
-                        s->sleepMs   = 0;
-                        s->lifeMs    = 0;
-                        s->accumMs   = 0;
-                        s->rotLocked = 0;
-                    }
-                }
-                VectorCopy(ce->lerpOrigin, s->entOriginLast);
-            }
+        if (!s->fxCarry) {
+            RagTossCarry(s); // today's order: a SLEEPING sim never reaches this line (bug-3133)
         }
         ms = cg.frametime;
         if (ms > 200) {
@@ -2520,7 +2625,34 @@ void CG_RagdollFrame(void)
             } else {
                 s->sleepMs = 0;
             }
-            if (s->sleepMs > 1000 || s->lifeMs > 6000) {
+            // [bug-3128] the meter above reads |pt - ptPrev|, but RagShapeMatch carries 85% of every pull onto
+            // ptPrev, so a point the shape-match holds reads ~33u/s at perfect rest: 47 of 52 live corpses (r12 log)
+            // never slept and rode the 6s cap. Windowed rest measures DISPLACEMENT instead (Doom 3 AF noMoveTime,
+            // Macklin 2014 s4.5): asleep once no point has left a 0.5u box for 300 ms. A wake resets lifeMs, which
+            // re-seeds the window. The 0.25u rest offset in RagResolveHit is deliberately KEPT (vet V1: removing it
+            // cut a shot head's swing from 57 to 13 degrees).
+            if (s->fxRest) {
+                float mx = 0.0f;
+                if (!s->restRefValid || s->lifeMs < s->restRefMs) {
+                    memcpy(s->restRef, s->pt, sizeof(s->restRef));
+                    s->restRefMs    = s->lifeMs;
+                    s->restRefValid = 1;
+                }
+                for (j = 0; j < RAG_PTS; j++) {
+                    vec3_t dd;
+                    float  l2;
+                    VectorSubtract(s->pt[j], s->restRef[j], dd);
+                    l2 = VectorLengthSquared(dd);
+                    if (l2 > mx) {
+                        mx = l2;
+                    }
+                }
+                if (mx > 0.5f * 0.5f) {
+                    memcpy(s->restRef, s->pt, sizeof(s->restRef));
+                    s->restRefMs = s->lifeMs;
+                }
+            }
+            if ((s->fxRest ? (s->lifeMs - s->restRefMs >= 300) : (s->sleepMs > 1000)) || s->lifeMs > 6000) {
                 s->state     = 2;
                 s->moverHash = RagMoverHash(s); // baseline for the mover-wake detector
                 if (rag_debug->integer) {
@@ -2780,9 +2912,11 @@ static void RagPendingThink(ragPend_t *p)
             }
             // the anim name is DIAGNOSTIC ONLY now - it gates nothing
             cgi.Printf("^~^~^ RAGDOLL settle-armed ent=%d channels=%d after=%dms via=solid anim=%s "
-                       "buried=%d prelift=%d capspan=(%.0f %.0f %.0f)\n",
+                       "buried=%d prelift=%d capspan=(%.0f %.0f %.0f) fx=face%d/cap%d/rest%d/carry%d "
+                       "faceDot=(%.2f %.2f)\n",
                        entnum, s->count, cg.time - armTime, nm ? nm : "?", (int)s->buried,
-                       (int)s->preLifted, s->capSpan[0], s->capSpan[1], s->capSpan[2]);
+                       (int)s->preLifted, s->capSpan[0], s->capSpan[1], s->capSpan[2], (int)s->fxFace,
+                       (int)s->fxCap, (int)s->fxRest, (int)s->fxCarry, s->faceDot[0], s->faceDot[1]);
         }
     }
 }

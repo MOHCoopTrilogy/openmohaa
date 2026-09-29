@@ -1115,6 +1115,13 @@ void CL_KeyEvent(int key, qboolean down, unsigned time)
     char *kb;
     char  cmd[1024];
 
+    // HZM coop [user 2026-09-27] loading-screen hint arrows: while a map loads, LEFT/RIGHT page the hint strip
+    // (cl_ui.cpp UI_LoadHints_KeyNav). A press it takes never reaches the key state or a bind, from key-down to
+    // key-up. Outside a load it takes nothing.
+    if (UI_LoadHints_KeyNav(key, down)) {
+        return;
+    }
+
     // update auto-repeat status and BUTTON_ANY status
     keys[key].down = down;
 

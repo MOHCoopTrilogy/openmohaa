@@ -36,6 +36,74 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 
 #include <utility>
 
+#if defined(GAME_DLL)
+// [HZM bug-3078] The loop guard below kills a thread once the running frame has spent MAX_EXECUTION_TIME (3000 ms)
+// past its first 15000-command checkpoint. That was measured on the WALL CLOCK, so the time the server was not
+// running at all - another process holding the CPU, a disk read while a spawn loads its model, a slow PC at map
+// load - counted as script time. A long one-frame init chain run at prespawn tripped "Command overflow" under load
+// in code that was never looping (bug-3078; bugs 2983/3001 before it). The thread died, so the mode never
+// initialised and every bot spawned on one point. Measured as the server thread's own CPU time, the guard still
+// stops a real runaway after 3 s of script work, and stops mistaking a busy machine for a loop.
+// g_scriptLoopCpu: -1 AUTO (HZM_SCRIPTLOOP_CPU_AUTO), 0 wall clock (stock), 1 thread CPU time.
+#    define HZM_SCRIPTLOOP_CPU_AUTO 1
+#    ifdef _WIN32
+typedef struct {
+    unsigned long lo, hi;
+} hzm_filetime_t;
+
+extern "C" __declspec(dllimport) void *__stdcall GetCurrentThread(void);
+extern "C" __declspec(dllimport) int __stdcall GetThreadTimes(
+    void *thread, hzm_filetime_t *creation, hzm_filetime_t *exitTime, hzm_filetime_t *kernel, hzm_filetime_t *user
+);
+#    else
+#        include <time.h>
+#    endif
+
+// the server thread's CPU time in ms (user + kernel); -1 when the platform cannot tell
+static int VM_ThreadCpuMs(void)
+{
+#    ifdef _WIN32
+    hzm_filetime_t c, e, k, u;
+    if (GetThreadTimes(GetCurrentThread(), &c, &e, &k, &u)) {
+        const unsigned long long t = ((unsigned long long)k.hi << 32 | k.lo) + ((unsigned long long)u.hi << 32 | u.lo);
+        return (int)(t / 10000ULL); // 100 ns units
+    }
+    return -1;
+#    else
+    struct timespec ts;
+    if (clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts) == 0) {
+        return (int)(ts.tv_sec * 1000 + ts.tv_nsec / 1000000);
+    }
+    return -1;
+#    endif
+}
+
+static bool VM_LoopGuardCpu(void)
+{
+    static cvar_t *s_on = NULL;
+    if (!s_on) {
+        s_on = gi.Cvar_Get("g_scriptLoopCpu", "-1", 0);
+    }
+    return s_on->integer < 0 ? (HZM_SCRIPTLOOP_CPU_AUTO != 0) : (s_on->integer != 0);
+}
+
+// the guard's clock for the current window: fixed when the window opens, so toggling the cvar mid-window is harmless
+static bool s_hzmGuardCpu = false;
+static int  s_hzmWall0    = 0; // probe: both clocks at the window's first checkpoint
+static int  s_hzmCpu0     = 0;
+
+static int VM_GuardNow(void)
+{
+    if (s_hzmGuardCpu) {
+        const int t = VM_ThreadCpuMs();
+        if (t >= 0) {
+            return t + 1; // never 0: cmdTime 0 means "no window open"
+        }
+    }
+    return gi.Milliseconds();
+}
+#endif
+
 #ifdef CGAME_DLL
 
 #    define VM_Printf  cgi.Printf
@@ -1843,6 +1911,36 @@ void ScriptVM::Execute(ScriptVariable *data, int dataSize, str label)
             Director.cmdCount++;
 
             if (Director.cmdCount >= 15000) {
+#if defined(GAME_DLL)
+                // [HZM bug-3078] the window's clock (see VM_GuardNow) and the dev probe
+                static cvar_t *s_timeProbe = NULL;
+                if (!s_timeProbe) {
+                    s_timeProbe = gi.Cvar_Get("g_scriptTimeProbe", "0", 0);
+                }
+                if (!Director.cmdTime) {
+                    s_hzmGuardCpu    = VM_LoopGuardCpu() && VM_ThreadCpuMs() >= 0;
+                    Director.cmdTime = VM_GuardNow();
+                    s_hzmWall0       = gi.Milliseconds();
+                    s_hzmCpu0        = VM_ThreadCpuMs();
+                    Director.cmdCount = 0;
+                    continue;
+                }
+                if (s_timeProbe->integer) {
+                    str sourceLine;
+                    int column = 0, line = 0;
+                    m_ScriptClass->GetScript()->GetSourceAt(m_CodePos, &sourceLine, column, line);
+                    gi.Printf(
+                        "^~^~^ SCRIPTTIME wall=%d cpu=%d guard=%s %s:%d\n", gi.Milliseconds() - s_hzmWall0,
+                        VM_ThreadCpuMs() - s_hzmCpu0, s_hzmGuardCpu ? "cpu" : "wall",
+                        m_ScriptClass->GetScript()->Filename().c_str(), line
+                    );
+                }
+
+                if (VM_GuardNow() - Director.cmdTime < Director.maxTime) {
+                    Director.cmdCount = 0;
+                    continue;
+                }
+#else
                 if (!Director.cmdTime) {
                     Director.cmdTime  = gi.Milliseconds();
                     Director.cmdCount = 0;
@@ -1853,10 +1951,20 @@ void ScriptVM::Execute(ScriptVariable *data, int dataSize, str label)
                     Director.cmdCount = 0;
                     continue;
                 }
+#endif
 
                 // The maximum execution time was reached
                 if (level.m_LoopProtection) {
+#if defined(GAME_DLL)
+                    // [HZM bug-3078] how long it really ran, on both clocks, before the thread is killed
+                    gi.Printf(
+                        "^~^~^ SCRIPTOVERFLOW wall=%d cpu=%d guard=%s\n", gi.Milliseconds() - s_hzmWall0,
+                        VM_ThreadCpuMs() - s_hzmCpu0, s_hzmGuardCpu ? "cpu" : "wall"
+                    );
+                    Director.cmdTime = VM_GuardNow();
+#else
                     Director.cmdTime = gi.Milliseconds();
+#endif
 
                     GetScript()->PrintSourcePos(m_CodePos, true);
                     gi.DPrintf2("\n");

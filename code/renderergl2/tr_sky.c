@@ -485,6 +485,7 @@ static void DrawSkySide( struct image_s *image, const int mins[2], const int max
 		// fogging the sky WITHOUT also erasing every no-depth-write sprite drawn in front of
 		// it, because here the fog reads the shell being rasterised, not the depth buffer.
 		RB_SetGlobalFogUniforms( sp, 0, qtrue );
+		RB_HzmLt_SetUniforms( sp, 0, qtrue );   // HZM coop [2026-09-27] lightning: the sky shell never takes the haze term
 	}
 
 	R_DrawElements(tess.numIndexes - tess.firstIndex, tess.firstIndex);

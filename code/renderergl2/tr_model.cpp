@@ -70,6 +70,19 @@ static qboolean R_SkelDiagOn(void)
     return (qboolean)(r_skeldiag->integer != 0);
 }
 
+// HZM [2026-09-27] console quiet (docs/proposals/console_quiet_2026-09-27): the deterministic one-shot-per-model
+// SKELDRAW (and SKELDISP in tr_main.c) printed with no gate. r_skeltrace 1 restores them; the
+// r_skeldiag N verbose window below is unchanged.
+static qboolean R_SkelTraceOn(void)
+{
+    static cvar_t *r_skeltrace = NULL;
+
+    if (!r_skeltrace) {
+        r_skeltrace = ri.Cvar_Get("r_skeltrace", "0", CVAR_TEMP);
+    }
+    return (qboolean)(r_skeltrace->integer != 0);
+}
+
 static int     g_skeldiagFrameTag   = -1;   // tr.frame_skel_index of the frame currently bookkept
 static int     g_skeldiagFramesLeft = 0;    // frames still to trace (armed from r_skeldiag, OPTIONAL)
 static int     g_skeldiagFrontLines = 0;    // SKELDIAG verbose lines emitted this frame
@@ -253,7 +266,7 @@ static qboolean R_SkelDiag_DrawWanted(void)
         return qtrue;
     }
     hm = backEnd.currentEntity->e.hModel;
-    return (qboolean)(hm > 0 && hm < MAX_MOD_KNOWN && !g_skelSeenDraw[hm]);
+    return (qboolean)(R_SkelTraceOn() && hm > 0 && hm < MAX_MOD_KNOWN && !g_skelSeenDraw[hm]);
 }
 
 // Backend SKELDRAW emitter for RB_SkelMesh. Fires deterministically once per model handle, plus
@@ -264,7 +277,7 @@ static void R_SkelDiag_Draw(int render_count, unsigned int dV, const char *bail,
     int            slot  = (int)(e - backEnd.refdef.entities);
     int            hm    = e->e.hModel;
     qboolean       armed = (qboolean)(g_skeldiagFramesLeft > 0);
-    qboolean       first = (qboolean)(hm > 0 && hm < MAX_MOD_KNOWN && !g_skelSeenDraw[hm]);
+    qboolean       first = (qboolean)(R_SkelTraceOn() && hm > 0 && hm < MAX_MOD_KNOWN && !g_skelSeenDraw[hm]);
     float          ex, ey, ez;
 
     if (!armed && !first) {

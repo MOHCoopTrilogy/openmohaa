@@ -386,6 +386,15 @@ void CG_RegisterSounds(void)
     }
 
     cgi.FS_FreeFileList(fileList);
+
+    // HZM bug-3097: cg_view.c plays these by FILE NAME (cgi.S_StartLocalSound), so
+    // they were first loaded from disk the moment they played - each one a "S_LoadSound" console
+    // line and a disk hitch mid-fight (the ADS breath-hold and the brace toggle). Register them
+    // here, while the client is still loading.
+    cgi.S_RegisterSound("sound/coop_breath/breath_in.wav", qfalse);
+    cgi.S_RegisterSound("sound/coop_breath/breath_out.wav", qfalse);
+    cgi.S_RegisterSound("sound/coop_brace/brace_on.wav", qfalse);
+    cgi.S_RegisterSound("sound/coop_brace/brace_off.wav", qfalse);
 }
 
 /*
@@ -557,9 +566,13 @@ void CG_ProcessConfigString(int num, qboolean modelOnly)
             cg.farplaneColorOverride[1] = -1;
             cg.farplaneColorOverride[2] = -1;
             CG_ParseFogInfo(str);
+            CG_HzmLt_FogFilter(); // HZM coop [2026-09-27] lightning: hides the fallback fog pulses from a client that renders the strike
             return;
         case CS_SKYINFO:
             sscanf(str, "%f %d", &cg.sky_alpha, &cg.sky_portal);
+            return;
+        case CS_HZM_LIGHTNING: // HZM coop [2026-09-27] realistic lightning (cg_hzmlightning.c)
+            CG_HzmLt_ConfigString(str);
             return;
         case CS_SERVERINFO:
             CG_ParseServerinfo();
@@ -947,6 +960,8 @@ void CG_Init(clientGameImport_t *imported, int serverMessageNum, int serverComma
     {
         static const char *const hzmClearFx[] = {
             "r_ppHeat", "r_ppSuppress", "r_ppHit", "r_ppRainWet", "coop_dbnoView", "coop_medkitView",
+            // [2026-09-27] rain wetness (cg_view.c CG_HZMWorldWetness): the world film + puddle levels
+            "r_hzmWetNow", "r_hzmPuddleNow",
             // [2026-09-03] bug-1202 again, with a member nobody enumerated. r_ppBlood is
             // published from CG_CalcFov exactly like every name above it, and coop_lensBlood is
             // the script-poked input it consumes. Without these, dropping out mid-ramp with 0.85
@@ -972,6 +987,9 @@ void CG_Init(clientGameImport_t *imported, int serverMessageNum, int serverComma
         }
         // health fraction is inverted: 1.0 = full health = no effect
         cgi.Cvar_Set("r_ppHealthFrac", "1");
+        // HZM coop [2026-09-27] realistic lightning: registers its cvars and clears r_hzmLtState (vet V10), before any
+        // configstring of the new gamestate is processed
+        CG_HzmLt_Init();
         // [user 2026-09-06, bug-2507] the drowning air ramp is inverted the same way: 1.0 = full
         // air = no effect. coop_uwAir is the server-stuffed input, r_ppUnderwaterAir the
         // cgame-eased publish (cg_view.c CG_CalcFov) - a server dying mid-ramp must not leave

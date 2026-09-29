@@ -425,6 +425,16 @@ void Menu::CheckRestart(void)
                         do_ter_restart = true;
                     }
                 }
+            } else if (cvar && (cvar->flags & CVAR_TERRAIN_LATCH) && !(cvar->flags & CVAR_LATCH)) {
+                // HZM bug-3039/bug-3100: Cvar_Set2 defers only CVAR_LATCH (qcommon/cvar.c), so a
+                // terrain-latched cvar never holds a latchedString and the branch above
+                // could never fire - terrain "Max Detail" silently waited for the next map.
+                // Compare the live value with the SaveCVars snapshot instead.
+                // (CVAR_SOUND_LATCH has the same gap; left alone - a mid-game snd_restart
+                // is a larger behaviour change. See defect_sweep_2026-09-27/report.md.)
+                if (str::icmp(wid->m_cvarvalue, cvar->string)) {
+                    do_ter_restart = true;
+                }
             }
         }
     }

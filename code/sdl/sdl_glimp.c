@@ -57,6 +57,13 @@ static SDL_GLContext SDL_glContext = NULL;
 cvar_t *r_allowSoftwareGL; // Don't abort out if a hardware visual can't be obtained
 cvar_t *r_allowResize; // make window resizable
 cvar_t *r_centerWindow;
+// HZM test_window_policy_2026-09-27: explicit window placement for BACKGROUND TEST CLIENTS. Flags 0 (never archived,
+// never in a player's config); the defaults ("-1", "", "") change nothing. SDL_WINDOWPOS_UNDEFINED centres a new
+// window on display 0 (the primary), and GLimp_Shutdown destroys the window before every vid_restart, so without
+// these a harness client is created on the player's screen at boot AND at every renderer restart.
+cvar_t *r_windowDisplay;   // 0-based SDL display index: create the window centred on that display
+cvar_t *vid_xpos;          // absolute top-left in desktop coordinates (both must be set; wins over r_windowDisplay)
+cvar_t *vid_ypos;
 cvar_t *r_sdlDriver;
 cvar_t *r_preferOpenGLES;
 
@@ -531,6 +538,18 @@ static int GLimp_SetMode(int mode, qboolean fullscreen, qboolean noborder, qbool
 			display = 0;
 		}
 	}
+	// HZM test_window_policy: a NEW window's display (for the desktop mode / aspect below) follows the placement cvars
+	else if( *vid_xpos->string && *vid_ypos->string )
+	{
+		SDL_Point p = { vid_xpos->integer, vid_ypos->integer };
+		display = SDL_GetPointDisplayIndex( &p );
+		if( display < 0 )
+			display = 0;
+	}
+	else if( r_windowDisplay->integer >= 0 && r_windowDisplay->integer < SDL_GetNumVideoDisplays( ) )
+	{
+		display = r_windowDisplay->integer;
+	}
 
 	if( SDL_GetDesktopDisplayMode( display, &desktopMode ) == 0 )
 	{
@@ -662,6 +681,19 @@ static int GLimp_SetMode(int mode, qboolean fullscreen, qboolean noborder, qbool
 			flags |= SDL_WINDOW_BORDERLESS;
 
 		glConfig.isFullscreen = qfalse;
+	}
+
+	// HZM test_window_policy: explicit placement, applied last so it also covers borderless/fullscreen and a
+	// vid_restart. Unset (the default) leaves x/y exactly as computed above.
+	if( *vid_xpos->string && *vid_ypos->string )
+	{
+		x = vid_xpos->integer;
+		y = vid_ypos->integer;
+	}
+	else if( r_windowDisplay->integer >= 0 && r_windowDisplay->integer < SDL_GetNumVideoDisplays( ) )
+	{
+		x = SDL_WINDOWPOS_CENTERED_DISPLAY( r_windowDisplay->integer );
+		y = SDL_WINDOWPOS_CENTERED_DISPLAY( r_windowDisplay->integer );
 	}
 
 	colorBits = r_colorbits->value;
@@ -1226,6 +1258,9 @@ void GLimp_Init( qboolean fixedFunction )
 	r_sdlDriver = ri.Cvar_Get( "r_sdlDriver", "", CVAR_ROM );
 	r_allowResize = ri.Cvar_Get( "r_allowResize", "0", CVAR_ARCHIVE | CVAR_LATCH );
 	r_centerWindow = ri.Cvar_Get( "r_centerWindow", "0", CVAR_ARCHIVE | CVAR_LATCH );
+	r_windowDisplay = ri.Cvar_Get( "r_windowDisplay", "-1", 0 );   // HZM test_window_policy (see the declaration)
+	vid_xpos = ri.Cvar_Get( "vid_xpos", "", 0 );
+	vid_ypos = ri.Cvar_Get( "vid_ypos", "", 0 );
 	r_preferOpenGLES = ri.Cvar_Get( "r_preferOpenGLES", "-1", CVAR_ARCHIVE | CVAR_LATCH );
 	// HZM [bug-1795] registered HERE rather than in a renderer's tr_init.c because this file is the
 	// only consumer and it is linked into BOTH renderers - r_desktopfullscreen is registered by gl1

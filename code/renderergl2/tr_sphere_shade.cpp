@@ -1317,6 +1317,13 @@ void R_Sphere_InitLights()
 
     s_sun.szFlareName[0] = 0;
     s_sun.exists         = qfalse;
+    // HZM bug-3014/bug-3101: s_sun is a static that outlives the map. suncolor alone sets exists, so a
+    // map with suncolor but no sundirection used to keep the PREVIOUS map's direction (and the
+    // sun bridge in RE_LoadWorldMap copied it into tr.sunDirection). Reset per map to the same
+    // fallback RE_LoadWorldMap gives tr.sunDirection (0.45 0.3 0.9, normalised).
+    VectorSet(s_sun.direction, 0.45f, 0.3f, 0.9f);
+    VectorNormalize(s_sun.direction);
+    VectorCopy(s_sun.direction, s_sun.flaredirection);
 
     for (int i = 0; i < MAX_SPHERE_LIGHTS; i++) {
         backEnd.spheres[i].TessFunction = &RB_Light_Real;

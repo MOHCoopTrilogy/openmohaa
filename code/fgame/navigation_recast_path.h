@@ -95,6 +95,8 @@ private:
     Vector        slideTarget;     // [HZM bug-2956] pinned on the way to a corner: slide along the obstacle to here
     int           slideUntil;
     int           steerMode;       // [HZM bug-2956] probe (GetSteerMode)
+    Vector        gapRaw;          // [bug-3146 bot_gapCentre] the raw corner the gap test was run for
+    Vector        gapOut;          //   and where to steer instead (== gapRaw when it is not a narrow gap)
 };
 
 class RecastPathMaster

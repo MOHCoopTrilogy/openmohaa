@@ -592,7 +592,11 @@ skelAnimDataGameHeader_t *SkeletorCacheFileCallback(const char *path)
         }
 
         if (version == TIKI_SKC_HEADER_OLD_VERSION) {
-            Com_DPrintf("WARNING- DOWNGRADING TO OLD ANIMATION FORMAT FOR FILE: %s\n", path);
+            // [2026-09-27] console quiet (docs/proposals/console_quiet_2026-09-27): benign legacy-SKC notice,
+            // ~60 per map load under developer 1. developer 2 brings it back.
+            if (developer && developer->integer > 1) {
+                Com_Printf("WARNING- DOWNGRADING TO OLD ANIMATION FORMAT FOR FILE: %s\n", path);
+            }
 
             //
             // Handle the endianness

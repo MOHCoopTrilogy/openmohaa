@@ -5214,7 +5214,15 @@ void Player::ClientMove(usercmd_t *ucmd)
     // print the FULL speed chain: base (before ADS/weapon mults), final, and every factor - the
     // measured 45 could not be reproduced from the audited mults, so dump them all. Remove once the
     // "ADS side-step slow/weird" report closes.
-    if (((last_ucmd.buttons & BUTTON_COOPADS) || m_bCoopShoulderAim) && level.time - m_fCoopProbeTime > 1.0f) {
+    // [2026-09-27] console quiet (docs/proposals/console_quiet_2026-09-27): ungated since [222], once a second
+    // for as long as ADS is held (~8 lines a minute in play). coop_speedProbe 1 brings it back; the
+    // bot-soak pace check (TRAPS T10, dm=) passes it explicitly.
+    static cvar_t *s_pCoopSpeedProbe = NULL;
+    if (!s_pCoopSpeedProbe) {
+        s_pCoopSpeedProbe = gi.Cvar_Get("coop_speedProbe", "0", 0);
+    }
+    if (s_pCoopSpeedProbe->integer && ((last_ucmd.buttons & BUTTON_COOPADS) || m_bCoopShoulderAim)
+        && level.time - m_fCoopProbeTime > 1.0f) {
         m_fCoopProbeTime = level.time;
         Weapon *pWProbe  = GetActiveWeapon(WEAPON_MAIN);
         gi.Printf(
@@ -6023,7 +6031,13 @@ void Player::ClientThink(void)
     TickCoopLobbyCursor(); // HZM coop - lobby mouse cursor (no binds) -> self.coop_lobbyCurX/Y + coop_lobbyClick
     // HZM coop [221] - bug-309 GUNNERPROBE: once/sec truth table of every candidate manning
     // signal while any is live (or the player is entity-attached, e.g. script-seated gunner).
-    if (level.time - m_fCoopProbeTime > 1.0f
+    // [2026-09-27] console quiet (docs/proposals/console_quiet_2026-09-27): once a second for every second a
+    // player rides or mans anything - every truck ride and turret. coop_gunnerProbe 1 brings it back.
+    static cvar_t *s_pCoopGunnerProbe = NULL;
+    if (!s_pCoopGunnerProbe) {
+        s_pCoopGunnerProbe = gi.Cvar_Get("coop_gunnerProbe", "0", 0);
+    }
+    if (s_pCoopGunnerProbe->integer && level.time - m_fCoopProbeTime > 1.0f
         && (m_pTurret || m_pVehicle || edict->s.parent != ENTITYNUM_NONE
             || (client->ps.pm_flags & PMF_TURRET))) {
         m_fCoopProbeTime = level.time;

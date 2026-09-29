@@ -1009,6 +1009,42 @@ static void IN_JoyMove( void )
 
 /*
 ===============
+IN_TakeLoadingNavKeys
+
+HZM coop [user 2026-09-27] loading-screen hint arrows (client/cl_ui.cpp UI_LoadHints_PollNav). While a map load
+blocks, no client frame runs: Sys_PumpMessageLoop dispatches the window messages into the SDL queue, and every key
+waits there until the load ends. This takes the LEFT/RIGHT arrow KEY-DOWNS out of the queue and counts the real
+presses. Auto-repeats are taken too, but not counted: they belong to a press already counted, or to a key that was
+held before the load, whose key-up must still reach the game. Key-ups, every other key and the keypad arrows (bound
+to dev tools in autoexec.cfg) stay queued exactly as before.
+===============
+*/
+static int IN_LoadingNavFilter( void *userdata, SDL_Event *e )
+{
+	int *counts = (int *)userdata;
+
+	if( e->type == SDL_KEYDOWN && ( e->key.keysym.sym == SDLK_LEFT || e->key.keysym.sym == SDLK_RIGHT ) )
+	{
+		if( !e->key.repeat )
+			counts[ e->key.keysym.sym == SDLK_RIGHT ? 1 : 0 ]++;
+		return 0; // drop it from the queue
+	}
+	return 1;
+}
+
+void IN_TakeLoadingNavKeys( int *left, int *right )
+{
+	int counts[ 2 ] = { 0, 0 };
+
+	if( SDL_WasInit( SDL_INIT_VIDEO ) )
+		SDL_FilterEvents( IN_LoadingNavFilter, counts );
+
+	*left  = counts[ 0 ];
+	*right = counts[ 1 ];
+}
+
+/*
+===============
 IN_ProcessEvents
 ===============
 */

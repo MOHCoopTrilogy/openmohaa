@@ -35,6 +35,7 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 #define RECOIL_MAX_BACK  1.1f
 #include "cg_parsemsg.h"
 #include "../renderercommon/hzm_light_restore.h" // HZM coop [2026-09-25] headlights: AUTO defaults + Omaha list
+#include "../renderercommon/hzm_waterwet.h"      // HZM coop [2026-09-27] rain wetness: easing + Omaha list
 
 //============================================================================
 
@@ -6501,6 +6502,72 @@ float CG_CoopLensSplashLevel(float dt)
     return s_coopSplashWet;
 }
 
+/*
+===============
+CG_HZMWorldWetness
+
+HZM coop [2026-09-27] RAIN WETNESS publisher (docs/proposals/water_wetness_2026-09-27 plan W1). Publishes
+r_hzmWetNow (the film) and r_hzmPuddleNow (the puddles), 0..1, for renderergl2's lightall wet term (tr_hzm_wet.c).
+NOT r_ppRainWet: that is a LENS value gated on one up-trace from the eye, so it drops to 0 the moment the player steps
+under a roof - the world does not dry when you walk indoors. This follows the weather itself: the networked
+cg.rain.density, RAIN only (CG_CoopPrecipType - snow and dust storms never wet, bug-1206), 0 on the Omaha list.
+Two-stage easing (hzm_waterwet.h): stage 1 asymmetric - wet fast, dry slow, puddles slowest; stage 2 one fixed
+constant, so the value stays C1 when stage 1 changes direction and the 2 s configstring staircase is smoothed twice
+(lookdev/05_transition_curve.png: <= 0.17 LSB of change per 60 Hz frame). Snaps to the target on the first frame of a
+map, so a mid-storm join or vid_restart starts wet instead of visibly wetting under the player. Sets the cvars only
+when they move; both are cleared on connect with the other published FX values (cg_main.c, bug-1202).
+===============
+*/
+static void CG_HZMWorldWetness(void)
+{
+    static int   s_last;
+    static char  s_map[MAX_QPATH];
+    static float s_w1, s_w2, s_p1, s_p2;
+    static float s_pubW = -1.0f, s_pubP = -1.0f;
+    float        dt, tw = 0.0f, tp = 0.0f;
+
+    if (!HZM_WaterWetOmahaMap(cgs.mapname) && CG_CoopPrecipType() == PRECIP_RAIN) {
+        tw = HZM_WetFilmTarget(cg.rain.density);
+        tp = HZM_WetPuddleTarget(cg.rain.density);
+    }
+
+    if (s_last == 0 || cg.time < s_last || Q_stricmp(s_map, cgs.mapname)) {
+        // a new map, a time reset or the first frame: start AT the weather, never ease in from a stale value
+        Q_strncpyz(s_map, cgs.mapname, sizeof(s_map));
+        s_w1 = s_w2 = tw;
+        s_p1 = s_p2 = tp;
+        s_pubW = s_pubP = -1.0f;
+        dt = 0.0f;
+    } else {
+        dt = (cg.time - s_last) / 1000.0f;
+        if (dt < 0.0f) {
+            dt = 0.0f;
+        } else if (dt > 0.25f) {
+            dt = 0.25f;     // a hitch must not dump a whole envelope (TRAPS: integrate elapsed time, clamped)
+        }
+        s_w1 += (tw - s_w1) * (1.0f - expf(-dt / (tw > s_w1 ? HZM_WET_TAU_UP : HZM_WET_TAU_DOWN)));
+        s_w2 += (s_w1 - s_w2) * (1.0f - expf(-dt / HZM_WET_TAU_S2));
+        s_p1 += (tp - s_p1) * (1.0f - expf(-dt / (tp > s_p1 ? HZM_PUDDLE_TAU_UP : HZM_PUDDLE_TAU_DOWN)));
+        s_p2 += (s_p1 - s_p2) * (1.0f - expf(-dt / HZM_PUDDLE_TAU_S2));
+    }
+    s_last = cg.time;
+
+    if (s_w2 < 0.0005f) {
+        s_w2 = (tw > 0.0f) ? s_w2 : 0.0f;
+    }
+    if (s_p2 < 0.0005f) {
+        s_p2 = (tp > 0.0f) ? s_p2 : 0.0f;
+    }
+    if (fabs(s_w2 - s_pubW) > 1e-4f || (s_w2 == 0.0f && s_pubW != 0.0f)) {
+        s_pubW = s_w2;
+        cgi.Cvar_Set("r_hzmWetNow", va("%g", s_w2));
+    }
+    if (fabs(s_p2 - s_pubP) > 1e-4f || (s_p2 == 0.0f && s_pubP != 0.0f)) {
+        s_pubP = s_p2;
+        cgi.Cvar_Set("r_hzmPuddleNow", va("%g", s_p2));
+    }
+}
+
 static int CG_CalcFov(void)
 {
     float x;
@@ -6946,6 +7013,10 @@ static int CG_CalcFov(void)
         s_rainWet += (target - s_rainWet) * (1.0f - exp(-k * dtw));
         if (s_rainWet < 0.0f) { s_rainWet = 0.0f; }
         cgi.Cvar_Set("r_ppRainWet", va("%g", s_rainWet));
+
+        // HZM coop [2026-09-27] rain wetness: the WORLD's wetness, published beside the lens value it must not be
+        // confused with (see CG_HZMWorldWetness)
+        CG_HZMWorldWetness();
 
         // [user 08-07] FROST-ON-LENS REMOVED - "lets remove the frozen effect on screen for when
         // it snows it looks really bad". The publisher that drove it (an eased r_ppFrostAmt off the
@@ -8860,6 +8931,7 @@ void CG_DrawActiveFrame(int serverTime, int frameTime, stereoFrame_t stereoView,
     CG_CoopHeadlights();       // HZM coop [2026-09-25] vehicle headlights (Phase H) - AFTER the muzzle lights (vet F8)
     CG_HZM_FlushSpots();       // HZM coop [2026-09-26] Phase S: emit every manager's spots + flares (cg_hzmspot.c)
     CG_UpdateEnvReverb();       // HZM coop - auto indoor/outdoor reverb (where the map sets none)
+    CG_HzmLt_Frame();           // HZM coop [2026-09-27] realistic lightning: thunder + r_hzmLtState (cg_hzmlightning.c)
 
     if (cg_acidtrip->integer) {
         // lol disco

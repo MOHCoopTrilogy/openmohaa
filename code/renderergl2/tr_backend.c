@@ -1782,6 +1782,10 @@ const void	*RB_DrawSurfs( const void *data ) {
 	{
 		RB_RenderDrawSurfList( cmd->drawSurfs, cmd->numDrawSurfs );
 
+		// HZM coop [2026-09-27] realistic lightning: the lit cloud lobe and the far bolt, additive at depth range (1,1)
+		// so only sky pixels take them. Returns at once (no GL call) unless a strike is lit on the main view.
+		RB_HzmLt_SkyPass();
+
 		if (r_drawSun->integer)
 		{
 			RB_DrawSun(0.1, tr.sunShader);

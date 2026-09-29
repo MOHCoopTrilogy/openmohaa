@@ -130,6 +130,7 @@ static void    UI_MemorialDraw(void); // defined with the memorial, above CL_Fin
 static cvar_t *ui_loadHints;    // HZM coop [user 2026-09-26] loading-screen hints (UI_LoadHints_*): -1 auto, 0 off, 1 on
 static cvar_t *ui_loadHintSecs; // seconds per hint (3-60)
 static cvar_t *ui_loadRedrawMs; // HZM [2026-09-27] min ms between loading-screen redraws from UI_LoadResource (16-1000)
+static cvar_t *ui_loadHintNav;  // HZM [user 2026-09-27] LEFT/RIGHT page the loading hints (UI_LoadHints_Nav): -1 auto, 0 off, 1 on
 static qboolean s_uiNoLoadDraw; // HZM bug-3015: TRUE while the renderer (re)registers or the UI realigns - no loading draw
 static void    UI_LoadHints_SetWidgets(qboolean enable); // defined with UI_LoadHints_*, used by UI_ServerLoaded
 cvar_t        *sound_overlay;
@@ -4060,7 +4061,9 @@ void CL_EndRegistration(void)
 
     end = Sys_Milliseconds();
 
-    Com_Printf("CL_EndRegistration: %5.2f seconds\n", (float)(start - end) / 1000.0);
+    // HZM bug-3016/bug-3103: was (start - end), which always printed a negative duration.
+    // Log parsers (scratchpad rr/mapload_phases.py, rr/rinit_measure.py) accept either sign.
+    Com_Printf("CL_EndRegistration: %5.2f seconds\n", (float)(end - start) / 1000.0);
 }
 
 /*
@@ -5762,6 +5765,10 @@ void CL_InitializeUI(void)
     ui_loadRedrawMs    = Cvar_Get("ui_loadRedrawMs", "100", 0);
     Cvar_Get("ui_loadhint", "", 0);
     Cvar_Get("ui_loadHintsOn", "1", 0);
+    // -1 = HZM_LOADHINTNAV_AUTO. ui_loadHintNavOn is what ui/loadingbar.txt's two arrow widgets test. Only this
+    // exe ever sets it to 1, so an old exe (which cannot page) never shows arrows. No cfg seeds it, on purpose.
+    ui_loadHintNav     = Cvar_Get("ui_loadHintNav", "-1", 0);
+    Cvar_Get("ui_loadHintNavOn", "0", 0);
     Cvar_Get("ui_loadClassic", "0", 0);
     Cvar_Get("ui_loadIconScale", "1", 0);
     Cvar_Get("ui_signshader", "", 0);
@@ -6389,10 +6396,13 @@ static struct {
     int          lastShownPlus1;               // survives loads: a load never opens on the hint the last one showed
     unsigned int rng;
     qboolean     active;
+    qboolean     nav;                          // LEFT/RIGHT paging on for this load (ui_loadHintNavOn 1)
 } s_loadHints;
 
 // ours in ui/loadingbar.txt; the engine never addresses them otherwise
-static const char *s_loadHintWidgets[] = {"hzm_loadmedal", "hzm_loadhint", "hzm_loadhint_bg", "hzm_loadhint_line"};
+static const char *s_loadHintWidgets[] = {
+    "hzm_loadmedal", "hzm_loadhint", "hzm_loadhint_bg", "hzm_loadhint_line", "hzm_loadhint_prev", "hzm_loadhint_next"
+};
 
 static void UI_LoadHints_SetWidgets(qboolean enable)
 {
@@ -6515,12 +6525,195 @@ static void UI_LoadHints_Show(void)
     }
 }
 
+/*
+====================
+HZM coop [user 2026-09-27] LOADING-SCREEN HINT ARROWS
+
+LEFT/RIGHT page back and forth through this load's hints and restart the ui_loadHintSecs timer, so a hint the player
+picked stays up for a full period. A load is mostly one blocking call, so there are two ways in:
+  UI_TestUpdateScreen  while the load blocks, no client frame runs and every key waits in the SDL queue until the
+                       load ends. After each tick's message pump, IN_TakeLoadingNavKeys (sdl_input.c) takes the
+                       LEFT/RIGHT KEY-DOWNS out of that queue. Key-ups and every other key stay queued exactly as before.
+  CL_KeyEvent          (cl_keys.cpp) the stretches that do run frames, e.g. a joiner waiting on the server.
+A press belongs to the hint strip from its key-down to its key-up (s_loadNavHeld). Its auto-repeats are swallowed
+without paging, and its key-up is swallowed too, so the game never sees half a key press. Ownership ends with the
+load. If a key is still held when the load ends, its key-up reaches the game with no matching key-down, which does
+nothing, and SDL drops in-game auto-repeats (sdl_input.c IN_ProcessEvents). So a key held through the end of a load
+never fires a bind. The keypad arrows are not taken (autoexec.cfg binds them to dev tools).
+The arrows are two ui/loadingbar.txt widgets (hzm_loadhint_prev/next). They show only while ui_loadHintNavOn is 1,
+and only this exe ever sets it, so an old exe that cannot page never shows them. UI_LoadHints_PlaceNav moves them
+beside the hint text on every drawn frame. They register and draw like every other loading-menu widget
+(UI_LoadScreenPrimeMaterials primes them - bug-3015).
+ui_loadHintNav: -1 = auto (HZM_LOADHINTNAV_AUTO), 0 = off (keys pass through, no arrows), 1 = on. flags 0 (TRAPS T7).
+====================
+*/
+#define HZM_LOADHINTNAV_AUTO 1 // ui_loadHintNav -1 means this. ON: user decision 2026-09-27 (design A).
+#define LOADNAV_GAP          8.0f  // virtual px between the hint text and an arrow's box
+#define LOADNAV_BOX_W        7.0f  // an arrow's box, virtual px - the same 1:2 as the 32x64 art
+#define LOADNAV_BOX_H        14.0f
+
+static qboolean s_loadNavHeld[2]; // [0] LEFT, [1] RIGHT: a press the hint strip owns, key-down to key-up
+
+static int UI_LoadHints_Secs(void)
+{
+    int secs = ui_loadHintSecs ? ui_loadHintSecs->integer : 7;
+
+    if (secs < 3) {
+        secs = 3;
+    } else if (secs > 60) {
+        secs = 60;
+    }
+    return secs;
+}
+
+static void UI_LoadHints_NavStop(void)
+{
+    s_loadHints.nav  = qfalse;
+    s_loadNavHeld[0] = qfalse;
+    s_loadNavHeld[1] = qfalse;
+    Cvar_Set("ui_loadHintNavOn", "0");
+}
+
+static void UI_LoadHints_Nav(int steps)
+{
+    if (!s_loadHints.active || !s_loadHints.nav || s_loadHints.orderCount < 2 || !steps) {
+        return;
+    }
+
+    steps %= s_loadHints.orderCount;
+    s_loadHints.pos    = (s_loadHints.pos + steps + s_loadHints.orderCount) % s_loadHints.orderCount;
+    s_loadHints.nextMs = Sys_Milliseconds() + UI_LoadHints_Secs() * 1000;
+
+    if (s_loadProbe.active) {
+        Com_Printf(
+            "^~^~^ LOADHINTNAV map=%s steps=%d at=%d\n",
+            s_loadProbe.map,
+            steps,
+            Sys_Milliseconds() - s_loadProbe.startMs
+        );
+    }
+    UI_LoadHints_Show();
+}
+
+/*
+UI_TestUpdateScreen, right after each message pump. It does not touch the renderer, so it is safe in the pump-only
+ticks too: a page taken there shows on the next frame that draws.
+*/
+static void UI_LoadHints_PollNav(void)
+{
+    int left, right;
+
+    if (!s_loadHints.active || !s_loadHints.nav || UI_ConsoleIsVisible()) {
+        return;
+    }
+
+    IN_TakeLoadingNavKeys(&left, &right);
+    if (left) {
+        s_loadNavHeld[0] = qtrue;
+    }
+    if (right) {
+        s_loadNavHeld[1] = qtrue;
+    }
+    UI_LoadHints_Nav(right - left);
+}
+
+/*
+CL_KeyEvent, before anything else sees the key. qtrue = the hint strip took it.
+*/
+qboolean UI_LoadHints_KeyNav(int key, qboolean down)
+{
+    int i;
+
+    if (key != K_LEFTARROW && key != K_RIGHTARROW) {
+        return qfalse;
+    }
+    i = (key == K_RIGHTARROW) ? 1 : 0;
+
+    if (!down) {
+        if (s_loadNavHeld[i]) {
+            s_loadNavHeld[i] = qfalse;
+            return qtrue; // the key-up of a press we own
+        }
+        return qfalse;
+    }
+    if (s_loadNavHeld[i]) {
+        return qtrue; // an auto-repeat of a press we own
+    }
+    if (!s_loadHints.active || !s_loadHints.nav || UI_ConsoleIsVisible()) {
+        return qfalse;
+    }
+
+    s_loadNavHeld[i] = qtrue;
+    UI_LoadHints_Nav(i ? 1 : -1);
+    return qtrue;
+}
+
+/*
+Every drawn loading frame (UI_LoadScreenFramePreDraw): put the two arrow widgets LOADNAV_GAP virtual px either side
+of the CURRENT hint's measured text, at the text's own scale. So they sit beside the words on every aspect ratio and
+for every hint length, and they are never stretched. The maths is the label's own draw: UIFont::PrintJustified
+centres the text in the label's frame, at UI_UniformTextScale (uifont.cpp). With ui_textUniform 1 that is the
+VERTICAL virtual scale on both axes.
+*/
+static void UI_LoadHints_PlaceNav(void)
+{
+    UIWidget   *label, *prev, *next;
+    UIFont     *font;
+    const char *uni;
+    float       sx, sy, tw, cx, cy, w, h;
+    UIRect2D    frame, r;
+
+    if (!s_loadHints.active || !s_loadHints.nav || !ui_pLoadingMenu) {
+        return;
+    }
+
+    label = ui_pLoadingMenu->GetNamedWidget("hzm_loadhint");
+    prev  = ui_pLoadingMenu->GetNamedWidget("hzm_loadhint_prev");
+    next  = ui_pLoadingMenu->GetNamedWidget("hzm_loadhint_next");
+    if (!label || !prev || !next) {
+        return; // an older or third-party loadingbar.txt
+    }
+    font = label->getFont();
+    if (!font) {
+        return;
+    }
+
+    {
+        const vec2_t& vs = label->getVirtualScale();
+        sx               = vs[0];
+        sy               = vs[1];
+    }
+    uni = Cvar_VariableString("ui_textUniform");
+    if (sx != sy && (!uni[0] || atoi(uni))) {
+        sx = sy;
+    }
+
+    tw    = font->getWidth(Cvar_VariableString("ui_loadhint"), -1) * sx;
+    frame = label->getFrame();
+    cx    = frame.pos.x + frame.size.width * 0.5f;
+    cy    = frame.pos.y + frame.size.height * 0.5f;
+    w     = LOADNAV_BOX_W * sy;
+    h     = LOADNAV_BOX_H * sy;
+
+    r = UIRect2D(cx - tw * 0.5f - LOADNAV_GAP * sy - w, cy - h * 0.5f, w, h);
+    frame = prev->getFrame();
+    if (r.pos != frame.pos || r.size != frame.size) {
+        prev->setFrame(r);
+    }
+    r = UIRect2D(cx + tw * 0.5f + LOADNAV_GAP * sy, cy - h * 0.5f, w, h);
+    frame = next->getFrame();
+    if (r.pos != frame.pos || r.size != frame.size) {
+        next->setFrame(r);
+    }
+}
+
 static void UI_LoadHints_Begin(const char *mapname)
 {
     int      i, j, t;
     qboolean on, mp;
 
     s_loadHints.active = qfalse;
+    UI_LoadHints_NavStop();
     if (!ui_loadHints) {
         return; // the UI is not initialised yet
     }
@@ -6570,6 +6763,12 @@ static void UI_LoadHints_Begin(const char *mapname)
     s_loadHints.pos    = 0;
     s_loadHints.nextMs = 0;
     s_loadHints.active = qtrue;
+    // LEFT/RIGHT paging (UI_LoadHints_Nav) needs at least two hints to page through
+    if (s_loadHints.orderCount > 1 && ui_loadHintNav
+        && (ui_loadHintNav->integer < 0 ? HZM_LOADHINTNAV_AUTO : ui_loadHintNav->integer)) {
+        s_loadHints.nav = qtrue;
+        Cvar_Set("ui_loadHintNavOn", "1");
+    }
     UI_LoadHints_Show();
 }
 
@@ -6582,12 +6781,7 @@ static void UI_LoadHints_Tick(void)
     }
 
     now  = Sys_Milliseconds();
-    secs = ui_loadHintSecs ? ui_loadHintSecs->integer : 7;
-    if (secs < 3) {
-        secs = 3;
-    } else if (secs > 60) {
-        secs = 60;
-    }
+    secs = UI_LoadHints_Secs();
 
     if (!s_loadHints.nextMs) {
         // the first drawn frame of this load: the hint published at UI_BeginLoad is only now on screen
@@ -6653,6 +6847,7 @@ void UI_LoadScreenFrameBegin(void)
 void UI_LoadScreenFramePreDraw(void)
 {
     UI_LoadHints_Tick(); // HZM loading-screen hints: a new hint lands on the frame about to draw
+    UI_LoadHints_PlaceNav(); // HZM hint arrows: beside the text of the hint about to draw
 
     if (!s_loadProbe.active) {
         return;
@@ -6713,6 +6908,7 @@ void UI_TestUpdateScreen(unsigned int timeout)
     // only when the renderer shuts down), and that is exactly the path that froze.
     if (!cls.rendererReady || s_uiNoLoadDraw) {
         Sys_PumpMessageLoop();
+        UI_LoadHints_PollNav(); // HZM hint arrows: LEFT/RIGHT out of the queue the pump just filled
         if (s_loadProbe.active) {
             s_loadProbe.pumpOnly++;
         }
@@ -6721,6 +6917,7 @@ void UI_TestUpdateScreen(unsigned int timeout)
 
     startRenderTime = Sys_Milliseconds();
     Sys_PumpMessageLoop();
+    UI_LoadHints_PollNav(); // HZM hint arrows: LEFT/RIGHT out of the queue the pump just filled
     // HZM loading-screen probe: mark this frame as a resource tick, and count a tick that the
     // SCR_UpdateScreen recursion guard swallows (it fired inside R_Init or a nested cgame init)
     probeDraws = s_loadProbe.draws;
@@ -7092,6 +7289,7 @@ void UI_EndLoad(void)
     }
 
     s_loadHints.active = qfalse; // HZM loading-screen hints stop with the load
+    UI_LoadHints_NavStop();      // and the arrows: a key still held now releases into the game as a no-op
     UI_LoadProbe_Report("end"); // HZM loading-screen probe (before SS_DEAD, so 'mode' still reads the load)
 
     UI_FreeLoadStrings();
@@ -7107,6 +7305,7 @@ UI_AbortLoad
 void UI_AbortLoad(void)
 {
     s_loadHints.active = qfalse; // HZM loading-screen hints
+    UI_LoadHints_NavStop();
     UI_LoadProbe_Report("abort"); // HZM loading-screen probe
 
     if (cls.loading) {

@@ -206,6 +206,17 @@ private:
     int    m_iLeafTouchT;        // [bot_doorLeaf] start of the current contact episode with an open leaf (0 = none)
     int    m_iLeafLastT;         // [bot_doorLeaf] last frame the open leaf was touched
     int    m_iLeafSteerLogT;     // [bot_doorLeaf 2] probe throttle
+    // [bug-3086 bot_runJump] run-up jump at a steep lip a standing hop failed on
+    Vector m_vRJFrom;            // take-off point of the last stuck hop
+    Vector m_vRJDir;             // its heading (flat, unit)
+    float  m_fRJZ;               // its height
+    int    m_iRJHopT;            // when it jumped (0 = not watching)
+    int    m_iRJPhase;           // 0 none, 1 back off, 2 run, 3 in the air
+    int    m_iRJPhaseT;          // phase start
+    Vector m_vRJSpot;            // the spot the tries are counted for
+    int    m_iRJSpotT;
+    int    m_iRJTries;
+    bool   SteepLipAhead(const Vector& dir, float& nz);
     Vector LeafDeflect(const Vector& delta); // [bot_doorLeaf 2] steer round an open door leaf the next leg crosses
     Vector m_vDoorFace;          // [bot_doorFace] the closed door's centre at eye height, while waiting at it
     int    m_iDoorLogged;        // [bot_doorFace probe] 1 = wait start logged, 2 = give-up logged

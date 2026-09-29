@@ -130,6 +130,7 @@ void     UI_LoadScreenFrameBegin(void);
 void     UI_LoadScreenFramePreDraw(void);
 void     UI_LoadScreenFrameEnd(void);
 void     UI_LoadScreenPrimeMaterials(void); // HZM bug-3015: CL_StartHunkUsers, before CL_InitCGame
+qboolean UI_LoadHints_KeyNav(int key, qboolean down); // HZM hint arrows: CL_KeyEvent, qtrue = key taken
 
 //
 // windows

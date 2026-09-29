@@ -90,8 +90,35 @@ varying vec4      var_PrimaryLightDir;
 // everything else toward the fog colour - fogging an additive stage toward grey would
 // BRIGHTEN it with distance. Alpha is deliberately untouched (GL spec: fog does not modify
 // alpha), so coverage, silhouettes and the alpha test are identical fogged or not.
+// HZM coop [2026-09-27] realistic lightning: outdoor surface light (see the use below main)
+uniform vec4      u_HzmLtWorld;
 uniform vec4      u_GlobalFogColor;
 uniform vec4      u_GlobalFogParams;
+
+// HZM coop [2026-09-27] realistic lightning: fog IN-SCATTER toward the strike (tr_hzm_lightning.c). The lit cloud
+// region lights the haze between it and the eye, so fogged distance in the strike's direction brightens in a 35-degree
+// lobe - never a flat band. u_HzmLtFog = (strike direction in EYE space, energy); w 0 = inert (the default: every
+// uniform starts at 0), so with lightning off the fog colour below is exactly u_GlobalFogColor.rgb.
+uniform vec4      u_HzmLtFog;
+uniform vec4      u_HzmLtView;
+uniform vec4      u_HzmLtProj;
+
+vec3 HzmLtFogColor()
+{
+	vec3 fogCol = u_GlobalFogColor.rgb;
+
+	if (u_HzmLtFog.w > 0.0)
+	{
+		vec2  ndc = (gl_FragCoord.xy - u_HzmLtView.xy) * u_HzmLtView.zw * 2.0 - 1.0;
+		vec3  ray = normalize(vec3(ndc.x * u_HzmLtProj.x, ndc.y * u_HzmLtProj.y, -1.0));
+		float ang = acos(clamp(dot(ray, u_HzmLtFog.xyz), -1.0, 1.0));
+		float lob = exp(-0.5 * ang * ang / (0.611 * 0.611));
+
+		fogCol += vec3(0.86, 0.90, 1.0) * (u_HzmLtFog.w * (lob + 0.10));
+	}
+
+	return fogCol;
+}
 
 vec3 ApplyGlobalFog(vec3 color)
 {
@@ -116,7 +143,7 @@ vec3 ApplyGlobalFog(vec3 color)
 	// ramp was measured +8..+13/255 too bright at frac 0.125-0.2 and rejected.
 	vec3 operand = (frac > 0.0) ? clamp(color, 0.0, 1.0) : color;
 
-	return mix(operand, u_GlobalFogColor.rgb, frac);
+	return mix(operand, HzmLtFogColor(), frac);
 }
 
 // HZM gl2 soft particles (r_softParticles). u_ScreenDepthMap is the scene-depth snapshot bound on
@@ -373,6 +400,152 @@ vec4 hitCube(vec3 ray, vec3 pos, vec3 invSize, float lod, samplerCube tex)
 }
 #endif
 
+#if defined(USE_LIGHT) && !defined(USE_FAST_LIGHT)
+// HZM rain wetness (r_hzmWet, tr_hzm_wet.c; docs/proposals/water_wetness_2026-09-27 plan W4). The offline twin that
+// fixed every constant below is tools/ww_look.py hzm_wet. u_HzmWet.w == 0 (every draw that is not the first opaque
+// stage of a tagged world surface while it rains, and every draw with r_hzmWet off) skips the whole block, so the
+// output is unchanged byte for byte. The block is a UNIFORM branch: the implicit-LOD fetches inside it are legal.
+uniform vec3      u_ViewOrigin;
+uniform vec4      u_HzmWet;       // film, puddle, time, on
+uniform vec4      u_HzmWetMat;    // darken, wet roughness, puddles allowed, sealed
+uniform vec4      u_HzmWetOcc;    // occlusion map world->uv (x0, y0, 1/width, 1/height)
+uniform vec4      u_HzmWetOccZ;   // zmin, zrange, puddle threshold, lightmap sheen
+uniform vec4      u_HzmWetSkyZ;   // sky zenith rgb
+uniform vec4      u_HzmWetSkyH;   // sky horizon rgb
+uniform vec4      u_HzmWetSun;    // toward-sun xyz, sun present
+uniform vec4      u_HzmWetSunCol; // sun rgb
+uniform sampler2D u_HzmOccMap;
+uniform sampler2D u_HzmWetNoise;
+
+// sky exposure 0..1 at world point p: the top-down max-height map, soft compare
+float HzmOccExposure(vec3 p, float soft)
+{
+	float h = texture2D(u_HzmOccMap, (p.xy - u_HzmWetOcc.xy) * u_HzmWetOcc.zw).r * u_HzmWetOccZ.y + u_HzmWetOccZ.x;
+	return smoothstep(-soft, 2.0, p.z - h + 2.0);
+}
+
+// procedural rain rings: 20 u cells, one drop per cell per ~0.9 s; returns the xy tilt
+vec2 HzmRainRings(vec2 p, float t)
+{
+	vec2 acc = vec2(0.0);
+	vec2 c0 = floor(p / 20.0);
+	for (int oy = -1; oy <= 1; oy++)
+	{
+		for (int ox = -1; ox <= 1; ox++)
+		{
+			vec2  hc  = c0 + vec2(float(ox), float(oy));
+			float r1  = fract(sin(dot(hc, vec2(127.1, 311.7))) * 43758.5453);
+			float r2  = fract(sin(dot(hc, vec2(269.5, 183.3))) * 43758.5453);
+			vec2  dc  = (hc + vec2(0.25) + 0.5 * vec2(r1, r2)) * 20.0;
+			float fr  = fract(t / 0.9 + r1 * 7.0);
+			vec2  d   = p - dc;
+			float dd  = length(d) + 0.001;
+			float x   = dd - fr * 11.0;
+			float rng = sin(x * 1.6) * exp(-(x * x) / 6.0) * (1.0 - fr) * (1.0 - fr);
+			acc += rng * d / dd;
+		}
+	}
+	return acc;
+}
+
+// the wet term: darkens albedo, flattens N, and returns the film reflectance F, film roughness r, sun glint and the
+// reflected (fogged) sky for the composite at the end of main()
+void HzmWet(vec3 viewDir, vec3 E, vec3 n, vec3 lm, inout vec3 albedo, inout vec3 N,
+            out float F, out float r, out float glint, out vec3 env)
+{
+	vec3  P    = u_ViewOrigin - viewDir;
+	float dist = length(viewDir);
+	float fp   = max(length(dFdx(P.xy)), length(dFdy(P.xy)));   // pixel footprint, world units
+
+	// exposure: floors test straight up; walls march a rain ray slanted 20 deg out of the wall (4 taps), so an eave
+	// only shelters the strip beneath it
+	float upf = smoothstep(0.3, 0.9, n.z);
+	float ef  = HzmOccExposure(vec3(P.xy + n.xy * 4.0, P.z + 4.0), 32.0);
+	vec2  hn  = normalize(n.xy + vec2(0.00001, 0.0));
+	float ew  = min(min(HzmOccExposure(vec3(P.xy + hn * 26.0, P.z + 72.2), 24.0),
+	                    HzmOccExposure(vec3(P.xy + hn * 44.0, P.z + 122.2), 24.0)),
+	                min(HzmOccExposure(vec3(P.xy + hn * 62.0, P.z + 172.2), 24.0),
+	                    HzmOccExposure(vec3(P.xy + hn * 80.0, P.z + 222.2), 24.0)));
+	float e   = mix(ew, ef, upf);
+	float wf  = u_HzmWet.x * e * (0.55 + 0.45 * upf);   // walls take less rain
+
+	// puddles: flat, exposed, allowed; the mask edge is at least one pixel wide (no crawling rims)
+	float nse = texture2D(u_HzmWetNoise, P.xy / 2048.0).r;
+	float lvl = u_HzmWet.y * e;
+	float thr = u_HzmWetOccZ.z * lvl;
+	float edg = 0.03 + 0.5 * fp / 64.0;
+	float pm  = (1.0 - smoothstep(thr - edg, thr + edg, nse)) * smoothstep(0.96, 0.99, n.z) * u_HzmWetMat.z * step(0.01, lvl);
+
+	// [in-engine tune 2026-09-28, docs/proposals/water_wetness_2026-09-27/ingame/INGAME.md] NIGHT: under a dark sky
+	// a puddle reflects almost nothing, so its extra darkening and flattening read as black, detail-less patches (m4l2
+	// full puddles measured P1 0.70, P2 0.58). The sky the surface reflects - the horizon, fogged as the visible sky -
+	// decides it: at night a puddle darkens no more than the film around it and keeps half its relief, and the film
+	// darkens 10 % less. m4l2's fogged night sky is 0.20, the day maps 0.33 and up: day is unchanged.
+	float hzF = 0.0;
+	if (u_GlobalFogColor.a > 0.0)
+	{
+		float zf0 = u_GlobalFogParams.y / min(u_GlobalFogParams.x + 1.0, -0.000001);
+		hzF = clamp((zf0 - u_GlobalFogParams.z) * u_GlobalFogParams.w, 0.0, 1.0) * u_GlobalFogColor.a;
+	}
+	float night = 1.0 - smoothstep(0.22, 0.32, dot(mix(u_HzmWetSkyH.rgb, u_GlobalFogColor.rgb, hzF), vec3(0.299, 0.587, 0.114)));
+
+	// darken + roughness by class; cavities (darker texels) hold water first
+	float dk  = 1.0 + (u_HzmWetMat.x - 1.0) * wf * (1.0 - 0.1 * night);
+	dk = mix(dk, mix(u_HzmWetMat.x * 0.72, dk, night), pm);
+	r  = 1.0 + (u_HzmWetMat.y - 1.0) * wf;
+	float al  = dot(albedo, vec3(0.299, 0.587, 0.114));
+	float cav = 1.0 - smoothstep(0.12, 0.55, al);
+	r   = r - 0.14 * cav * wf;
+	dk *= 1.0 - 0.10 * cav * wf;
+	r   = mix(r, 0.03, pm);
+	albedo *= dk;
+
+	// water fills the relief; a puddle is flat
+	N = normalize(mix(N, n, clamp(0.5 * wf + pm * (1.0 - 0.5 * night), 0.0, 1.0)));
+
+	// reflection normal: the surface's own, plus rain rings in puddles, faded out before they go sub-pixel
+	vec3 Nr = n;
+	if (pm > 0.01)
+	{
+		float fd = (1.0 - smoothstep(350.0, 900.0, dist)) * (1.0 - smoothstep(1.17, 2.73, fp));
+		vec2  rg = HzmRainRings(P.xy, u_HzmWet.z) * (0.22 * fd * pm * u_HzmWet.x);
+		Nr = normalize(n + vec3(rg, 0.0));
+	}
+
+	// Fresnel-Schlick-roughness: a rough film can never reach mirror reflectance at grazing (the anti-plastic term)
+	float ndv = max(dot(Nr, E), 0.001);
+	F  = 0.02 + (max(1.0 - r, 0.02) - 0.02) * pow(1.0 - ndv, 5.0);
+	F *= e * max(wf, pm) * (1.0 - u_HzmWetMat.w);
+
+	// the sky it reflects, fogged exactly as gl2 fogs the visible sky at zFar (r_globalFogSky)
+	vec3 R = reflect(-E, Nr);
+	R.z = max(R.z, 0.03);
+	R = normalize(R);
+	env = mix(u_HzmWetSkyH.rgb, u_HzmWetSkyZ.rgb, smoothstep(-0.3 * r, 0.6 + 0.3 * r, R.z));
+	float haze = 0.0;
+	if (u_GlobalFogColor.a > 0.0)
+	{
+		float zf = u_GlobalFogParams.y / min(u_GlobalFogParams.x + 1.0, -0.000001);
+		haze = clamp((zf - u_GlobalFogParams.z) * u_GlobalFogParams.w, 0.0, 1.0) * u_GlobalFogColor.a;
+	}
+	env = mix(env, u_GlobalFogColor.rgb, haze);
+
+	// sun / moon glint: roughness floor 0.26 (a narrower lobe sparkles in motion), gated by exposure and by the baked
+	// light (no glint in lightmap shadow), widened away by haze, never on sealed surfaces
+	vec3  Ls = u_HzmWetSun.xyz;
+	vec3  Hs = normalize(Ls + E);
+	float a  = max(r * r, 0.068);
+	float nh = max(dot(Nr, Hs), 0.0);
+	float nl = max(dot(Nr, Ls), 0.0);
+	float d2 = nh * nh * (a - 1.0) + 1.0;
+	float fh = 0.02 + 0.98 * pow(1.0 - max(dot(Hs, E), 0.0), 5.0);
+	float sv = smoothstep(0.35, 0.9, dot(lm, vec3(0.299, 0.587, 0.114)));
+	glint = a / (3.14159265 * d2 * d2) * fh * nl / (4.0 * ndv + 0.001);
+	glint *= e * sv * max(wf, pm) * (1.0 - 0.8 * haze) * u_HzmWetSun.w * (1.0 - u_HzmWetMat.w);
+	glint = min(glint, 1.5);
+}
+#endif
+
 void main()
 {
 	vec3 viewDir, lightColor, ambientColor, reflectance;
@@ -430,6 +603,8 @@ void main()
 #endif
 
 	vec4 diffuse = texture2D(u_DiffuseMap, texCoords);
+	vec3 hzmLtAlbedo = diffuse.rgb;   // HZM coop [2026-09-27] lightning: the surface colour the flash lights
+	float hzmLtVis = 0.0;             // HZM coop [2026-09-27] lightning: open to the sky (the sun mask), 0 without one
 	
 	float alpha = diffuse.a * var_Color.a;
 	if (u_AlphaTest == 1)
@@ -480,9 +655,27 @@ void main()
 
 	N = normalize(N);
 
+	// HZM rain wetness (see HzmWet above): darkens the albedo and flattens N BEFORE the lighting below
+	vec3  hzmLm  = lightColor;
+	float hzmF   = 0.0;
+	float hzmR   = 1.0;
+	float hzmG   = 0.0;
+	vec3  hzmEnv = vec3(0.0);
+	if (u_HzmWet.w > 0.0)
+	{
+		vec3 hzmAlb = diffuse.rgb;
+		HzmWet(viewDir, E, surfNormal, hzmLm, hzmAlb, N, hzmF, hzmR, hzmG, hzmEnv);
+		diffuse.rgb = hzmAlb;
+	}
+
   #if defined(USE_SHADOWMAP) 
 	vec2 shadowTex = gl_FragCoord.xy * r_FBufScale;
 	float shadowValue = texture2D(u_ShadowMap, shadowTex).r;
+	// HZM [bug-3171] the sun mask means 'open to the sky' only on a surface that FACES the sun. Facing away, it reads
+	// the wall's own sun-side face through the shadow bias (a thin wall's interior face reads lit), so the flash lit
+	// interior walls whose rays to the sun AND to the strike enter the wall itself. Gated on the geometric normal,
+	// before the sun N.L below (the flash comes from the strike, not the sun).
+	hzmLtVis = shadowValue * smoothstep(0.02, 0.20, dot(normalize(surfNormal), normalize(var_PrimaryLightDir.xyz)));
 
 	// surfaces not facing the light are always shadowed
 	shadowValue *= clamp(dot(N, var_PrimaryLightDir.xyz), 0.0, 1.0);
@@ -651,6 +844,23 @@ void main()
 
   #if defined(USE_PBR)
 	gl_FragColor.rgb = sqrt(gl_FragColor.rgb);
+  #endif
+
+	// HZM rain wetness composite: the film reflects the fogged sky, the baked light around it (plan D6 sheen) and the
+	// sun; all of it before the forward global fog below, like every other term
+	if (u_HzmWet.w > 0.0)
+	{
+		gl_FragColor.rgb = gl_FragColor.rgb * (1.0 - hzmF) + hzmEnv * hzmF
+		                 + hzmLm * (hzmF * u_HzmWetOccZ.w * (1.0 - hzmR)) + u_HzmWetSunCol.rgb * (hzmG * 0.5);
+	}
+  // HZM coop [2026-09-27] realistic lightning: the outdoor surface light. u_HzmLtWorld = (strike direction, world
+  // space; energy). hzmLtVis is the sun shadow mask (1 where the sun reaches = open to the sky, 0 under a roof), so a
+  // room stays dark except where daylight comes in. w 0 = inert (the default), so with lightning off nothing changes.
+  #if defined(USE_SHADOWMAP)
+	if (u_HzmLtWorld.w > 0.0)
+	{
+		gl_FragColor.rgb += hzmLtAlbedo * vec3(0.86, 0.90, 1.0) * (u_HzmLtWorld.w * hzmLtVis * (0.25 + 0.75 * clamp(dot(N, u_HzmLtWorld.xyz), 0.0, 1.0)));
+	}
   #endif
 
 #else

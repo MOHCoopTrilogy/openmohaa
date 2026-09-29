@@ -621,6 +621,12 @@ void RE_RenderScene( const refdef_t *fd ) {
 		ri.Error (ERR_DROP, "R_RenderScene: NULL worldmodel");
 	}
 
+	// HZM coop [2026-09-27] realistic lightning: this scene's strike state (tr_hzm_lightning.c). Only a world scene
+	// refreshes it, so a HUD 3D icon drawn after the world cannot switch the flash off mid-frame.
+	if ( !( fd->rdflags & RDF_NOWORLDMODEL ) ) {
+		R_HzmLt_FrontEnd( fd->time );
+	}
+
 	// ------------------------------------------------------------------------------------
 	// HZM gl2 -> cgame bridges. Both are gl1-SAFE BY CONSTRUCTION: renderergl1 never sets
 	// either cvar, so under gl1 they stay at the defaults cgame itself registers and gl1
@@ -646,6 +652,10 @@ void RE_RenderScene( const refdef_t *fd ) {
 			// keep gl1's intensity threshold: measured worldspawn suncolor spans ~400x across
 			// shipped maps, and tr.sunShadows has no intensity gate.
 			ri.Cvar_Set( "r_coopSunValid", ( sunSum > 0.05f ) ? "1" : "0" );
+		} else {
+			// HZM bug-3011/bug-3102: publishing off (or turned off mid-session) must not leave the
+			// last published sun standing for cgame; Cvar_Set is a no-op when already "0".
+			ri.Cvar_Set( "r_coopSunValid", "0" );
 		}
 
 		// (b) r_coopRealShadows: capability signal telling cgame that renderergl2 is ACTUALLY
@@ -1028,7 +1038,7 @@ RE_AddTerrainMarkToScene
 void RE_AddTerrainMarkToScene(int iTerrainIndex, qhandle_t hShader, int numVerts, const polyVert_t* verts, int renderfx) {
     srfMarkFragment_t* terMark;
 
-    if (!tr.registered) {
+    if (!tr.registered || !backEndData || !backEndData->terMarks) {
         return;
     }
 

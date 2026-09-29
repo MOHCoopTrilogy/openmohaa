@@ -4,7 +4,10 @@ project(omohrenderergl2)
 
 # HZM: touch to re-glob (added tr_gore.c; 2026-07-28 added glsl/tonemap_hzm_fp.glsl - gl1 parity grade;
 #      2026-09-13 added glsl/fsr_easu_fp.glsl, fsr_rcas_fp.glsl, fsr_downscale_fp.glsl - render scale + FSR 1;
-#      2026-09-26 added tr_hzm_spot.c, tr_hzm_spot_rb.c - headlight Phase S spot cones + lamp flares)
+#      2026-09-26 added tr_hzm_spot.c, tr_hzm_spot_rb.c - headlight Phase S spot cones + lamp flares;
+#      2026-09-27 added tr_hzm_lodfog.c, tr_hzm_lodfog_rb.c - fog-owned LOD + fog-faded SSAO, r_hzmLodFog / r_hzmFogAO;
+#      2026-09-27 added tr_hzm_wet.c - rain wetness r_hzmWet, docs/proposals/water_wetness_2026-09-27;
+#      2026-09-27 added tr_hzm_water.c, glsl/hzmwater_vp.glsl, glsl/hzmwater_fp.glsl - water pass r_hzmWater)
 file(GLOB SOURCES_RENDERER "*.c" "*.cpp" "../renderercommon/tr_*.c")
 # Remove Quake III old model source
 list(REMOVE_ITEM SOURCES_RENDERER "${CMAKE_CURRENT_SOURCE_DIR}/tr_model.c")

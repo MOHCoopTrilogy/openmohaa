@@ -1587,6 +1587,10 @@ void R_Register( void )
 	// HZM gl2 [2026-09-26] PHASE S spot cones + lamp flares: r_hzmSpot / r_hzmFlares (flags 0, "-1" = auto) and their
 	// tuning, plus the r_hzmSpotProtocol handshake, forced here on every R_Init (tr_hzm_spot_rb.c)
 	R_HZM_SpotRegister();
+	// HZM gl2 [2026-09-27] fog-owned LOD (r_hzmLodFog*) + fog-faded SSAO (r_hzmFogAO): flags 0, default OFF
+	// (tr_hzm_lodfog_rb.c; docs/proposals/fog_lod_pop_2026-09-27)
+	R_HZM_LodFogRegister();
+	R_HzmLt_Register();   // HZM coop [2026-09-27] realistic lightning (tr_hzm_lightning.c)
 
 	// HZM (bug-1237) automatic probe placement from info_pathnode - see R_PlaceCubemapsAuto.
 	// NOT latched on purpose: both are read at map load, so a change applies on the next map
@@ -2372,10 +2376,19 @@ void R_Init( void ) {
 	if (max_polyverts < MAX_POLYVERTS)
 		max_polyverts = MAX_POLYVERTS;
 
-	ptr = ri.Hunk_Alloc( sizeof( *backEndData ) + sizeof(srfPoly_t) * max_polys + sizeof(polyVert_t) * max_polyverts, h_low);
+	// HZM bug-3089: allocate terMarks like gl1 (renderergl1/tr_init.c:1844-1848).
+	// gl2 used to leave backEndData->terMarks NULL (Hunk_Alloc zeroes) while
+	// RE_AddTerrainMarkToScene writes through it. Unreachable today only because gl2's
+	// R_MarkFragments never returns a terrain fragment (iIndex > 0), so cgame never calls it.
+	max_termarks = r_maxtermarks->integer;
+	if (max_termarks < MAX_TERMARKS)
+		max_termarks = MAX_TERMARKS;
+
+	ptr = ri.Hunk_Alloc( sizeof( *backEndData ) + sizeof(srfPoly_t) * max_polys + sizeof(polyVert_t) * max_polyverts + sizeof(srfMarkFragment_t) * max_termarks, h_low);
 	backEndData = (backEndData_t *) ptr;
 	backEndData->polys = (srfPoly_t *) ((char *) ptr + sizeof( *backEndData ));
 	backEndData->polyVerts = (polyVert_t *) ((char *) ptr + sizeof( *backEndData ) + sizeof(srfPoly_t) * max_polys);
+	backEndData->terMarks = (srfMarkFragment_t *) ((char *) ptr + sizeof( *backEndData ) + sizeof(srfPoly_t) * max_polys + sizeof(polyVert_t) * max_polyverts);
 	R_InitNextFrame();
 
 	InitOpenGL();
@@ -2405,9 +2418,7 @@ void R_Init( void ) {
 
     R_Sky_Init();
 
-    max_termarks = r_maxtermarks->integer;
-    if (max_termarks < MAX_TERMARKS)
-        max_termarks = MAX_TERMARKS;
+    // max_termarks is now computed before the backEndData allocation above.
 
     R_LevelMarksInit();
 
@@ -2433,6 +2444,13 @@ RE_Shutdown
 void RE_Shutdown( qboolean destroyWindow ) {	
 
 	ri.Printf( PRINT_ALL, "RE_Shutdown( %i )\n", destroyWindow );
+
+	// HZM bug-3011/bug-3102: cvars outlive the renderer DLL. Withdraw the gl2 -> cgame handshake
+	// values here, so a gl2 -> gl1 vid_restart (or the silent opengl1 fallback) does not
+	// leave r_coopRealShadows 1 behind, which made cgame hide gl1's decal shadows. The
+	// per-frame publisher in RE_RenderScene sets them again on the next gl2 frame.
+	ri.Cvar_Set( "r_coopRealShadows", "0" );
+	ri.Cvar_Set( "r_coopSunValid", "0" );
 
 	ri.Cmd_RemoveCommand( "imagelist" );
 	ri.Cmd_RemoveCommand( "shaderlist" );

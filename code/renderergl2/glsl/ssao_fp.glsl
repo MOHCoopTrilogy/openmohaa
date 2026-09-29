@@ -12,6 +12,15 @@ uniform vec4   u_ViewInfo; // zfar / znear, zfar, 1/width, 1/height
 // literal without escaping, so a quote even inside a comment breaks the build.
 uniform vec4   u_HzmParams; // (radius, intensity, bias, unused)
 
+// HZM gl2 [2026-09-27] r_hzmFogAO (bug-3084; docs/proposals/fog_lod_pop_2026-09-27 plan piece A). The AO buffer is
+// multiplied onto the frame AFTER the forward global fog, so a surface at 100% fog kept its occlusion and that
+// darkening vanished in one frame at the far-plane cull. These are the SAME two uniforms the forward fog uses
+// (RB_SetGlobalFogUniforms): u_GlobalFogParams = (projMat10, projMat14, fog start, 1 / (end - start)) and
+// u_GlobalFogColor.a = r_globalFogScale. u_GlobalFogColor.a == 0 (r_hzmFogAO 0, no fog, screen-space fog path)
+// skips the block, so the output is unchanged. The fade is computed here, before the depth-aware blur.
+uniform vec4   u_GlobalFogColor;
+uniform vec4   u_GlobalFogParams;
+
 varying vec2   var_ScreenTex;
 
 #if 0
@@ -112,6 +121,18 @@ void main()
 	// 1.0 on steep slopes and that path must stay fully lit (1.0 maps to 1.0 through this too).
 	// Same algebraic form as gl1's grade. Default 1.0 = identity; 0 = no AO; 3 = 3x darkening.
 	result = clamp(1.0 - (1.0 - result) * u_HzmParams.y, 0.0, 1.0);
+
+	// r_hzmFogAO: fade the occlusion out exactly as the forward fog faded the surface in (generic_fp ApplyGlobalFog):
+	// same window depth, same projection terms, same linear ramp, same scale. Fully fogged = no occlusion.
+	if (u_GlobalFogColor.a > 0.0)
+	{
+		float fogZw    = texture2D(u_ScreenDepthMap, var_ScreenTex).r;
+		float fogDenom = u_GlobalFogParams.x + (2.0 * fogZw - 1.0);
+		float fogDist  = u_GlobalFogParams.y / min(fogDenom, -1e-6);
+		float fogFrac  = clamp((fogDist - u_GlobalFogParams.z) * u_GlobalFogParams.w, 0.0, 1.0);
+		fogFrac = clamp(fogFrac * u_GlobalFogColor.a, 0.0, 1.0);
+		result = mix(result, 1.0, fogFrac);
+	}
 
 	gl_FragColor = vec4(vec3(result), 1.0);
 }

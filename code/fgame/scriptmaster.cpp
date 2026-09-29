@@ -553,6 +553,15 @@ void ScriptMaster::RegisterAlias(Event *ev)
         } else {
             subtitle = s.icmp("subtitle") == 0;
 
+            // HZM bug-3098: mirror cgame (cg_commands.cpp ClientGameCommandManager::Alias).
+            // qcommon/alias.c accepts forcesubtitle exactly like subtitle, but only "subtitle" re-quoted
+            // its text here, so `forcesubtitle "Hands up!"` reached Alias_ListAddParms as two bare tokens
+            // and "up!" printed "Unknown parameter" on every server-side parse. bug-2728 silenced that by
+            // deleting `always` from the coop_av_de_handsup aliases, which unregistered them instead.
+            if (!subtitle) {
+                subtitle = s.icmp("forcesubtitle") == 0;
+            }
+
             strcat(parameters, s);
         }
 

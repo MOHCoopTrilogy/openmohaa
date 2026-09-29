@@ -578,7 +578,12 @@ enum
 	// sizes the per-stage bundle[] and tess texcoords[] arrays and MUST stay 7; NUM_TEXTURE_UNITS
 	// only sizes the DSA texture bind cache (tr_dsa.c), so widening that to 8 is safe.
 	TB_SCREENDEPTH = 7,
-	NUM_TEXTURE_UNITS = 8
+	// HZM rain wetness (tr_hzm_wet.c, water_wetness_2026-09-27 plan W4). Unit 8 is RESERVED for the shadows plan's
+	// TB_SUNWORLD (docs/proposals/shadows_2026-09-26/vet.md) - do not take it. NUM_TEXTURE_UNITS only sizes the DSA
+	// bind cache (tr_dsa.c); GL 3.x guarantees 16 fragment units.
+	TB_HZMRAINOCC  = 9,
+	TB_HZMWETNOISE = 10,
+	NUM_TEXTURE_UNITS = 11
 };
 
 typedef enum
@@ -714,6 +719,9 @@ typedef struct shader_s {
 
 	int			surfaceFlags;			// if explicitlyDefined, this will have SURF_* flags
 	int			contentFlags;
+	int			hzmWetBits;				// HZM rain wetness: BSP surface-type bits OR-ed at load (tr_hzm_wet.c)
+	int			hzmWater;				// HZM water pass: hzm_waterwet.h allowlist slot + 1, 0 = never (tr_hzm_water.c)
+	float		hzmWaterLmRef;			// HZM water pass: p90 lightmap luminance of this shader name, 0 = no glint gate
 
 	qboolean	entityMergable;			// merge across entites optimizable (smoke, blood)
 
@@ -1059,6 +1067,38 @@ typedef enum
 	//   uniforms start at 0 and GLSL_SetUniformVec4 caches from 0, so zero MUST be the inert value (plan finding 5).
 	UNIFORM_HZMLIGHTSPOT,
 
+	// HZM rain wetness (tr_hzm_wet.c). Appended LAST, per the rule above; rows in the same order in uniformsInfo[].
+	//   u_HzmWet = (film, puddle, time mod 3600, on). on == 0 = the lightall wet branch is skipped: ALL ZERO is inert.
+	UNIFORM_HZMWET,
+	UNIFORM_HZMWETMAT,      // (darken, wet roughness, puddles allowed, sealed)
+	UNIFORM_HZMWETOCC,      // rain-occlusion map world->uv: (x0, y0, 1/width, 1/height)
+	UNIFORM_HZMWETOCCZ,     // (zmin, zrange, puddle threshold, lightmap sheen)
+	UNIFORM_HZMWETSKYZ,     // sky zenith rgb
+	UNIFORM_HZMWETSKYH,     // sky horizon rgb
+	UNIFORM_HZMWETSUN,      // toward-sun xyz, sun present
+	UNIFORM_HZMWETSUNCOL,   // sun rgb, max component <= 1
+	UNIFORM_HZMOCCMAP,      // sampler, TB_HZMRAINOCC
+	UNIFORM_HZMWETNOISE,    // sampler, TB_HZMWETNOISE
+
+	// HZM water pass (tr_hzm_water.c). Appended LAST, rows in the same order in uniformsInfo[].
+	UNIFORM_HZMWATER,       // (fade, time mod 1000, lightmap reference or 0, glint on)
+	UNIFORM_HZMRIPPLEMAP,   // sampler, TB_HZMWETNOISE (the water program has no puddle noise)
+	// HZM coop [2026-09-27] realistic lightning (tr_hzm_lightning.c, renderercommon/hzm_lightning.h). Appended LAST,
+	// per the rule above (the gfx branch appends after UNIFORM_HZMLIGHTSPOT too: a trivial append conflict at merge).
+	// ALL ZERO = inert (nothing added anywhere), which is also what every program starts with.
+	//   u_HzmLtFog    = (strike direction in EYE space, haze energy)          lightall/generic ApplyGlobalFog
+	//   u_HzmLtView   = (viewport x, y, 1/width, 1/height)                     lightall/generic ApplyGlobalFog
+	//   u_HzmLtProj   = (1/projMat[0], 1/projMat[5], 0, 0)                     lightall/generic ApplyGlobalFog
+	//   u_HzmLtWorld  = (strike direction in WORLD space, surface/sky energy)  lightall surface light, sky pass
+	//   u_HzmLtBolt   = (bolt centre direction WORLD, bolt energy)             sky pass
+	//   u_HzmLtParams = (tan bolt half-width, tan bolt half-height, sin lowest bolt elevation, 0)   sky pass
+	UNIFORM_HZMLTFOG,
+	UNIFORM_HZMLTVIEW,
+	UNIFORM_HZMLTPROJ,
+	UNIFORM_HZMLTWORLD,
+	UNIFORM_HZMLTBOLT,
+	UNIFORM_HZMLTPARAMS,
+
 	UNIFORM_COUNT
 } uniform_t;
 
@@ -1078,6 +1118,17 @@ typedef struct shaderProgram_s
 	short uniformBufferOffsets[UNIFORM_COUNT]; // max 32767/64=511 uniforms
 	char  *uniformBuffer;
 } shaderProgram_t;
+
+// HZM coop [2026-09-27] realistic lightning: the parsed r_hzmLtState of this frame (tr_hzm_lightning.c)
+typedef struct {
+	qboolean on;
+	float    eSky, eWorld, eHaze, eBolt;
+	vec3_t   dir;         // unit, world space, toward the lit cloud region
+	int      boltSeed;
+	float    boltYaw;     // degrees
+	float    boltTopEl;   // degrees
+	int      builtSeed;   // the seed tr.hzmLtBoltImage currently holds
+} hzmLtState_t;
 
 // trRefdef_t holds everything that comes in refdef_t,
 // as well as the locally generated scene information
@@ -2584,6 +2635,37 @@ typedef struct {
     qboolean hzmFlareQueriesValid;
     hzmFlareState_t hzmFlareState[HZM_FLARE_SLOTS];
     int hzmFlareFrame;					// the viewParms.frameCount the flare pass last ran for (once per frame)
+
+    // HZM rain wetness (tr_hzm_wet.c, water_wetness_2026-09-27). In tr ON PURPOSE: R_Init's memset clears it with
+    // the images it points at; R_HZMWetBuild rebuilds it on every world load.
+    qboolean hzmWetReady;
+    qboolean hzmOmahaWorld;				// the loaded BSP is on hzm_waterwet.h's Omaha list: every water/wet path off
+    image_t *hzmRainOccImage;
+    image_t *hzmWetNoiseImage;
+    vec4_t hzmRainOccXform;
+    vec2_t hzmRainOccZ;
+    float hzmPuddleQ;
+    vec4_t hzmSkyZenith;
+    vec4_t hzmSkyHorizon;
+    vec4_t hzmWetSun;
+    vec4_t hzmWetSunCol;
+
+    // HZM water pass (tr_hzm_water.c). Same lifetime rules as the wetness block above.
+    qboolean hzmWaterReady;
+    int hzmWaterWorld;					// allowlisted water surfaces in the loaded BSP (0 = build nothing)
+    image_t *hzmRippleImage;
+    image_t *hzmRainOccSoftImage;		// sigma 48 u copy of the rain-occlusion map (tr_hzm_wet.c)
+    vec4_t hzmRainOccSoftXform;
+    vec2_t hzmRainOccSoftZ;
+    shaderProgram_t hzmWaterShader[2];	// [1] = USE_DEFORM_VERTEXES, the fogShader split
+    // HZM coop [2026-09-27] realistic lightning (tr_hzm_lightning.c). In tr so R_Init's memset clears all of it: the
+    // program and the bolt image are created on the first lit frame and GLSL_ShutdownGPUShaders / the image shutdown
+    // free them, after which the memset re-arms the lazy creation.
+    hzmLtState_t    hzmLt;
+    shaderProgram_t hzmLtSkyShader;
+    qboolean        hzmLtSkyShaderTried;
+    qboolean        hzmLtSkyShaderOk;
+    image_t        *hzmLtBoltImage;
 } trGlobals_t;
 
 extern backEndState_t	backEnd;
@@ -2734,6 +2816,13 @@ qboolean R_HZM_LightGlowNearOn( void );              // r_hzmLightGlowNear resol
 qboolean R_HZM_RgbGenDotOn( void );                  // r_hzmRgbGenDot resolved, Omaha exclusion applied
 qboolean R_HZM_AlphaDotToRgb( const shaderStage_t *pStage ); // searchlights S1: additive alphaGen dot -> RGB (gl1)
 qboolean R_HZM_LightRestoreProtectedWorld( void );   // the loaded BSP is on the Omaha protection list
+// HZM coop [2026-09-27] realistic lightning (tr_hzm_lightning.c)
+void     R_HzmLt_Register( void );
+void     R_HzmLt_FrontEnd( int refdefTime );
+void     RB_HzmLt_SetUniforms( shaderProgram_t *sp, int stateBits, qboolean fogAsSky );
+void     RB_HzmLt_ZeroUniforms( shaderProgram_t *sp );
+void     RB_HzmLt_SkyPass( void );
+qboolean GLSL_HzmLtInitSkyShader( void );
 // HZM gl2 [2026-09-25] Phase R3 EDGEFADE window: 1 at the light, 0 at `radius`, smooth (saturate(1 - t^4)^2).
 // Used ONLY for lights carrying hzm_dlight_edgefade (tr_types_new.h), so every other light is byte-identical.
 static ID_INLINE float R_HZM_DlightEdgeWindow( float dist, float radius ) {
@@ -2802,6 +2891,41 @@ qboolean RB_HZM_SpotSphereLight( const dlight_t *dl, const sphereor_t *sph, cons
 void     R_HZM_FlareInitQueries( void );
 void     R_HZM_FlareShutdownQueries( void );
 void     RB_HZM_SpotFlares( void );
+
+// HZM gl2 [2026-09-27] FOG-OWNED LOD + fog-faded SSAO (docs/proposals/fog_lod_pop_2026-09-27, plan pieces B + A).
+// tr_hzm_lodfog.c is pure (arguments only; docs/tools/hzm_lodfog_selftest), tr_hzm_lodfog_rb.c is the glue.
+typedef struct {
+	float		nearDist;		// fade start to use
+	float		range;			// fade range to use (always the shader's own)
+	float		distScale;		// multiply the UNSCALED model-space tess.xyz by this before measuring a vertex distance
+	float		gateDist;		// > 0: per-vertex fades hold their near-side value while the ORIGIN is closer than this
+	qboolean	trueDistance;	// coarse culls use the true 3-D distance (not R_DistanceCullPointAndRadius's doubled dz)
+} hzmLodBand_t;
+#define HZM_LODBAND_AUTHORED	0	// retail band, retail distances, retail culls
+#define HZM_LODBAND_GOVERNED	1	// the whole model is past 100% fog before any fade starts
+#define HZM_LODBAND_HANDBACK	2	// above the cap: sliding back to the authored band
+float    R_HZM_LodFogFloor( float farplane, float endScale, float fovXdeg, float fovYdeg );
+int      R_HZM_LodFogBand( float floorDist, float cap, float instRadius, float nearIn, float rangeIn, float modelScale,
+                           hzmLodBand_t *out );
+// the Omaha-list decision, cached per LOADED BSP NAME (bug: a tr.world POINTER key never changes - tr.world is
+// always &s_worldData - so the first map of the DLL's life decided every later map). The cache is the caller's.
+typedef struct {
+	char		name[MAX_QPATH];	// tr.world->baseName the decision was made for
+	qboolean	valid;
+	qboolean	excluded;
+} hzmLodFogMapCache_t;
+qboolean R_HZM_LodFogMapNameExcluded( const char *worldBaseName );
+qboolean R_HZM_LodFogExcludedCached( const char *worldBaseName, hzmLodFogMapCache_t *cache, qboolean *changed );
+// tr_hzm_lodfog_rb.c - glue
+extern cvar_t *r_hzmLodFog;			// 0 (default) = retail; 1 = piece B
+extern cvar_t *r_hzmLodFogCap;		// 3500: B governs a model only while floor + radius <= this
+extern cvar_t *r_hzmLodFogOmaha;	// 0 (default) = m3l1a m3l1b e3l1 e3l2 obj_team3 stay retail
+extern cvar_t *r_hzmFogAO;			// 0 (default) = retail; 1 = piece A (tr_postprocess.c RB_HZMSsao)
+extern cvar_t *r_hzmLodFogDebug;	// 0 (default); 2 = no-LOD REFERENCE for the headless dolly (plan.md 5.3)
+void     R_HZM_LodFogRegister( void );
+float    R_HZM_LodFogFloorForView( const viewParms_t *vp );
+int      R_HZM_LodFogStaticBand( float floorDist, const shader_t *sh, const cStaticModelUnpacked_t *SM,
+                                 hzmLodBand_t *out );
 extern  cvar_t  *r_cubemapAuto;        // HZM bug-1237: auto probe budget (info_pathnode placement)
 extern  cvar_t  *r_cubemapAutoRadius;  // HZM bug-1237: parallax radius for auto-placed probes
 
@@ -4258,6 +4382,17 @@ void RE_TakeVideoFrame( int width, int height,
 		byte *captureBuffer, byte *encodeBuffer, qboolean motionJpeg );
 
 void R_ConvertTextureFormat( const byte *in, int width, int height, GLenum format, GLenum type, byte *out );
+
+// HZM rain wetness - tr_hzm_wet.c (docs/proposals/water_wetness_2026-09-27)
+void R_HZMWetBuild( dheader_t *header );
+void R_HZMWetTagShader( shader_t *sh, int surfaceFlags );
+void RB_HZMWetUniforms( shaderProgram_t *sp, const shaderCommands_t *input, const shaderStage_t *pStage, int stage,
+                        qboolean charLit );
+void RB_HZMWetOff( shaderProgram_t *sp );
+
+// HZM water pass - tr_hzm_water.c
+void R_HZMWaterBuild( void );
+void RB_HZMWaterPass( int deformGen, const vec5_t deformParams );
 
 #ifdef __cplusplus
 }

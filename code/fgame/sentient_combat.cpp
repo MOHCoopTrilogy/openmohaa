@@ -489,8 +489,12 @@ void Sentient::FireWeapon(int number, firemode_t mode)
         } else {
             activeWeapon->Fire(mode);
         }
-    } else {
-        gi.DPrintf("No active weapon in slot #: \"%i\"\n", number);
+    } else if (!activeWeapon) {
+        // HZM bug-3095: this used to print for a weapon that exists but is merely
+        // not ReadyToFire (fire-rate gap, reload, empty clip) as well - the normal state of every
+        // AI burst, ~158 misleading lines a session. Only an empty hand is worth a line, and it
+        // now names the entity so the caller can be found from the log alone.
+        gi.DPrintf("No active weapon in slot #: \"%i\" (%s #%d)\n", number, getClassname(), entnum);
     }
 }
 
@@ -557,9 +561,9 @@ void Sentient::StopFireWeapon(Event *ev)
     if (activeWeapon) {
         activeWeapon->ForceIdle();
     } else {
-        if (!activeWeapon) {
-            gi.DPrintf("No active weapon in slot #: \"%i\"\n", number);
-        }
+        // HZM bug-3095: stopping fire on an empty hand is a harmless no-op; name
+        // the entity so the caller is identifiable (see FireWeapon above).
+        gi.DPrintf("No active weapon in slot #: \"%i\" (%s #%d, stopfire)\n", number, getClassname(), entnum);
     }
 }
 

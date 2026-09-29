@@ -47,6 +47,12 @@ void TIKI_Reset_Caches()
 {
     static int peakBones = 0;
     static int peakMorph = 0;
+    // [2026-09-27] console quiet (docs/proposals/console_quiet_2026-09-27): "a handful of lines at most" was
+    // wrong - the peak creeps up a few bones at a time and printed ~80 lines a map. Report a new peak
+    // only when it grew >25% over the last one printed, or every new peak once it is >=75% of the cap
+    // (so the approach to exhaustion is still logged line by line). The last line stays within 25%.
+    static int toldBones = 0;
+    static int toldMorph = 0;
 
     if (TIKI_Skel_Bones_Index > peakBones || skeletorMorphCacheIndex > peakMorph) {
         if (TIKI_Skel_Bones_Index > peakBones) {
@@ -55,6 +61,13 @@ void TIKI_Reset_Caches()
         if (skeletorMorphCacheIndex > peakMorph) {
             peakMorph = skeletorMorphCacheIndex;
         }
+    }
+
+    if (peakBones > toldBones + toldBones / 4 || peakMorph > toldMorph + toldMorph / 4
+        || (peakBones > toldBones && peakBones >= (MAX_SKELBONES / 4) * 3)
+        || (peakMorph > toldMorph && peakMorph >= (MAX_SKELMORPH / 4) * 3)) {
+        toldBones = peakBones;
+        toldMorph = peakMorph;
 
         Com_Printf(
             "^~^~^ SKELPOOL peak bones=%d/%d (%d%%)  morph=%d/%d (%d%%)\n",

@@ -1829,6 +1829,11 @@ void R_Init( void ) {
 
 	R_Register();
 
+	// HZM bug-3011/bug-3102: gl1 never publishes r_coopRealShadows, so a value left at 1 by a gl2
+	// session in this process (cvars outlive the renderer DLL) would keep cgame hiding gl1's
+	// decal shadows. gl1 casts no real character shadows: state that explicitly.
+	ri.Cvar_Set( "r_coopRealShadows", "0" );
+
 	max_polys = r_maxpolys->integer;
 	if (max_polys < MAX_POLYS)
 		max_polys = MAX_POLYS;

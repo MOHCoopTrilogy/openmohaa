@@ -1717,6 +1717,20 @@ void R_SortDrawSurfs( drawSurf_t *drawSurfs, int numDrawSurfs,
 // but never appears here => cgame never submits its entity. REMOVE with the rest of the skel trace.
 static unsigned char g_skeldispSeen[MAX_MOD_KNOWN];
 
+// HZM [2026-09-27] console quiet (docs/proposals/console_quiet_2026-09-27): bug-1153 gated the SKEL* forensics behind
+// r_skeldiag but missed this one-shot and SKELDRAW's (tr_model.cpp), so ~170 lines a map still
+// printed. Both now need r_skeltrace 1 (CVAR_TEMP like r_skeldiag - not CVAR_CHEAT, bug-1148).
+// Checked BEFORE the handle is marked seen, so turning it on mid-map still logs every new model.
+static qboolean R_SkelTraceOn(void)
+{
+	static cvar_t *r_skeltrace = NULL;
+
+	if (!r_skeltrace) {
+		r_skeltrace = ri.Cvar_Get("r_skeltrace", "0", CVAR_TEMP);
+	}
+	return (qboolean)(r_skeltrace->integer != 0);
+}
+
 static void R_AddEntitySurface (int entityNum)
 {
 	trRefEntity_t	*ent;
@@ -1811,7 +1825,7 @@ static void R_AddEntitySurface (int entityNum)
 		// ^~^~^ SKELDISP (temporary): first dispatch of each TIKI/BAD model handle.
 		{
 			int hm = ent->e.hModel;
-			if (hm >= 0 && hm < MAX_MOD_KNOWN && !g_skeldispSeen[hm]) {
+			if (R_SkelTraceOn() && hm >= 0 && hm < MAX_MOD_KNOWN && !g_skeldispSeen[hm]) {
 				g_skeldispSeen[hm] = 1;
 				if (tr.currentModel && (tr.currentModel->type == MOD_TIKI || tr.currentModel->type == MOD_BAD)) {
 					ri.Printf(PRINT_ALL,

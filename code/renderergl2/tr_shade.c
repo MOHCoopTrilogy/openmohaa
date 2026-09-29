@@ -531,7 +531,7 @@ static qboolean RB_DistFadeConstAlpha( const shaderStage_t *pStage, float *alpha
 {
 	const float *modelOrigin;
 	vec3_t       org;
-	float        lenSqr, fNear, fFar, a;
+	float        lenSqr, fNear, fFar, fRange, a;
 
 	if ( backEnd.currentStaticModel ) {
 		modelOrigin = backEnd.currentStaticModel->origin;
@@ -547,15 +547,34 @@ static qboolean RB_DistFadeConstAlpha( const shaderStage_t *pStage, float *alpha
 
 	lenSqr = VectorLengthSquared( org );
 	fNear  = tess.shader->fDistNear;
+	fRange = tess.shader->fDistRange;
 	fFar   = tess.shader->fDistNear + tess.shader->fDistRange;
+
+	// HZM gl2 [2026-09-27] r_hzmLodFog (docs/proposals/fog_lod_pop_2026-09-27 plan piece B): a static model the
+	// floor governs uses the moved band - the same one tr_staticmodels.cpp's coarse culls use. Measured from the
+	// origin already, so no gate is needed: near' >= floor + cull radius puts the whole model past 100% fog.
+	// HZM_LODBAND_AUTHORED (the default, r_hzmLodFog 0) leaves fNear / fRange / fFar exactly as above.
+	if ( backEnd.currentStaticModel ) {
+		const float lodFloor = R_HZM_LodFogFloorForView( &backEnd.viewParms );
+
+		if ( lodFloor > 0.0f ) {
+			hzmLodBand_t lodBand;
+
+			if ( R_HZM_LodFogStaticBand( lodFloor, tess.shader, backEnd.currentStaticModel, &lodBand ) != HZM_LODBAND_AUTHORED ) {
+				fNear  = lodBand.nearDist;
+				fRange = lodBand.range;
+				fFar   = fNear + fRange;
+			}
+		}
+	}
 
 	if ( lenSqr <= fNear * fNear ) {
 		a = 0.0f;
 	} else if ( lenSqr >= fFar * fFar ) {
 		a = 1.0f;
 	} else {
-		// unreachable when fDistRange == 0 (the two clamps meet), so no divide by zero
-		a = ( VectorLength( org ) - fNear ) / tess.shader->fDistRange;
+		// unreachable when fRange == 0 (the two clamps meet), so no divide by zero
+		a = ( VectorLength( org ) - fNear ) / fRange;
 	}
 
 	if ( pStage->alphaGen == AGEN_TIKI_DIST_FADE ) {
@@ -1062,6 +1081,9 @@ static void ForwardDlight( void ) {
 		// additive stage, i.e. toward black: exactly its fog transmittance (plan finding 9; RB_SetGlobalFogUniforms
 		// maps ONE/ONE to a black fog target), so a pool 900 u away no longer glows through fog that hides the truck.
 		// Every other light keeps the zeroing below, byte for byte.
+		// HZM coop [2026-09-27] lightning: this pure-additive dlight pass never takes the flash (and the uniforms are
+		// per-program persistent state shared with RB_IterateStagesGeneric, so they are zeroed explicitly here)
+		RB_HzmLt_ZeroUniforms( sp );
 		if ( ( dl->type & HZM_DLIGHT_FOGGED ) && dl->hzmSpot == HZM_SPOT_READY )
 		{
 			RB_SetGlobalFogUniforms( sp, GLS_SRCBLEND_ONE | GLS_DSTBLEND_ONE, qfalse );
@@ -1072,6 +1094,10 @@ static void ForwardDlight( void ) {
 			GLSL_SetUniformVec4( sp, UNIFORM_GLOBALFOGCOLOR,  off );
 			GLSL_SetUniformVec4( sp, UNIFORM_GLOBALFOGPARAMS, off );
 		}
+
+		// HZM rain wetness: this additive pass shares the lightall programs; a stale u_HzmWet from the main pass would
+		// add the wet reflection once per dlight (vet.md B2). Always zero here.
+		RB_HZMWetOff( sp );
 
 		GLSL_SetUniformMat4(sp, UNIFORM_MODELVIEWPROJECTIONMATRIX, glState.modelviewProjection);
 		GLSL_SetUniformVec3(sp, UNIFORM_VIEWORIGIN, backEnd.viewParms.or.origin);
@@ -1794,6 +1820,12 @@ static void RB_IterateStagesGeneric( shaderCommands_t *input )
 			(qboolean)( input->shader->isSky
 			            || input->shader == tr.sunShader
 			            || input->shader == tr.sunFlareShader ) );
+		// HZM coop [2026-09-27] realistic lightning: haze in-scatter + outdoor surface light. All zero (today's inputs)
+		// unless a strike is lit; same gates as the fog (main view only) plus opaque/alpha-blend stages only.
+		RB_HzmLt_SetUniforms( sp, pStage->stateBits,
+			(qboolean)( input->shader->isSky
+			            || input->shader == tr.sunShader
+			            || input->shader == tr.sunFlareShader ) );
 
 		// HZM gl2 SOFT PARTICLES (r_softParticles): uploads mode 0 for every non-sprite draw and
 		// the qualifying fade mode for emitter sprites. No-op when r_softParticles is off.
@@ -2252,6 +2284,10 @@ static void RB_IterateStagesGeneric( shaderCommands_t *input )
 			}
 
 			GLSL_SetUniformVec4(sp, UNIFORM_ENABLETEXTURES, enableTextures);
+
+			// HZM rain wetness (tr_hzm_wet.c): uploads the wet uniforms for a qualifying draw and ZERO for every
+			// other lightall draw - uniforms are per-program state shared with ForwardDlight and the cube bake.
+			RB_HZMWetUniforms(sp, input, pStage, stage, stageCharLit);
 		}
 		else if ( pStage->bundle[1].image[0] != 0 )
 		{
@@ -2632,6 +2668,8 @@ static void RB_FillDistFadeAlpha( void )
 	vec3_t               eyeLocal;
 	vec3_t               v;
 	float                fNear, fRange;
+	float                distScale = 1.0f;	// HZM r_hzmLodFog: 1 = the retail unscaled measure
+	qboolean             holdNear  = qfalse;	// HZM r_hzmLodFog: the gate (see below)
 	qboolean             oneMinus;
 	int                  i;
 
@@ -2680,12 +2718,51 @@ static void RB_FillDistFadeAlpha( void )
 		eyeLocal[2] = DotProduct( v, backEnd.currentEntity->e.axis[2] );
 	}
 
+	// HZM gl2 [2026-09-27] r_hzmLodFog (docs/proposals/fog_lod_pop_2026-09-27 plan piece B). For a static model the
+	// floor governs: (1) the moved band, the same one the coarse culls use; (2) the TRUE vertex distance - tess.xyz is
+	// UNSCALED model space here (RB_StaticMesh copies pStaticXyz; the scale lives only in the GL matrix,
+	// R_RotateForStaticModel), so the retail measure is off by 1/scale (2x on the 0.52 common tree); (3) the gate:
+	// every vertex holds its near-side value until the ORIGIN reaches floor + cull radius, because only then is every
+	// fragment of the model past 100% fog (a vertex alone past near' says nothing about its neighbours).
+	// HZM_LODBAND_AUTHORED (the default, r_hzmLodFog 0) leaves all three untouched - the retail loop below.
+	if ( backEnd.currentStaticModel ) {
+		const float lodFloor = R_HZM_LodFogFloorForView( &backEnd.viewParms );
+
+		if ( lodFloor > 0.0f ) {
+			hzmLodBand_t lodBand;
+
+			if ( R_HZM_LodFogStaticBand( lodFloor, tess.shader, backEnd.currentStaticModel, &lodBand ) != HZM_LODBAND_AUTHORED ) {
+				fNear     = lodBand.nearDist;
+				fRange    = lodBand.range;
+				distScale = lodBand.distScale;
+				if ( lodBand.gateDist > 0.0f ) {
+					vec3_t d;
+
+					VectorSubtract( backEnd.currentStaticModel->origin, backEnd.viewParms.or.origin, d );
+					holdNear = (qboolean)( VectorLength( d ) < lodBand.gateDist );
+				}
+			}
+		}
+	}
+
 	for ( i = 0; i < tess.numVertexes; i++ ) {
 		vec3_t org;
 		float  len;
 		int    alpha;
 
-		VectorSubtract( tess.xyz[i], eyeLocal, org );
+		if ( holdNear ) {
+			// the near-side value: fade-out fully visible, fade-in fully invisible
+			tess.color[i][3] = (uint16_t)( ( oneMinus ? 0 : 0xff ) * 257 );
+			continue;
+		}
+
+		if ( distScale != 1.0f ) {
+			org[0] = tess.xyz[i][0] * distScale - eyeLocal[0];
+			org[1] = tess.xyz[i][1] * distScale - eyeLocal[1];
+			org[2] = tess.xyz[i][2] * distScale - eyeLocal[2];
+		} else {
+			VectorSubtract( tess.xyz[i], eyeLocal, org );
+		}
 
 		if ( fRange != 0.0f ) {
 			len = ( VectorLength( org ) - fNear ) / fRange;
@@ -3277,6 +3354,18 @@ void RB_StageIteratorGeneric( void )
 		{
 			ProjectDlightTexture();
 		}
+	}
+
+	//
+	// HZM water pass (r_hzmWater, tr_hzm_water.c): allowlisted water only, the fog pass's deform recipe. With the
+	// switch off RB_HZMWaterPass returns before touching any GL state.
+	//
+	if ( tess.shader->hzmWater ) {
+		int		hzmDeformGen;
+		vec5_t	hzmDeformParams;
+
+		ComputeDeformValues( &hzmDeformGen, hzmDeformParams );
+		RB_HZMWaterPass( hzmDeformGen, hzmDeformParams );
 	}
 
 	//

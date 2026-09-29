@@ -87,6 +87,15 @@ BotMovement::BotMovement()
     m_iLeafTouchT        = 0;
     m_iLeafLastT         = 0;
     m_iLeafSteerLogT     = 0;
+    m_vRJFrom            = vec_zero; // [bug-3086]
+    m_vRJDir             = vec_zero;
+    m_fRJZ               = 0;
+    m_iRJHopT            = 0;
+    m_iRJPhase           = 0;
+    m_iRJPhaseT          = 0;
+    m_vRJSpot            = vec_zero;
+    m_iRJSpotT           = 0;
+    m_iRJTries           = 0;
     m_iDoorLogged        = 0;
     m_iHoldUntil         = 0; // [HZM bot breach]
     m_szWhy              = NULL; // [HZM bot probe2]
@@ -152,14 +161,31 @@ void BotMovement::SetControlledEntity(Player *newEntity)
 // speed on walkable ground). On a 30-38 deg slope the ground rises more than a step within the probes' 30-150u, so the
 // feelers eased the throttle and steered off the line, the wall-slide called it blocked and strafe-hopped, and CheckJump
 // hopped - each hop losing the climb (t2l1 (-352,-3504): 2201 stuck samples in 22 soaks, bots hopping in place on a
-// normal-0.75-0.81 hillside). bot_slopeWalk 0 = stock.
+// normal-0.75-0.81 hillside). bot_slopeWalk 0 = stock. Default 2 [bug-3066]: 9-map A/B, stuck -17% map-averaged (6 better,
+// 3 mildly worse), t2l1 blocks -31% and hops -64%; 2 also skips the corner brake while climbing.
 static bool BotProbeHitWalkable(const trace_t& t)
 {
     static cvar_t *s_on = NULL;
     if (!s_on) {
-        s_on = gi.Cvar_Get("bot_slopeWalk", "0", 0);
+        s_on = gi.Cvar_Get("bot_slopeWalk", "2", 0);
     }
     return s_on->integer && t.fraction < 1.0f && !t.startsolid && !t.allsolid && t.plane.normal[2] >= MIN_WALK_NORMAL;
+}
+
+// [bug-3086] a STEEP LIP ahead: the player box at step height, 32u along dir, stops on a plane too steep to walk
+// (normal z < MIN_WALK_NORMAL) but not a wall (> 0.3) - a bank a run-up jump can take and a standing hop cannot.
+bool BotMovement::SteepLipAhead(const Vector& dir, float& nz)
+{
+    nz               = 1.0f;
+    const Vector st  = controlledEntity->origin + Vector(0, 0, STEPSIZE);
+    Vector       mx  = controlledEntity->maxs;
+    mx.z            -= STEPSIZE;
+    const trace_t t = G_Trace(st, controlledEntity->mins, mx, st + dir * 32.0f, controlledEntity, MASK_PLAYERSOLID, qtrue, "BotRunJumpLip");
+    if (t.startsolid || t.allsolid || t.fraction >= 1.0f) {
+        return false;
+    }
+    nz = t.plane.normal[2];
+    return nz > 0.3f && nz < MIN_WALK_NORMAL;
 }
 
 float BotMovement::WhiskerClear(const Vector& dirAngles, float degOff, float len)
@@ -419,6 +445,131 @@ void BotMovement::MoveThink(usercmd_t& botcmd)
             m_iLadderStart      = level.inttime;
             botcmd.forwardmove  = 127;
             return;
+        }
+    }
+
+    // [bug-3086] RUN-UP JUMP (bot_runJump). Watch each stuck hop; one that ends back where it took off, facing a steep
+    // lip (plane normal 0.3-0.7: too steep to walk, low enough to jump), becomes a run-up: back off, run at it, jump
+    // at the take-off line with the run's speed (the jump keeps it; air control cannot build it). See SteepLipAhead.
+    {
+        static cvar_t *s_runJump = NULL;
+        if (!s_runJump) {
+            s_runJump = gi.Cvar_Get("bot_runJump", "1", 0); // [bug-3086] default 1 after the m4l2 A/B (crease -65%)
+        }
+        gclient_t *cl = controlledEntity->client;
+        if (!s_runJump->integer || bOnLadder || bLadder || !cl) {
+            m_iRJPhase = 0;
+            m_iRJHopT  = 0;
+        } else if (!m_iRJPhase && m_iRJHopT) {
+            const int dt = level.inttime - m_iRJHopT;
+            if (dt > 2500) {
+                m_iRJHopT = 0;
+            } else if (dt >= 900 && cl->ps.walking && cl->ps.groundEntityNum != ENTITYNUM_NONE) {
+                m_iRJHopT = 0;
+                Vector d  = controlledEntity->origin - m_vRJFrom;
+                d.z       = 0;
+                float nz  = 1.0f;
+                // back where the hop took off, no height gained: it missed
+                const bool bMiss = d.lengthSquared() < Square(28.0f) && controlledEntity->origin.z < m_fRJZ + 12.0f;
+                // [v3] the run goes where the ROUTE goes - toward its first corner 24u+ away, which must be higher
+                // than the bot (it is a climb) - never along the hop's own heading: a wall-slide hop strafes, and on
+                // m4l2 (6474,2880) v2 ran a bot up the MG42 hill face the navlinks cut, 90 deg off its route north.
+                bool   bRoute = false;
+                Vector cc[3];
+                const int nc = (bMiss && m_pPath && m_pPath->GetNodeCount()) ? m_pPath->GetCorners(cc, 3) : 0;
+                for (int ci = 0; ci < nc && !bRoute; ci++) {
+                    Vector cd = cc[ci] - controlledEntity->origin;
+                    cd.z      = 0;
+                    if (cd.lengthSquared() >= Square(24.0f)) {
+                        if (cc[ci].z > controlledEntity->origin.z + 8.0f) {
+                            VectorNormalize2D(cd);
+                            m_vRJDir = cd;
+                            bRoute   = true;
+                        }
+                        break;
+                    }
+                }
+                if (bRoute) {
+                    m_vRJFrom = controlledEntity->origin; // it slid back here: the run is measured from here
+                    m_fRJZ    = controlledEntity->origin.z;
+                }
+                if (bRoute && SteepLipAhead(m_vRJDir, nz)) {
+                    Vector ds = m_vRJFrom - m_vRJSpot;
+                    ds.z      = 0;
+                    if (ds.lengthSquared() > Square(96.0f) || level.inttime - m_iRJSpotT > 20000) {
+                        m_vRJSpot  = m_vRJFrom;
+                        m_iRJSpotT = level.inttime;
+                        m_iRJTries = 0;
+                    }
+                    if (m_iRJTries < 3) {
+                        m_iRJTries++;
+                        m_iRJPhase  = 1;
+                        m_iRJPhaseT = level.inttime;
+                        static cvar_t *s_rjProbe = NULL;
+                        if (!s_rjProbe) {
+                            s_rjProbe = gi.Cvar_Get("bot_probe", "0", 0);
+                        }
+                        if (s_rjProbe->integer) {
+                            gi.Printf(
+                                "^~^~^ BOTRUNJUMP e=%d ev=start at=(%.0f %.0f %.0f) lip_n=%.2f try=%d why=%s\n",
+                                controlledEntity->entnum, m_vRJFrom.x, m_vRJFrom.y, m_vRJFrom.z, nz, m_iRJTries,
+                                GetGoalWhy()
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        if (m_iRJPhase) {
+            Vector      dir;
+            const int   pt  = level.inttime - m_iRJPhaseT;
+            Vector      rel = controlledEntity->origin - m_vRJFrom;
+            rel.z           = 0;
+            const float spd = controlledEntity->velocity.lengthXY();
+            if (m_iRJPhase == 1) {
+                dir = Vector(0, 0, 0) - m_vRJDir; // back off the way it came
+                // [v2] far enough back to be at full run when it reaches the face (the v1 56u / 700ms run-up hit it at
+                // 74-80u/s and landed on the bank's steep top, 10u short)
+                if (rel.lengthSquared() > Square(88.0f) || pt > 900) {
+                    m_iRJPhase  = 2;
+                    m_iRJPhaseT = level.inttime;
+                }
+            } else if (m_iRJPhase == 2) {
+                dir   = (m_vRJFrom + m_vRJDir * 40.0f) - controlledEntity->origin; // at the lip, just past the take-off
+                dir.z = 0;
+                if (dir.lengthSquared() > 1.0f) {
+                    VectorNormalize2D(dir);
+                } else {
+                    dir = m_vRJDir;
+                }
+                const float along = rel.x * m_vRJDir.x + rel.y * m_vRJDir.y;
+                // [v2] take off 20u BEFORE the face: touching it clips the run's speed to nothing (v1 stalled there at
+                // 21u/s and never jumped). The reversal passes through 0u/s, so a stall only counts after 600ms.
+                if (pt > 600 && spd < 30.0f) {
+                    m_iRJPhase = 0; // blocked on the run (a team-mate, a wall): let the ordinary handling have it
+                } else if ((along > -20.0f && spd > 70.0f) || (pt > 1400 && along > -48.0f) || pt > 1800) {
+                    m_iRJPhase      = 3;
+                    m_iRJPhaseT     = level.inttime;
+                    m_iPathJumpNext = level.inttime + 1500;
+                    Jump(botcmd, "runjump");
+                    m_iRJHopT = level.inttime; // watched like any hop: a miss earns the next try
+                }
+            } else {
+                dir = m_vRJDir; // hold the heading through the air
+                if (pt > 800 || (pt > 200 && cl->ps.walking)) {
+                    m_iRJPhase = 0;
+                }
+            }
+            if (m_iRJPhase) {
+                Vector f, r;
+                AngleVectors(Vector(0, controlledEntity->GetViewAngles().y, 0), f, r, NULL);
+                botcmd.forwardmove = (signed char)((dir.x * f.x + dir.y * f.y) * 127.0f);
+                botcmd.rightmove   = (signed char)((dir.x * r.x + dir.y * r.y) * 127.0f);
+                m_iCheckPathTime   = level.inttime;
+                m_iLastMoveTime    = level.inttime;
+                m_iStuckPushTime   = 0;
+                return;
+            }
         }
     }
 
@@ -1014,7 +1165,7 @@ void BotMovement::MoveThink(usercmd_t& botcmd)
                     // overshoot, and the brake held it at 65% input for a whole hillside leg (t2l1 (-352,-3504))
                     static cvar_t *s_slopeB = NULL;
                     if (!s_slopeB) {
-                        s_slopeB = gi.Cvar_Get("bot_slopeWalk", "0", 0);
+                        s_slopeB = gi.Cvar_Get("bot_slopeWalk", "2", 0);
                     }
                     const bool bClimb = s_slopeB->integer >= 2 && here.z > 16.0f;
                     if (dot < 0.57f && !bClimb) { // sharper than ~55 deg
@@ -3957,6 +4108,22 @@ void BotMovement::Jump(usercmd_t& botcmd, const char *why)
 {
     // [HZM bot probe2] every bot jump, with its reason (^~^~^ BOTJUMP, bot_probe on; same reason 700ms throttled)
     botcmd.upmove = 127;
+    // [bug-3086] watch the hop: back where it started ~1s later, at a steep lip, is a miss the run-up can fix
+    if (controlledEntity && !m_iRJPhase && strcmp(why, "runjump") && strcmp(why, "ladderbail")) {
+        Vector d = m_vCurrentGoal - controlledEntity->origin;
+        d.z      = 0;
+        if (d.lengthSquared() < Square(8.0f)) {
+            d   = m_vCurrentDir;
+            d.z = 0;
+        }
+        if (d.lengthSquared() > 0.01f) {
+            VectorNormalize2D(d);
+            m_vRJDir  = d;
+            m_vRJFrom = controlledEntity->origin;
+            m_fRJZ    = controlledEntity->origin.z;
+            m_iRJHopT = level.inttime;
+        }
+    }
     static cvar_t *s_probe = NULL;
     if (!s_probe) {
         s_probe = gi.Cvar_Get("bot_probe", "0", 0);

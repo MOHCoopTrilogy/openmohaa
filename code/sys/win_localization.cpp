@@ -549,6 +549,16 @@ const char *cLocalization::ConvertString(const char *var)
         }
     }
 
+    // HZM bug-3096: a string carrying a digit is composed at runtime (the DBNO
+    // "BLEEDING OUT: 47s" HUD countdown, player.cpp's "Reinforcements in %i") and can never have a
+    // localization entry. Each distinct value used to print one LOCALIZATION ERROR line (~53 a
+    // session) and add one permanent entry to `missing`, which therefore grew without bound.
+    for (i = 0; var[i]; i++) {
+        if (var[i] >= '0' && var[i] <= '9') {
+            return var;
+        }
+    }
+
     if (!missing.ObjectInList(var)) {
         missing.AddUniqueObject(var);
         Com_DPrintf("LOCALIZATION ERROR: '%s' does not have a localization entry\n", var);

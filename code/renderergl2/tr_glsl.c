@@ -58,12 +58,17 @@ extern const char *fallbackShader_bloom_blur_fp;
 extern const char *fallbackShader_fxaa_fp;
 extern const char *fallbackShader_sharpen_fp;
 extern const char *fallbackShader_raindrops_fp;
+extern const char *fallbackShader_hzmwater_vp;      // HZM water pass (tr_hzm_water.c)
+extern const char *fallbackShader_hzmwater_fp;
 extern const char *fallbackShader_lowhealth_fp;
 extern const char *fallbackShader_suppression_fp;
 extern const char *fallbackShader_hitblood_fp;
 extern const char *fallbackShader_heathaze_fp;
 extern const char *fallbackShader_dof_fp;
 extern const char *fallbackShader_underwater_fp;
+// HZM coop [2026-09-27] realistic lightning sky pass (tr_hzm_lightning.c; compiled lazily on the first lit frame)
+extern const char *fallbackShader_hzmlt_sky_vp;
+extern const char *fallbackShader_hzmlt_sky_fp;
 extern const char *fallbackShader_bloodspatter_fp;
 extern const char *fallbackShader_chromab_fp;
 extern const char *fallbackShader_motionblur_fp;
@@ -215,6 +220,29 @@ static uniformInfo_t uniformsInfo[] =
 
 	// HZM gl2 [2026-09-26] Phase S1 spot cone - see UNIFORM_HZMLIGHTSPOT. Kept LAST, in enum order.
 	{ "u_HzmLightSpot",    GLSL_VEC4 },
+
+	// HZM rain wetness - see UNIFORM_HZMWET. Kept LAST, in enum order.
+	{ "u_HzmWet",          GLSL_VEC4 },
+	{ "u_HzmWetMat",       GLSL_VEC4 },
+	{ "u_HzmWetOcc",       GLSL_VEC4 },
+	{ "u_HzmWetOccZ",      GLSL_VEC4 },
+	{ "u_HzmWetSkyZ",      GLSL_VEC4 },
+	{ "u_HzmWetSkyH",      GLSL_VEC4 },
+	{ "u_HzmWetSun",       GLSL_VEC4 },
+	{ "u_HzmWetSunCol",    GLSL_VEC4 },
+	{ "u_HzmOccMap",       GLSL_INT },
+	{ "u_HzmWetNoise",     GLSL_INT },
+
+	// HZM water pass - see UNIFORM_HZMWATER. Kept LAST, in enum order.
+	{ "u_HzmWater",        GLSL_VEC4 },
+	{ "u_HzmRippleMap",    GLSL_INT },
+	// HZM coop [2026-09-27] realistic lightning - see UNIFORM_HZMLTFOG. Kept LAST, in enum order.
+	{ "u_HzmLtFog",        GLSL_VEC4 },
+	{ "u_HzmLtView",       GLSL_VEC4 },
+	{ "u_HzmLtProj",       GLSL_VEC4 },
+	{ "u_HzmLtWorld",      GLSL_VEC4 },
+	{ "u_HzmLtBolt",       GLSL_VEC4 },
+	{ "u_HzmLtParams",     GLSL_VEC4 },
 };
 
 // HZM gl2 [2026-09-26] vet_phaseS F10: this table is indexed by uniform_t and GLSL_InitUniforms walks it to
@@ -522,6 +550,25 @@ static int GLSL_CompileGPUShader(GLuint program, GLuint *prevShader, const GLcha
 	return 1;
 }
 
+// HZM [2026-09-27] console quiet (docs/proposals/console_quiet_2026-09-27): the upstream GLSL compile dump - one
+// '------- GPU shader -------' header, two '...loading built-in' lines and every active uniform, per
+// program - printed ~6,700 lines per R_Init pair into every session run with developer 1 (which the
+// launcher sets and the script-error gate needs). It now also needs r_glslVerbose 1. flags 0, never
+// archived. The renderer-reinit harness hashes these lines: it passes +set r_glslVerbose 1.
+static qboolean GLSL_VerboseDump(void)
+{
+	static cvar_t *r_glslVerbose = NULL;
+
+	if (!r_glslVerbose) {
+		r_glslVerbose = ri.Cvar_Get("r_glslVerbose", "0", 0);
+	}
+	return (qboolean)(r_glslVerbose->integer != 0);
+}
+
+// HZM [2026-09-28, bug-3179] the per-stage shader text buffer of GLSL_InitGPUShader (header + source + NUL must fit).
+// glsl_variant_lint.py parses this define: keep it a plain decimal literal.
+#define HZM_GLSL_TEXT_MAX 65536
+
 static int GLSL_LoadGPUShaderText(const char *name, const char *fallback,
 	GLenum shaderType, char *dest, int destSize)
 {
@@ -551,7 +598,9 @@ static int GLSL_LoadGPUShaderText(const char *name, const char *fallback,
 	{
 		if (fallback)
 		{
-			ri.Printf(PRINT_DEVELOPER, "...loading built-in '%s'\n", filename);
+			if (GLSL_VerboseDump()) {
+				ri.Printf(PRINT_DEVELOPER, "...loading built-in '%s'\n", filename);
+			}
 			shaderText = fallback;
 			size = strlen(shaderText);
 		}
@@ -567,8 +616,12 @@ static int GLSL_LoadGPUShaderText(const char *name, const char *fallback,
 		shaderText = buffer;
 	}
 
-	if (size > destSize)
+	// HZM [2026-09-28, bug-3179] '>=': the copy below writes size + 1 bytes (with the NUL), so size == destSize wrote
+	// one byte past the buffer. And no longer silent: the caller's only message was "Could not load <name> shader!".
+	if (size >= destSize)
 	{
+		ri.Printf(PRINT_ALL, "^1GLSL_LoadGPUShaderText: '%s' is %d bytes but only %d fit after the header "
+			"(buffer %d, HZM_GLSL_TEXT_MAX in tr_glsl.c)\n", filename, size, destSize - 1, HZM_GLSL_TEXT_MAX);
 		result = 0;
 	}
 	else
@@ -605,6 +658,10 @@ static void GLSL_ShowProgramUniforms(GLuint program)
 	GLenum			type;
 	char            uniformName[1000];
 
+	if (!GLSL_VerboseDump()) {
+		return;
+	}
+
 	// query the number of active uniforms
 	qglGetProgramiv(program, GL_ACTIVE_UNIFORMS, &count);
 
@@ -619,7 +676,9 @@ static void GLSL_ShowProgramUniforms(GLuint program)
 
 static int GLSL_InitGPUShader2(shaderProgram_t * program, const char *name, int attribs, const char *vpCode, const char *fpCode)
 {
-	ri.Printf(PRINT_DEVELOPER, "------- GPU shader -------\n");
+	if (GLSL_VerboseDump()) {
+		ri.Printf(PRINT_DEVELOPER, "------- GPU shader -------\n");
+	}
 
 	if(strlen(name) >= MAX_QPATH)
 	{
@@ -702,8 +761,13 @@ static int GLSL_InitGPUShader(shaderProgram_t * program, const char *name,
 	int attribs, qboolean fragmentShader, const GLchar *extra, qboolean addHeader,
 	const char *fallback_vp, const char *fallback_fp)
 {
-	char vpCode[32000];
-	char fpCode[32000];
+	// HZM [2026-09-28, bug-3179] were 32000-byte STACK arrays. The HZM additions to lightall_fp (lightning, wetness,
+	// fog) grew every assembled variant (header + source) to 32145-32744 bytes, GLSL_LoadGPUShaderText refused the
+	// text without a word, and every gl2 client died with "Could not load lightall shader!" (v1103c). 64 KB each,
+	// static (init is single-threaded and never re-enters). docs/tools/glsl_variant_lint.py reads HZM_GLSL_TEXT_MAX
+	// from this file and fails the build if any variant no longer fits (warns at 95%).
+	static char vpCode[HZM_GLSL_TEXT_MAX];
+	static char fpCode[HZM_GLSL_TEXT_MAX];
 	char *postHeader;
 	int size;
 	int result;
@@ -1406,6 +1470,8 @@ void GLSL_InitGPUShaders(void)
 		GLSL_SetUniformInt(&tr.lightallShader[i], UNIFORM_SHADOWMAP,   TB_SHADOWMAP);
 		GLSL_SetUniformInt(&tr.lightallShader[i], UNIFORM_CUBEMAP,     TB_CUBEMAP);
 		GLSL_SetUniformInt(&tr.lightallShader[i], UNIFORM_SCREENDEPTHMAP, TB_SCREENDEPTH); // HZM soft particles
+		GLSL_SetUniformInt(&tr.lightallShader[i], UNIFORM_HZMOCCMAP,   TB_HZMRAINOCC);  // HZM rain wetness
+		GLSL_SetUniformInt(&tr.lightallShader[i], UNIFORM_HZMWETNOISE, TB_HZMWETNOISE); // HZM rain wetness
 
 		GLSL_FinishGPUShader(&tr.lightallShader[i]);
 
@@ -1665,6 +1731,29 @@ void GLSL_InitGPUShaders(void)
 	GLSL_FinishGPUShader(&tr.rainDropsShader);
 
 	numEtcShaders++;
+
+	// HZM water pass (tr_hzm_water.c, water_wetness_2026-09-27 W3): [0] plain, [1] USE_DEFORM_VERTEXES - the fogShader
+	// split. Optional: a failed compile leaves program 0 and the pass never draws, it never takes the renderer down.
+	for (i = 0; i < 2; i++)
+	{
+		attribs = ATTR_POSITION | ATTR_NORMAL | ATTR_TEXCOORD | ATTR_LIGHTCOORD;
+		extradefines[0] = '\0';
+		if (i)
+			Q_strcat(extradefines, 1024, "#define USE_DEFORM_VERTEXES\n");
+
+		if (!GLSL_InitGPUShader(&tr.hzmWaterShader[i], "hzmwater", attribs, qtrue, extradefines, qtrue, fallbackShader_hzmwater_vp, fallbackShader_hzmwater_fp))
+		{
+			ri.Printf(PRINT_WARNING, "WARNING: hzmwater shader %d failed; the r_hzmWater pass is unavailable\n", i);
+			Com_Memset(&tr.hzmWaterShader[i], 0, sizeof(tr.hzmWaterShader[i]));
+			continue;
+		}
+		GLSL_InitUniforms(&tr.hzmWaterShader[i]);
+		GLSL_SetUniformInt(&tr.hzmWaterShader[i], UNIFORM_LIGHTMAP,     TB_LIGHTMAP);
+		GLSL_SetUniformInt(&tr.hzmWaterShader[i], UNIFORM_HZMOCCMAP,    TB_HZMRAINOCC);
+		GLSL_SetUniformInt(&tr.hzmWaterShader[i], UNIFORM_HZMRIPPLEMAP, TB_HZMWETNOISE);
+		GLSL_FinishGPUShader(&tr.hzmWaterShader[i]);
+		numEtcShaders++;
+	}
 
 	// HZM gl2 POST-FX PORT (bug-1151): the GAMEPLAY-DRIVEN stages of gl1's chain - heat haze +
 	// muzzle shimmer, low-health desat/red vignette/heartbeat, and the suppression tunnel-vignette.
@@ -2004,6 +2093,26 @@ void GLSL_InitGPUShaders(void)
 		numEtcShaders, (endTime - startTime) / 1000.0);
 }
 
+/*
+HZM coop [2026-09-27] realistic lightning: the sky-pass program, built on the FIRST lit frame (RB_HzmLt_SkyPass), never
+at start-up - so a player who never turns the feature on never compiles it. Same shape as the post-FX programs.
+*/
+qboolean GLSL_HzmLtInitSkyShader(void)
+{
+	int  attribs = ATTR_POSITION | ATTR_TEXCOORD;
+	char extradefines[1024];
+
+	extradefines[0] = 0;
+	if (!GLSL_InitGPUShader(&tr.hzmLtSkyShader, "hzmlt_sky", attribs, qtrue, extradefines, qtrue, fallbackShader_hzmlt_sky_vp, fallbackShader_hzmlt_sky_fp))
+	{
+		return qfalse;
+	}
+	GLSL_InitUniforms(&tr.hzmLtSkyShader);
+	GLSL_SetUniformInt(&tr.hzmLtSkyShader, UNIFORM_DIFFUSEMAP, TB_DIFFUSEMAP);
+	GLSL_FinishGPUShader(&tr.hzmLtSkyShader);
+	return qtrue;
+}
+
 void GLSL_ShutdownGPUShaders(void)
 {
 	int i;
@@ -2045,12 +2154,19 @@ void GLSL_ShutdownGPUShaders(void)
 	GLSL_DeleteGPUShader(&tr.fsrRcasShader);
 	GLSL_DeleteGPUShader(&tr.fsrDownscaleShader);
 	GLSL_DeleteGPUShader(&tr.rainDropsShader);
+	GLSL_DeleteGPUShader(&tr.hzmWaterShader[0]);      // HZM water pass
+	GLSL_DeleteGPUShader(&tr.hzmWaterShader[1]);
 	GLSL_DeleteGPUShader(&tr.heatHazeShader);
 	GLSL_DeleteGPUShader(&tr.lowHealthShader);
 	GLSL_DeleteGPUShader(&tr.suppressionShader);
 	GLSL_DeleteGPUShader(&tr.hitBloodShader);   // HZM coop [user 08-02]
 	GLSL_DeleteGPUShader(&tr.dofShader);
 	GLSL_DeleteGPUShader(&tr.underwaterShader);
+	if (tr.hzmLtSkyShaderOk) {
+		GLSL_DeleteGPUShader(&tr.hzmLtSkyShader);   // HZM coop [2026-09-27] lightning (only if it was ever built)
+		tr.hzmLtSkyShaderOk    = qfalse;
+		tr.hzmLtSkyShaderTried = qfalse;
+	}
 	GLSL_DeleteGPUShader(&tr.bloodSpatterShader);
 	GLSL_DeleteGPUShader(&tr.chromabShader);
 	GLSL_DeleteGPUShader(&tr.motionBlurShader);

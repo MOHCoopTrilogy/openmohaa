@@ -2009,8 +2009,10 @@ static void S_OPENAL_Start2DSound(
         extern cvar_t *s_dialogscale;
         static cvar_t *s_voxProbe = NULL;
 
+        // [2026-09-27] console quiet (docs/proposals/console_quiet_2026-09-27): default 1 -> 0. The bug-2449
+        // hunt this served is closed; one line per dialogue start was ~30 lines a minute.
         if (!s_voxProbe) {
-            s_voxProbe = Cvar_Get("s_voxProbe", "1", 0);
+            s_voxProbe = Cvar_Get("s_voxProbe", "0", 0);
         }
 
         if (s_voxProbe->value > 0.f) {
@@ -3423,13 +3425,16 @@ void S_OPENAL_Respatialize(int iEntNum, const vec3_t vHeadPos, const vec3_t vAxi
     if (s_iPoolCur2D > s_iPoolPeak2D) {
         s_iPoolPeak2D = s_iPoolCur2D;
     }
+    // [2026-09-27] console quiet (docs/proposals/console_quiet_2026-09-27): default 1 -> 0. At 0 the periodic
+    // gauge is silent but the FIRST-EVER denial still prints one line - that is the cliff, and a log
+    // with no SNDPOOL line at all then still proves no sound was ever refused. 1 = every 5 s as before.
     if (!s_poolProbe) {
-        s_poolProbe = Cvar_Get("s_poolProbe", "1", 0);
+        s_poolProbe = Cvar_Get("s_poolProbe", "0", 0);
     }
-    if (s_poolProbe->integer > 0) {
-        // every 5s, plus an immediate line the first time anything is ever denied
-        qboolean bDenialNew = (qboolean)(s_iPoolDenied > s_iPoolDeniedReported);
-        if (cls.realtime - s_iPoolLastReport > 5000 || (bDenialNew && s_iPoolDeniedReported == 0)) {
+    {
+        qboolean bDenialNew   = (qboolean)(s_iPoolDenied > s_iPoolDeniedReported);
+        qboolean bFirstDenial = (qboolean)(bDenialNew && s_iPoolDeniedReported == 0);
+        if ((s_poolProbe->integer > 0 && cls.realtime - s_iPoolLastReport > 5000) || bFirstDenial) {
             s_iPoolLastReport = cls.realtime;
             Com_Printf(
                 "^~^~^ SNDPOOL 3d=%i/%i peak=%i 2d=%i/%i peak=%i loops=%i denied3d=%i denied2d=%i\n",

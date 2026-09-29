@@ -69,6 +69,8 @@ RecastPather::RecastPather()
     , elevatorPhase(0)
     , slideUntil(0)
     , steerMode(0)
+    , gapRaw(vec_zero)
+    , gapOut(vec_zero)
 {
     detourData = new DetourData();
     detourData->corridor.init(MAX_NPOLYS); // [HZM bot nav] match the raised path cap
@@ -511,7 +513,12 @@ void RecastPather::UpdatePos(const Vector& origin)
                     const float lout    = dout.length();
                     Vector      inward  = vec_zero;
                     bool        bInward = false;
-                    if (bHaveNext && lin > 24.0f && lout > 8.0f) {
+                    // [bug-3146] bot_cornerFix 2: pad AND slide only at a real corner - the next leg 24u+. Mode 1 (A/B:
+                    // m2l1 -55%, its doorways *21/*27 81 vs 372 samples) swung bots 24u sideways and back on t1l3's
+                    // zig-zag of 16-24u corners at (-1180,-2064) (+56% there); pad-only (tried) lost the m2l1 gain.
+                    const bool  bMicroGuard = s_cornerFix->integer >= 2;
+                    const float minOut      = bMicroGuard ? 24.0f : 8.0f;
+                    if (bHaveNext && lin > 24.0f && lout > minOut) {
                         const Vector di = din * (1.0f / lin);
                         const Vector dd = dout * (1.0f / lout);
                         if (di * dd < 0.94f) { // a turn of ~20 degrees or more
@@ -524,7 +531,7 @@ void RecastPather::UpdatePos(const Vector& origin)
                                 padInward = inward;
                             }
                         }
-                    } else if (bHaveNext && lout > 8.0f && (padCorner - currentNodePos).lengthSquared() < 1.0f
+                    } else if (bHaveNext && lout > minOut && (padCorner - currentNodePos).lengthSquared() < 1.0f
                                && padInward.lengthSquared() > 0.5f) {
                         inward  = padInward; // closing in on the corner the pad was worked out for: keep it
                         bInward = true;
@@ -544,7 +551,7 @@ void RecastPather::UpdatePos(const Vector& origin)
                             }
                         }
                     }
-                    if (!bPadded) {
+                    if (!bPadded && (!bMicroGuard || !bHaveNext || lout > minOut)) {
                         if (level.inttime < slideUntil && (slideTarget - origin).lengthXYSquared() > Square(6.0f)) {
                             currentNodePos = slideTarget; // committed slide still under way
                             steerMode      = 3;
@@ -611,6 +618,72 @@ void RecastPather::UpdatePos(const Vector& origin)
                                 }
                             }
                         }
+                    }
+                }
+                // [bug-3146] GAP CENTRING (bot_gapCentre): a corner inside a narrow gap - a doorway - goes to the gap's
+                // middle. Probed across the NEXT leg (the way through), at body height, from the raw corner (or from
+                // the nearest free spot to it: in a doorway the raw corner itself is often inside the jamb).
+                static cvar_t *s_gapCentre = NULL;
+                if (!s_gapCentre) {
+                    s_gapCentre = gi.Cvar_Get("bot_gapCentre", "1", 0); // default 1 after the A/B (m2l1 -40%, e3l2 -43%)
+                }
+                if (s_gapCentre->integer && !(detourData->cornerFlags[0] & DT_STRAIGHTPATH_OFFMESH_CONNECTION)) {
+                    Vector raw;
+                    ConvertRecastToGameCoord(detourData->corners[0], raw);
+                    if ((raw - gapRaw).lengthSquared() > 1.0f) {
+                        gapRaw = raw;
+                        gapOut = raw;
+                        Vector dir;
+                        if (detourData->ncorners >= 2) {
+                            Vector c1;
+                            ConvertRecastToGameCoord(detourData->corners[1], c1);
+                            dir = c1 - raw;
+                        } else {
+                            dir = raw - origin;
+                        }
+                        dir.z = 0;
+                        if (dir.lengthSquared() < Square(4.0f)) {
+                            dir   = raw - origin;
+                            dir.z = 0;
+                        }
+                        if (dir.lengthSquared() > 1.0f) {
+                            dir.normalize();
+                            const Vector side(-dir.y, dir.x, 0.0f);
+                            const int    gapMask = MASK_PLAYERSOLID & ~CONTENTS_BODY;
+                            const Vector gmins(MINS_X, MINS_Y, STEPSIZE);
+                            const Vector gmaxs(MAXS_X, MAXS_Y, MAXS_Z);
+                            // a free spot to measure from: the corner, else the nearest of +-4..16u across the gap
+                            Vector       st    = raw;
+                            bool         bFree = false;
+                            for (int k = 0; k <= 16 && !bFree; k += 4) {
+                                for (int sgn = 1; sgn >= -1 && !bFree; sgn -= 2) {
+                                    const Vector p = raw + side * (float)(k * sgn);
+                                    trace_t      t = G_Trace(p, gmins, gmaxs, p, NULL, gapMask, qtrue, "BotGapFree");
+                                    if (!t.startsolid && !t.allsolid) {
+                                        st    = p;
+                                        bFree = true;
+                                    }
+                                    if (!k) {
+                                        break;
+                                    }
+                                }
+                            }
+                            if (bFree) {
+                                trace_t tl = G_Trace(st, gmins, gmaxs, st - side * 48.0f, NULL, gapMask, qtrue, "BotGapL");
+                                trace_t tr = G_Trace(st, gmins, gmaxs, st + side * 48.0f, NULL, gapMask, qtrue, "BotGapR");
+                                const float l = tl.fraction * 48.0f;
+                                const float r = tr.fraction * 48.0f;
+                                if (tl.fraction < 1.0f && tr.fraction < 1.0f && l + r < 48.0f) {
+                                    gapOut = st + side * ((r - l) * 0.5f);
+                                }
+                            }
+                        }
+                    }
+                    if ((gapOut - gapRaw).lengthSquared() > 1.0f) {
+                        currentNodePos = gapOut;
+                        steerMode      = 16;
+                    } else if (steerMode == 16) {
+                        steerMode = 0; // (probe only: the cornerFix-0 path never resets it)
                     }
                 }
             }

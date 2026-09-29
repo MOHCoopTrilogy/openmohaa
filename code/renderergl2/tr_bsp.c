@@ -684,6 +684,10 @@ static shader_t *ShaderForShaderNum( int shaderNum, int lightmapNum ) {
 		return tr.defaultShader;
 	}
 
+	// HZM rain wetness: the material class comes from the BSP lump's surface-type bits, which gl2's infoParms[] never
+	// parses into shader->surfaceFlags (water_wetness_2026-09-27 vet.md B3). World surfaces and terrain both land here.
+	R_HZMWetTagShader( shader, LittleLong( dsh->surfaceFlags ) );
+
 	return shader;
 }
 
@@ -4023,6 +4027,10 @@ void RE_LoadWorldMap( const char *name ) {
 
 	// make sure the VAO glState entry is safe
 	R_BindNullVao();
+
+    // HZM rain wetness: the rain-occlusion map, sky colours and puddle mask, built while the BSP is still in memory
+    // (tr_hzm_wet.c). Every non-Omaha map, whatever r_hzmWet says, so the option works when switched on mid-map.
+    R_HZMWetBuild( header );
 
     ri.FS_FreeFile( buffer.v );
 

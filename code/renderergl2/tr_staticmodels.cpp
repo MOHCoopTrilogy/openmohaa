@@ -378,6 +378,9 @@ void R_AddStaticModelSurfaces(void)
 
     tr.shiftedIsStatic = (1 << QSORT_STATICMODEL_SHIFT);
 
+    // HZM gl2 [2026-09-27] r_hzmLodFog: the per-view LOD floor (0 = retail - off, sub-view, no fog, excluded map)
+    const float lodFloor = R_HZM_LodFogFloorForView(&tr.viewParms);
+
     for (i = 0; i < tr.world->numStaticModels; i++) {
         SM = &tr.world->staticModels[i];
 
@@ -465,7 +468,58 @@ void R_AddStaticModelSurfaces(void)
 
                     shader = tr.shaders[dsurf->hShader[0]];
 
-                    if (shader->numUnfoggedPasses == 1 && !r_nocull->integer) {
+                    // HZM gl2 [2026-09-27] r_hzmLodFog (docs/proposals/fog_lod_pop_2026-09-27 plan piece B): when the
+                    // floor governs this instance, the four coarse culls below use the moved band and the TRUE 3-D
+                    // distance - the same band RB_FillDistFadeAlpha / RB_DistFadeConstAlpha use for the alpha, so a
+                    // surface is never culled while its fade still shows it. lodFloor == 0 (the default) returns
+                    // HZM_LODBAND_AUTHORED and falls through to the retail switch, unchanged.
+                    qboolean lodHandled = qfalse;
+
+                    if (shader->numUnfoggedPasses == 1 && !r_nocull->integer && lodFloor > 0.0f
+                        && (shader->stages[0]->alphaGen == AGEN_DIST_FADE
+                            || shader->stages[0]->alphaGen == AGEN_ONE_MINUS_DIST_FADE
+                            || shader->stages[0]->alphaGen == AGEN_TIKI_DIST_FADE
+                            || shader->stages[0]->alphaGen == AGEN_ONE_MINUS_TIKI_DIST_FADE)) {
+                        hzmLodBand_t lodBand;
+
+                        if (R_HZM_LodFogStaticBand(lodFloor, shader, SM, &lodBand) != HZM_LODBAND_AUTHORED) {
+                            float fDistTrue;
+
+                            VectorSubtract(tiki_worldorigin, tr.viewParms.or.origin, vDelta);
+                            fDistTrue = VectorLength(vDelta);
+
+                            switch (shader->stages[0]->alphaGen) {
+                            case AGEN_DIST_FADE:
+                                // every vertex is past near + range, i.e. alpha 0
+                                if (fDistTrue > lodBand.nearDist + lodBand.range + SM->cull_radius) {
+                                    continue;
+                                }
+                                break;
+                            case AGEN_ONE_MINUS_DIST_FADE:
+                                // every vertex is inside near, i.e. alpha 0
+                                if (fDistTrue + SM->cull_radius < lodBand.nearDist) {
+                                    continue;
+                                }
+                                break;
+                            case AGEN_TIKI_DIST_FADE:
+                                if (fDistTrue >= lodBand.nearDist + lodBand.range) {
+                                    continue;
+                                }
+                                break;
+                            case AGEN_ONE_MINUS_TIKI_DIST_FADE:
+                                if (fDistTrue <= lodBand.nearDist) {
+                                    continue;
+                                }
+                                break;
+                            default:
+                                break;
+                            }
+
+                            lodHandled = qtrue;
+                        }
+                    }
+
+                    if (!lodHandled && shader->numUnfoggedPasses == 1 && !r_nocull->integer) {
                         switch (shader->stages[0]->alphaGen) {
                         case AGEN_DIST_FADE:
                             if (R_DistanceCullPointAndRadius(

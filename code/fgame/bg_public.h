@@ -90,6 +90,13 @@ static const unsigned int DEAD_VIEWHEIGHT       = 8;
 
 #define CS_MATCHEND        26 // cgs.matchEndTime
 
+// HZM coop [2026-09-27] realistic lightning (docs/proposals/lightning_2026-09-27/plan.md 2.1, vet V8). 28, NOT 27:
+// protocol 6 (AA) denormalizes 24 -> 26 and 25 -> 27 on the wire (qcommon/bg_compat.cpp), so 27 would carry
+// CS_VOTE_UNDECIDED for an AA-protocol peer. 28-31 pass through both protocols unchanged. Written by game.dll
+// (g_main.cpp G_HzmLtPublish), read by cgame (cg_hzmlightning.c); a cgame without the case ignores it.
+//   "v1 <seq> <serverTimeMs> <kind c|i> <yawDeg> <distM> <nStrokes> <seed>"
+#define CS_HZM_LIGHTNING   28
+
 #define CS_MODELS          32
 #define CS_OBJECTIVES      (CS_MODELS + MAX_MODELS)         // 1056
 #define CS_SOUNDS          (CS_OBJECTIVES + MAX_OBJECTIVES) // 1076

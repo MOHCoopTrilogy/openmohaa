@@ -393,6 +393,13 @@ void G_InitGame(int levelTime, int randomSeed)
     // and permanently defeat the engine's own default (bug-1669, three dead features).
     CoopQDrawRegisterCvars();
 
+    // HZM coop [2026-09-27] realistic lightning: the script's strike hand-off cvar (flags 0, never archived, empty =
+    // nothing to publish). Registered HERE, before any script runs, because global/weather.scr WRITES it (TRAPS T7).
+    {
+        extern void G_HzmLtInit(void);
+        G_HzmLtInit();
+    }
+
     g_protocol    = gi.Cvar_Get("com_protocol", "", 0)->integer;
     g_target_game = (target_game_e)gi.Cvar_Get("com_target_game", "0", 0)->integer;
 
@@ -579,6 +586,78 @@ void G_AddGEntity(gentity_t *edict, qboolean showentnums)
 
 /*
 ================
+G_HzmLtPublish - HZM coop [2026-09-27] realistic lightning (docs/proposals/lightning_2026-09-27/plan.md 2.1)
+
+global/weather.scr (coop_ltMode 2) writes one strike into coop_ltStrike as "<kind c|i> <yawDeg> <distM> <n> <seed>".
+Every change is validated (a malformed string is dropped with one log line), clamped (distance 1500-12000 m, user
+decision D4; 1-4 strokes), stamped with a sequence number and the server time, and published ONCE on the configstring
+CS_HZM_LIGHTNING (28), which reaches every client reliably and in order. Nothing is published unless the script wrote
+the cvar, so with coop_ltMode unset this is inert: no configstring is ever set, and the wire carries nothing new.
+All state is reset per map in G_HzmLtInit (called from G_InitGame).
+================
+*/
+static cvar_t *g_hzmLtStrike   = NULL;
+static int     g_hzmLtLastMod  = -1;
+static int     g_hzmLtSeq      = 0;
+
+void G_HzmLtInit(void)
+{
+    g_hzmLtStrike  = gi.Cvar_Get("coop_ltStrike", "", 0);
+    g_hzmLtLastMod = g_hzmLtStrike ? g_hzmLtStrike->modificationCount : -1;
+    g_hzmLtSeq     = 0;
+    // T10/T14e: proves which game.dll loaded (grep -a -c LTBUILD in the DLL finds the literal)
+    gi.Printf("^~^~^ LTBUILD game %s %s\n", __DATE__, __TIME__);
+}
+
+static void G_HzmLtPublish(int levelTime)
+{
+    char  kind = 0;
+    float yaw = 0, dist = 0;
+    int   n = 0, seed = 0;
+
+    if (!g_hzmLtStrike || g_hzmLtStrike->modificationCount == g_hzmLtLastMod) {
+        return;
+    }
+    g_hzmLtLastMod = g_hzmLtStrike->modificationCount;
+    if (!g_hzmLtStrike->string[0]) {
+        return;
+    }
+    if (sscanf(g_hzmLtStrike->string, " %c %f %f %d %d", &kind, &yaw, &dist, &n, &seed) != 5 || (kind != 'c' && kind != 'i')) {
+        gi.Printf("^~^~^ LTSTRIKE bad \"%s\"\n", g_hzmLtStrike->string);
+        return;
+    }
+    while (yaw < 0.0f) {
+        yaw += 360.0f;
+    }
+    while (yaw >= 360.0f) {
+        yaw -= 360.0f;
+    }
+    if (dist < 1500.0f) {
+        dist = 1500.0f;
+    } else if (dist > 12000.0f) {
+        dist = 12000.0f;
+    }
+    if (n < 1) {
+        n = 1;
+    } else if (n > 4) {
+        n = 4;
+    }
+    if (seed < 0) {
+        seed = -seed;
+    }
+    seed %= 1000000;
+    g_hzmLtSeq++;
+    gi.setConfigstring(
+        CS_HZM_LIGHTNING, va("v1 %d %d %c %d %d %d %d", g_hzmLtSeq, levelTime, kind, (int)yaw, (int)dist, n, seed)
+    );
+    gi.Printf(
+        "^~^~^ LTSTRIKE seq=%d t=%d kind=%c yaw=%d dist=%d n=%d seed=%d\n",
+        g_hzmLtSeq, levelTime, kind, (int)yaw, (int)dist, n, seed
+    );
+}
+
+/*
+================
 G_RunFrame
 
 Advances the non-player objects in the world
@@ -617,6 +696,9 @@ void G_RunFrame(int levelTime, int frameTime)
 
         level.setFrametime(frameTime);
         level.setTime(levelTime);
+
+        // HZM coop [2026-09-27] realistic lightning: publish a strike the script handed over (inert when none)
+        G_HzmLtPublish(levelTime);
 
         if (level.intermissiontime || level.died_already) {
             L_ProcessPendingEvents();

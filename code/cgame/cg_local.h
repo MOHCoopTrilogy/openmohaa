@@ -735,6 +735,11 @@ const adsGunTune_t *CG_FindAdsTune(const char *wpn);
         int    cls;        // HZM_FLARE_CLASS_HEADLIGHT / _SEARCHLIGHT
     } hzmFlareReq_t;
     qboolean CG_HZM_RendererIsGl2(void);    // cl_renderer names a gl2 build ("opengl2", "opengl2flip")
+    // HZM coop [2026-09-27] realistic lightning (cg_hzmlightning.c)
+    void CG_HzmLt_Init(void);
+    void CG_HzmLt_ConfigString(const char *str);
+    void CG_HzmLt_Frame(void);
+    void CG_HzmLt_FogFilter(void);
     qboolean CG_HZM_ProtocolOk(void);       // + r_hzmSpotProtocol == this cgame's HZM_SPOT_PROTOCOL
     int      CG_HZM_RendererProtocol(void); // what the loaded renderer published (0 = none)
     qboolean CG_HZM_SpotsAvailable(void);   // + r_hzmSpot resolved on, not Omaha

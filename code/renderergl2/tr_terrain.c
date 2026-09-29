@@ -1514,7 +1514,10 @@ R_TerrainRestart_f
 */
 void R_TerrainRestart_f(void)
 {
-    if (tr.world->numTerraPatches < 0) {
+    // HZM bug-3040/bug-3090: ter_restart stays registered after a disconnect (R_ClearWorld sets
+    // tr.world = NULL but R_ShutdownTerrain only runs at RE_Shutdown), so typing it at
+    // the menu dereferenced NULL.
+    if (!tr.world || tr.world->numTerraPatches < 0) {
         return;
     }
     

@@ -1512,6 +1512,31 @@ void RB_HZMSsao(FBO_t *srcFbo, ivec4_t srcBox)
 	GLSL_SetUniformVec4(&tr.ssaoShader, UNIFORM_VIEWINFO, viewInfo);
 	GLSL_SetUniformVec4(&tr.ssaoShader, UNIFORM_HZMPARAMS, ssaoParams);
 
+	// HZM gl2 [2026-09-27] r_hzmFogAO (bug-3084, docs/proposals/fog_lod_pop_2026-09-27 plan piece A): hand ssao_fp
+	// the forward fog's own inputs so it can fade the occlusion by the fog fraction the surface already got. Only
+	// when the FORWARD fog is live: on the screen-space fog path RB_GlobalFog runs after this composite and fogs the
+	// AO-darkened pixel itself, so fading here would double-count. An all-zero upload (the default) is a no-op in
+	// the shader. Uploaded every call so the per-program uniform cache can never carry a stale enable.
+	{
+		vec4_t fogColor, fogParams;
+
+		VectorSet4(fogColor,  0.0f, 0.0f, 0.0f, 0.0f);
+		VectorSet4(fogParams, 0.0f, 0.0f, 0.0f, 0.0f);
+
+		if (r_hzmFogAO && r_hzmFogAO->integer && rb_globalFog.active && R_UseForwardGlobalFog()
+		    && rb_globalFog.end > rb_globalFog.start)
+		{
+			fogColor[3]  = r_globalFogScale ? r_globalFogScale->value : 1.0f;
+			fogParams[0] = rb_globalFog.projMat10;
+			fogParams[1] = rb_globalFog.projMat14;
+			fogParams[2] = rb_globalFog.start;
+			fogParams[3] = 1.0f / (rb_globalFog.end - rb_globalFog.start);
+		}
+
+		GLSL_SetUniformVec4(&tr.ssaoShader, UNIFORM_GLOBALFOGCOLOR,  fogColor);
+		GLSL_SetUniformVec4(&tr.ssaoShader, UNIFORM_GLOBALFOGPARAMS, fogParams);
+	}
+
 	RB_InstantQuad2(quadVerts, texCoords);
 
 
