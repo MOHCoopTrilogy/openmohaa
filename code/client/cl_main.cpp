@@ -30,6 +30,10 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 #include "../qcommon/localization.h"
 #include "../qcommon/bg_compat.h"
 #include "../sys/sys_local.h"
+// HZM coop [bugreport_parity bug-3278] client/cl_bugreport.cpp
+void CL_BugReportInit( void );
+void CL_BugReportFrame( int msec );
+void CL_SendReport_f( void );
 #include "../sys/sys_update_checker.h"
 #include "../uilib/uimessage.h"
 
@@ -2822,6 +2826,8 @@ void CL_Frame ( int msec ) {
 		}
 	}
 
+	CL_BugReportFrame( msec ); // HZM coop [bugreport_parity bug-3278] in-map fps, the report screenshot, the upload status
+
 #ifdef USE_CURL
 	if(clc.downloadCURLM) {
 		CL_cURL_PerformDownload();
@@ -4084,61 +4090,8 @@ static void CL_CoopDiscord_f( void )
     }
 }
 
-/*
-====================
-CL_SendReport_f
-
-HZM coop - in-game "Report a Bug" -> Discord webhook. This build has NO libcurl (find_package(CURL) failed),
-so we build the message here (report text + auto context: version/map/maxclients/fps), write it RAW to a
-file in fs_homepath, and hand off to Sys_SendReport() which spawns PowerShell to POST it (PowerShell reads
-the file and JSON-encodes it, so arbitrary user text is safe). Best-effort: success is reported once the
-sender launches. coop_reportWebhook is seeded from the loose maintt/coop_reportwebhook.cfg (out of the repo).
-====================
-*/
-void CL_SendReport_f( void )
-{
-	const char *webhook = Cvar_VariableString( "coop_reportWebhook" );
-	const char *text    = Cvar_VariableString( "coop_reportText" );
-	char        payload[2400];
-	char        path[MAX_OSPATH];
-	FILE       *f;
-
-	// [bug-2907] each failure gets its OWN result code (coop_report.urc has a line per code). All three
-	// used to set "0", which the menu shows as "ENTER A DESCRIPTION FIRST" - so a player with a missing
-	// webhook was told to type a description they had already typed. Description is checked first.
-	if ( !text || !text[0] ) {
-		Com_Printf( "coop report: type a description first\n" );
-		Cvar_Set( "coop_reportResult", "0" );
-		return;
-	}
-	if ( !webhook || !webhook[0] ) {
-		Com_Printf( "coop report: no webhook configured (coop_reportWebhook is empty)\n" );
-		Cvar_Set( "coop_reportResult", "2" );
-		return;
-	}
-
-	Com_sprintf( payload, sizeof( payload ),
-		"**In-game bug report**\n%s\n\nver: %s | map: %s | maxclients: %s | fps: %s",
-		text,
-		Cvar_VariableString( "version" ),
-		Cvar_VariableString( "mapname" ),
-		Cvar_VariableString( "sv_maxclients" ),
-		Cvar_VariableString( "com_maxfps" ) );
-
-	Com_sprintf( path, sizeof( path ), "%s/coop_report_payload.txt", Cvar_VariableString( "fs_homepath" ) );
-	f = fopen( path, "wb" );
-	if ( !f ) {
-		Com_Printf( "coop report: cannot write %s\n", path );
-		Cvar_Set( "coop_reportResult", "3" );
-		return;
-	}
-	fwrite( payload, 1, strlen( payload ), f );
-	fclose( f );
-
-	Sys_SendReport( webhook, path );
-	Com_Printf( "coop report: submitted\n" );
-	Cvar_Set( "coop_reportResult", "1" );
-}
+// HZM coop [bugreport_parity bug-3278, security bug-3276] CL_SendReport_f moved to cl_bugreport.cpp (in-game report = desktop parity). The old body put the
+// coop_reportWebhook cvar - which a server could rewrite - inside a PowerShell command line.
 
 void CL_Init( void ) {
 	int start, end;
@@ -4233,10 +4186,11 @@ void CL_Init( void ) {
 	// (CL_SendReport_f) instead of any in-engine HTTP. Registered unconditionally. coop_reportWebhook is
 	// seeded on the user's machine (loose maintt/coop_reportwebhook.cfg from updater.ini, kept out of the repo);
 	// the UI (coop_report menu) links coop_reportText and runs coop_sendreport.
-	Cvar_Get("coop_reportWebhook", "", CVAR_ARCHIVE);
+	Cvar_Get("coop_reportWebhook", "", 0); // HZM coop [bugreport_parity bug-3278] old-exe seed only; the new report reads FILES
 	Cvar_Get("coop_reportText", "", 0);
 	Cvar_Get("coop_reportResult", "", 0);
 	Cmd_AddCommand("coop_sendreport", CL_SendReport_f);
+	CL_BugReportInit(); // HZM coop [bugreport_parity bug-3278] the report commands, cvars and preview
 	Cmd_AddCommand("coop_discord", CL_CoopDiscord_f); // HZM coop - main-menu Discord button
 
 	// HZM coop [user 08-06] bug-1503 - disconnected-capable Service Record challenge pinning.

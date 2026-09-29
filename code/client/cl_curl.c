@@ -389,67 +389,6 @@ static void CL_ReportUrlEncode(const char *in, char *out, int outSize)
 	out[o] = '\0';
 }
 
-/*
-=================
-CL_SendReport_f
-HZM coop - in-game "Report a Bug" sender. POSTs the player's typed message (cvar coop_reportText) plus
-auto-context to the Discord webhook (cvar coop_reportWebhook, seeded on the user's machine from updater.ini,
-the SAME webhook the desktop report_problem.ps1 uses). One-shot blocking form POST, 15s timeout. Result is
-published to coop_reportResult (1 = sent, 0 = failed) so the menu can show a confirmation.
-=================
-*/
-void CL_SendReport_f(void)
-{
-	char        webhook[1024];
-	char        msg[2600];
-	char        encoded[8000];
-	char        post[8100];
-	CURL       *h;
-	CURLcode    res;
-	const char *text;
-
-	Q_strncpyz(webhook, Cvar_VariableString("coop_reportWebhook"), sizeof(webhook));
-	if (!webhook[0] || !strstr(webhook, "discord")) {
-		Com_Printf("Report a Bug: no webhook configured (coop_reportWebhook).\n");
-		Cvar_Set("coop_reportResult", "0");
-		return;
-	}
-	if (!qcurl_easy_init && !CL_cURL_Init()) {
-		Com_Printf("Report a Bug: HTTP not available.\n");
-		Cvar_Set("coop_reportResult", "0");
-		return;
-	}
-
-	text = Cvar_VariableString("coop_reportText");
-	Com_sprintf(msg, sizeof(msg),
-		"**In-game bug report**\n%s\n\n`ver` %s  `map` %s  `maxclients` %s  `fps` %s",
-		(text && text[0]) ? text : "(no description typed)",
-		Cvar_VariableString("version"),
-		Cvar_VariableString("mapname"),
-		Cvar_VariableString("sv_maxclients"),
-		Cvar_VariableString("com_maxfps"));
-
-	CL_ReportUrlEncode(msg, encoded, sizeof(encoded));
-	Com_sprintf(post, sizeof(post), "content=%s", encoded);
-
-	h = qcurl_easy_init();
-	if (!h) { Cvar_Set("coop_reportResult", "0"); return; }
-	qcurl_easy_setopt_warn(h, CURLOPT_URL, webhook);
-	qcurl_easy_setopt_warn(h, CURLOPT_POSTFIELDS, post);
-	qcurl_easy_setopt_warn(h, CURLOPT_USERAGENT, "mohcoop-reporter");
-	qcurl_easy_setopt_warn(h, CURLOPT_TIMEOUT, 15);
-	qcurl_easy_setopt_warn(h, CURLOPT_FOLLOWLOCATION, 1);
-	qcurl_easy_setopt_warn(h, CURLOPT_PROTOCOLS, CURLPROTO_HTTPS);
-	res = qcurl_easy_perform(h);
-	qcurl_easy_cleanup(h);
-
-	if (res == CURLE_OK) {
-		Com_Printf("Report a Bug: sent - thank you!\n");
-		Cvar_Set("coop_reportResult", "1");
-		Cvar_Set("coop_reportText", "");
-	} else {
-		Com_Printf("Report a Bug: send failed (%s).\n", qcurl_easy_strerror(res));
-		Cvar_Set("coop_reportResult", "0");
-	}
-}
+// HZM coop [bugreport_parity, security bug-3276] the dead USE_CURL CL_SendReport_f was removed: it read the
+// server-writable coop_reportWebhook cvar. The live sender is client/cl_bugreport.cpp.
 #endif /* USE_CURL */

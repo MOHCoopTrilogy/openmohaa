@@ -816,6 +816,24 @@ qboolean SrvFilter_CheckArgs(const srvFilterEnv_t *env, int argc, char **argv, i
     }
     verb = argv[0];
 
+    // HZM coop [bugreport_parity bug-3278, security bug-3276] nothing a server sends may touch the Report a Bug machinery: its cvars (webhook, text, toggles,
+    // dry-run / test URL), commands, menus or widgets - checked on the verb and on the first argument, which
+    // covers set/seta/sets/setu/append/vstr/reset/toggle, bare writes, pushmenu/showmenu and globalwidgetcommand.
+    // Security review 2026-09-29 (MED): ANY argument, not only argv[0]/argv[1], may not mention the report machinery -
+    // `globalwidgetcommand <other button> stuffcommand "set coop_reportText x;coop_reportprepare;coop_sendreport"`
+    // launders a report through another widget. The statement's raw text is exactly its tokens, so this covers it.
+    {
+        int ri;
+        for (ri = 0; ri < argc; ri++) {
+            const char *a = argv[ri];
+            for (; a && *a; a++) {
+                if (!Q_stricmpn(a, "coop_report", 11) || !Q_stricmpn(a, "coop_sendreport", 15)) {
+                    return SrvFilter_DropReason(env, "report", argv[ri]);
+                }
+            }
+        }
+    }
+
     if (!Q_stricmp(verb, "set") || !Q_stricmp(verb, "setu") || !Q_stricmp(verb, "seta") || !Q_stricmp(verb, "sets")
         || !Q_stricmp(verb, "append")) {
         qboolean    isAppend = !Q_stricmp(verb, "append");

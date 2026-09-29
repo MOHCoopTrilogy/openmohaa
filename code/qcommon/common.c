@@ -278,6 +278,19 @@ void QDECL Com_Printf( const char *fmt, ... ) {
 			time( &aclock );
 			newtime = localtime( &aclock );
 			
+			// HZM coop [bugreport_parity bug-3278] keep the previous session's log: qconsole.log is opened "wt" (truncated) every launch, so a
+			// report filed after restarting from a crash never had the crashed session. Once per process.
+			{
+				static qboolean s_logRotated = qfalse;
+				if ( !s_logRotated ) {
+					char logFrom[MAX_OSPATH], logTo[MAX_OSPATH];
+					s_logRotated = qtrue;
+					Q_strncpyz( logFrom, FS_BuildOSPath( Cvar_VariableString( "fs_homepath" ), FS_GetCurrentGameDir(), "qconsole.log" ), sizeof( logFrom ) );
+					Q_strncpyz( logTo, FS_BuildOSPath( Cvar_VariableString( "fs_homepath" ), FS_GetCurrentGameDir(), "qconsole_prev.log" ), sizeof( logTo ) );
+					remove( logTo );
+					rename( logFrom, logTo );
+				}
+			}
 			logfile = FS_FOpenTextFileWrite( "qconsole.log" );
 
             // Remove recursive count as it won't be able to print relevant info
@@ -2255,6 +2268,44 @@ int Com_TimeVal(int minMsec)
 	return timeVal;
 }
 
+// HZM coop [bugreport_parity bug-3278] the server's own frame cost and the interval between server frames, for the in-game
+// report ("server slow while hosting"). Two 60 s windows - the last full minute and the current one - read by
+// client/cl_bugreport.cpp through Com_HzmServerFrameStats. Only counted while a server runs.
+typedef struct {
+	int frames, sumCost, maxCost, sumGap, maxGap, cost50, gap100;
+} hzmSvWin_t;
+static hzmSvWin_t s_hzmSvCur, s_hzmSvLast;
+static int        s_hzmSvWinStart;
+
+static void Com_HzmNoteServerFrame( int costMs, int gapMs ) {
+	int now = Sys_Milliseconds();
+	if ( !com_sv_running || !com_sv_running->integer ) {
+		return;
+	}
+	if ( now - s_hzmSvWinStart >= 60000 || now < s_hzmSvWinStart ) {
+		s_hzmSvLast = s_hzmSvCur;
+		memset( &s_hzmSvCur, 0, sizeof( s_hzmSvCur ) );
+		s_hzmSvWinStart = now;
+	}
+	s_hzmSvCur.frames++;
+	s_hzmSvCur.sumCost += costMs;
+	s_hzmSvCur.sumGap += gapMs;
+	if ( costMs > s_hzmSvCur.maxCost ) {
+		s_hzmSvCur.maxCost = costMs;
+	}
+	if ( gapMs > s_hzmSvCur.maxGap ) {
+		s_hzmSvCur.maxGap = gapMs;
+	}
+	s_hzmSvCur.cost50 += costMs >= 50;
+	s_hzmSvCur.gap100 += gapMs >= 100;
+}
+
+// out[14]: the last window then the current one, 7 ints each (frames, sumCost, maxCost, sumGap, maxGap, cost50, gap100)
+void Com_HzmServerFrameStats( int *out ) {
+	memcpy( out, &s_hzmSvLast, 7 * sizeof( int ) );
+	memcpy( out + 7, &s_hzmSvCur, 7 * sizeof( int ) );
+}
+
 /*
 =================
 Com_Frame
@@ -2408,7 +2459,11 @@ void Com_Frame( void ) {
         timeBeforeServer = Sys_Milliseconds();
     }
 
-	SV_Frame( msec );
+	{
+		int hzmSvT0 = Sys_Milliseconds(); // HZM coop [bugreport_parity bug-3278]
+		SV_Frame( msec );
+		Com_HzmNoteServerFrame( Sys_Milliseconds() - hzmSvT0, msec );
+	}
 
 	// if "dedicated" has been modified, start up
 	// or shut down the client system.
