@@ -130,7 +130,9 @@ static void    UI_MemorialDraw(void); // defined with the memorial, above CL_Fin
 static cvar_t *ui_loadHints;    // HZM coop [user 2026-09-26] loading-screen hints (UI_LoadHints_*): -1 auto, 0 off, 1 on
 static cvar_t *ui_loadHintSecs; // seconds per hint (3-60)
 static cvar_t *ui_loadRedrawMs; // HZM [2026-09-27] min ms between loading-screen redraws from UI_LoadResource (16-1000)
-static cvar_t *ui_loadHintNav;  // HZM [user 2026-09-27] LEFT/RIGHT page the loading hints (UI_LoadHints_Nav): -1 auto, 0 off, 1 on
+static cvar_t *ui_loadHintNav;
+// HZM coop [user 2026-09-28] LOADING-SCREEN ART POOL (UI_LoadArt_*): -1 auto, 0 off, 1 on
+static cvar_t *ui_loadArt;  // HZM [user 2026-09-27] LEFT/RIGHT page the loading hints (UI_LoadHints_Nav): -1 auto, 0 off, 1 on
 static qboolean s_uiNoLoadDraw; // HZM bug-3015: TRUE while the renderer (re)registers or the UI realigns - no loading draw
 static void    UI_LoadHints_SetWidgets(qboolean enable); // defined with UI_LoadHints_*, used by UI_ServerLoaded
 cvar_t        *sound_overlay;
@@ -5770,6 +5772,11 @@ void CL_InitializeUI(void)
     ui_loadHintNav     = Cvar_Get("ui_loadHintNav", "-1", 0);
     Cvar_Get("ui_loadHintNavOn", "0", 0);
     Cvar_Get("ui_loadClassic", "0", 0);
+    // HZM coop [user 2026-09-28] LOADING-SCREEN ART POOL: ui/loadingbar.txt's hzm_loadart widgets show while ui_loadArtOn is 1 and draw the shader
+    // named by ui_loadArtShader. Only this exe sets them (UI_LoadArt_Begin), so an old exe shows each map's own art.
+    ui_loadArt = Cvar_Get("ui_loadArt", "-1", 0);
+    Cvar_Get("ui_loadArtOn", "0", 0);
+    Cvar_Get("ui_loadArtShader", "", 0);
     Cvar_Get("ui_loadIconScale", "1", 0);
     Cvar_Get("ui_signshader", "", 0);
     ui_compass             = Cvar_Get("ui_compass", "1", 0);
@@ -7097,6 +7104,192 @@ bool UI_ArchiveLoadMapinfo(const char *mapname)
 
 /*
 ====================
+UI_LoadArt_Begin
+
+HZM coop [user 2026-09-28] LOADING-SCREEN ART POOL (docs/proposals/bt_loadscreens_2026-09-28).
+ui/loadart.txt, one entry per line ('//' and '#' comment lines, blank lines ignored):
+    art <shader> <tag> [tag ...]          an image (a scripts/*.shader name) and the tags it carries
+    map <mapname>[*] <token> [token ...]  a rule; the FIRST rule whose name matches wins (case-insensitive;
+                                          a trailing '*' matches any map starting with the text before it)
+        token  tag    the image qualifies if it carries ANY of the rule's plain tags (no plain tag = every image)
+               !tag   ...and carries NONE of the rule's '!' tags
+               -      no art for this map: its own loading screen shows, exactly as on an old exe
+A map with no matching rule, an empty pool, ui_loadArt 0 or a missing file all publish ui_loadArtOn 0.
+====================
+*/
+#define LOADART_MAX      64
+#define LOADART_TAGS     8
+#define LOADART_TOKLEN   64
+#define LOADART_TOKS     16
+
+static struct {
+    unsigned int rng;
+    char         last[LOADART_TOKLEN]; // the previous pick: never shown twice in a row when the pool allows
+} s_loadArt;
+
+// splits one line into whitespace-separated tokens (truncated to LOADART_TOKLEN-1); returns the count
+static int UI_LoadArt_Tokens(const char *ls, const char *le, char tok[][LOADART_TOKLEN], int max)
+{
+    int n = 0;
+
+    while (ls < le && n < max) {
+        int k = 0;
+        while (ls < le && (*ls == ' ' || *ls == '\t')) {
+            ls++;
+        }
+        if (ls >= le || (le - ls >= 2 && ls[0] == '/' && ls[1] == '/')) {
+            break; // end of line, or a trailing // comment
+        }
+        while (ls < le && *ls != ' ' && *ls != '\t') {
+            if (k < LOADART_TOKLEN - 1) {
+                tok[n][k++] = *ls;
+            }
+            ls++;
+        }
+        tok[n][k] = 0;
+        n++;
+    }
+    return n;
+}
+
+static qboolean UI_LoadArt_MapMatches(const char *pattern, const char *mapname)
+{
+    size_t len = strlen(pattern);
+
+    if (len && pattern[len - 1] == '*') {
+        return !Q_stricmpn(pattern, mapname, (int)(len - 1)) ? qtrue : qfalse;
+    }
+    return !Q_stricmp(pattern, mapname) ? qtrue : qfalse;
+}
+
+static void UI_LoadArt_Begin(const char *mapname)
+{
+    static char art[LOADART_MAX][LOADART_TAGS + 1][LOADART_TOKLEN]; // [i][0] = shader, [i][1..] = tags
+    static int  artTags[LOADART_MAX];
+    char        tok[LOADART_TOKS][LOADART_TOKLEN];
+    char        rule[LOADART_TOKS][LOADART_TOKLEN];
+    int         pool[LOADART_MAX];
+    char       *buf = NULL;
+    const char *p, *end;
+    long        len;
+    int         nArt = 0, nRule = -1, nPool = 0, i, j, k, n, pick;
+    qboolean    on;
+
+    Cvar_Set("ui_loadArtOn", "0");
+    if (!ui_loadArt) {
+        return; // the UI is not initialised yet
+    }
+    on = ui_loadArt->integer < 0 ? qtrue : (ui_loadArt->integer ? qtrue : qfalse);
+    if (!on || !mapname || !*mapname) {
+        return;
+    }
+
+    len = FS_ReadFile("ui/loadart.txt", (void **)&buf);
+    if (len <= 0 || !buf) {
+        return; // no pool on this install: the map's own screen
+    }
+
+    p   = buf;
+    end = buf + len;
+    while (p < end) {
+        const char *ls = p;
+        const char *le;
+
+        while (p < end && *p != '\n') {
+            p++;
+        }
+        le = p;
+        if (p < end) {
+            p++;
+        }
+        while (ls < le && (*ls == ' ' || *ls == '\t')) {
+            ls++;
+        }
+        while (le > ls && (le[-1] == '\r' || le[-1] == ' ' || le[-1] == '\t')) {
+            le--;
+        }
+        if (le <= ls || *ls == '#' || (le - ls >= 2 && ls[0] == '/' && ls[1] == '/')) {
+            continue;
+        }
+
+        n = UI_LoadArt_Tokens(ls, le, tok, LOADART_TOKS);
+        if (n >= 2 && !Q_stricmp(tok[0], "art") && nArt < LOADART_MAX) {
+            Q_strncpyz(art[nArt][0], tok[1], LOADART_TOKLEN);
+            artTags[nArt] = 0;
+            for (k = 2; k < n && artTags[nArt] < LOADART_TAGS; k++) {
+                Q_strncpyz(art[nArt][1 + artTags[nArt]], tok[k], LOADART_TOKLEN);
+                artTags[nArt]++;
+            }
+            nArt++;
+        } else if (n >= 2 && !Q_stricmp(tok[0], "map") && nRule < 0 && UI_LoadArt_MapMatches(tok[1], mapname)) {
+            nRule = n - 2; // the first matching rule wins; later ones are ignored
+            for (k = 0; k < nRule; k++) {
+                Q_strncpyz(rule[k], tok[2 + k], LOADART_TOKLEN);
+            }
+        }
+    }
+    FS_FreeFile(buf);
+
+    if (nRule < 0) {
+        Com_DPrintf("^~^~^ LOADART map=%s rule=none\n", mapname);
+        return;
+    }
+
+    for (i = 0; i < nArt; i++) {
+        qboolean anyInclude = qfalse, included = qfalse, excluded = qfalse;
+
+        for (k = 0; k < nRule; k++) {
+            if (!strcmp(rule[k], "-")) {
+                excluded = qtrue; // "-": this map keeps its own screen
+                break;
+            }
+            if (rule[k][0] == '!') {
+                for (j = 0; j < artTags[i]; j++) {
+                    if (!Q_stricmp(rule[k] + 1, art[i][1 + j])) {
+                        excluded = qtrue;
+                    }
+                }
+            } else {
+                anyInclude = qtrue;
+                for (j = 0; j < artTags[i]; j++) {
+                    if (!Q_stricmp(rule[k], art[i][1 + j])) {
+                        included = qtrue;
+                    }
+                }
+            }
+        }
+        if (!excluded && (included || !anyInclude)) {
+            pool[nPool++] = i;
+        }
+    }
+    if (!nPool) {
+        Com_DPrintf("^~^~^ LOADART map=%s pool=0\n", mapname);
+        return;
+    }
+
+    // a private LCG (the hints' recipe): the game's rand() stream is left alone
+    s_loadArt.rng ^= (unsigned int)Sys_Milliseconds() * 2654435761u;
+    s_loadArt.rng = s_loadArt.rng * 1664525u + 1013904223u;
+    pick          = pool[(s_loadArt.rng >> 8) % (unsigned int)nPool];
+    if (nPool > 1 && !Q_stricmp(art[pick][0], s_loadArt.last)) {
+        s_loadArt.rng = s_loadArt.rng * 1664525u + 1013904223u;
+        k             = (int)((s_loadArt.rng >> 8) % (unsigned int)(nPool - 1));
+        for (i = 0; i < nPool; i++) {
+            if (Q_stricmp(art[pool[i]][0], s_loadArt.last) && k-- == 0) {
+                pick = pool[i];
+                break;
+            }
+        }
+    }
+
+    Q_strncpyz(s_loadArt.last, art[pick][0], sizeof(s_loadArt.last));
+    Cvar_Set("ui_loadArtShader", art[pick][0]);
+    Cvar_Set("ui_loadArtOn", "1");
+    Com_DPrintf("^~^~^ LOADART map=%s pool=%d pick=%s\n", mapname, nPool, art[pick][0]);
+}
+
+/*
+====================
 UI_BeginLoad
 ====================
 */
@@ -7119,6 +7312,7 @@ void UI_BeginLoad(const char *pszMapName)
 
     UI_LoadProbe_Begin(pszMapName); // HZM loading-screen probe
     UI_LoadHints_Begin(pszMapName); // HZM loading-screen hints (before the first frame below)
+    UI_LoadArt_Begin(pszMapName);   // HZM loading-screen art pool (ui/loadart.txt), also before the first frame
 
     if (str::icmp(ui_sCurrentLoadingMenu, server_mapname)) {
         ui_sCurrentLoadingMenu = server_mapname;
