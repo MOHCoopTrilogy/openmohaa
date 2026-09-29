@@ -1703,6 +1703,19 @@ Event EV_Player_InventorySet
     "Set up the player's inventory",
     EV_SETTER
 );
+// HZM coop [user 2026-09-29] RESPAWN SAFE SPOT (players reported getting stuck in objects after a respawn).
+// Returns the player's own origin when a standing player hull fits there, else the nearest clear spot within
+// 96u (rings 16..96u, three lifts, each dropped to a floor within 128u and required to have a clear line back
+// to the original spot so nobody is popped through a wall), else 0 0 0 (caller falls back to a spawnlocation).
+Event EV_Player_CoopSafeSpot
+(
+    "coop_safespot",
+    EV_DEFAULT,
+    NULL,
+    NULL,
+    "HZM coop: nearest spot to the player where a standing hull is clear of world and solid entities, or 0 0 0",
+    EV_GETTER
+);
 Event EV_Player_LeanLeftHeld
 (
     "leanleftheld",
@@ -2164,6 +2177,7 @@ CLASS_DECLARATION(Sentient, Player, "player") {
     {&EV_Player_InventorySet,             &Player::InventorySet                 },
     {&EV_Player_IsSpectator,              &Player::GetIsSpectator               },
     {&EV_Player_IsAdmin,                  &Player::IsAdmin                      },
+    {&EV_Player_CoopSafeSpot,             &Player::CoopSafeSpot                 },
     {&EV_Player_LeanLeftHeld,             &Player::LeanLeftHeld                 },
     {&EV_Player_LeanRightHeld,            &Player::LeanRightHeld                },
     {&EV_Player_MoveSpeedScale,           &Player::SetSpeed                     },
@@ -19629,6 +19643,68 @@ void Player::InventorySet(Event *ev)
 
     // Clear the variable
     array.Clear();
+}
+
+static bool HZM_CoopHullClear(Entity *self, const Vector& pos)
+{
+    const Vector mins(-15, -15, 0);
+    const Vector maxs(15, 15, 94);
+    trace_t      tr = G_Trace(pos, mins, maxs, pos, self, MASK_PLAYERSOLID, qfalse, "HZM_CoopHullClear");
+    return !tr.startsolid && !tr.allsolid;
+}
+
+void Player::CoopSafeSpot(Event *ev)
+{
+    const Vector mins(-15, -15, 0);
+    const Vector maxs(15, 15, 94);
+    const Vector base = origin;
+    static const float radii[] = {16.0f, 32.0f, 48.0f, 64.0f, 96.0f};
+    static const float lifts[] = {0.0f, 18.0f, 36.0f};
+
+    if (HZM_CoopHullClear(this, base)) {
+        ev->AddVector(base);
+        return;
+    }
+
+    for (int r = 0; r < 5; r++) {
+        for (int l = 0; l < 3; l++) {
+            for (int a = 0; a < 8; a++) {
+                const float ang  = a * 0.78539816f;
+                const Vector cand = base + Vector(cos(ang) * radii[r], sin(ang) * radii[r], lifts[l]);
+                if (!HZM_CoopHullClear(this, cand)) {
+                    continue;
+                }
+                // land it: a floor within 128u below, and the hull must still fit there
+                trace_t down = G_Trace(
+                    cand, mins, maxs, cand - Vector(0, 0, 128), this, MASK_PLAYERSOLID, qfalse, "HZM_CoopSafeSpot_down"
+                );
+                if (down.startsolid || down.allsolid || down.fraction >= 1.0f) {
+                    continue;
+                }
+                const Vector landed = down.endpos;
+                if (!HZM_CoopHullClear(this, landed)) {
+                    continue;
+                }
+                // never through a wall: clear chest-height line from the original spot
+                trace_t los = G_Trace(
+                    base + Vector(0, 0, 48),
+                    vec_zero,
+                    vec_zero,
+                    landed + Vector(0, 0, 48),
+                    this,
+                    MASK_SOLID,
+                    qfalse,
+                    "HZM_CoopSafeSpot_los"
+                );
+                if (los.allsolid || los.fraction < 1.0f) {
+                    continue;
+                }
+                ev->AddVector(landed);
+                return;
+            }
+        }
+    }
+    ev->AddVector(vec_zero);
 }
 
 void Player::LeanLeftHeld(Event *ev)

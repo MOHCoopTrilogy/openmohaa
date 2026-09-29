@@ -1319,6 +1319,7 @@ public:
     void IsAdmin(Event *ev);
     void JoinDMTeamReal(Event *ev);
     void JoinDMTeam(Event *ev);
+    void CoopSafeSpot(Event *ev);
     void LeanLeftHeld(Event *ev);
     void LeanRightHeld(Event *ev);
     void PlayLocalSound(Event *ev);
