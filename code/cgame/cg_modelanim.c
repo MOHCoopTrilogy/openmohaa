@@ -25,6 +25,7 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 
 #include "cg_local.h"
 #include "tiki.h"
+#include "../renderercommon/hzm_storm.h" // HZM coop [2026-09-28] storm darkness: the contact decal under cloud
 
 static qboolean cg_forceModelAllowed = qfalse;
 
@@ -729,8 +730,10 @@ qboolean CG_EntityShadow(centity_t *cent, refEntity_t *model)
     vec3_t  vMins, vMaxs;
     vec3_t  vSize;
     trace_t trace;
+    float   stormDecal; // HZM coop [2026-09-28] storm darkness
 
     iTagR = -1;
+    stormDecal = 0.0f;   // HZM coop [2026-09-28] storm darkness: > 0 = real shadows are fading, decal only
 
     if (cg_shadows->integer == 0) {
         return qfalse;
@@ -764,7 +767,12 @@ qboolean CG_EntityShadow(centity_t *cent, refEntity_t *model)
             sRealShadows = cgi.Cvar_Get("r_coopRealShadows", "0", 0);
         }
         if (sRealShadows && sRealShadows->integer) {
-            return qfalse;
+            // HZM coop [2026-09-28] storm darkness: the real cast shadow fades with the sun under a storm deck, so a
+            // round contact decal fades in by the same amount (the Phase-A branch below, stretch 1, alpha x fade)
+            if (CG_HzmStorm_SunFade() < 0.02f) {
+                return qfalse;
+            }
+            stormDecal = CG_HzmStorm_SunFade();
         }
     }
 
@@ -784,6 +792,9 @@ qboolean CG_EntityShadow(centity_t *cent, refEntity_t *model)
             sSunAz    = cgi.Cvar_Get("r_coopSunAz",     "45", 0);
             sSunEl    = cgi.Cvar_Get("r_coopSunEl",     "45", 0);
             sSunValid = cgi.Cvar_Get("r_coopSunValid",  "0",  0);
+        }
+        if (!sDir->integer && stormDecal > 0.0f) {
+            return qfalse;   // HZM coop [2026-09-28] real shadows + no Phase-A decal: today's behaviour
         }
         if (sDir->integer) {
             float azDeg = sAz->value;
@@ -825,6 +836,13 @@ qboolean CG_EntityShadow(centity_t *cent, refEntity_t *model)
                         alpha  *= cap / stretch; // longer than we allow => proportionally fainter
                         stretch = cap;
                     }
+                }
+                // HZM coop [2026-09-28] storm darkness: no sun under a storm deck - the shadow shrinks to a round
+                // contact shadow (the offset below follows stretch, so it also re-centres)
+                stretch = 1.0f + (stretch - 1.0f) * (1.0f - CG_HzmStorm_SunFade());
+                if (stormDecal > 0.0f) {
+                    stretch = 1.0f;
+                    alpha  *= stormDecal;
                 }
                 vec3_t sunH, pos;
                 sunH[0] = (float)cos(azr);

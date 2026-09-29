@@ -681,7 +681,10 @@ void main()
 	shadowValue *= clamp(dot(N, var_PrimaryLightDir.xyz), 0.0, 1.0);
 
     #if defined(SHADOWMAP_MODULATE)
-	lightColor *= shadowValue * (1.0 - u_PrimaryLightAmbient.r) + u_PrimaryLightAmbient.r;
+	// HZM coop [2026-09-28] storm darkness: .b / .r is the SUN'S VISIBILITY (1 = the map's sun; tr_scene.c lowers .b
+	// under a storm deck). Only the sun's share fades: a shadowed texel keeps its ambient share, nothing brightens.
+	float hzmSunVis = (u_PrimaryLightAmbient.r > 0.0) ? clamp(u_PrimaryLightAmbient.b / u_PrimaryLightAmbient.r, 0.0, 1.0) : 1.0;
+	lightColor *= shadowValue * (1.0 - u_PrimaryLightAmbient.r) * hzmSunVis + u_PrimaryLightAmbient.r;
     #endif
   #endif
 

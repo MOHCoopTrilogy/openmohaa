@@ -21,6 +21,7 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 */
 // tr_sky.c
 #include "tr_local.h"
+#include "../renderercommon/hzm_storm.h" // HZM coop [2026-09-28] storm darkness
 
 #define SKY_SUBDIVISIONS		8
 #define HALF_SKY_SUBDIVISIONS	(SKY_SUBDIVISIONS/2)
@@ -458,6 +459,14 @@ static void DrawSkySide( struct image_s *image, const int mins[2], const int max
 		color[2] =
 		color[3] = 1.0f;
 		GLSL_SetUniformVec4(sp, UNIFORM_BASECOLOR, color);
+		// HZM coop [2026-09-28] storm darkness: the textured part of a partly fogged sky takes the fog's own storm tint,
+		// so an enclosed view never shows a bright sky patch above a darkened fogged horizon
+		if (R_HZM_Storm()->active) {
+			color[0] = R_HZM_Storm()->fog[0];
+			color[1] = R_HZM_Storm()->fog[1];
+			color[2] = R_HZM_Storm()->fog[2];
+			GLSL_SetUniformVec4(sp, UNIFORM_BASECOLOR, color);
+		}
 
 		color[0] = 
 		color[1] = 

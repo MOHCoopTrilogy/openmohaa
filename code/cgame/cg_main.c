@@ -28,6 +28,7 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 #include "cg_parsemsg.h"
 #include "cg_archive.h"
 #include "cg_radar.h"
+#include "../renderercommon/hzm_storm.h" // HZM coop [2026-09-28] storm darkness (cg_hzmstorm.c)
 
 #ifdef _WIN32
 #    include <windows.h>
@@ -1086,6 +1087,10 @@ void CG_Init(clientGameImport_t *imported, int serverMessageNum, int serverComma
     // gamestate for its key, hence after CG_GameStateReceived). CG_CoopMapGradeThink applies it on the first frame.
     CG_HZM_GradeKeepRestore();
 
+    // HZM coop [2026-09-28] storm darkness: registers, clears the renderer state and takes back a keyframe a
+    // vid_restart parked for this same level (needs the parsed gamestate for its key, like the grade keep above)
+    CG_HzmStorm_Init();
+
     CG_InitConsoleCommands();
 
     cg.vEyeOffsetMax[0]         = 40.0f;
@@ -1135,6 +1140,10 @@ void CG_Shutdown(void)
 
     // HZM coop [bug-3048] park the live grade, keyed on this level instance, before the reset below clears it.
     // CG_Init hands it back only when the reload kept the level (vid_restart); any other load discards it.
+    // HZM coop [2026-09-28] storm darkness: park the live keyframe (vid_restart), then clear coop_storm and the
+    // renderer state so nothing outlives the level
+    CG_HzmStorm_Shutdown();
+
     CG_HZM_GradeKeepPark();
 
     // HZM coop [per-map grade] the per-map grade LAYER never outlives the level: reset to identity

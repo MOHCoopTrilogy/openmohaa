@@ -18,6 +18,9 @@ uniform vec4      u_Color;     // (exposure, contrast, saturation, temp tint)
 // every set was dropped and the shader ran with an all-zero grade.
 
 varying vec2      var_TexCoords;
+// HZM coop [2026-09-28] storm darkness: x = 1 - the display-referred gain (0 = none; FBO_Blit pushes a zero vec4 unless
+// tr_postprocess.c RB_ToneMap set it). A gain after the curve keeps the ACES toe, which an exposure cut crushes.
+uniform vec4      u_HzmParams;
 
 void main()
 {
@@ -40,5 +43,6 @@ void main()
 	c.r = clamp(c.r * (1.0 + u_Color.w), 0.0, 1.0);
 	c.b = clamp(c.b * (1.0 - u_Color.w), 0.0, 1.0);
 
+	c *= 1.0 - u_HzmParams.x;   // HZM coop [2026-09-28] storm darkness
 	gl_FragColor = vec4(c, 1.0);
 }

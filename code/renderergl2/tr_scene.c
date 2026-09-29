@@ -21,6 +21,7 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 */
 
 #include "tr_local.h"
+#include "../renderercommon/hzm_storm.h" // HZM coop [2026-09-28] storm darkness
 
 int			r_firstSceneDrawSurf;
 
@@ -459,6 +460,21 @@ void RE_BeginScene(const refdef_t *fd)
 			else
 				VectorScale(tr.sunLight, scale * tr.sunShadowScale, tr.refdef.sunAmbCol);
 		}
+
+		// HZM coop [2026-09-28] storm darkness: the sun is behind the storm deck. Mode 1 (the shipped one): lightall's
+		// SHADOWMAP_MODULATE reads sunAmbCol.b / .r as the SUN'S VISIBILITY, so only the sun's share of each texel fades -
+		// the lit side darkens toward the shadow level, a shadowed texel keeps its ambient, NOTHING brightens (vet F1).
+		// sunCol (the sun specular; mode 2's direct term) fades with it. The lightning's sky-visibility test reads the
+		// shadow MASK, not these, so it is unchanged.
+		{
+			const hzmStormState_t *hs = R_HZM_Storm();
+			if (hs->active && hs->sunFade > 0.0f) {
+				if (r_sunlightMode->integer == 1) {
+					tr.refdef.sunAmbCol[2] = tr.refdef.sunAmbCol[0] * (1.0f - hs->sunFade);
+				}
+				VectorScale(tr.refdef.sunCol, 1.0f - hs->sunFade, tr.refdef.sunCol);
+			}
+		}
 	}
 
 	if (r_forceAutoExposure->integer)
@@ -816,6 +832,10 @@ void RE_RenderScene( const refdef_t *fd ) {
 	   && ((r_forceSun->integer) || tr.sunShadows))
 	{
 		parms.flags = VPF_USESUNLIGHT;
+	}
+	// HZM coop [2026-09-28] storm darkness: does removing the sun darken anything this frame (hzm_storm.h 4)?
+	if (!(fd->rdflags & RDF_NOWORLDMODEL)) {
+		R_HZM_StormSetSunLive((parms.flags & VPF_USESUNLIGHT) && r_sunlightMode->integer == 1 ? 1 : 0);
 	}
 
 	//

@@ -22,6 +22,7 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 // tr_shade.c
 
 #include "tr_local.h" 
+#include "../renderercommon/hzm_storm.h" // HZM coop [2026-09-28] storm darkness
 
 /*
 
@@ -1888,6 +1889,16 @@ static void RB_IterateStagesGeneric( shaderCommands_t *input )
 			vec4_t vertColor;
 
 			ComputeShaderColors(pStage, baseColor, vertColor, pStage->stateBits);
+
+			// HZM coop [2026-09-28] storm darkness: a sky shader's cloud / HD layers take the fog's storm tint, like the
+			// outer box (tr_sky.c DrawSkySide) - additive layers included (their light is what darkens)
+			if (input->shader->isSky && !backEnd.projection2D && R_HZM_Storm()->active) {
+				int k;
+				for (k = 0; k < 3; k++) {
+					baseColor[k] *= R_HZM_Storm()->fog[k];
+					vertColor[k] *= R_HZM_Storm()->fog[k];
+				}
+			}
 
 			GLSL_SetUniformVec4(sp, UNIFORM_BASECOLOR, baseColor);
 			GLSL_SetUniformVec4(sp, UNIFORM_VERTCOLOR, vertColor);

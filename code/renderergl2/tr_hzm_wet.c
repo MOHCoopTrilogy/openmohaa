@@ -48,6 +48,7 @@ infoParms[] never parses them into shader->surfaceFlags (vet.md B3):
 #include "tr_local.h"
 #include "tr_dsa.h"
 #include "../renderercommon/hzm_waterwet.h"
+#include "../renderercommon/hzm_storm.h" // HZM coop [2026-09-28] storm darkness
 
 // tr_image.c; not in tr_local.h (only tr_image.c called it before). Storage-only when pic is NULL.
 image_t *R_CreateImage2( const char *name, byte *pic, int width, int height, GLenum picFormat, int numMips, imgType_t type,
@@ -588,6 +589,34 @@ static void R_HZMWetBuildNoise( void )
 
 /*
 ================
+HZM coop [2026-09-28] storm darkness: re-set the wet / water sky + sun uniforms from the storm state (called
+right after the plain sets, so with no storm nothing is re-sent). Shared by tr_hzm_wet.c and tr_hzm_water.c.
+================
+*/
+void R_HZM_StormWetUniforms( shaderProgram_t *sp )
+{
+	const hzmStormState_t *hs = R_HZM_Storm();
+	vec4_t sun, sz, sh;
+	int    k;
+
+	if ( !hs->active ) {
+		return;
+	}
+	VectorCopy4( tr.hzmWetSun, sun );
+	sun[3] *= 1.0f - hs->sunFade;
+	VectorCopy4( tr.hzmSkyZenith, sz );
+	VectorCopy4( tr.hzmSkyHorizon, sh );
+	for ( k = 0; k < 3; k++ ) {
+		sz[k] *= hs->fog[k];
+		sh[k] *= hs->fog[k];
+	}
+	GLSL_SetUniformVec4( sp, UNIFORM_HZMWETSUN, sun );
+	GLSL_SetUniformVec4( sp, UNIFORM_HZMWETSKYZ, sz );
+	GLSL_SetUniformVec4( sp, UNIFORM_HZMWETSKYH, sh );
+}
+
+/*
+================
 R_HZMWetBuild - RE_LoadWorldMap, after every lump is loaded and BEFORE the BSP file is freed.
 ================
 */
@@ -719,6 +748,8 @@ void RB_HZMWetUniforms( shaderProgram_t *sp, const shaderCommands_t *input, cons
 			GLSL_SetUniformVec4( sp, UNIFORM_HZMWETSKYZ, tr.hzmSkyZenith );
 			GLSL_SetUniformVec4( sp, UNIFORM_HZMWETSKYH, tr.hzmSkyHorizon );
 			GLSL_SetUniformVec4( sp, UNIFORM_HZMWETSUN, tr.hzmWetSun );
+			// HZM coop [2026-09-28] storm darkness: no sun glint under a storm deck; the reflected sky darkens with the fog
+			R_HZM_StormWetUniforms( sp );
 			GLSL_SetUniformVec4( sp, UNIFORM_HZMWETSUNCOL, tr.hzmWetSunCol );
 			GL_BindToTMU( tr.hzmRainOccImage, TB_HZMRAINOCC );
 			GL_BindToTMU( tr.hzmWetNoiseImage, TB_HZMWETNOISE );

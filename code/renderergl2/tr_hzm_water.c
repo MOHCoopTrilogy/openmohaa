@@ -37,6 +37,8 @@ BUILT ONCE PER MAP LOAD (R_HZMWaterBuild, from R_HZMWetBuild), only on a non-Oma
 #include "tr_local.h"
 #include "tr_dsa.h"
 #include "../renderercommon/hzm_waterwet.h"
+#include "../renderercommon/hzm_storm.h" // HZM coop [2026-09-28] storm darkness
+void R_HZM_StormWetUniforms( shaderProgram_t *sp );   // tr_hzm_wet.c
 
 #define HZM_RIPPLE_SIZE     256         // power of two: the FFT below
 #define HZM_RIPPLE_SLOPE    0.55f
@@ -435,6 +437,9 @@ void RB_HZMWaterPass( int deformGen, const vec5_t deformParams )
 	GLSL_SetUniformVec4( sp, UNIFORM_HZMWETSKYZ, tr.hzmSkyZenith );
 	GLSL_SetUniformVec4( sp, UNIFORM_HZMWETSKYH, tr.hzmSkyHorizon );
 	GLSL_SetUniformVec4( sp, UNIFORM_HZMWETSUN, tr.hzmWetSun );
+	// HZM coop [2026-09-28] storm darkness (vet F14): the water, like the wet film, loses the sun glint under a storm
+	// deck and reflects the darker sky
+	R_HZM_StormWetUniforms( sp );
 	GLSL_SetUniformVec4( sp, UNIFORM_HZMWETSUNCOL, tr.hzmWetSunCol );
 
 	// the fog colour a SRC_ALPHA/ONE_MINUS_SRC_ALPHA draw would get; the shader applies it premultiplied itself

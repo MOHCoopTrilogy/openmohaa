@@ -21,6 +21,7 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 */
 
 #include "tr_local.h"
+#include "../renderercommon/hzm_storm.h" // HZM coop [2026-09-28] storm darkness
 
 // HZM: does the active tone pass run the ACES grade (tonemap_hzm) rather than rend2's Hable curve?
 // The bloom bright pass needs this to choose its display-domain proxy, and RB_ToneMap uses it to gate
@@ -51,6 +52,68 @@ static void RB_HZMGradeCvars(void)
 		r_ppMapSaturation   = ri.Cvar_Get("r_ppMapSaturation",   "1", 0);
 		r_ppMapTemp         = ri.Cvar_Get("r_ppMapTemp",         "0", 0);
 	}
+}
+
+// HZM coop [2026-09-28] storm darkness (hzm_storm.h 3): r_hzmStormNow, written by cgame, parsed once per change and
+// CLAMPED here whatever it holds. Identity when empty and on the Omaha list. NOT part of RB_HZMToneUsesGrade: the storm
+// never switches a player from the Hable path to the grade path (that would be a pop) - it multiplies whichever runs.
+static hzmStormState_t s_hzmStorm = { 1.0f, 1.0f, 1.0f, 0.0f, 0.0f, { 1.0f, 1.0f, 1.0f }, 1.0f, 0 };
+static const hzmStormState_t s_hzmStormIdentity = { 1.0f, 1.0f, 1.0f, 0.0f, 0.0f, { 1.0f, 1.0f, 1.0f }, 1.0f, 0 };
+static cvar_t         *r_hzmStormNow = NULL;
+static int             s_hzmStormMod = -1;
+static int             s_hzmStormSunLive = 0;
+
+const hzmStormState_t *R_HZM_Storm(void)
+{
+	float v[9];
+	int   was;
+
+	if (!r_hzmStormNow) {
+		r_hzmStormNow = ri.Cvar_Get("r_hzmStormNow", "", 0);
+	}
+	if (tr.world && tr.hzmOmahaWorld) {
+		return &s_hzmStormIdentity;   // vet F24: a second line of defence behind cgame's own refusal
+	}
+	if (r_hzmStormNow->modificationCount == s_hzmStormMod) {
+		return &s_hzmStorm;
+	}
+	s_hzmStormMod = r_hzmStormNow->modificationCount;
+	was = s_hzmStorm.active;
+	s_hzmStorm = s_hzmStormIdentity;
+	if (r_hzmStormNow->string[0] && sscanf(r_hzmStormNow->string, "%f %f %f %f %f %f %f %f %f",
+		&v[0], &v[1], &v[2], &v[3], &v[4], &v[5], &v[6], &v[7], &v[8]) == 9) {
+		s_hzmStorm.expo    = Com_Clamp(HZM_STORM_EXPO_MIN, 1.0f, v[0]);
+		s_hzmStorm.cont    = Com_Clamp(HZM_STORM_CONT_MIN, HZM_STORM_CONT_MAX, v[1]);
+		s_hzmStorm.sat     = Com_Clamp(HZM_STORM_SAT_MIN, 1.0f, v[2]);
+		s_hzmStorm.temp    = Com_Clamp(-HZM_STORM_TEMP_MAX, HZM_STORM_TEMP_MAX, v[3]);
+		s_hzmStorm.sunFade = Com_Clamp(0.0f, 1.0f, v[4]);
+		s_hzmStorm.fog[0]  = Com_Clamp(HZM_STORM_FOG_MIN, HZM_STORM_FOG_MAX, v[5]);
+		s_hzmStorm.fog[1]  = Com_Clamp(HZM_STORM_FOG_MIN, HZM_STORM_FOG_MAX, v[6]);
+		s_hzmStorm.fog[2]  = Com_Clamp(HZM_STORM_FOG_MIN, HZM_STORM_FOG_MAX, v[7]);
+		s_hzmStorm.gain    = Com_Clamp(HZM_STORM_GAIN_MIN, 1.0f, v[8]);
+		s_hzmStorm.active  = 1;
+	}
+	if (was != s_hzmStorm.active) {   // edges only (vet F12: a ramp changes the cvar every frame)
+		ri.Printf(PRINT_DEVELOPER, "^~^~^ STORMBUILD gl2 storm layer %s\n", s_hzmStorm.active ? "on" : "off");
+	}
+	return &s_hzmStorm;
+}
+
+void R_HZM_StormSetSunLive(int live)
+{
+	s_hzmStormSunLive = live;
+}
+
+// the exposure multiplier: the grade term, and where the runtime sun term is not live (so removing the sun darkens
+// nothing) the no-sun compensation (hzm_storm.h 4)
+float R_HZM_StormExposure(int withGain)
+{
+	const hzmStormState_t *hs = R_HZM_Storm();
+
+	if (!hs->active) {
+		return 1.0f;
+	}
+	return hs->expo * (withGain ? hs->gain : 1.0f) * (s_hzmStormSunLive ? 1.0f : 1.0f - HZM_STORM_NOSUN_K * hs->sunFade);
 }
 
 qboolean RB_HZMNightGradeActive(void)
@@ -209,15 +272,42 @@ void RB_ToneMap(FBO_t *hdrFbo, ivec4_t hdrBox, FBO_t *ldrFbo, ivec4_t ldrBox, in
 			sat  *= r_ppMapSaturation->value;
 			temp += r_ppMapTemp->value;
 
+			// HZM coop [2026-09-28] storm darkness: the last layer (player -> night -> map -> storm). Identity at rest.
+			{
+				const hzmStormState_t *hs = R_HZM_Storm();
+				if (hs->active) {
+					expo *= R_HZM_StormExposure(0);
+					cont *= hs->cont;
+					sat  *= hs->sat;
+					temp += hs->temp;
+				}
+			}
+
 			grade[0] = expo;
 			grade[1] = cont;
 			grade[2] = sat;
 			grade[3] = temp;
 
+			// HZM coop [2026-09-28] storm darkness: the display-referred gain rides u_HzmParams.x (0 = none, every
+			// other user of that spare vec4 sets and clears its own)
+			if (R_HZM_Storm()->active) {
+				vec4_t hp;
+				VectorSet4(hp, 1.0f - R_HZM_Storm()->gain, 0.0f, 0.0f, 0.0f);
+				FBO_SetHzmParams(hp);
+				FBO_Blit(hdrFbo, hdrBox, NULL, ldrFbo, ldrBox, &tr.tonemapHzmShader, grade, 0);
+				FBO_SetHzmParams(NULL);
+				return;
+			}
 			FBO_Blit(hdrFbo, hdrBox, NULL, ldrFbo, ldrBox, &tr.tonemapHzmShader, grade, 0);
 			return;
 		}
 	}
+
+	// HZM coop [2026-09-28] storm darkness on the Hable path: a gain on u_Color, applied AFTER the auto-exposure
+	// measurement (which reads the HDR buffer), so adaptation cannot undo it - an exposure bias by construction
+	color[0] *= R_HZM_StormExposure(1);
+	color[1] *= R_HZM_StormExposure(1);
+	color[2] *= R_HZM_StormExposure(1);
 
 	if (autoExposure)
 		GL_BindToTMU(tr.calcLevelsImage,  TB_LEVELSMAP);

@@ -22,6 +22,7 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 #include "tr_local.h"
 #include "tr_fbo.h"
 #include "tr_dsa.h"
+#include "../renderercommon/hzm_storm.h" // HZM coop [2026-09-28] storm darkness
 
 backEndData_t	*backEndData;
 backEndState_t	backEnd;
@@ -2309,6 +2310,10 @@ const void *RB_PostProcess(const void *data)
 				color[0] =
 				color[1] =
 				color[2] = pow(2, r_cameraExposure->value); //exp2(r_cameraExposure->value);
+				// HZM coop [2026-09-28] storm darkness: the no-tonemap path takes the same exposure gain
+				color[0] *= R_HZM_StormExposure(1);
+				color[1] *= R_HZM_StormExposure(1);
+				color[2] *= R_HZM_StormExposure(1);
 				color[3] = 1.0f;
 
 				FBO_BlitFromTexture(tr.whiteImage, NULL, NULL, srcFbo, srcBox, NULL, color, GLS_SRCBLEND_DST_COLOR | GLS_DSTBLEND_ZERO);

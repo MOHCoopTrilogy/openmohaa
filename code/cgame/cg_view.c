@@ -36,6 +36,7 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 #include "cg_parsemsg.h"
 #include "../renderercommon/hzm_light_restore.h" // HZM coop [2026-09-25] headlights: AUTO defaults + Omaha list
 #include "../renderercommon/hzm_waterwet.h"      // HZM coop [2026-09-27] rain wetness: easing + Omaha list
+#include "../renderercommon/hzm_storm.h"         // HZM coop [2026-09-28] storm darkness (cg_hzmstorm.c)
 
 //============================================================================
 
@@ -5778,6 +5779,11 @@ static void CG_HL_UpdateFrame(void)
     // by cg_hzmHeadlightsDay (0 = none - hl7 Bizerte Canal must show no ground light and no flare)
     s_hl.dark     = dark;
     s_hl.dayScale = dark ? 1.0f : s_hlDay->value;
+    // HZM coop [2026-09-28] storm darkness: on a day map a DARK storm fades the pools and flares in (continuous; the
+    // beam gate above still reads the raw fog, so no beam switches)
+    if (!dark && CG_HzmStorm_HeadlightDay() > s_hl.dayScale) {
+        s_hl.dayScale = CG_HzmStorm_HeadlightDay();
+    }
     if (s_hl.dayScale < 0.0f) {
         s_hl.dayScale = 0.0f;
     } else if (s_hl.dayScale > 1.0f) {
@@ -7207,6 +7213,10 @@ void CG_SetupFog() {
     cg.refdef.farplaneColorOverride[0] = cg.farplaneColorOverride[0];
     cg.refdef.farplaneColorOverride[1] = cg.farplaneColorOverride[1];
     cg.refdef.farplaneColorOverride[2] = cg.farplaneColorOverride[2];
+    // HZM coop [2026-09-28] storm darkness: the REFDEF copy only (gl2; identity on gl1) - cg.farplane_color stays the
+    // map's own fog, so the headlight dark gate, the lightning's fog scaling and the fog keeper never see the storm
+    CG_HzmStorm_FogColor(cg.refdef.farplane_color);
+    CG_HzmStorm_FogColor(cg.refdef.farplaneColorOverride);
 }
 
 /*
@@ -8617,6 +8627,7 @@ void CG_DrawActiveFrame(int serverTime, int frameTime, stereoFrame_t stereoView,
     CoopGunFoleyThink();    // handling foley: sprint, crouch, ADS, switch, dry fire
     CG_CoopDaylightThink(); // time-of-day grade (see banner) - cheap, early-outs when unchanged
     CG_CoopMapGradeThink(); // per-map colour grade layer (see banner) - cheap, early-outs when unchanged
+    CG_HzmStorm_Frame();    // HZM coop [2026-09-28] storm darkness (cg_hzmstorm.c) - before CG_SetupFog reads it
     CG_CoopHeadshotCueThink(); // shooter-only headshot cue (see banner)
     CG_UpdateScriptedAudioDucks();
     // HZM coop bug-1508 - throttled internally, safe to call every frame (see function banner).
