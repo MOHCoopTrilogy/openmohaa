@@ -2168,7 +2168,9 @@ void CG_OffsetFirstPersonView(refEntity_t *pREnt, qboolean bUseWorldPosition)
     {
         static cvar_t *pMass = NULL, *pMassRate = NULL;
         static vec3_t  s_vMassLag = {0, 0, 0};
+        static int     s_iMassLast = 0;   // cg.time of the last update (gap re-seed, stg44 viewmodel (bug-3207))
         float          fMass, fDtM, kM;
+        vec3_t         vCam, vEye;
 
         if (!pMass)     { pMass     = cgi.Cvar_Get("coop_weaponMass",     "0.35", CVAR_ARCHIVE); }
         if (!pMassRate) { pMassRate = cgi.Cvar_Get("coop_weaponMassRate", "14.0", CVAR_ARCHIVE); }
@@ -2214,19 +2216,39 @@ void CG_OffsetFirstPersonView(refEntity_t *pREnt, qboolean bUseWorldPosition)
         // one-pole low-pass of vDelta, so it is bounded by vDelta's own range and cannot pump; the
         // weapon then gets a blend of the instantaneous offset and the lagged one. fMass 0 reproduces
         // the old rigid transfer exactly, fMass 1 would be fully lagged.
+        //
+        // [user 2026-09-28] stg44 viewmodel (bug-3207): "the STG44 weight where the arms will sometimes randomly pop
+        // towards top of screen... during movement shooting and reloading". vDelta is NOT only camera motion. It is
+        // the camera MINUS the eyes bone of the CURRENT POSE (vOldOrigin, top of this function) - the term that pins
+        // the animated rig's eye to the camera - and that term steps whenever an animation change moves the eye.
+        // The retail StG 44 idle (viewmodel/mp44/mp44_idle_stand.skc) is the only viewmodel clip that keys the ROOT:
+        // Bip01 pos z = 100.72, x0.52 = 52.4 world units. Its fire, reload, pullout and ADS clips leave Bip01 at 0,
+        // so every idle<->fire/reload/ADS change stepped vDelta by 52 u vertically, and low-passing it threw the rig
+        // 0.35 x 52 = 18 u off - UP on the return to idle after a burst or a reload - and slid it back over ~200 ms.
+        // Vanilla hands the whole alignment over every frame, which is why the data never showed before this filter.
+        //
+        // So the low-pass sees ONLY the camera's excursion relative to the player entity (bob, lean, crouch, the
+        // collision traces - what mass is meant to lag) and the pose's eye offset is applied RIGIDLY, as vanilla does.
+        // For a constant pose this is algebraically the old filter exactly; it differs only when the animation moves
+        // the eye, which is the one thing that must never be smeared. Never low-pass a pose-alignment term.
+        VectorSubtract(origin, pCent->lerpOrigin, vCam);     // the camera, relative to the player entity
+        VectorSubtract(vOldOrigin, pCent->lerpOrigin, vEye); // this pose's eyes bone, relative to the entity
+        // re-seed after any gap (third person, cutscene, death, map load): a stale state must not lurch the gun
+        if (s_iMassLast == 0 || cg.time < s_iMassLast || cg.time - s_iMassLast > 250) {
+            VectorCopy(vCam, s_vMassLag);
+        }
+        s_iMassLast = cg.time;
+
         if (fMass > 0.001f && cg.frametime > 0) {
-            vec3_t vBlend;
+            s_vMassLag[0] += (vCam[0] - s_vMassLag[0]) * kM;
+            s_vMassLag[1] += (vCam[1] - s_vMassLag[1]) * kM;
+            s_vMassLag[2] += (vCam[2] - s_vMassLag[2]) * kM;
 
-            s_vMassLag[0] += (vDelta[0] - s_vMassLag[0]) * kM;
-            s_vMassLag[1] += (vDelta[1] - s_vMassLag[1]) * kM;
-            s_vMassLag[2] += (vDelta[2] - s_vMassLag[2]) * kM;
-
-            vBlend[0] = vDelta[0] * (1.0f - fMass) + s_vMassLag[0] * fMass;
-            vBlend[1] = vDelta[1] * (1.0f - fMass) + s_vMassLag[1] * fMass;
-            vBlend[2] = vDelta[2] * (1.0f - fMass) + s_vMassLag[2] * fMass;
-            VectorCopy(vBlend, vDelta);
+            vDelta[0] = vCam[0] * (1.0f - fMass) + s_vMassLag[0] * fMass - vEye[0];
+            vDelta[1] = vCam[1] * (1.0f - fMass) + s_vMassLag[1] * fMass - vEye[1];
+            vDelta[2] = vCam[2] * (1.0f - fMass) + s_vMassLag[2] * fMass - vEye[2];
         } else {
-            VectorCopy(vDelta, s_vMassLag);   // stay tracked so re-enabling cannot step
+            VectorCopy(vCam, s_vMassLag);   // stay tracked so re-enabling cannot step
         }
     }
 
