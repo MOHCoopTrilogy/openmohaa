@@ -710,6 +710,12 @@ void SCR_StopCinematic (void);
 int CIN_PlayCinematic( const char *arg0, int xpos, int ypos, int width, int height, int bits);
 e_status CIN_StopCinematic(int handle);
 e_status CIN_RunCinematic (int handle);
+// HZM coop bug-3234 networked briefing video overlay (cl_cin.cpp). CIN_HZM_COOPOVERLAY is a client-private
+// systemBits flag (q_shared uses 1..16): the slot is the overlay's from creation on
+#define CIN_HZM_COOPOVERLAY 0x4000
+void CL_CoopBriefVideoFrame(void);
+void CL_CoopBriefVideoDraw(float sw, float sh);
+qboolean CL_CoopBriefVideoOwns(const char *arg);
 void CIN_DrawCinematic (int handle);
 void CIN_SetExtents (int handle, int x, int y, int w, int h);
 void CIN_SetLooping (int handle, qboolean loop);

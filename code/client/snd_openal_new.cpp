@@ -5983,6 +5983,28 @@ int S_CurrentMoviePosition()
 }
 
 /*
+==============
+S_SeekMovieAudio
+
+HZM coop bug-3234: a late joiner's briefing audio starts where the film is.
+==============
+*/
+void S_SeekMovieAudio(int ms)
+{
+    S32 rate;
+
+    if (ms <= 0 || !openal.chan_movie.is_playing()) {
+        return;
+    }
+    rate = openal.chan_movie.sample_playback_rate();
+    if (rate <= 0) {
+        return;
+    }
+    // 64-bit: set_sample_ms_offset's U32 ms*rate overflows past ~97 s at 44.1 kHz
+    openal.chan_movie.set_sample_offset((U32)((unsigned long long)ms * (unsigned long long)rate / 1000ull));
+}
+
+/*
 =================
 S_AL_Format
 =================

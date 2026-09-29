@@ -88,6 +88,7 @@ unsigned int S_GetMusicOffset();
 
 void S_StopMovieAudio();
 int S_CurrentMoviePosition();
+void S_SeekMovieAudio(int ms); // HZM coop bug-3234
 void S_SetupMovieAudio(const char* pszMovieName);
 
 #ifdef __cplusplus

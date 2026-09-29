@@ -157,6 +157,7 @@ void S_TriggeredMusic_PlayIntroMusic();
 void S_StopMovieAudio();
 void S_SetupMovieAudio(const char* pszMovieName);
 int S_CurrentMoviePosition();
+void S_SeekMovieAudio(int ms); // HZM coop bug-3234
 
 const char* S_GetMusicFilename();
 int S_GetMusicLoopCount();

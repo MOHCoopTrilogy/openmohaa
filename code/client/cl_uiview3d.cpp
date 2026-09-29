@@ -490,6 +490,9 @@ void View3D::DrawNetProfile(void)
 
 void View3D::Draw2D(void)
 {
+    // HZM coop bug-3234: networked briefing video - under fades, letterbox and every HUD layer
+    CL_CoopBriefVideoDraw(m_screenframe.size.width, m_screenframe.size.height);
+
     if (!cls.no_menus) {
         DrawFades();
     }

@@ -758,6 +758,10 @@ int S_CurrentMoviePosition() {
     return 0;
 }
 
+// HZM coop bug-3234
+void S_SeekMovieAudio(int ms) {
+}
+
 /*
 ==============
 S_SetupMovieAudio

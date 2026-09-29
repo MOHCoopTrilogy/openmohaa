@@ -2990,6 +2990,9 @@ void CL_Frame ( int msec ) {
 	// advance local effects for next frame
 	SCR_RunCinematic();
 
+	// HZM coop bug-3234: the networked briefing video (serverinfo coop_briefvideo)
+	CL_CoopBriefVideoFrame();
+
 	cls.framecount++;
 }
 

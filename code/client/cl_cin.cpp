@@ -133,6 +133,7 @@ typedef struct {
 	long realTime;
 	long currTime;
 	long soundTime;
+	qboolean coopOverlay; // HZM coop bug-3234: the networked briefing overlay owns this slot's teardown
 } cin_cache;
 
 static cinematics_t		cin;
@@ -163,6 +164,7 @@ static int CIN_HandleForVideo(void) {
 
 	for ( i = 0 ; i < MAX_VIDEO_HANDLES ; i++ ) {
 		if ( cinTable[i].fileName[0] == 0 ) {
+			cinTable[i].coopOverlay = qfalse; // HZM coop bug-3234: the overlay flag never survives into a new use
 			return i;
 		}
 	}
@@ -1283,6 +1285,15 @@ static void RoQShutdown( void ) {
 		cinTable[currentHandle].iFile = 0;
 	}
 
+	// HZM coop bug-3234: an overlay slot is released here WITHOUT the fullscreen tail below (the shared movie
+	// audio, the clc.state restore, CL_FinishedCinematic's nextmap exec); CL_CoopBV_Stop then sees it gone
+	if (cinTable[currentHandle].coopOverlay) {
+		cinTable[currentHandle].fileName[0] = 0;
+		cinTable[currentHandle].coopOverlay = qfalse;
+		currentHandle = -1;
+		return;
+	}
+
 	S_StopMovieAudio();
 
 	if (cinTable[currentHandle].alterGameState) {
@@ -1443,6 +1454,8 @@ e_status CIN_RunCinematic (int handle)
 		RoQReset();
 	  } else {
 		RoQShutdown();
+		// HZM coop bug-3234: RoQShutdown can leave currentHandle at -1 - never index cinTable[-1]
+		return FMV_EOF;
 	  }
 	}
 
@@ -1501,6 +1514,7 @@ int CIN_PlayCinematic( const char *arg, int x, int y, int w, int h, int systemBi
 	cinTable[currentHandle].playonwalls = 1;
 	cinTable[currentHandle].silent = (systemBits & CIN_silent) != 0;
 	cinTable[currentHandle].shader = (systemBits & CIN_shader) != 0;
+	cinTable[currentHandle].coopOverlay = (systemBits & CIN_HZM_COOPOVERLAY) != 0; // HZM coop bug-3234
 
 	if (cinTable[currentHandle].alterGameState) {
 		// close the menu
@@ -1529,6 +1543,20 @@ int CIN_PlayCinematic( const char *arg, int x, int y, int w, int h, int systemBi
 		return currentHandle;
 	}
 	Com_DPrintf("trFMV::play(), invalid RoQ ID\n");
+
+	// HZM coop bug-3234: a failed overlay start releases its slot in full here (RoQShutdown would skip it, or do
+	// nothing at all before the first frame buffer exists) - never the fullscreen tail
+	if (cinTable[currentHandle].coopOverlay) {
+		if (cinTable[currentHandle].iFile) {
+			FS_FCloseFile(cinTable[currentHandle].iFile);
+			cinTable[currentHandle].iFile = 0;
+		}
+		cinTable[currentHandle].status      = FMV_EOF;
+		cinTable[currentHandle].fileName[0] = 0;
+		cinTable[currentHandle].coopOverlay = qfalse;
+		currentHandle                       = -1;
+		return -1;
+	}
 
 	RoQShutdown();
 	return -1;
@@ -1718,6 +1746,12 @@ void CL_PlayCinematic_f(void) {
 	char	*arg, *s;
 	char	name[256];
 
+	// HZM coop bug-3234: the networked briefing overlay already shows this film - do not also go fullscreen
+	if (CL_CoopBriefVideoOwns(Cmd_Argv(1))) {
+		Com_Printf("^~^~^ COOPBV ignored fullscreen cinematic %s (overlay running)\n", Cmd_Argv(1));
+		return;
+	}
+
 	if (clc.state == CA_CINEMATIC) {
 		SCR_StopCinematic();
 	}
@@ -1757,4 +1791,354 @@ void SCR_StopCinematic(void) {
 	if (CL_handle >= 0 && CL_handle < MAX_VIDEO_HANDLES) {
 		CIN_StopCinematic(CL_handle);
 	}
+}
+
+
+//=============================================================================================================
+// HZM coop bug-3234 - NETWORKED BRIEFING VIDEO (overlay). See docs/proposals/briefing_joiners_2026-09-28.
+// The server publishes serverinfo key coop_briefvideo = "<file>,<map>,<startLevelMs>" (mod: stuffsrv "sets ...").
+// Every check below must pass or the key is ignored. Nothing here executes server text.
+// Security review (2026-09-28) fixes folded in: movie audio via video/<file>; the overlay never runs RoQShutdown's
+// fullscreen tail (cin_cache.coopOverlay); starts rate-limited; handle re-validated by file name; audio stopped
+// only when the overlay owns it; 64-bit offset math.
+//=============================================================================================================
+static const char *s_cbvAllow[] = {
+    "briefinge1.roq", "briefinge2.roq", "briefinge3.roq", "briefingt1.roq", "briefingt2.roq", "briefingt3.roq"
+};
+static char     s_cbvKey[96];          // last serverinfo value acted on ("" = none)
+static char     s_cbvName[32];         // allowlisted file name now playing
+static char     s_cbvPath[MAX_QPATH];  // "video/<name>", as cinTable stores it
+static int      s_cbvHandle    = -1;   // cinTable handle of the overlay, -1 = none
+static qboolean s_cbvAudio     = qfalse;
+static int      s_cbvLastStart = -1000000;
+static int      s_cbvStarts    = 0;    // starts since this client last left CA_ACTIVE
+
+#define CBV_START_GAP_MS 3000
+#define CBV_MAX_STARTS   8
+#define CBV_MAX_OFFSET   (10 * 60 * 1000)
+
+static void CL_CoopBV_Stop(const char *why)
+{
+    cin_cache *c;
+
+    if (s_cbvHandle < 0) {
+        return;
+    }
+    c = &cinTable[s_cbvHandle];
+    Com_Printf("^~^~^ COOPBV stop %s reason=%s audioMs=%d\n", s_cbvName, why, s_cbvAudio ? S_CurrentMoviePosition() : -1);
+    // only touch the slot while it is still ours (a restart of the file system can reuse slots/handles)
+    if (c->coopOverlay && !Q_stricmp(c->fileName, s_cbvPath)) {
+        // RoQShutdown minus its alterGameState / CL_FinishedCinematic ("nextmap") tail
+        if (c->iFile) {
+            FS_FCloseFile(c->iFile);
+            c->iFile = 0;
+        }
+        c->status      = FMV_EOF;
+        c->fileName[0] = 0;
+        c->coopOverlay = qfalse;
+        if (currentHandle == s_cbvHandle) {
+            currentHandle = -1;
+        }
+        if (cin.currentHandle == s_cbvHandle) {
+            cin.currentHandle = -1;
+        }
+    }
+    // the movie channel is shared with the fullscreen player: stop it only if the overlay started it
+    if (s_cbvAudio && clc.state != CA_CINEMATIC) {
+        S_StopMovieAudio();
+    }
+    s_cbvAudio   = qfalse;
+    s_cbvHandle  = -1;
+    s_cbvName[0] = 0;
+    s_cbvPath[0] = 0;
+}
+
+// allowlisted name for `s` (case-insensitive exact match), or NULL
+static const char *CL_CoopBV_Allowed(const char *s)
+{
+    int i;
+
+    for (i = 0; i < (int)ARRAY_LEN(s_cbvAllow); i++) {
+        if (!Q_stricmp(s, s_cbvAllow[i])) {
+            return s_cbvAllow[i];
+        }
+    }
+    return NULL;
+}
+
+// Validate a coop_briefvideo value. Returns NULL and fills *name (the literal allowlist string) + *startMs when it
+// is valid for THIS map, else a short reason. Pure: no side effects, so the fullscreen guard can use it too.
+static const char *CL_CoopBV_Parse(const char *v, const char **name, int *startMs)
+{
+    char        buf[96];
+    char       *f[3];
+    char       *q;
+    int         n, i;
+    const char *info, *map;
+
+    if (strlen(v) >= sizeof(buf)) {
+        return "toolong";
+    }
+    Q_strncpyz(buf, v, sizeof(buf));
+
+    n    = 0;
+    f[0] = buf;
+    for (q = buf; *q; q++) {
+        if (*q == ',') {
+            if (++n > 2) {
+                break;
+            }
+            *q   = 0;
+            f[n] = q + 1;
+        }
+    }
+    if (n != 2) {
+        return (!v[0] || !Q_stricmp(v, "off")) ? "cleared" : "malformed";
+    }
+
+    *name = CL_CoopBV_Allowed(f[0]);
+    if (!*name) {
+        return "notallowed";
+    }
+
+    if (!cl.gameState.stringOffsets[CS_SERVERINFO]) {
+        return "noinfo";
+    }
+    info = cl.gameState.stringData + cl.gameState.stringOffsets[CS_SERVERINFO];
+    map  = Info_ValueForKey(info, "mapname");
+    if (!map[0] || Q_stricmp(map, f[1])) {
+        return "othermap";
+    }
+
+    n = (int)strlen(f[2]);
+    if (n < 1 || n > 9) {
+        return "badtime";
+    }
+    for (i = 0; i < n; i++) {
+        if (f[2][i] < '0' || f[2][i] > '9') {
+            return "badtime";
+        }
+    }
+    *startMs = atoi(f[2]);
+    return NULL;
+}
+
+// returns qfalse only when a start is deferred by the rate limit (the caller retries on a later frame)
+static qboolean CL_CoopBV_Apply(const char *v)
+{
+    int         startMs, now;
+    long long   offset;
+    const char *name, *why;
+    char        path[MAX_QPATH];
+
+    why = CL_CoopBV_Parse(v, &name, &startMs);
+    if (why) {
+        CL_CoopBV_Stop(why);
+        return qtrue;
+    }
+
+    if (s_cbvHandle >= 0 && !Q_stricmp(s_cbvName, name)) {
+        return qtrue; // same film already running (a re-published value) - never restart it
+    }
+
+    // rate limit: a server flipping the key cannot make this client restart/seek more than once per 3 s,
+    // nor more than CBV_MAX_STARTS times per map
+    now = Com_Milliseconds();
+    if (s_cbvStarts >= CBV_MAX_STARTS) {
+        CL_CoopBV_Stop("ratelimit");
+        return qtrue;
+    }
+    if (now - s_cbvLastStart < CBV_START_GAP_MS) {
+        return qfalse;
+    }
+    CL_CoopBV_Stop("replaced");
+
+    Com_sprintf(path, sizeof(path), "video/%s", name);
+    if (FS_FOpenFileRead(path, NULL, qfalse, qtrue) <= 0) {
+        Com_Printf("^~^~^ COOPBV missing %s - not played\n", path);
+        return qtrue;
+    }
+
+    offset = (long long)cl.snap.serverTime
+           - (long long)atoi(cl.gameState.stringData + cl.gameState.stringOffsets[CS_LEVEL_START_TIME])
+           - (long long)startMs;
+    if (offset < 1500) {
+        offset = 0; // everyone who was there when it started: from the top, together
+    }
+    if (offset > CBV_MAX_OFFSET) {
+        Com_Printf("^~^~^ COOPBV stale %s offset=%lld - not played\n", name, offset);
+        return qtrue;
+    }
+
+    s_cbvLastStart = now;
+    s_cbvStarts++;
+    // CIN_HZM_COOPOVERLAY marks the slot inside CIN_PlayCinematic, BEFORE the first RoQ read, so even a corrupt
+    // file's failure path releases it without RoQShutdown's fullscreen tail
+    s_cbvHandle = CIN_PlayCinematic(name, 0, 0, 640, 480, CIN_hold | CIN_HZM_COOPOVERLAY);
+    if (s_cbvHandle < 0) {
+        Com_Printf("^~^~^ COOPBV cannot open %s\n", path);
+        return qtrue;
+    }
+    if (!cinTable[s_cbvHandle].coopOverlay) {
+        // CIN_PlayCinematic handed back somebody else's slot already playing this file (its non-system de-dupe):
+        // never adopt it
+        Com_Printf("^~^~^ COOPBV %s busy in another player - not played\n", path);
+        s_cbvHandle = -1;
+        return qtrue;
+    }
+    Q_strncpyz(s_cbvName, name, sizeof(s_cbvName));
+    Q_strncpyz(s_cbvPath, path, sizeof(s_cbvPath));
+    cinTable[s_cbvHandle].currTime    = (long)offset;
+    cinTable[s_cbvHandle].soundTime   = 0;
+
+    if (cl_movieaudio->integer) {
+        // the same audio lookup as the fullscreen player: video/<name>.mp3, else .wav
+        S_SetupMovieAudio(path);
+        s_cbvAudio = qtrue;
+        if (offset > 0) {
+            S_SeekMovieAudio((int)offset);
+        }
+    }
+    Com_Printf(
+        "^~^~^ COOPBV start %s offset=%lld start=%d audio=%d audioMs=%d\n",
+        name,
+        offset,
+        startMs,
+        cl_movieaudio->integer,
+        s_cbvAudio ? S_CurrentMoviePosition() : -1
+    );
+    return qtrue;
+}
+
+/*
+==================
+CL_CoopBriefVideoFrame - once per client frame (CL_Frame)
+==================
+*/
+void CL_CoopBriefVideoFrame(void)
+{
+    const char *v = "";
+    e_status    st;
+
+    if (clc.state == CA_ACTIVE && !clc.demoplaying && cl.gameState.stringOffsets[CS_SERVERINFO]) {
+        v = Info_ValueForKey(cl.gameState.stringData + cl.gameState.stringOffsets[CS_SERVERINFO], "coop_briefvideo");
+    } else if (clc.state != CA_ACTIVE) {
+        s_cbvStarts = 0; // a new map (or connection) gets a fresh start budget
+    }
+    if (strlen(v) >= sizeof(s_cbvKey)) {
+        v = "-"; // over-long: treated as invalid, and stored in a form that compares stably
+    }
+
+    // the slot must still be ours (file-system restarts, another player of the same slot)
+    if (s_cbvHandle >= 0
+        && (!cinTable[s_cbvHandle].coopOverlay || Q_stricmp(cinTable[s_cbvHandle].fileName, s_cbvPath))) {
+        CL_CoopBV_Stop("lost");
+    }
+
+    if (strcmp(v, s_cbvKey)) {
+        if (CL_CoopBV_Apply(v)) {
+            Q_strncpyz(s_cbvKey, v, sizeof(s_cbvKey));
+        }
+    }
+
+    if (s_cbvHandle >= 0) {
+        st = CIN_RunCinematic(s_cbvHandle);
+        if (st == FMV_IDLE || st == FMV_EOF) {
+            CL_CoopBV_Stop("end");
+        }
+    }
+}
+
+/*
+==================
+CL_CoopBriefVideoDraw - View3D::Draw2D, before fades/letterbox/cgame 2D (screen pixels)
+==================
+*/
+void CL_CoopBriefVideoDraw(float sw, float sh)
+{
+    static const vec4_t black = {0, 0, 0, 1};
+    cin_cache          *c;
+    float               x, y, w, h;
+
+    if (s_cbvHandle < 0) {
+        return;
+    }
+    c = &cinTable[s_cbvHandle];
+    if (!c->coopOverlay || !c->buf || c->status == FMV_EOF || c->drawX <= 0 || c->drawY <= 0) {
+        return;
+    }
+
+    // pillar/letter-box the 4:3 film over black
+    h = sh;
+    w = sh * 4.0f / 3.0f;
+    if (w > sw) {
+        w = sw;
+        h = sw * 3.0f / 4.0f;
+    }
+    x = (sw - w) * 0.5f;
+    y = (sh - h) * 0.5f;
+
+    re.SetColor(black);
+    re.DrawBox(0, 0, sw, sh);
+    re.SetColor(NULL);
+
+    if (c->dirty && (c->CIN_WIDTH != c->drawX || c->CIN_HEIGHT != c->drawY)) {
+        int *buf2 = (int *)Hunk_AllocateTempMemory(256 * 256 * 4);
+
+        CIN_ResampleCinematic(s_cbvHandle, buf2);
+        re.DrawStretchRaw(x, y, w, h, 256, 256, 0, (byte *)buf2);
+        c->dirty = qfalse;
+        Hunk_FreeTempMemory(buf2);
+        return;
+    }
+    re.DrawStretchRaw(x, y, w, h, c->drawX, c->drawY, 0, c->buf);
+    c->dirty = qfalse;
+}
+
+/*
+==================
+CL_CoopBriefVideoOwns - true when the overlay shows `arg`, or the server's valid coop_briefvideo names it (the overlay
+is then about to start: a listen host that was still loading can run the old-style `cinematic` in the same frame the
+key first becomes visible). The old-style fullscreen command is then ignored.
+==================
+*/
+qboolean CL_CoopBriefVideoOwns(const char *arg)
+{
+    const char *name;
+    int         startMs;
+
+    if (!arg) {
+        return qfalse;
+    }
+    if (s_cbvHandle >= 0 && !Q_stricmp(arg, s_cbvName)) {
+        return qtrue;
+    }
+    if (clc.demoplaying || !cl.gameState.stringOffsets[CS_SERVERINFO]) {
+        return qfalse;
+    }
+    if (CL_CoopBV_Parse(
+            Info_ValueForKey(cl.gameState.stringData + cl.gameState.stringOffsets[CS_SERVERINFO], "coop_briefvideo"),
+            &name,
+            &startMs
+        )) {
+        return qfalse;
+    }
+    if (Q_stricmp(arg, name)) {
+        return qfalse;
+    }
+    // defer ONLY when the overlay is actually able to start - otherwise the fullscreen film must play, or the
+    // player would see neither (security re-review LOW 1)
+    if (s_cbvStarts >= CBV_MAX_STARTS) {
+        return qfalse;
+    }
+    if (FS_FOpenFileRead(va("video/%s", name), NULL, qfalse, qtrue) <= 0) {
+        return qfalse;
+    }
+    if ((long long)cl.snap.serverTime
+            - (long long)atoi(cl.gameState.stringData + cl.gameState.stringOffsets[CS_LEVEL_START_TIME])
+            - (long long)startMs
+        > CBV_MAX_OFFSET) {
+        return qfalse;
+    }
+    return qtrue;
 }
