@@ -1099,6 +1099,8 @@ static void ForwardDlight( void ) {
 		// HZM rain wetness: this additive pass shares the lightall programs; a stale u_HzmWet from the main pass would
 		// add the wet reflection once per dlight (vet.md B2). Always zero here.
 		RB_HZMWetOff( sp );
+		// HZM ground variety: the dlight pass lights the SAME varied texture as the lit pass (never the plain repeat)
+		RB_HZM_GroundVarUniforms( sp, input, pStage, 0, qfalse );
 
 		GLSL_SetUniformMat4(sp, UNIFORM_MODELVIEWPROJECTIONMATRIX, glState.modelviewProjection);
 		GLSL_SetUniformVec3(sp, UNIFORM_VIEWORIGIN, backEnd.viewParms.or.origin);
@@ -2299,6 +2301,8 @@ static void RB_IterateStagesGeneric( shaderCommands_t *input )
 			// HZM rain wetness (tr_hzm_wet.c): uploads the wet uniforms for a qualifying draw and ZERO for every
 			// other lightall draw - uniforms are per-program state shared with ForwardDlight and the cube bake.
 			RB_HZMWetUniforms(sp, input, pStage, stage, stageCharLit);
+			// HZM ground variety (tr_hzm_groundvar.c): the same rule - a tagged world ground stage, else ZERO
+			RB_HZM_GroundVarUniforms(sp, input, pStage, stage, stageCharLit);
 		}
 		else if ( pStage->bundle[1].image[0] != 0 )
 		{

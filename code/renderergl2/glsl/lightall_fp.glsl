@@ -546,6 +546,165 @@ void HzmWet(vec3 viewDir, vec3 E, vec3 n, vec3 lm, inout vec3 albedo, inout vec3
 }
 #endif
 
+#if defined(USE_LIGHT) && !defined(USE_FAST_LIGHT)
+// HZM ground variety (r_groundVariety, tr_hzm_groundvar.c; docs/proposals/ground_variety_2026-09-29). Every name here
+// starts HzmGv / hzmGv (bug-3252: two features declaring the same local name is a fatal redefinition).
+// u_HzmGroundVar  = (mode, macro strength, 1 / hex cell in world units, blend sharpness)
+//   mode 0 = OFF: every draw that is not a tagged world ground stage uploads ALL ZERO and HzmGvDiffuse / HzmGvTap take
+//   the original texture2D path, so the output is unchanged byte for byte. 1 = macro variation, 2 = macro + hex tiling.
+// u_HzmGroundVar2 = (luminance weighting, steep-face gate lo, gate hi, debug: 1 class tint, 2 hex weights)
+// Both branches on mode are UNIFORM (one value per draw), so the implicit-derivative texture2D calls stay legal; the
+// hex fetches use explicit gradients of the UNSHIFTED coordinate, so a lattice edge never changes the mip level.
+uniform vec4 u_HzmGroundVar;
+uniform vec4 u_HzmGroundVar2;
+
+vec3  hzmGvW  = vec3(1.0, 0.0, 0.0);   // this pixel's hex weights (sum 1)
+vec2  hzmGvO1 = vec2(0.0);             // the three lattice vertices' texture offsets
+vec2  hzmGvO2 = vec2(0.0);
+vec2  hzmGvO3 = vec2(0.0);
+vec2  hzmGvDx = vec2(0.0);             // gradients of the unshifted texture coordinate
+vec2  hzmGvDy = vec2(0.0);
+float hzmGvG  = 0.0;                   // steep-face gate: 0 on walls, 1 on ground. Written ONLY by HzmGvDiffuse, which
+                                       // main() calls before any HzmGvTap (normal, specular) - keep that order
+
+#if __VERSION__ >= 130
+// hash without sine (Hoskins): stable on every GPU for the small lattice coordinates used here
+float HzmGvHash1(vec2 p)
+{
+	vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+	p3 += dot(p3, p3.zyx + 31.32);
+	return fract((p3.x + p3.y) * p3.z);
+}
+
+vec2 HzmGvHash2(vec2 p)
+{
+	vec3 p3 = fract(vec3(p.xyx) * vec3(0.1031, 0.1030, 0.0973));
+	p3 += dot(p3, p3.yzx + 33.33);
+	return fract((p3.xx + p3.yz) * p3.zy);
+}
+
+// smooth (quintic) value noise, 0..1
+float HzmGvNoise(vec2 x)
+{
+	vec2 i = floor(x);
+	vec2 f = fract(x);
+	vec2 u = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
+	return mix(mix(HzmGvHash1(i), HzmGvHash1(i + vec2(1.0, 0.0)), u.x),
+	           mix(HzmGvHash1(i + vec2(0.0, 1.0)), HzmGvHash1(i + vec2(1.0, 1.0)), u.x), u.y);
+}
+
+// the MACRO field: brightness from two octaves (~1400 u and ~450 u) plus a very small warm/cool drift (~2300 u).
+// Mean 1.0; strength 0.10 is about +-8 % at the extremes. Never a hue change: the art keeps its own colour.
+vec3 HzmGvMacro(vec2 p)
+{
+	float n = HzmGvNoise(p * (1.0 / 1400.0)) * 0.65 + HzmGvNoise(p * (1.0 / 450.0) + vec2(17.0, 5.0)) * 0.35;
+	float t = HzmGvNoise(p * (1.0 / 2300.0) + vec2(41.0, 23.0)) - 0.5;
+	return vec3(1.0) + u_HzmGroundVar.y * ((n - 0.5) * 2.0 * vec3(1.0) + t * vec3(0.30, 0.0, -0.30));
+}
+
+// Mikkelsen hex-tiling triangle lattice (JCGT 2022), in WORLD units: q = world xy / cell
+void HzmGvLattice(vec2 q)
+{
+	q *= 3.4641016;   // 2 sqrt 3: hex cells of about one cell unit across
+	vec2  sk   = vec2(q.x - 0.57735027 * q.y, 1.15470054 * q.y);
+	vec2  base = floor(sk);
+	vec3  t    = vec3(fract(sk), 0.0);
+	t.z = 1.0 - t.x - t.y;
+	float s  = step(0.0, -t.z);
+	float s2 = 2.0 * s - 1.0;
+	vec3  w  = vec3(-t.z * s2, s - t.y * s2, s - t.x * s2);
+	hzmGvO1 = HzmGvHash2(base + vec2(s, s));
+	hzmGvO2 = HzmGvHash2(base + vec2(s, 1.0 - s));
+	hzmGvO3 = HzmGvHash2(base + vec2(1.0 - s, s));
+	w = pow(max(w, vec3(0.0)), vec3(u_HzmGroundVar.w));
+	hzmGvW = w / max(w.x + w.y + w.z, 1e-6);
+}
+
+// one hex-blended fetch with the current weights; a weight that cannot show (under 0.1 percent) skips its fetch
+vec4 HzmGvHex(sampler2D s, vec2 uv)
+{
+	vec4 c = vec4(0.0);
+	if (hzmGvW.x > 0.001) c += hzmGvW.x * textureGrad(s, uv + hzmGvO1, hzmGvDx, hzmGvDy);
+	if (hzmGvW.y > 0.001) c += hzmGvW.y * textureGrad(s, uv + hzmGvO2, hzmGvDx, hzmGvDy);
+	if (hzmGvW.z > 0.001) c += hzmGvW.z * textureGrad(s, uv + hzmGvO3, hzmGvDx, hzmGvDy);
+	return c;
+}
+
+// the diffuse fetch. p = world position, n = geometric normal
+vec4 HzmGvDiffuse(vec2 uv, vec3 p, vec3 n)
+{
+	if (u_HzmGroundVar.x < 0.5)
+		return texture2D(u_DiffuseMap, uv);           // OFF: the original fetch
+
+	hzmGvDx = dFdx(uv);
+	hzmGvDy = dFdy(uv);
+	hzmGvG  = smoothstep(u_HzmGroundVar2.y, u_HzmGroundVar2.z, normalize(n).z);
+	vec4 c;
+	if (u_HzmGroundVar.x > 1.5 && hzmGvG <= 0.0)
+	{
+		// a wall of a hex-tagged shader: the plain texture, through an explicit-gradient fetch (the implicit one is not
+		// legal in this per-pixel branch). Same texels and mip; not guaranteed bit-identical to texture2D on every driver
+		c = textureGrad(u_DiffuseMap, uv, hzmGvDx, hzmGvDy);
+	}
+	else if (u_HzmGroundVar.x > 1.5)
+	{
+		HzmGvLattice(p.xy * u_HzmGroundVar.z);
+		// luminance weighting (Mikkelsen): the brighter texel wins a blend zone, so the zones follow the art's own
+		// light/dark structure; weights under 0.1 percent are dropped (and their fetch skipped), then renormalised
+		vec3 L = vec3(0.0);
+		vec4 c1 = vec4(0.0);
+		vec4 c2 = vec4(0.0);
+		vec4 c3 = vec4(0.0);
+		if (hzmGvW.x > 0.001) { c1 = textureGrad(u_DiffuseMap, uv + hzmGvO1, hzmGvDx, hzmGvDy); L.x = dot(c1.rgb, vec3(0.299, 0.587, 0.114)); }
+		if (hzmGvW.y > 0.001) { c2 = textureGrad(u_DiffuseMap, uv + hzmGvO2, hzmGvDx, hzmGvDy); L.y = dot(c2.rgb, vec3(0.299, 0.587, 0.114)); }
+		if (hzmGvW.z > 0.001) { c3 = textureGrad(u_DiffuseMap, uv + hzmGvO3, hzmGvDx, hzmGvDy); L.z = dot(c3.rgb, vec3(0.299, 0.587, 0.114)); }
+		vec3 w0 = hzmGvW * step(vec3(0.001), hzmGvW);
+		w0 /= max(w0.x + w0.y + w0.z, 1e-6);
+		vec3 w  = w0 * mix(vec3(1.0), L, u_HzmGroundVar2.x);
+		float ws = w.x + w.y + w.z;
+		hzmGvW = (ws > 0.001) ? w / ws : w0;   // black texels under full luminance weighting: plain barycentric
+		c = hzmGvW.x * c1 + hzmGvW.y * c2 + hzmGvW.z * c3;
+		if (hzmGvG < 1.0)
+		{
+			vec4 c0 = textureGrad(u_DiffuseMap, uv, hzmGvDx, hzmGvDy);
+			c = mix(c0, c, hzmGvG);
+		}
+	}
+	else
+	{
+		c = texture2D(u_DiffuseMap, uv);
+	}
+	c.rgb *= mix(vec3(1.0), HzmGvMacro(p.xy), hzmGvG);
+
+	if (u_HzmGroundVar2.w > 0.5)
+	{
+		if (u_HzmGroundVar2.w < 1.5)      // debug 1: class tint (green = hex, blue = macro only), faded by the gate
+			c.rgb = mix(c.rgb, (u_HzmGroundVar.x > 1.5) ? vec3(0.2, 0.9, 0.2) : vec3(0.2, 0.4, 1.0), 0.45 * hzmGvG);
+		else if (u_HzmGroundVar.x > 1.5)  // debug 2: the three hex weights as rgb
+			c.rgb = hzmGvW;
+	}
+	return c;
+}
+
+// every other map sampled at the diffuse coordinate (normal, specular): the SAME offsets and weights
+vec4 HzmGvTap(sampler2D s, vec2 uv)
+{
+	if (u_HzmGroundVar.x < 1.5)
+		return texture2D(s, uv);                      // OFF or macro only: the original fetch
+	if (hzmGvG <= 0.0)
+		return textureGrad(s, uv, hzmGvDx, hzmGvDy);
+	vec4 h = HzmGvHex(s, uv);
+	if (hzmGvG < 1.0)
+		h = mix(textureGrad(s, uv, hzmGvDx, hzmGvDy), h, hzmGvG);
+	return h;
+}
+#else
+// GLSL 1.20 has no textureGrad: the feature compiles out and every fetch is the original one
+vec4 HzmGvDiffuse(vec2 uv, vec3 p, vec3 n) { return texture2D(u_DiffuseMap, uv); }
+vec4 HzmGvTap(sampler2D s, vec2 uv) { return texture2D(s, uv); }
+#endif
+#endif
+
 void main()
 {
 	vec3 viewDir, lightColor, ambientColor, reflectance;
@@ -602,7 +761,11 @@ void main()
 	}
 #endif
 
+#if defined(USE_LIGHT) && !defined(USE_FAST_LIGHT)
+	vec4 diffuse = HzmGvDiffuse(texCoords, u_ViewOrigin - viewDir, surfNormal);   // HZM ground variety (plain fetch when off)
+#else
 	vec4 diffuse = texture2D(u_DiffuseMap, texCoords);
+#endif
 	vec3 hzmLtAlbedo = diffuse.rgb;   // HZM coop [2026-09-27] lightning: the surface colour the flash lights
 	float hzmLtVis = 0.0;             // HZM coop [2026-09-27] lightning: open to the sky (the sun mask), 0 without one
 	
@@ -642,9 +805,9 @@ void main()
 
   #if defined(USE_NORMALMAP)
     #if defined(SWIZZLE_NORMALMAP)
-	N.xy = texture2D(u_NormalMap, texCoords).ag - vec2(0.5);
+	N.xy = HzmGvTap(u_NormalMap, texCoords).ag - vec2(0.5);   // HZM ground variety: same hex offsets/weights
     #else
-	N.xy = texture2D(u_NormalMap, texCoords).rg - vec2(0.5);
+	N.xy = HzmGvTap(u_NormalMap, texCoords).rg - vec2(0.5);   // HZM ground variety: same hex offsets/weights
     #endif
 	N.xy *= u_NormalScale.xy;
 	N.z = sqrt(clamp((0.25 - N.x * N.x) - N.y * N.y, 0.0, 1.0));
@@ -723,7 +886,7 @@ void main()
 	NH = clamp(dot(N, H), 0.0, 1.0);
 
   #if defined(USE_SPECULARMAP)
-	vec4 specular = texture2D(u_SpecularMap, texCoords);
+	vec4 specular = HzmGvTap(u_SpecularMap, texCoords);        // HZM ground variety: same hex offsets/weights
   #else
 	vec4 specular = vec4(1.0);
   #endif

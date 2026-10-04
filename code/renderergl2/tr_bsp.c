@@ -696,6 +696,8 @@ static shader_t *ShaderForShaderNum( int shaderNum, int lightmapNum ) {
 	// HZM rain wetness: the material class comes from the BSP lump's surface-type bits, which gl2's infoParms[] never
 	// parses into shader->surfaceFlags (water_wetness_2026-09-27 vet.md B3). World surfaces and terrain both land here.
 	R_HZMWetTagShader( shader, LittleLong( dsh->surfaceFlags ) );
+	// HZM ground variety: the class the generated list gives this shader on this map (tr_hzm_groundvar.c)
+	R_HZM_GroundVarTagShader( shader );
 
 	return shader;
 }
@@ -3575,6 +3577,8 @@ void RE_LoadWorldMap( const char *name ) {
 
 	Q_strncpyz( s_worldData.baseName, COM_SkipPath( s_worldData.name ), sizeof( s_worldData.name ) );
 	COM_StripExtension(s_worldData.baseName, s_worldData.baseName, sizeof(s_worldData.baseName));
+	// HZM ground variety: read this map's block of the generated list (Omaha refused) before any shader is looked up
+	R_HZM_GroundVarWorldBegin( s_worldData.baseName );
 
 	// HZM gl2 re-port (bug-gl2-ztagmalloc): the ioq3 hunk start/end marker trick
 	// (Hunk_Alloc(0) pointer diff for dataSize stats) cannot work here -

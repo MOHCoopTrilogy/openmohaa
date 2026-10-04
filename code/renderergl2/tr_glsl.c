@@ -236,6 +236,9 @@ static uniformInfo_t uniformsInfo[] =
 	// HZM water pass - see UNIFORM_HZMWATER. Kept LAST, in enum order.
 	{ "u_HzmWater",        GLSL_VEC4 },
 	{ "u_HzmRippleMap",    GLSL_INT },
+	// HZM ground variety - see UNIFORM_HZMGROUNDVAR. In enum order (after the water rows, not at the end).
+	{ "u_HzmGroundVar",    GLSL_VEC4 },
+	{ "u_HzmGroundVar2",   GLSL_VEC4 },
 	// HZM coop [2026-09-27] realistic lightning - see UNIFORM_HZMLTFOG. Kept LAST, in enum order.
 	{ "u_HzmLtFog",        GLSL_VEC4 },
 	{ "u_HzmLtView",       GLSL_VEC4 },

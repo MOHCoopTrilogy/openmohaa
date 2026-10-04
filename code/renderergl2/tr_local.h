@@ -722,6 +722,9 @@ typedef struct shader_s {
 	int			hzmWetBits;				// HZM rain wetness: BSP surface-type bits OR-ed at load (tr_hzm_wet.c)
 	int			hzmWater;				// HZM water pass: hzm_waterwet.h allowlist slot + 1, 0 = never (tr_hzm_water.c)
 	float		hzmWaterLmRef;			// HZM water pass: p90 lightmap luminance of this shader name, 0 = no glint gate
+	int			hzmGvClass;				// HZM ground variety: 0 none, 1 macro, 2 macro + hex (tr_hzm_groundvar.c)
+	float		hzmGvPeriod;			// HZM ground variety: world units per texture repeat (generated list)
+	int			hzmGvWorld;				// HZM ground variety: the world load that tagged it (stale tags never count)
 
 	qboolean	entityMergable;			// merge across entites optimizable (smoke, blood)
 
@@ -1083,6 +1086,12 @@ typedef enum
 	// HZM water pass (tr_hzm_water.c). Appended LAST, rows in the same order in uniformsInfo[].
 	UNIFORM_HZMWATER,       // (fade, time mod 1000, lightmap reference or 0, glint on)
 	UNIFORM_HZMRIPPLEMAP,   // sampler, TB_HZMWETNOISE (the water program has no puddle noise)
+	// HZM ground variety (tr_hzm_groundvar.c). Inserted here, rows in the same place in uniformsInfo[] (the table
+	// length is checked at compile time); kept off the enum's end, where the gfx tree appends. ALL ZERO = inert.
+	//   u_HzmGroundVar  = (mode 0/1/2, macro strength, 1 / hex cell in world units, blend sharpness)
+	//   u_HzmGroundVar2 = (luminance weighting, steep-face gate lo, gate hi, debug)
+	UNIFORM_HZMGROUNDVAR,
+	UNIFORM_HZMGROUNDVAR2,
 	// HZM coop [2026-09-27] realistic lightning (tr_hzm_lightning.c, renderercommon/hzm_lightning.h). Appended LAST,
 	// per the rule above (the gfx branch appends after UNIFORM_HZMLIGHTSPOT too: a trivial append conflict at merge).
 	// ALL ZERO = inert (nothing added anywhere), which is also what every program starts with.
@@ -4398,6 +4407,12 @@ void R_HZMWetTagShader( shader_t *sh, int surfaceFlags );
 void RB_HZMWetUniforms( shaderProgram_t *sp, const shaderCommands_t *input, const shaderStage_t *pStage, int stage,
                         qboolean charLit );
 void RB_HZMWetOff( shaderProgram_t *sp );
+
+// HZM ground variety - tr_hzm_groundvar.c (docs/proposals/ground_variety_2026-09-29)
+void R_HZM_GroundVarWorldBegin( const char *baseName );
+void R_HZM_GroundVarTagShader( shader_t *sh );
+void RB_HZM_GroundVarUniforms( shaderProgram_t *sp, const shaderCommands_t *input, const shaderStage_t *pStage,
+                               int stage, qboolean charLit );
 
 // HZM water pass - tr_hzm_water.c
 void R_HZMWaterBuild( void );
