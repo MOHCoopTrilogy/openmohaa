@@ -2037,7 +2037,14 @@ void CG_AdsRigAdvance(void)
     if (cls != 0) {
         s_rigHoldUntil = cg.time + 300; // outlast the crossblend back to the aim pose
     }
-    AdsCritFollow(&s_rigGate, &s_rigGateV, cls == 2 ? 0.0f : 1.0f, pWg->value, dt);
+    if (CG_VmHandFix() > 0.5f) {
+        // HZM coop [weaponview 2026-10-04] F3: the gate IS the aim pose's share of what is on screen (set again, fresh,
+        // in CG_AdsRigSolve once this frame's crossblend is known). No follower, so it can neither lead nor lag the clip.
+        s_rigGate  = CG_VMAimWeight();
+        s_rigGateV = 0.0f;
+    } else {
+        AdsCritFollow(&s_rigGate, &s_rigGateV, cls == 2 ? 0.0f : 1.0f, pWg->value, dt);
+    }
     p  = CG_AdsPoseFactor();
     sp = p * p * (3.0f - 2.0f * p);
     AdsCritFollow(&s_rigBlend, &s_rigBlendV, sp, pWb->value, dt);
@@ -2083,6 +2090,10 @@ static void CG_AdsRigSolve(refEntity_t *pREnt)
         dt = 0.1f;
     }
     s_rigLastRun = cg.time;
+    if (CG_VmHandFix() > 0.5f) {
+        s_rigGate = CG_VMAimWeight(); // this frame's crossblend (CG_ViewModelAnimation ran before us)
+        s_rigW    = s_rigGate * s_rigBlend;
+    }
     wpn = CG_ConfigString(CS_WEAPONS + wpnIdx);
     s   = CG_FindAdsSightByName(wpn);
     if (s_iTagTiki != (int)(size_t)pREnt->tiki) {
@@ -2099,7 +2110,8 @@ static void CG_AdsRigSolve(refEntity_t *pREnt)
     }
 
     // ---- target: only from an AIM pose, and not while a fire/reload crossblend is still settling
-    if (!s_rigTgtOk || (s_rigAnimCls == 0 && cg.time >= s_rigHoldUntil)) {
+    if (!s_rigTgtOk || ((CG_VmHandFix() > 0.5f) ? (CG_VMAimWeight() > 0.999f && s_rigAnimCls == 0)
+                                                : (s_rigAnimCls == 0 && cg.time >= s_rigHoldUntil))) {
         or = cgi.TIKI_Orientation(pREnt, s_iTag);
         VectorCopy(pREnt->origin, G);
         for (i = 0; i < 3; i++) {
@@ -7343,6 +7355,9 @@ static int CG_CalcFov(void)
             float fGunZoom = cg_adsGunZoom ? cg_adsGunZoom->value : 0.0f;
             if (fGunZoom < 0.0f) { fGunZoom = 0.0f; } else if (fGunZoom > 1.0f) { fGunZoom = 1.0f; }
             // blend the weapon fov toward the (eased) zoomed world fov by fGunZoom
+            if (CG_VmHandFix() > 0.5f) {
+                fGunZoom *= CG_AdsAnimGate(); // HZM coop [weaponview] F3: a hip clip under ADS is drawn at its own fov
+            }
             fWeaponFov = fov_x + (fov_x * s_adsZoomCur - fov_x) * fGunZoom;
             // zoom the world by the eased factor
             fov_x *= s_adsZoomCur;
@@ -9316,6 +9331,15 @@ float CoopGunHeft(void)
     if (v < 0.0f) { v = 0.0f; } else if (v > 1.0f) { v = 1.0f; }
     return v;
 }
+float CG_VmHandFix(void)
+{
+    static cvar_t *p = NULL;
+    if (!p) {
+        p = cgi.Cvar_Get("cg_vmHandFix", "1", CVAR_ARCHIVE); // HZM coop [weaponview 2026-10-04] 0 = shipped hands/ADS
+    }
+    return p->integer ? 1.0f : 0.0f;
+}
+
 float CG_AdsPoseFactor(void)
 {
     return s_adsFactorCur;

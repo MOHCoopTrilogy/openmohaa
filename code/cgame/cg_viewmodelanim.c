@@ -481,6 +481,37 @@ int CG_GetVMAnimPrefixIndex()
 
 static int s_iCoopPrevVMAnim = -1;
 
+// HZM coop [weaponview 2026-10-04] F2: the crossblend weight was LINEAR in time - a velocity step at the first and the
+// last frame of every clip change (ADS in/out, reload in/out, bolt in/out), which reads as a small pop at both ends.
+// Smoothstep keeps the same duration and the same midpoint and starts/ends at zero rate. Applied identically where the
+// fraction is DISPLAYED and where it is frozen into the slot weights on a mid-blend change, so weights stay continuous.
+static int   s_coopSlotAim[MAX_FRAMEINFOS]; // HZM coop [weaponview] 1 = the clip in this slot is an aim pose
+static float s_fCoopVMAimW = 1.0f;         // displayed weight of aim-pose clips, this frame
+static float s_fCoopVMCurW = 1.0f;         // displayed weight of the newest clip, this frame
+
+static int CoopVMAnimIsAim(int a)
+{
+    return (a == VM_ANIM_IDLE || a == VM_ANIM_IDLE_0 || a == VM_ANIM_IDLE_1 || a == VM_ANIM_IDLE_2 || a == VM_ANIM_CHARGE);
+}
+
+float CG_VMAimWeight(void)
+{
+    return s_fCoopVMAimW;
+}
+
+float CG_VMCurWeight(void)
+{
+    return s_fCoopVMCurW; // displayed share of the newest clip (1 = no crossblend running)
+}
+
+static float CoopVMBlendShape(float f)
+{
+    if (CG_VmHandFix() < 0.5f || f <= 0.0f || f >= 1.0f) {
+        return f;
+    }
+    return f * f * (3.0f - 2.0f * f);
+}
+
 static float CoopVMCrossblend(dtiki_t *pTiki, int index)
 {
     static cvar_t *pBlend   = NULL;
@@ -569,6 +600,7 @@ void CG_ViewModelAnimation(refEntity_t *pModel)
         cgi.anim->g_VMFrameInfo[cgi.anim->g_iCurrentVMAnimSlot].time   = 0.0;
         cgi.anim->g_VMFrameInfo[cgi.anim->g_iCurrentVMAnimSlot].weight = 1.0;
         cgi.anim->g_iLastVMAnim                                        = 0;
+        s_coopSlotAim[cgi.anim->g_iCurrentVMAnimSlot]                  = 1; // idle
     }
 
     if (cg.snap->ps.iViewModelAnimChanged != cgi.anim->g_iLastVMAnimChanged) {
@@ -760,7 +792,7 @@ void CG_ViewModelAnimation(refEntity_t *pModel)
             fCrossblendAmount = cgi.anim->g_iCurrentVMDuration / 1000.0;
 
             if (fCrossblendAmount < fCrossblendTime && fCrossblendAmount > 0.0) {
-                fCrossblendFrac = fCrossblendAmount / fCrossblendTime;
+                fCrossblendFrac = CoopVMBlendShape(fCrossblendAmount / fCrossblendTime);
                 for (i = 0; i < MAX_FRAMEINFOS; ++i) {
                     if (cgi.anim->g_VMFrameInfo[i].weight) {
                         if (i == cgi.anim->g_iCurrentVMAnimSlot) {
@@ -778,6 +810,7 @@ void CG_ViewModelAnimation(refEntity_t *pModel)
         }
 
         cgi.anim->g_iCurrentVMAnimSlot = (cgi.anim->g_iCurrentVMAnimSlot + 1) % MAX_FRAMEINFOS;
+        s_coopSlotAim[cgi.anim->g_iCurrentVMAnimSlot] = CoopVMAnimIsAim(cgi.anim->g_iLastVMAnim);
         cgi.anim->g_VMFrameInfo[cgi.anim->g_iCurrentVMAnimSlot].index = cgi.Anim_NumForName(pTiki, szAnimName);
 
         if (cgi.anim->g_VMFrameInfo[cgi.anim->g_iCurrentVMAnimSlot].index == -1) {
@@ -831,7 +864,7 @@ void CG_ViewModelAnimation(refEntity_t *pModel)
 
             cgi.anim->g_bCrossblending = qfalse;
         } else {
-            fCrossblendFrac = fCrossblendAmount / fCrossblendTime;
+            fCrossblendFrac = CoopVMBlendShape(fCrossblendAmount / fCrossblendTime);
         }
     }
 
@@ -873,6 +906,17 @@ void CG_ViewModelAnimation(refEntity_t *pModel)
     }
 
     pModel->actionWeight = 1.0;
+    {
+        float sw = 0.0f, sa = 0.0f;
+        for (i = 0; i < MAX_FRAMEINFOS; ++i) {
+            sw += pModel->frameInfo[i].weight;
+            if (s_coopSlotAim[i]) {
+                sa += pModel->frameInfo[i].weight;
+            }
+        }
+        s_fCoopVMAimW = (sw > 0.0001f) ? sa / sw : 1.0f;
+        s_fCoopVMCurW = (sw > 0.0001f) ? pModel->frameInfo[cgi.anim->g_iCurrentVMAnimSlot].weight / sw : 1.0f;
+    }
 }
 
 void CG_CalcViewModelMovement(float fViewBobPhase, float fViewBobAmp, vec_t *vVelocity, vec_t *vMovement)
@@ -965,7 +1009,15 @@ void CG_CalcViewModelMovement(float fViewBobPhase, float fViewBobAmp, vec_t *vVe
         // is consistent with someone damping the two visible effects, finding the sights still did
         // not line up because THIS third one was untouched, and reverting to vanilla.
         float fLower = vm_lean_lower->value;
-        if (CG_AimingDownSights()) {
+        if (CG_VmHandFix() > 0.5f) {
+            // HZM coop [weaponview 2026-10-04] F4: follow the EASED ADS pose (smoothstep), not the button - the binary test
+            // dropped/raised the whole rig |lean| * 0.1 = 4-4.5 u in ONE frame at every ADS press/release while leaning.
+            static cvar_t *pALL = NULL;
+            float          p = CG_AdsPoseFactor();
+            if (!pALL) { pALL = cgi.Cvar_Get("cg_adsLeanLower", "0", CVAR_ARCHIVE); }
+            p = p * p * (3.0f - 2.0f * p);
+            fLower *= 1.0f - p * (1.0f - pALL->value);
+        } else if (CG_AimingDownSights()) {
             static cvar_t *pALL = NULL;
             if (!pALL) { pALL = cgi.Cvar_Get("cg_adsLeanLower", "0", CVAR_ARCHIVE); }
             fLower *= pALL->value;

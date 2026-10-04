@@ -681,6 +681,9 @@ const adsGunTune_t *CG_FindAdsTune(const char *wpn);
     qboolean CG_AdsCleanRig(vec3_t org, vec3_t axis[3]);
     // HZM coop [ironsights 2026-09-28] rig-level sight solve: owns this gun / per-frame smoothing / weights
     qboolean CG_AdsRigSolveOwns(void);
+    float    CG_VmHandFix(void); // HZM coop [weaponview 2026-10-04] cg_vmHandFix
+    float    CG_VMAimWeight(void); // HZM coop [weaponview 2026-10-04] displayed weight of aim-pose view clips (0..1)
+    float    CG_VMCurWeight(void); // HZM coop [weaponview 2026-10-04] displayed weight of the newest view clip
     void     CG_AdsRigAdvance(void);
     float    CG_AdsAnimGate(void);   // 1 = aim pose (idle/charge/fire/rechamber), eases to 0 for reload/switch/ladder
     float    CG_AdsRigWeight(void);  // applied rig-correction weight = eased ADS blend * animation gate

@@ -1782,6 +1782,9 @@ static void AdsSightResid(
     *r1 = (ru - fu) + delta;
 }
 
+static float s_vmhSolveA = 0.0f, s_vmhSolveB = 0.0f; // HZM coop [weaponview 2026-10-04] cg_vmHandDebug probe
+static int   s_vmhSolveT = 0;
+
 static void CG_AdsSightSolve(refEntity_t *model, refEntity_t *parent, float fPose, const char *wpn)
 {
     static cvar_t *pSolve = NULL, *pDbg = NULL, *pSx = NULL, *pSy = NULL;
@@ -1793,7 +1796,7 @@ static void CG_AdsSightSolve(refEntity_t *model, refEntity_t *parent, float fPos
     float             lax[3][3];
     float             a = 0.0f, b = 0.0f, r0, r1, r00, r10, scale;
     float             tanWx, tanWy, kl, ku, shx = 0.0f, shy = 0.0f;
-    int               it, i, k;
+    int               it, i, k, iMode;
     qboolean          bClean;
 
     if (!pSolve) {
@@ -1804,6 +1807,15 @@ static void CG_AdsSightSolve(refEntity_t *model, refEntity_t *parent, float fPos
     }
     if (!pSolve->integer || !model->tiki || fPose <= 0.001f) {
         return;
+    }
+    // HZM coop [weaponview 2026-10-04] F1: on a gun the RIG solve owns, this gun-only Newton turn about the grip and its NDC
+    // shift are the hands' enemy: the rig already put the sights on the axis in the aim pose (<= 1 px, sweepB-CO measured
+    // with this solve as a probe), so here it only ever acts where the rig is deliberately NOT aligned - the ADS in/out
+    // ease, a bolt cycle or a reload held aimed, the tag_weapon_left bolt/reload hand-off - and there it turned the gun
+    // up to ~45 deg out of the hands and slid the picture. Probe only (mode 2 behaviour) for those guns.
+    iMode = pSolve->integer;
+    if (iMode == 1 && CG_VmHandFix() > 0.5f && CG_AdsRigSolveOwns()) {
+        iMode = 2;
     }
     tikiName = cgi.TIKI_Name(model->tiki);
     s        = CG_FindAdsSight(tikiName);
@@ -1890,7 +1902,10 @@ static void CG_AdsSightSolve(refEntity_t *model, refEntity_t *parent, float fPos
         shy = pSy->value * ku / tanWy;
     }
 
-    if (pSolve->integer == 1) {
+    s_vmhSolveA = (iMode == 1) ? a * fPose : 0.0f; // HZM coop [weaponview 2026-10-04] probe: the gun-only correction applied
+    s_vmhSolveB = (iMode == 1) ? b * fPose : 0.0f;
+    s_vmhSolveT = cg.time;
+    if (iMode == 1) {
         vec3_t v;
         for (k = 0; k < 3; k++) {
             AdsSightRotDir(model->axis[k], cam, a * fPose, b * fPose, v);
@@ -1906,7 +1921,7 @@ static void CG_AdsSightSolve(refEntity_t *model, refEntity_t *parent, float fPos
         float  fl, fu, rl, ru, curSx, curSy, fpx, fpy, rpx, rpy, hw, hh;
         vec3_t F2, R2;
         s_iLastPrint = cg.time;
-        if (pSolve->integer == 1) {
+        if (iMode == 1) {
             AdsSightRotPoint(Fw, G, cam, a * fPose, b * fPose, F2);
             AdsSightRotPoint(Rw, G, cam, a * fPose, b * fPose, R2);
             curSx = shx * fPose;
@@ -2021,6 +2036,174 @@ static void CG_AdsSightTrace(refEntity_t *model)
                    cg.predicted_player_state.fLeanAngle, px[0], py[0], px[1], py[1], px[2], py[2], cg_fAdsWeaponFov,
                    shx, shy, sy, sp, by, bp, ct, rel);
     }
+}
+
+/*
+HZM coop [weaponview 2026-10-04] HANDS-ON-GUN PROBE (cg_vmHandDebug 1: one ^~^~^ VMH line per first-person frame).
+"it's still glitchy when you pull bolts back, reload, and go in and out of ads in various stances". Per frame, for the
+local first-person weapon on either hand tag: the view anim and crossblend state, the ADS/rig weights, the gun-only
+correction the sight solve applied (a, b deg about the grip) and the NDC shift, the GUN in the camera frame, and both
+HANDS (Bip01 L/R Hand) in the frame of the gun AS ATTACHED (before any gun-only rotation: gA) and AS DRAWN (gD). A
+hand that leaves the gun shows as gD drifting from gA (a gun-only layer) or as gA itself jumping (a crossblend / a tag
+switch). Analysis: docs/proposals/weaponview_2026-10-04/tools/vmh_analyze.py.
+*/
+/*
+HZM coop [weaponview 2026-10-04] F5 HAND-OFF CROSSFADE. Retail bolt and rifle-reload clips carry `weaponcommand mainhand
+attachtohand offhand` (and back): the SERVER moves the gun from tag_weapon_right to tag_weapon_left and back. The two tags
+coincide only inside the clip's own hand-off frames (kar98_rechamber frame 0-5: 0.0-0.05 u); the switch lands while the
+view model is still CROSSBLENDING out of the aim/idle pose, whose tag_weapon_left sits ~14 u up the fore-end - so the gun
+jumped 13-16 u forward out of both hands at every bolt pull and rifle reload (measured, run wv1vis: kar98 14.8 u, Mosin
+15.6, Lee-Enfield 12.2, Springfield 13.2), and the Garand's quick R->L->R double hand-off jumped twice. Now the gun is
+faded from where the OLD tag holds it to where the new one does, keyed to the incoming clip's own crossblend weight (so
+the gun belongs to whichever authored pose dominates the screen), or over 120 ms if no crossblend is running; a switch
+back mid-fade reverses the fade from where it is. Origin lerp, axes nlerp + re-orthonormalised.
+*/
+#define VMTAG_SLOTS 4
+static void CG_VmTagHandoff(refEntity_t *model, const refEntity_t *pre, refEntity_t *parent, dtiki_t *tiki, int iTagNum,
+                            entityState_t *s1)
+{
+    static int   s_ent[VMTAG_SLOTS] = {-1, -1, -1, -1}, s_tag[VMTAG_SLOTS], s_from[VMTAG_SLOTS], s_sw[VMTAG_SLOTS],
+                 s_seen[VMTAG_SLOTS], s_key[VMTAG_SLOTS];
+    static float s_f[VMTAG_SLOTS], s_f0[VMTAG_SLOTS], s_w0[VMTAG_SLOTS];
+    refEntity_t  tmp;
+    vec3_t       a0, a2;
+    float        f, w;
+    int          k, slot = -1, oldest = 0;
+
+    for (k = 0; k < VMTAG_SLOTS; k++) {
+        if (s_ent[k] == s1->number) {
+            slot = k;
+            break;
+        }
+        if (s_seen[k] < s_seen[oldest]) {
+            oldest = k;
+        }
+    }
+    if (slot < 0) {
+        slot         = oldest;
+        s_ent[slot]  = s1->number;
+        s_tag[slot]  = iTagNum;
+        s_from[slot] = -1;
+        s_seen[slot] = cg.time;
+        return;
+    }
+    w = CG_VMCurWeight();
+    if (cg.time < s_seen[slot] || cg.time - s_seen[slot] > 250) {
+        s_from[slot] = -1; // not drawn for a while: no history
+    } else if (iTagNum != s_tag[slot]) {
+        // a switch back while still fading reverses the fade from where the gun is now
+        s_f0[slot]   = (s_from[slot] == iTagNum) ? 1.0f - s_f[slot] : 0.0f;
+        s_from[slot] = s_tag[slot];
+        s_sw[slot]   = cg.time;
+        s_key[slot]  = (w < 0.98f) ? 1 : 0;
+        s_w0[slot]   = w;
+        s_f[slot]    = s_f0[slot];
+    }
+    s_tag[slot]  = iTagNum;
+    s_seen[slot] = cg.time;
+    if (s_from[slot] < 0 || CG_VmHandFix() < 0.5f) {
+        return;
+    }
+    if (s_key[slot]) {
+        f = (w - s_w0[slot]) / (1.0f - s_w0[slot] + 0.0001f); // the incoming clip's share, renormalised from the switch
+    } else {
+        f = (cg.time - s_sw[slot]) / 120.0f;
+        f = (f >= 1.0f) ? 1.0f : (f <= 0.0f ? 0.0f : f * f * (3.0f - 2.0f * f));
+    }
+    f = s_f0[slot] + (1.0f - s_f0[slot]) * f;
+    if (f < s_f[slot]) {
+        f = s_f[slot]; // never back up (a new clip restarting the crossblend mid-fade)
+    }
+    if (f >= 0.999f || cg.time - s_sw[slot] > 500) {
+        s_from[slot] = -1;
+        s_f[slot]    = 1.0f;
+        return;
+    }
+    s_f[slot] = f;
+    tmp       = *pre;
+    CG_AttachEntity(&tmp, parent, tiki, s_from[slot] & TAG_MASK, s1->attach_use_angles, s1->attach_offset);
+    for (k = 0; k < 3; k++) {
+        model->origin[k] = tmp.origin[k] + (model->origin[k] - tmp.origin[k]) * f;
+        a0[k]            = tmp.axis[0][k] + (model->axis[0][k] - tmp.axis[0][k]) * f;
+        a2[k]            = tmp.axis[2][k] + (model->axis[2][k] - tmp.axis[2][k]) * f;
+    }
+    VectorCopy(model->origin, model->oldorigin);
+    VectorNormalize(a0);
+    VectorMA(a2, -DotProduct(a2, a0), a0, a2);
+    VectorNormalize(a2);
+    VectorCopy(a0, model->axis[0]);
+    VectorCopy(a2, model->axis[2]);
+    CrossProduct(a2, a0, model->axis[1]);
+}
+
+static void CG_VmHandTrace(refEntity_t *model, refEntity_t *parent, const char *szTag, vec3_t attAxis[3], const vec3_t attOrg)
+{
+    static cvar_t *pDbg = NULL;
+    static int     s_iL = -2, s_iR = -2;
+    static void   *s_pTiki = NULL;
+    vec3_t         cam[3], E, d, H[2], hA[2], hD[2], gc, fw;
+    orientation_t  or;
+    int            i, k, tags[2];
+    float          wsum = 0.0f;
+
+    if (!pDbg) {
+        pDbg = cgi.Cvar_Get("cg_vmHandDebug", "0", 0);
+    }
+    if (!pDbg->integer || !parent || !parent->tiki || !model->tiki) {
+        return;
+    }
+    if (s_pTiki != (void *)parent->tiki) {
+        s_iL    = cgi.Tag_NumForName(parent->tiki, "Bip01 L Hand");
+        s_iR    = cgi.Tag_NumForName(parent->tiki, "Bip01 R Hand");
+        s_pTiki = (void *)parent->tiki;
+    }
+    tags[0] = s_iL;
+    tags[1] = s_iR;
+    for (k = 0; k < 2; k++) {
+        VectorCopy(parent->origin, H[k]);
+        if (tags[k] >= 0) {
+            or = cgi.TIKI_Orientation(parent, tags[k]);
+            for (i = 0; i < 3; i++) {
+                VectorMA(H[k], or.origin[i], parent->axis[i], H[k]);
+            }
+        }
+        VectorSubtract(H[k], attOrg, d);
+        for (i = 0; i < 3; i++) {
+            hA[k][i] = DotProduct(d, attAxis[i]);
+        }
+        VectorSubtract(H[k], model->origin, d);
+        for (i = 0; i < 3; i++) {
+            hD[k][i] = DotProduct(d, model->axis[i]);
+        }
+    }
+    AnglesToAxis(cg.refdefViewAngles, cam);
+    VectorCopy(cg.refdef.vieworg, E);
+    VectorSubtract(model->origin, E, d);
+    for (i = 0; i < 3; i++) {
+        gc[i] = DotProduct(d, cam[i]);
+    }
+    // drawn gun axes in the camera frame: forward yaw/pitch, and the up axis' roll about the view
+    fw[0] = RAD2DEG(atan2(DotProduct(model->axis[0], cam[1]), DotProduct(model->axis[0], cam[0])));
+    fw[1] = RAD2DEG(atan2(DotProduct(model->axis[0], cam[2]), DotProduct(model->axis[0], cam[0])));
+    fw[2] = RAD2DEG(atan2(DotProduct(model->axis[2], cam[1]), DotProduct(model->axis[2], cam[2])));
+    for (i = 0; i < MAX_FRAMEINFOS; i++) {
+        wsum += cgi.anim->g_VMFrameInfo[i].weight;
+    }
+    cgi.Printf("^~^~^ VMH mdl=%s t=%d ft=%d anim=%d chg=%d xb=%d xbd=%d slot=%d ws=%.3f tag=%c pose=%.4f w=%.4f gate=%.4f "
+               "sa=%.3f sb=%.3f st=%d sh=(%.4f %.4f) pmf=0x%x lean=%.2f vh=%d "
+               "g=(%.3f %.3f %.3f) ga=(%.3f %.3f %.3f) LA=(%.3f %.3f %.3f) RA=(%.3f %.3f %.3f) "
+               "LD=(%.3f %.3f %.3f) RD=(%.3f %.3f %.3f) vo=(%.2f %.2f %.2f) va=(%.2f %.2f %.2f) pmt=%d\n",
+               cgi.TIKI_Name(model->tiki), cg.time, cg.frametime, cg.snap ? cg.snap->ps.iViewModelAnim : -1,
+               cg.snap ? cg.snap->ps.iViewModelAnimChanged : -1, (int)cgi.anim->g_bCrossblending,
+               cgi.anim->g_iCurrentVMDuration, cgi.anim->g_iCurrentVMAnimSlot, wsum,
+               (szTag && !Q_stricmp(szTag, "tag_weapon_left")) ? 'L' : 'R', CG_AdsPoseFactor(), CG_AdsRigWeight(),
+               CG_AdsAnimGate(), (cg.time == s_vmhSolveT) ? s_vmhSolveA : 0.0f, (cg.time == s_vmhSolveT) ? s_vmhSolveB : 0.0f,
+               (cg.time == s_vmhSolveT) ? 1 : 0, cgi.Cvar_Get("r_weaponshiftx", "0", 0)->value,
+               cgi.Cvar_Get("r_weaponshifty", "0", 0)->value, cg.predicted_player_state.pm_flags,
+               cg.predicted_player_state.fLeanAngle, cg.predicted_player_state.viewheight, gc[0], gc[1], gc[2], fw[0],
+               fw[1], fw[2], hA[0][0], hA[0][1], hA[0][2], hA[1][0], hA[1][1], hA[1][2], hD[0][0], hD[0][1], hD[0][2],
+               hD[1][0], hD[1][1], hD[1][2], E[0], E[1], E[2], cg.refdefViewAngles[0], cg.refdefViewAngles[1],
+               cg.refdefViewAngles[2], cg.predicted_player_state.pm_type);
 }
 
 /*
@@ -2804,8 +2987,13 @@ void CG_ModelAnim(centity_t *cent, qboolean bDoShaderTime)
                 iTagNum = cgi.Tag_NumForName(tiki, szTagName);
                 CG_AttachEyeEntity(&model, parent, tiki, iTagNum & TAG_MASK, s1->attach_use_angles, s1->attach_offset);
             } else if (!Q_stricmp(szTagName, "tag_weapon_right") || !Q_stricmp(szTagName, "tag_weapon_left")) {
+                vec3_t vVmhAttAxis[3], vVmhAttOrg; // HZM coop [weaponview 2026-10-04] the gun as attached (probe)
+                refEntity_t mVmPre = model;        // HZM coop [weaponview] F5: the gun before any attach (hand-off fade)
                 iTagNum = cgi.Tag_NumForName(tiki, szTagName);
                 CG_AttachEntity(&model, parent, tiki, iTagNum & TAG_MASK, s1->attach_use_angles, s1->attach_offset);
+                CG_VmTagHandoff(&model, &mVmPre, parent, tiki, iTagNum, s1);
+                AxisCopy(model.axis, vVmhAttAxis);
+                VectorCopy(model.origin, vVmhAttOrg);
 
                 // HZM coop: ADS iron-sight aim. A screen shift (r_weaponshift) moves the whole gun
                 // uniformly, so it cannot line the REAR aperture up with the FRONT post; rotating the
@@ -3153,6 +3341,9 @@ void CG_ModelAnim(centity_t *cent, qboolean bDoShaderTime)
 
                 if (!Q_stricmp(szTagName, "tag_weapon_right")) {
                     CG_AdsSightTrace(&model); // HZM coop [ironsights 2026-09-28] cg_adsSightDebug 2: per-frame drawn-sight trace
+                }
+                if (!CG_CoopQDrawIsParked(s1)) {
+                    CG_VmHandTrace(&model, parent, szTagName, vVmhAttAxis, vVmhAttOrg); // HZM coop [weaponview] cg_vmHandDebug
                 }
 
                 // HZM coop [user 2026-09-05] THE PARKED PRIMARY. Last statement in the branch on
