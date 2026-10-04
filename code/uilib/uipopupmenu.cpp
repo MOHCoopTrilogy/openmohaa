@@ -21,6 +21,7 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 */
 
 #include "ui_local.h"
+#include "uitheme.h"
 #include "localization.h"
 
 CLASS_DECLARATION(UIWidget, UIPopupMenu, NULL) {
@@ -258,6 +259,15 @@ void UIPopupMenu::Create(
     }
 
     InitFrame(NULL, place.x, place.y, totalSize.width, totalSize.height, 1);
+
+    // [HZM E2] War Room popups: body, text and highlight from the theme table, the border bevel built from the body.
+    // Classic: nothing is touched (the constructor's colours stand).
+    if (UI_ThemeActive()) {
+        m_highlightFGColor = UI_ThemeColor(UITC_POPUP_SEL_FG, m_highlightFGColor);
+        m_highlightBGColor = UI_ThemeColor(UITC_POPUP_SEL_BG, m_highlightBGColor);
+        m_foreground_color = UI_ThemeColor(UITC_POPUP_FG, m_foreground_color);
+        setBackgroundColor(UI_ThemeColor(UITC_POPUP_BG, m_background_color), true);
+    }
 }
 
 void UIPopupMenu::YouAreASubmenu(UIPopupMenu *me)

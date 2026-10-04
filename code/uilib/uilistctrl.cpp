@@ -21,6 +21,7 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 */
 
 #include "ui_local.h"
+#include "uitheme.h"
 #include "../qcommon/localization.h"
 
 static UISize2D s_columnpadding(2.0, 2.0);
@@ -253,8 +254,8 @@ void UIListCtrl::DrawColumns(void)
     UColor  columnColor, textColor;
 
     atleft      = 0;
-    columnColor = UColor(0.07f, 0.06f, 0.005f, 1.0f);
-    textColor   = UHudColor;
+    columnColor = UI_ThemeColor(UITC_LIST_HEADER_BG, UColor(0.07f, 0.06f, 0.005f, 1.0f)); // [HZM E2]
+    textColor   = UI_ThemeColor(UITC_LIST_HEADER_FG, UHudColor);
 
     pFont = m_headerfont;
     if (!pFont) {
@@ -305,8 +306,8 @@ void UIListCtrl::DrawContent(void)
     UColor  backColor, textColor;
 
     height    = m_font->getHeight(getVirtualScale());
-    selColor  = UColor(0.21f, 0.18f, 0.015f, 1.0f);
-    selText   = UColor(0.9f, 0.8f, 0.6f, 1.0f);
+    selColor  = UI_ThemeColor(UITC_LIST_SEL_BG, UColor(0.21f, 0.18f, 0.015f, 1.0f)); // [HZM E2]
+    selText   = UI_ThemeColor(UITC_LIST_SEL_FG, UColor(0.9f, 0.8f, 0.6f, 1.0f));
     backColor = m_background_color;
     textColor = m_foreground_color;
 

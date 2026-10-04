@@ -376,14 +376,18 @@ void Menu::PassEventToWidget(str name, Event *ev)
     int i;
     int n;
 
+    // [HZM E1] (menu_system_remaster) deliver to EVERY widget of this name in the menu, not just the first, so a
+    // widget the engine or a cfg addresses by name (refresh, cancelrefresh, bindlist, ...) can have a themed twin
+    // behind an enabledcvar gate. Each widget gets its own copy of the event; the original is freed here (it used
+    // to leak when nothing matched). With one widget per name - every menu before the theme - behaviour is unchanged.
     n = m_itemlist.NumObjects();
     for (i = 1; i <= n; i++) {
         UIWidget *wid = m_itemlist.ObjectAt(i);
         if (wid->getName() == name && wid->ValidEvent(ev->getName())) {
-            wid->ProcessEvent(ev);
-            return;
+            wid->ProcessEvent(*(const Event *)ev);
         }
     }
+    delete ev;
 }
 
 void Menu::PassEventToAllWidgets(Event& ev)

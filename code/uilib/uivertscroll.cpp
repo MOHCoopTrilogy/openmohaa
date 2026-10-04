@@ -21,6 +21,7 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 */
 
 #include "ui_local.h"
+#include "uitheme.h"
 #include "../qcommon/localization.h"
 
 Event W_Scrollbar_Positioned
@@ -80,7 +81,15 @@ bool UIVertScroll::isEnoughItems(void)
 
 void UIVertScroll::Draw(void)
 {
-    DrawBoxWithSolidBorder(getClientFrame(), getBackgroundColor(), m_solidbordercolor, 1, 3, m_local_alpha);
+    // [HZM E2] trough + border from the theme table (classic: the widget's own colours, unchanged)
+    DrawBoxWithSolidBorder(
+        getClientFrame(),
+        UI_ThemeColor(UITC_SCROLL_BG, getBackgroundColor()),
+        UI_ThemeColor(UITC_SCROLL_BORDER, m_solidbordercolor),
+        1,
+        3,
+        m_local_alpha
+    );
 
     DrawArrow(0.0, "5", m_pressed == VS_UP_ARROW);
     DrawArrow(m_frame.size.height - getVirtualScale()[1] * 16.0, "6", m_pressed == VS_DOWN_ARROW);
@@ -100,22 +109,25 @@ void UIVertScroll::DrawArrow(float top, const char *text, bool pressed)
     arrowRect.size.width  = m_frame.size.width;
     arrowRect.size.height = getVirtualScale()[1] * 16.0;
 
-    innerColor = getBackgroundColor();
-    m_marlett.setColor(getForegroundColor());
+    innerColor = UI_ThemeColor(UITC_SCROLL_BG, getBackgroundColor()); // [HZM E2]
+    m_marlett.setColor(UI_ThemeColor(UITC_SCROLL_ARROW, getForegroundColor()));
+
+    // classic: the widget's own bevel; themed: a bevel built from the themed trough colour
+    UBorderColor bevel = UI_ThemeActive() ? UBorderColor(innerColor) : m_border_color;
 
     if (pressed) {
-        innerColor = m_border_color.light;
+        innerColor = bevel.light;
 
         if (m_background_color.r != 0.0 || m_background_color.g || m_background_color.b) {
-            m_marlett.setColor(m_border_color.light);
+            m_marlett.setColor(bevel.light);
         } else {
-            m_marlett.setColor(UColor(0.15, 0.196, 0.278, 1.0));
+            m_marlett.setColor(UI_ThemeColor(UITC_SCROLL_BG, UColor(0.15, 0.196, 0.278, 1.0)));
         }
     }
 
-    DrawBoxWithSolidBorder(arrowRect, innerColor, m_solidbordercolor, 1, 3, m_local_alpha);
+    DrawBoxWithSolidBorder(arrowRect, innerColor, UI_ThemeColor(UITC_SCROLL_BORDER, m_solidbordercolor), 1, 3, m_local_alpha);
     if (m_numitems > m_pageheight) {
-        DrawMac3DBox(arrowRect, pressed, m_border_color, 1, m_local_alpha);
+        DrawMac3DBox(arrowRect, pressed, bevel, 1, m_local_alpha);
     }
 
     m_marlett.setAlpha(m_local_alpha);
@@ -151,14 +163,14 @@ void UIVertScroll::DrawThumb(void)
         thumbRect.size.height = 6.0;
     }
 
-    thumbInside = UColor(0.15, 0.196, 0.278, 1.0);
+    thumbInside = UI_ThemeColor(UITC_SCROLL_THUMB, UColor(0.15, 0.196, 0.278, 1.0)); // [HZM E2]
 
     if (thumbRect.pos.y + thumbRect.size.height - thumbdiff > 0.0) {
         thumbRect.pos.y -= thumbRect.pos.y + thumbRect.size.height - thumbdiff;
     }
     thumbRect.pos.y = thumbRect.pos.y + inbarrect.pos.y;
 
-    DrawBoxWithSolidBorder(thumbRect, thumbInside, m_solidbordercolor, 1, 3, m_local_alpha);
+    DrawBoxWithSolidBorder(thumbRect, thumbInside, UI_ThemeColor(UITC_SCROLL_BORDER, m_solidbordercolor), 1, 3, m_local_alpha);
     DrawMac3DBox(thumbRect, m_pressed == VS_THUMB, thumbInside, true, m_local_alpha);
 
     inbarrect.pos.x += 1.0;

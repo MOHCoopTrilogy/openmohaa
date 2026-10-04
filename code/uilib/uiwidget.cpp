@@ -21,6 +21,7 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 */
 
 #include "ui_local.h"
+#include "uitheme.h"
 #include "../qcommon/localization.h"
 
 //==========================================================================
@@ -672,6 +673,65 @@ bool UI_MenuCenterEnabled(void)
 {
     const char *v = uii.Cvar_GetString("ui_menuCenter", "0");
     return v && atoi(v) != 0;
+}
+
+// [HZM E2] (menu_system_remaster) UI colour table - see uitheme.h. Classic (ui_menuRoom <= 0) returns the caller's
+// constant untouched. The table cvar is re-parsed only when its string changes.
+bool UI_ThemeActive(void)
+{
+    return UI_GetCvarInt("ui_menuRoom", 0) > 0;
+}
+
+UColor UI_ThemeColor(int slot, const UColor& classic)
+{
+    static char   s_cache[2048] = "\x01";
+    static UColor s_table[UITC_COUNT];
+    static bool   s_set[UITC_COUNT];
+
+    if (slot < 0 || slot >= UITC_COUNT || !UI_ThemeActive()) {
+        return classic;
+    }
+
+    const char *cur = uii.Cvar_GetString("ui_themeColors", "");
+    if (!cur) {
+        cur = "";
+    }
+    if (strcmp(cur, s_cache)) {
+        Q_strncpyz(s_cache, cur, sizeof(s_cache));
+        memset(s_set, 0, sizeof(s_set));
+        const char *p = s_cache;
+        for (int i = 0; i < UITC_COUNT && *p; i++) {
+            char  tok[4][32];
+            int   got = 0;
+            while (got < 4 && *p) {
+                while (*p == ' ' || *p == '\t') {
+                    p++;
+                }
+                if (!*p) {
+                    break;
+                }
+                int n = 0;
+                while (*p && *p != ' ' && *p != '\t' && n < 31) {
+                    tok[got][n++] = *p++;
+                }
+                while (*p && *p != ' ' && *p != '\t') {
+                    p++; // an over-long token is truncated, never overflows
+                }
+                tok[got][n] = 0;
+                got++;
+            }
+            if (got < 4) {
+                break; // a trailing partial group is ignored
+            }
+            if (tok[0][0] == '-' && !tok[0][1]) {
+                continue; // "-" keeps the classic colour for this slot
+            }
+            s_table[i] = UColor(atof(tok[0]), atof(tok[1]), atof(tok[2]), atof(tok[3]));
+            s_set[i]   = true;
+        }
+    }
+
+    return s_set[slot] ? s_table[slot] : classic;
 }
 
 static bool scaleFrameVirtualRes(UIRect2D& frame, vec3_t outScale, const vec3_t newScale)
@@ -2573,6 +2633,17 @@ int UIWidget::getConfigstringIndex(void)
 
 bool UIWidget::PassEventToWidget(str name, Event *ev)
 {
+    // [HZM E1] (menu_system_remaster) globalwidgetcommand: the first ENABLED match still decides WHERE the event goes
+    // (same search order as before), but every same-named sibling in that container that is switched off only by its
+    // enabledcvar gate (a themed twin, e.g. the large and the small mission-tile sets) gets it too, so a twin is never
+    // stale when the gate flips. Each widget gets its own copy; the original is freed here (it used to leak unmatched).
+    bool handled = DeliverEventByName(name, *(const Event *)ev);
+    delete ev;
+    return handled;
+}
+
+bool UIWidget::DeliverEventByName(const str& name, const Event& ev)
+{
     int i;
     int n;
 
@@ -2587,7 +2658,21 @@ bool UIWidget::PassEventToWidget(str name, Event *ev)
 
     n = m_children.NumObjects();
     for (i = 1; i <= n; i++) {
-        if (m_children.ObjectAt(i)->PassEventToWidget(name, ev)) {
+        UIWidget *child = m_children.ObjectAt(i);
+        if (!str::cmp(name, child->m_name) && child->isEnabled()) {
+            // the first enabled match: deliver to it and to its gated-off twins in this same container
+            for (int k = 1; k <= n; k++) {
+                UIWidget *twin = m_children.ObjectAt(k);
+                if (str::cmp(name, twin->m_name)) {
+                    continue;
+                }
+                if (twin == child || (twin->m_enabled && twin->m_enabledCvar.length())) {
+                    twin->ProcessEvent(ev);
+                }
+            }
+            return true;
+        }
+        if (child->DeliverEventByName(name, ev)) {
             return true;
         }
     }

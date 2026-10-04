@@ -364,6 +364,7 @@ public:
     void               setConfigstringIndex(int cs);
     int                getConfigstringIndex(void);
     bool               PassEventToWidget(str name, Event *ev);
+    bool               DeliverEventByName(const str& name, const Event& ev); // [HZM E1]
 
     // Added in OPM
     UIFont       *getFont() const;

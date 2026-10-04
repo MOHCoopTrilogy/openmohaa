@@ -27,6 +27,7 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 //     when there are multiple server list instances
 
 #include "cl_ui.h"
+#include "../uilib/uitheme.h" // [HZM E2]
 #include "../gamespy/goaceng.h"
 #include "../gamespy/sv_gamespy.h"
 #include "../gamespy/common/gsPlatformSocket.h"
@@ -158,27 +159,27 @@ void FAKKServerListItem::DrawListItem(int iColumn, const UIRect2D& drawRect, boo
     if (!pColoringType->integer) {
         if (IfQueryFailed() || (IsDifferentVersion() && IsQueried())) {
             if (bSelected) {
-                DrawBox(newRect, UColor(0.2f, 0.0f, 0.0f), 1.0);
-                pFont->setColor(UColor(0.9f, 0.0f, 0.0f));
+                DrawBox(newRect, UI_ThemeColor(UITC_SRV_FAILSEL_BG, UColor(0.2f, 0.0f, 0.0f)), 1.0);
+                pFont->setColor(UI_ThemeColor(UITC_SRV_FAILSEL_FG, UColor(0.9f, 0.0f, 0.0f)));
             } else {
-                DrawBox(newRect, UColor(0.1f, 0.0f, 0.0f), 1.0);
-                pFont->setColor(UColor(0.55f, 0.0f, 0.0f));
+                DrawBox(newRect, UI_ThemeColor(UITC_SRV_FAIL_BG, UColor(0.1f, 0.0f, 0.0f)), 1.0);
+                pFont->setColor(UI_ThemeColor(UITC_SRV_FAIL_FG, UColor(0.55f, 0.0f, 0.0f)));
             }
         } else if (IsQueried()) {
             if (bSelected) {
-                DrawBox(newRect, UColor(0.2f, 0.18f, 0.015f), 1.0);
-                pFont->setColor(UColor(0.9f, 0.8f, 0.6f));
+                DrawBox(newRect, UI_ThemeColor(UITC_SRV_SEL_BG, UColor(0.2f, 0.18f, 0.015f)), 1.0);
+                pFont->setColor(UI_ThemeColor(UITC_SRV_SEL_FG, UColor(0.9f, 0.8f, 0.6f)));
             } else {
-                DrawBox(newRect, UColor(0.02f, 0.07f, 0.004f), 1.0);
-                pFont->setColor(UHudColor);
+                DrawBox(newRect, UI_ThemeColor(UITC_SRV_ROW_BG, UColor(0.02f, 0.07f, 0.004f)), 1.0);
+                pFont->setColor(UI_ThemeColor(UITC_SRV_ROW_FG, UHudColor));
             }
         } else {
             if (bSelected) {
-                DrawBox(newRect, UColor(0.15f, 0.18f, 0.18f), 1.0);
-                pFont->setColor(UColor(0.6f, 0.7f, 0.8f));
+                DrawBox(newRect, UI_ThemeColor(UITC_SRV_NEWSEL_BG, UColor(0.15f, 0.18f, 0.18f)), 1.0);
+                pFont->setColor(UI_ThemeColor(UITC_SRV_NEWSEL_FG, UColor(0.6f, 0.7f, 0.8f)));
             } else {
-                DrawBox(newRect, UColor(0.005f, 0.07f, 0.02f), 1.0);
-                pFont->setColor(UColor(0.05f, 0.5f, 0.6f));
+                DrawBox(newRect, UI_ThemeColor(UITC_SRV_NEW_BG, UColor(0.005f, 0.07f, 0.02f)), 1.0);
+                pFont->setColor(UI_ThemeColor(UITC_SRV_NEW_FG, UColor(0.05f, 0.5f, 0.6f)));
             }
         }
 
@@ -192,27 +193,27 @@ void FAKKServerListItem::DrawListItem(int iColumn, const UIRect2D& drawRect, boo
     } else {
         if (IfQueryFailed() || (IsDifferentVersion() && IsQueried())) {
             if (bSelected) {
-                DrawBox(newRect, UColor(0.2f, 0.0f, 0.0f), 1.0);
-                pFont->setColor(UColor(0.9f, 0.0f, 0.0f));
+                DrawBox(newRect, UI_ThemeColor(UITC_SRV_FAILSEL_BG, UColor(0.2f, 0.0f, 0.0f)), 1.0);
+                pFont->setColor(UI_ThemeColor(UITC_SRV_FAILSEL_FG, UColor(0.9f, 0.0f, 0.0f)));
             } else {
-                DrawBox(newRect, UColor(0.1f, 0.0f, 0.0f), 1.0);
-                pFont->setColor(UColor(0.55f, 0.0f, 0.0f));
+                DrawBox(newRect, UI_ThemeColor(UITC_SRV_FAIL_BG, UColor(0.1f, 0.0f, 0.0f)), 1.0);
+                pFont->setColor(UI_ThemeColor(UITC_SRV_FAIL_FG, UColor(0.55f, 0.0f, 0.0f)));
             }
         } else if (IsQueried()) {
             if (bSelected) {
-                DrawBox(newRect, UColor(0.2f, 0.18f, 0.015f), 1.0);
-                pFont->setColor(UColor(0.9f, 0.8f, 0.6f));
+                DrawBox(newRect, UI_ThemeColor(UITC_SRV_SEL_BG, UColor(0.2f, 0.18f, 0.015f)), 1.0);
+                pFont->setColor(UI_ThemeColor(UITC_SRV_SEL_FG, UColor(0.9f, 0.8f, 0.6f)));
             } else {
-                DrawBox(newRect, UColor(0.02f, 0.07f, 0.005f), 1.0);
-                pFont->setColor(UHudColor);
+                DrawBox(newRect, UI_ThemeColor(UITC_SRV_ROW_BG, UColor(0.02f, 0.07f, 0.005f)), 1.0);
+                pFont->setColor(UI_ThemeColor(UITC_SRV_ROW_FG, UHudColor));
             }
         } else {
             if (bSelected) {
-                DrawBox(newRect, UColor(0.15f, 0.18f, 0.18f), 1.0);
-                pFont->setColor(UColor(0.6f, 0.7f, 0.8f));
+                DrawBox(newRect, UI_ThemeColor(UITC_SRV_NEWSEL_BG, UColor(0.15f, 0.18f, 0.18f)), 1.0);
+                pFont->setColor(UI_ThemeColor(UITC_SRV_NEWSEL_FG, UColor(0.6f, 0.7f, 0.8f)));
             } else {
-                DrawBox(newRect, UColor(0.005f, 0.07f, 0.02f), 1.0);
-                pFont->setColor(UColor(0.05f, 0.5f, 0.6f));
+                DrawBox(newRect, UI_ThemeColor(UITC_SRV_NEW_BG, UColor(0.005f, 0.07f, 0.02f)), 1.0);
+                pFont->setColor(UI_ThemeColor(UITC_SRV_NEW_FG, UColor(0.05f, 0.5f, 0.6f)));
             }
         }
 
