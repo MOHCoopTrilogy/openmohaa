@@ -2090,6 +2090,8 @@ static void CG_VmTagHandoff(refEntity_t *model, const refEntity_t *pre, refEntit
     w = CG_VMCurWeight();
     if (cg.time < s_seen[slot] || cg.time - s_seen[slot] > 250) {
         s_from[slot] = -1; // not drawn for a while: no history
+    } else if (iTagNum != s_tag[slot] && cg.time - g_iCoopVmTagSnap >= 0 && cg.time - g_iCoopVmTagSnap < 60) {
+        s_from[slot] = -1; // HZM coop [adsbolt] ADS released mid-bolt: both tags hold the gun, no fade needed
     } else if (iTagNum != s_tag[slot]) {
         // a switch back while still fading reverses the fade from where the gun is now
         s_f0[slot]   = (s_from[slot] == iTagNum) ? 1.0f - s_f[slot] : 0.0f;
@@ -2989,6 +2991,12 @@ void CG_ModelAnim(centity_t *cent, qboolean bDoShaderTime)
             } else if (!Q_stricmp(szTagName, "tag_weapon_right") || !Q_stricmp(szTagName, "tag_weapon_left")) {
                 vec3_t vVmhAttAxis[3], vVmhAttOrg; // HZM coop [weaponview 2026-10-04] the gun as attached (probe)
                 refEntity_t mVmPre = model;        // HZM coop [weaponview] F5: the gun before any attach (hand-off fade)
+                // HZM coop [adsbolt] an aimed bolt clip keys BOTH weapon tags on the gun; following the server's
+                // attachtohand offhand would drag the gun through the left tag blended in from the aim pose.
+                if (!Q_stricmp(szTagName, "tag_weapon_left") && cg.snap && s1->parent == cg.snap->ps.clientNum
+                    && (parent->renderfx & RF_FIRST_PERSON) && CG_VMAdsTagRight()) {
+                    szTagName = "tag_weapon_right";
+                }
                 iTagNum = cgi.Tag_NumForName(tiki, szTagName);
                 CG_AttachEntity(&model, parent, tiki, iTagNum & TAG_MASK, s1->attach_use_angles, s1->attach_offset);
                 CG_VmTagHandoff(&model, &mVmPre, parent, tiki, iTagNum, s1);

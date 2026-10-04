@@ -1953,6 +1953,24 @@ static const adsSight_t *CG_FindAdsSightByName(const char *wpn)
     return NULL;
 }
 
+// HZM coop [adsbolt] two weapon names share one mesh (a re-skin) when their generated sight rows carry the same
+// sight points. Used to keep a hand-keyed aimed clip on the mesh it was authored on.
+qboolean CG_AdsSightSameMesh(const char *a, const char *b)
+{
+    const adsSight_t *sa = CG_FindAdsSightByName(a), *sb = CG_FindAdsSightByName(b);
+    int               i;
+
+    if (!sa || !sb) {
+        return qfalse;
+    }
+    for (i = 0; i < 3; i++) {
+        if (fabs(sa->F[i] - sb->F[i]) > 0.01f || fabs(sa->R[i] - sb->R[i]) > 0.01f) {
+            return qfalse;
+        }
+    }
+    return qtrue;
+}
+
 qboolean CG_AdsRigSolveOwns(void)
 {
     const char *wpn;

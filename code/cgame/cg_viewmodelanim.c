@@ -480,6 +480,11 @@ int CG_GetVMAnimPrefixIndex()
 #define COOP_VM_ANIM_IDLELOWER 15
 
 static int s_iCoopPrevVMAnim = -1;
+static qboolean s_coopAdsClip = qfalse; // HZM coop [adsanim] the clip being started is a <gun>_<anim>_ads variant
+static int      s_coopAdsSlot = -1;     // HZM coop [adsbolt] slot playing an _ads clip (-1 = none)
+static int      s_coopSwapSlot = -1;    // HZM coop [adsbolt] slot of the hip clip swapped in on ADS release
+static char     s_szCoopHipAnim[MAX_QPATH]; // HZM coop [adsbolt] the hip clip the _ads clip stands in for
+int             g_iCoopVmTagSnap = -100000; // HZM coop [adsbolt] cg.time of an ADS-release swap (no tag fade)
 
 // HZM coop [weaponview 2026-10-04] F2: the crossblend weight was LINEAR in time - a velocity step at the first and the
 // last frame of every clip change (ADS in/out, reload in/out, bolt in/out), which reads as a small pop at both ends.
@@ -492,6 +497,32 @@ static float s_fCoopVMCurW = 1.0f;         // displayed weight of the newest cli
 static int CoopVMAnimIsAim(int a)
 {
     return (a == VM_ANIM_IDLE || a == VM_ANIM_IDLE_0 || a == VM_ANIM_IDLE_1 || a == VM_ANIM_IDLE_2 || a == VM_ANIM_CHARGE);
+}
+
+// HZM coop [adsbolt] the newest view clip is a <gun>_<anim>_ads clip: both its weapon tags are keyed ON the gun, so
+// cg_modelanim.c keeps the local view weapon on tag_weapon_right through the server's attachtohand offhand.
+// HZM coop [adsbolt] an _ads clip's hand rides ONE mesh's bolt, but a view-model prefix is shared by other meshes
+// (kar98: the Gewehr 98 variant and the Arisaka Type 99, whose knobs sit 1-1.5 u elsewhere). The clip plays only
+// on the gun it was authored on and its re-skins (same sight geometry = same mesh). Prefixes not listed: no guard.
+static qboolean CoopAdsClipFitsHeldGun(const char *prefix)
+{
+    static const char *kAuthored[][2] = {{"kar98", "Mauser KAR 98K"}};
+    int i;
+
+    if (!cg.snap || cg.snap->ps.activeItems[1] < 0) {
+        return qfalse;
+    }
+    for (i = 0; i < (int)(sizeof(kAuthored) / sizeof(kAuthored[0])); i++) {
+        if (!Q_stricmp(prefix, kAuthored[i][0])) {
+            return CG_AdsSightSameMesh(CG_ConfigString(CS_WEAPONS + cg.snap->ps.activeItems[1]), kAuthored[i][1]);
+        }
+    }
+    return qtrue;
+}
+
+qboolean CG_VMAdsTagRight(void)
+{
+    return (s_coopAdsSlot >= 0 && s_coopAdsSlot == cgi.anim->g_iCurrentVMAnimSlot) ? qtrue : qfalse;
 }
 
 float CG_VMAimWeight(void)
@@ -517,6 +548,20 @@ static float CoopVMCrossblend(dtiki_t *pTiki, int index)
     static cvar_t *pBlend   = NULL;
     float          authored = cgi.Anim_CrossblendTime(pTiki, index);
 
+    // HZM coop [adsbolt] the hip clip swapped in on ADS release blends on its own (longer) time
+    if (s_coopSwapSlot >= 0 && s_coopSwapSlot == cgi.anim->g_iCurrentVMAnimSlot
+        && index == cgi.anim->g_VMFrameInfo[s_coopSwapSlot].index) {
+        cvar_t *pSw = cgi.Cvar_Get("coop_vmAdsSwapBlend", "0.25", 0);
+        return pSw->value > 0.0f ? pSw->value : 0.25f;
+    }
+    // HZM coop [adsbolt] an _ads clip starts bit-identical to the `charge` aim pose it replaces, so it needs no
+    // 0.3 s ADS floor - and that long blend dragged the gun with the right hand as it left the grip (run ab2):
+    // tag_weapon_right is a child of the hand, and its blended local swings while the hand travels.
+    if (s_coopAdsSlot >= 0 && s_coopAdsSlot == cgi.anim->g_iCurrentVMAnimSlot
+        && index == cgi.anim->g_VMFrameInfo[s_coopAdsSlot].index) {
+        cvar_t *pIn = cgi.Cvar_Get("coop_vmAdsInBlend", "0.06", 0);
+        return pIn->value >= 0.0f ? pIn->value : 0.06f;
+    }
     if (!pBlend) {
         pBlend = cgi.Cvar_Get("coop_vmBlend", "0.12", CVAR_ARCHIVE); // 0 = vanilla hard cuts
     }
@@ -786,6 +831,31 @@ void CG_ViewModelAnimation(refEntity_t *pModel)
         }
 
         Com_sprintf(szAnimName, sizeof(szAnimName), "%s_%s", AnimPrefixList[iAnimPrefixIndex], pszAnimSuffix);
+        // HZM coop [adsanim 2026-10-04 / adsbolt] AIMED BOLT: a reload or bolt that starts while aiming plays the
+        // gun's dedicated `<prefix>_<suffix>_ads` clip when fps_anims defines one (hand-keyed to start and end in
+        // the `charge` aim pose with the cheek near the stock), and the slot is flagged as an aim pose below so the
+        // ADS framing never fades out to the hip and back. No row = today's hip clip, silently. Client-only; same
+        // frame count and frame time as the hip clip, so the server's timing is unchanged.
+        s_coopAdsClip = qfalse;
+        {
+            static cvar_t *pAdsAnims = NULL;
+            int            a         = cgi.anim->g_iLastVMAnim;
+            if (!pAdsAnims) {
+                pAdsAnims = cgi.Cvar_Get("coop_vmAdsAnims", "1", 0);
+            }
+            if (pAdsAnims->integer && !bWeaponChanged && CG_AimingDownSights()
+                && (a == VM_ANIM_RELOAD || a == VM_ANIM_RELOAD_SINGLE || a == VM_ANIM_RELOAD_END
+                    || a == VM_ANIM_RECHAMBER)) {
+                char szAds[MAX_QPATH];
+                Com_sprintf(szAds, sizeof(szAds), "%s_ads", szAnimName);
+                if (cgi.Anim_NumForName(pTiki, szAds) != -1
+                    && CoopAdsClipFitsHeldGun(AnimPrefixList[iAnimPrefixIndex])) {
+                    Q_strncpyz(s_szCoopHipAnim, szAnimName, sizeof(s_szCoopHipAnim));
+                    Q_strncpyz(szAnimName, szAds, sizeof(szAnimName));
+                    s_coopAdsClip = qtrue;
+                }
+            }
+        }
         if (!bWeaponChanged) {
             fCrossblendTime =
                 CoopVMCrossblend(pTiki, cgi.anim->g_VMFrameInfo[cgi.anim->g_iCurrentVMAnimSlot].index);
@@ -810,7 +880,9 @@ void CG_ViewModelAnimation(refEntity_t *pModel)
         }
 
         cgi.anim->g_iCurrentVMAnimSlot = (cgi.anim->g_iCurrentVMAnimSlot + 1) % MAX_FRAMEINFOS;
-        s_coopSlotAim[cgi.anim->g_iCurrentVMAnimSlot] = CoopVMAnimIsAim(cgi.anim->g_iLastVMAnim);
+        s_coopSlotAim[cgi.anim->g_iCurrentVMAnimSlot] = CoopVMAnimIsAim(cgi.anim->g_iLastVMAnim) || s_coopAdsClip;
+        s_coopAdsSlot  = s_coopAdsClip ? cgi.anim->g_iCurrentVMAnimSlot : -1; // HZM coop [adsbolt]
+        s_coopSwapSlot = -1;
         cgi.anim->g_VMFrameInfo[cgi.anim->g_iCurrentVMAnimSlot].index = cgi.Anim_NumForName(pTiki, szAnimName);
 
         if (cgi.anim->g_VMFrameInfo[cgi.anim->g_iCurrentVMAnimSlot].index == -1) {
@@ -846,6 +918,47 @@ void CG_ViewModelAnimation(refEntity_t *pModel)
                 if (i != cgi.anim->g_iCurrentVMAnimSlot) {
                     cgi.anim->g_VMFrameInfo[i].weight = 0.0;
                 }
+            }
+        }
+    }
+
+    // HZM coop [adsbolt] ADS RELEASED WHILE AN _ads CLIP PLAYS: hand over to the hip clip at the same clip time.
+    // The weights are folded exactly as an anim change folds them, so nothing steps; the hip slot is not an aim
+    // slot, so the rig correction and the weapon-fov zoom fade out on this same crossblend (weaponview F3).
+    if (s_coopAdsSlot >= 0 && !bAnimChanged) {
+        if (s_coopAdsSlot != cgi.anim->g_iCurrentVMAnimSlot) {
+            s_coopAdsSlot = -1;
+        } else if (!CG_AimingDownSights()) {
+            int iOld = cgi.anim->g_iCurrentVMAnimSlot;
+            int iHip = cgi.Anim_NumForName(pTiki, s_szCoopHipAnim);
+            s_coopAdsSlot = -1;
+            if (iHip != -1) {
+                float fT = cgi.anim->g_VMFrameInfo[iOld].time;
+                if (cgi.anim->g_bCrossblending) {
+                    float fTm = CoopVMCrossblend(pTiki, cgi.anim->g_VMFrameInfo[iOld].index);
+                    float fAm = cgi.anim->g_iCurrentVMDuration / 1000.0f;
+                    if (fAm < fTm && fAm > 0.0f) {
+                        float fFr = CoopVMBlendShape(fAm / fTm);
+                        for (i = 0; i < MAX_FRAMEINFOS; ++i) {
+                            if (cgi.anim->g_VMFrameInfo[i].weight) {
+                                if (i == iOld) {
+                                    cgi.anim->g_VMFrameInfo[i].weight = fFr;
+                                } else {
+                                    cgi.anim->g_VMFrameInfo[i].weight *= (1.0 - fFr);
+                                }
+                            }
+                        }
+                    }
+                }
+                cgi.anim->g_iCurrentVMAnimSlot = (iOld + 1) % MAX_FRAMEINFOS;
+                s_coopSlotAim[cgi.anim->g_iCurrentVMAnimSlot]                  = 0;
+                cgi.anim->g_VMFrameInfo[cgi.anim->g_iCurrentVMAnimSlot].index  = iHip;
+                cgi.anim->g_VMFrameInfo[cgi.anim->g_iCurrentVMAnimSlot].time   = fT;
+                cgi.anim->g_VMFrameInfo[cgi.anim->g_iCurrentVMAnimSlot].weight = 1.0;
+                cgi.anim->g_iCurrentVMDuration                                 = 0;
+                cgi.anim->g_bCrossblending                                     = qtrue;
+                s_coopSwapSlot   = cgi.anim->g_iCurrentVMAnimSlot;
+                g_iCoopVmTagSnap = cg.time; // the gun goes back to the server's tag at once: both tags hold it
             }
         }
     }
