@@ -13,6 +13,7 @@ typedef struct {
 } adsSight_t;
 
 static const adsSight_t s_adsSights[] = {
+    {"models/weapons/30calportable.tik", "M1919 30cal", {45.0000f, -0.0000f, -1.4900f}, {0.8500f, -0.0000f, -1.4900f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 0.000f}, // m1919
     {"models/weapons/arisaka.tik", "Arisaka Type 99", {44.0557f, -0.9035f, -4.6376f}, {3.5564f, -0.9035f, -4.3424f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 0.000f}, // arisaka_type_99
     {"models/weapons/bar.tik", "BAR", {35.6267f, -0.7789f, -4.2493f}, {-0.3181f, -0.7833f, -4.3841f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 0.000f}, // bar
     {"models/weapons/bar_bar1918.tik", "BAR (M1918 WWI)", {35.6064f, -1.2984f, -5.4866f}, {-0.7600f, -1.2984f, -5.1210f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 0.000f}, // bar_wwi
@@ -201,15 +202,15 @@ static const adsSight_t s_adsSights[] = {
     {"models/weapons/m1_garand_lite_gold.tik", "M1 Garand (Gold)", {40.6610f, -0.4358f, -5.6579f}, {3.5880f, -0.8877f, -5.4777f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 0.000f}, // garand
     {"models/weapons/m1_garand_lv_ttgarand.tik", "M1 Garand (Team Tactics)", {40.6610f, -0.4358f, -5.6579f}, {3.5880f, -0.8877f, -5.4777f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 0.000f}, // garand
     {"models/weapons/m1_garand_pagarand.tik", "M1 Garand (Pacific)", {35.7871f, -0.9522f, -5.2110f}, {2.8589f, -0.9514f, -5.1679f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 0.000f}, // garand_pacific
-    {"models/weapons/mauser_c96.tik", "Mauser C96", {15.4048f, -0.8198f, -3.8394f}, {4.5035f, -0.8461f, -4.3355f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 0.000f}, // mauser_c96
-    {"models/weapons/mauser_c96_bloody.tik", "Mauser C96 (Bloody)", {15.4048f, -0.8198f, -3.8394f}, {4.5035f, -0.8461f, -4.3355f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 0.000f}, // mauser_c96
-    {"models/weapons/mauser_c96_blued.tik", "Mauser C96 (Blued)", {15.4048f, -0.8198f, -3.8394f}, {4.5035f, -0.8461f, -4.3355f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 0.000f}, // mauser_c96
+    {"models/weapons/mauser_c96.tik", "Mauser C96", {15.4048f, -0.8000f, -3.8262f}, {4.5035f, -0.8461f, -4.3355f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 0.000f}, // mauser_c96
+    {"models/weapons/mauser_c96_bloody.tik", "Mauser C96 (Bloody)", {15.4048f, -0.8000f, -3.8262f}, {4.5035f, -0.8461f, -4.3355f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 0.000f}, // mauser_c96
+    {"models/weapons/mauser_c96_blued.tik", "Mauser C96 (Blued)", {15.4048f, -0.8000f, -3.8262f}, {4.5035f, -0.8461f, -4.3355f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 0.000f}, // mauser_c96
     {"models/weapons/mauser_c96_c96trench.tik", "Mauser C96 (Trench C96)", {15.9643f, -0.5887f, -4.5297f}, {1.1567f, -0.6979f, -4.6554f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 0.000f}, // mauser_c96_trench_c96
-    {"models/weapons/mauser_c96_camo_desert.tik", "Mauser C96 (Desert)", {15.4048f, -0.8198f, -3.8394f}, {4.5035f, -0.8461f, -4.3355f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 0.000f}, // mauser_c96
-    {"models/weapons/mauser_c96_camo_winter.tik", "Mauser C96 (Winter)", {15.4048f, -0.8198f, -3.8394f}, {4.5035f, -0.8461f, -4.3355f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 0.000f}, // mauser_c96
-    {"models/weapons/mauser_c96_camo_woodland.tik", "Mauser C96 (Woodland)", {15.4048f, -0.8198f, -3.8394f}, {4.5035f, -0.8461f, -4.3355f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 0.000f}, // mauser_c96
-    {"models/weapons/mauser_c96_chrome.tik", "Mauser C96 (Chrome)", {15.4048f, -0.8198f, -3.8394f}, {4.5035f, -0.8461f, -4.3355f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 0.000f}, // mauser_c96
-    {"models/weapons/mauser_c96_gold.tik", "Mauser C96 (Gold)", {15.4048f, -0.8198f, -3.8394f}, {4.5035f, -0.8461f, -4.3355f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 0.000f}, // mauser_c96
+    {"models/weapons/mauser_c96_camo_desert.tik", "Mauser C96 (Desert)", {15.4048f, -0.8000f, -3.8262f}, {4.5035f, -0.8461f, -4.3355f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 0.000f}, // mauser_c96
+    {"models/weapons/mauser_c96_camo_winter.tik", "Mauser C96 (Winter)", {15.4048f, -0.8000f, -3.8262f}, {4.5035f, -0.8461f, -4.3355f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 0.000f}, // mauser_c96
+    {"models/weapons/mauser_c96_camo_woodland.tik", "Mauser C96 (Woodland)", {15.4048f, -0.8000f, -3.8262f}, {4.5035f, -0.8461f, -4.3355f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 0.000f}, // mauser_c96
+    {"models/weapons/mauser_c96_chrome.tik", "Mauser C96 (Chrome)", {15.4048f, -0.8000f, -3.8262f}, {4.5035f, -0.8461f, -4.3355f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 0.000f}, // mauser_c96
+    {"models/weapons/mauser_c96_gold.tik", "Mauser C96 (Gold)", {15.4048f, -0.8000f, -3.8262f}, {4.5035f, -0.8461f, -4.3355f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 0.000f}, // mauser_c96
     {"models/weapons/mg42portable.tik", "MG42", {36.5299f, -1.5014f, -6.2511f}, {14.0737f, -1.6420f, -6.6459f}, 0.003000f, {0.000f, 0.000f, -1.000f}, 0.000f}, // mg42
     {"models/weapons/moschetto.tik", "Beretta M38", {29.9974f, 0.5765f, -4.6223f}, {7.2603f, -0.0116f, -4.7814f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 0.000f}, // beretta_m38
     {"models/weapons/mosin_nagant_rifle.tik", "Mosin Nagant Rifle", {45.5440f, -0.8946f, -4.5793f}, {14.6681f, -1.0825f, -4.8724f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 0.000f}, // mosin_nagant_rifle
@@ -318,6 +319,7 @@ static const adsSight_t s_adsSights[] = {
     {"models/weapons/silencedpistol_camo_woodland.tik", "Hi-Standard Silenced (Woodland)", {23.1712f, -0.4575f, -3.2698f}, {0.5516f, -0.4621f, -3.3157f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 0.000f}, // hi_standard_silenced
     {"models/weapons/silencedpistol_chrome.tik", "Hi-Standard Silenced (Chrome)", {23.1712f, -0.4575f, -3.2698f}, {0.5516f, -0.4621f, -3.3157f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 0.000f}, // hi_standard_silenced
     {"models/weapons/silencedpistol_gold.tik", "Hi-Standard Silenced (Gold)", {23.1712f, -0.4575f, -3.2698f}, {0.5516f, -0.4621f, -3.3157f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 0.000f}, // hi_standard_silenced
+    {"models/weapons/springfield_unscoped.tik", "Springfield M1903", {42.5482f, -0.7081f, -5.4116f}, {13.6566f, -0.9664f, -5.0911f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 0.000f}, // springfield_unscoped
     {"models/weapons/sten.tik", "Sten Mark II", {21.7245f, -0.6818f, -4.7990f}, {-2.0997f, -0.6892f, -5.6021f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 0.000f}, // sten_mark_ii
     {"models/weapons/sten_bloody.tik", "Sten Mark II (Bloody)", {21.7245f, -0.6818f, -4.7990f}, {-2.0997f, -0.6892f, -5.6021f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 0.000f}, // sten_mark_ii
     {"models/weapons/sten_blued.tik", "Sten Mark II (Blued)", {21.7245f, -0.6818f, -4.7990f}, {-2.0997f, -0.6892f, -5.6021f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 0.000f}, // sten_mark_ii
@@ -377,6 +379,14 @@ static const adsSight_t s_adsSights[] = {
     {"models/weapons/uk_w_piat_camo_woodland.tik", "PIAT (Woodland)", {6.1039f, -2.0896f, -7.2842f}, {-9.2023f, -2.2167f, -7.4166f}, 0.003000f, {0.000f, 0.000f, -1.000f}, 0.000f}, // piat
     {"models/weapons/uk_w_piat_chrome.tik", "PIAT (Chrome)", {6.1039f, -2.0896f, -7.2842f}, {-9.2023f, -2.2167f, -7.4166f}, 0.003000f, {0.000f, 0.000f, -1.000f}, 0.000f}, // piat
     {"models/weapons/uk_w_piat_gold.tik", "PIAT (Gold)", {6.1039f, -2.0896f, -7.2842f}, {-9.2023f, -2.2167f, -7.4166f}, 0.003000f, {0.000f, 0.000f, -1.000f}, 0.000f}, // piat
+    {"models/weapons/uk_w_vickers.tik", "Vickers-Berthier", {40.1472f, 0.0050f, -5.8223f}, {3.0000f, -1.6000f, -5.8225f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 0.000f}, // vickers_berthier
+    {"models/weapons/uk_w_vickers_bloody.tik", "Vickers-Berthier (Bloody)", {40.1472f, 0.0050f, -5.8223f}, {3.0000f, -1.6000f, -5.8225f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 0.000f}, // vickers_berthier
+    {"models/weapons/uk_w_vickers_blued.tik", "Vickers-Berthier (Blued)", {40.1472f, 0.0050f, -5.8223f}, {3.0000f, -1.6000f, -5.8225f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 0.000f}, // vickers_berthier
+    {"models/weapons/uk_w_vickers_camo_desert.tik", "Vickers-Berthier (Desert)", {40.1472f, 0.0050f, -5.8223f}, {3.0000f, -1.6000f, -5.8225f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 0.000f}, // vickers_berthier
+    {"models/weapons/uk_w_vickers_camo_winter.tik", "Vickers-Berthier (Winter)", {40.1472f, 0.0050f, -5.8223f}, {3.0000f, -1.6000f, -5.8225f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 0.000f}, // vickers_berthier
+    {"models/weapons/uk_w_vickers_camo_woodland.tik", "Vickers-Berthier (Woodland)", {40.1472f, 0.0050f, -5.8223f}, {3.0000f, -1.6000f, -5.8225f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 0.000f}, // vickers_berthier
+    {"models/weapons/uk_w_vickers_chrome.tik", "Vickers-Berthier (Chrome)", {40.1472f, 0.0050f, -5.8223f}, {3.0000f, -1.6000f, -5.8225f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 0.000f}, // vickers_berthier
+    {"models/weapons/uk_w_vickers_gold.tik", "Vickers-Berthier (Gold)", {40.1472f, 0.0050f, -5.8223f}, {3.0000f, -1.6000f, -5.8225f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 0.000f}, // vickers_berthier
     {"models/weapons/webley_revolver.tik", "Webley Revolver", {14.8364f, -0.7711f, -4.7374f}, {4.3864f, -0.7711f, -4.4848f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 0.000f}, // webley_revolver
     {"models/weapons/webley_revolver_bloody.tik", "Webley Revolver (Bloody)", {14.8364f, -0.7711f, -4.7374f}, {4.3864f, -0.7711f, -4.4848f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 0.000f}, // webley_revolver
     {"models/weapons/webley_revolver_blued.tik", "Webley Revolver (Blued)", {14.8364f, -0.7711f, -4.7374f}, {4.3864f, -0.7711f, -4.4848f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 0.000f}, // webley_revolver
