@@ -830,6 +830,12 @@ qboolean SrvFilter_CheckArgs(const srvFilterEnv_t *env, int argc, char **argv, i
                 if (!Q_stricmpn(a, "coop_report", 11) || !Q_stricmpn(a, "coop_sendreport", 15)) {
                     return SrvFilter_DropReason(env, "report", argv[ri]);
                 }
+                // HZM coop [dedicated_launch 2026-10-04] nor the Dedicated launcher (cl_dedicated.cpp): its commands
+                // coop_dedStart / coop_dedStop and its cvars coop_dedKeep / coop_dedLog / coop_dedTimeout / coop_dedStatus.
+                // A server must never start a process on this machine, keep one alive, or fake its status line.
+                if (!Q_stricmpn(a, "coop_ded", 8)) {
+                    return SrvFilter_DropReason(env, "dedicated", argv[ri]);
+                }
             }
         }
     }

@@ -33,6 +33,12 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 // HZM coop [bugreport_parity bug-3278] client/cl_bugreport.cpp
 void CL_BugReportInit( void );
 void CL_BugReportFrame( int msec );
+// HZM coop [dedicated_launch 2026-10-04] the coop start screen's Dedicated option (cl_dedicated.cpp)
+void CL_DedicatedInit( void );
+void CL_DedicatedFrame( void );
+void CL_DedicatedInfoResponse( netadr_t from );
+void CL_DedicatedUserDisconnect( netadr_t was );
+void CL_DedicatedShutdown( void );
 void CL_SendReport_f( void );
 #include "../sys/sys_update_checker.h"
 #include "../uilib/uimessage.h"
@@ -1387,10 +1393,12 @@ CL_Disconnect_f
 */
 void CL_Disconnect_f( void ) {
 	qboolean bConsoleState;
+	netadr_t was; // HZM coop [dedicated_launch]
 
 	if ( clc.state == CA_DISCONNECTED ) {
 		return;
 	}
+	was = clc.serverAddress;
 
 	bConsoleState = UI_ConsoleIsOpen();
 
@@ -1413,6 +1421,9 @@ void CL_Disconnect_f( void ) {
 	} else {
 		UI_CloseConsole();
 	}
+
+	// HZM coop [dedicated_launch] leaving the dedicated server this game started stops it (unless Keep Running)
+	CL_DedicatedUserDisconnect( was );
 }
 
 
@@ -2517,6 +2528,7 @@ void CL_ConnectionlessPacket( netadr_t from, msg_t *msg ) {
 
 	// server responding to an info broadcast
 	if ( !Q_stricmp(c, "infoResponse") ) {
+		CL_DedicatedInfoResponse( from ); // HZM coop [dedicated_launch] the server we started is up
 		CL_ServerInfoPacket( from, msg );
 		return;
 	}
@@ -2827,6 +2839,7 @@ void CL_Frame ( int msec ) {
 	}
 
 	CL_BugReportFrame( msec ); // HZM coop [bugreport_parity bug-3278] in-map fps, the report screenshot, the upload status
+	CL_DedicatedFrame(); // HZM coop [dedicated_launch] watch / poll / stop the dedicated server this game started
 
 #ifdef USE_CURL
 	if(clc.downloadCURLM) {
@@ -4191,6 +4204,7 @@ void CL_Init( void ) {
 	Cvar_Get("coop_reportResult", "", 0);
 	Cmd_AddCommand("coop_sendreport", CL_SendReport_f);
 	CL_BugReportInit(); // HZM coop [bugreport_parity bug-3278] the report commands, cvars and preview
+	CL_DedicatedInit(); // HZM coop [dedicated_launch] coop_dedStart / coop_dedStop
 	Cmd_AddCommand("coop_discord", CL_CoopDiscord_f); // HZM coop - main-menu Discord button
 
 	// HZM coop [user 08-06] bug-1503 - disconnected-capable Service Record challenge pinning.
@@ -4462,6 +4476,10 @@ void CL_Shutdown(const char* finalmsg, qboolean disconnect, qboolean quit) {
 
 	if(disconnect)
 		CL_Disconnect();
+
+	if ( quit ) {
+		CL_DedicatedShutdown(); // HZM coop [dedicated_launch] stop (or, Keep Running, leave) the server this game started
+	}
 
 #if defined(NO_MODERN_DMA) && NO_MODERN_DMA
 	S_Shutdown();
