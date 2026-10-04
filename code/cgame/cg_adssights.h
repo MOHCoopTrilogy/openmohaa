@@ -13,7 +13,6 @@ typedef struct {
 } adsSight_t;
 
 static const adsSight_t s_adsSights[] = {
-    {"models/weapons/30calportable.tik", "M1919 30cal", {45.0000f, -0.0000f, -1.4900f}, {0.8500f, -0.0000f, -1.4900f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 0.000f}, // m1919
     {"models/weapons/arisaka.tik", "Arisaka Type 99", {44.0557f, -0.9035f, -4.6376f}, {3.5564f, -0.9035f, -4.3424f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 0.000f}, // arisaka_type_99
     {"models/weapons/bar.tik", "BAR", {35.6267f, -0.7789f, -4.2493f}, {-0.3181f, -0.7833f, -4.3841f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 0.000f}, // bar
     {"models/weapons/bar_bar1918.tik", "BAR (M1918 WWI)", {35.6064f, -1.2984f, -5.4866f}, {-0.7600f, -1.2984f, -5.1210f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 0.000f}, // bar_wwi
