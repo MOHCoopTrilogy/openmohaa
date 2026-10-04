@@ -137,8 +137,12 @@ void R_HZM_GroundVarWorldBegin( const char *baseName )
 		return;
 	}
 
+	buf.v = NULL;
 	len = ri.FS_ReadFile( HZM_GV_LIST, &buf.v );
 	if ( len <= 0 || !buf.c ) {
+		if ( buf.v ) {
+			ri.FS_FreeFile( buf.v );    // an EMPTY file still comes back as an allocated buffer
+		}
 		ri.Printf( PRINT_DEVELOPER, "^~^~^ HZMGV no %s\n", HZM_GV_LIST );
 		return;
 	}
@@ -159,7 +163,9 @@ void R_HZM_GroundVarWorldBegin( const char *baseName )
 			continue;
 		}
 		if ( !inMap ) {
-			SkipRestOfLine( &p );
+			if ( p ) {        // COM_ParseExt NULLs p at end of file (a truncated last line)
+				SkipRestOfLine( &p );
+			}
 			continue;
 		}
 		if ( s_gvCount < HZM_GV_MAX ) {
@@ -171,12 +177,16 @@ void R_HZM_GroundVarWorldBegin( const char *baseName )
 			e->cls = atoi( tok );
 			tok = COM_ParseExt( &p, qfalse );
 			e->period = (float)atof( tok );
-			SkipRestOfLine( &p );
+			if ( p ) {        // COM_ParseExt NULLs p at end of file (a truncated last line)
+				SkipRestOfLine( &p );
+			}
 			if ( e->cls >= 1 && e->cls <= 2 && e->period >= 8.0f && !R_HZM_GroundVarOmahaName( e->name ) ) {
 				s_gvCount++;
 			}
 		} else {
-			SkipRestOfLine( &p );
+			if ( p ) {        // COM_ParseExt NULLs p at end of file (a truncated last line)
+				SkipRestOfLine( &p );
+			}
 		}
 	}
 	ri.FS_FreeFile( buf.v );
