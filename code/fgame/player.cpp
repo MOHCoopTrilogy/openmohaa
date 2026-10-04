@@ -7067,7 +7067,22 @@ void Player::EvaluateState(State *forceTorso, State *forceLegs)
 
     if (flags & FL_IMMOBILE) {
         // Don't evaluate state when immobile
-        return;
+        //
+        // HZM coop [bugsweep 2026-10-04] bug-3324 - EXCEPT a dead player. `physics_off` (coop_mod/replace.scr
+        // physics_off: the t2l1 intro, the e2l1 glider ride, every scripted ride/intro lock) sets FL_IMMOBILE,
+        // and this early return then froze the torso statemap on its STAND state for the whole death. KILLED was
+        // never entered, so its entrycommands `exec coop_mod/events.scr "playerdeath"` never ran: no manageDead,
+        // no coop_respawning (exact-ammo restore), no LMS life counted, no death callbacks - and the corpse stood
+        // upright. Applies to real players and bots alike (measured on a bot only because the headless runs
+        // killed it inside the intro lock). A dead body has no movement to protect, and the KILLED chain only
+        // plays its death anims. coop_immobileDeathState 0 restores the old freeze (A/B probe only).
+        static cvar_t *pImmDeath = NULL;
+        if (!pImmDeath) {
+            pImmDeath = gi.Cvar_Get("coop_immobileDeathState", "1", 0);
+        }
+        if (!IsDead() || !pImmDeath->integer) {
+            return;
+        }
     }
 
     if (getMoveType() == MOVETYPE_PORTABLE_TURRET) {
@@ -12410,7 +12425,11 @@ void Player::EventGetCurrentDMWeaponType(Event *ev)
 
 void Player::PhysicsOff(Event *ev)
 {
-    if (g_target_game > TG_MOH || g_gametype->integer != GT_SINGLE_PLAYER) {
+    // HZM coop [bugsweep 2026-10-04] not on a corpse: coop_mod/player.scr's manage loop re-issues physics_off every
+    // tick while level.coop_physicsOff, and since a dead immobile player now evaluates its death states
+    // (EvaluateState above), forcing STAND here re-entered KILLED on every call - 152 playerdeath events for one
+    // death in the first test. A dead body keeps the death state it is in.
+    if ((g_target_game > TG_MOH || g_gametype->integer != GT_SINGLE_PLAYER) && !IsDead()) {
         // Added in 2.0
         //  Reset the state to STAND before disabling physics
         EvaluateState(statemap_Torso->FindState("STAND"), statemap_Legs->FindState("STAND"));

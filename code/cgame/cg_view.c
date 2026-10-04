@@ -2330,6 +2330,110 @@ static void CG_AdsRigSolve(refEntity_t *pREnt)
 
 static const adsGunTune_t s_adsZeroTuneV = {"", 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}; // HZM coop [ironsights 2026-09-28]
 
+/*
+HZM coop [bugsweep 2026-10-04] bug-3317 PRONE EYE EASE.
+The first-person eye height is a ONE-POLE ease (12.5/s) of origin.z + ps.viewheight, and viewheight is a
+step: 82 stand / 48 crouch / 16 prone. A one-pole ease has no ease-IN - its velocity jumps to its maximum on
+the very frame the step lands - so the eye left on 20% of the gap in that frame: ~6 u on crouch->prone (the
+"camera drops ~6u in ONE frame", while the gun waits on the rig), and the 32 u lag clamp below turned
+prone->stand (a 66 u gap) into a 30 u SNAP in one frame (measured wv4vis: +29.7 u). Crouch<->stand stays as
+shipped (that is the reference feel); only a step that enters or leaves PRONE is shaped: the viewheight term
+follows a critically damped spring (cg_stanceEaseRate, rad/s), which starts at zero velocity and lands without
+overshoot. The one-pole ease and the origin term (stairs, falling) are untouched, so the spring can never make
+the eye lag a moving body. cg_stanceEase 0 = shipped behaviour. cg_eyeDebug 1 = one ^~^~^ EYEH line per frame.
+*/
+static float s_seH = 0.0f, s_seV = 0.0f;
+static int   s_seLast = 0, s_seActive = 0, s_seProne = -1;
+
+static float CG_StanceEyeHeight(void)
+{
+    static cvar_t *pOn = NULL, *pRate = NULL;
+    float          tgt    = (float)cg.predicted_player_state.viewheight;
+    int            bProne = (cg.predicted_player_state.pm_flags & PMF_VIEW_PRONE) ? 1 : 0;
+    float          dt, w, h, a;
+    int            k;
+
+    if (!pOn) {
+        pOn   = cgi.Cvar_Get("cg_stanceEase", "1", CVAR_ARCHIVE);
+        pRate = cgi.Cvar_Get("cg_stanceEaseRate", "28", CVAR_ARCHIVE);
+    }
+    // re-seed after any gap (third person, death cam, spectate, cutscene, map load) or when switched off:
+    // a stale spring must never move the eye on its own
+    if (!pOn->integer || s_seLast == 0 || cg.time < s_seLast || cg.time - s_seLast > 250) {
+        s_seH      = tgt;
+        s_seV      = 0.0f;
+        s_seActive = 0;
+        s_seProne  = bProne;
+        s_seLast   = cg.time;
+        return tgt;
+    }
+    s_seLast = cg.time;
+    if (bProne != s_seProne) {
+        s_seProne  = bProne;
+        s_seActive = 1; // entering or leaving prone: ease from wherever the eye term is now
+    }
+    if (!s_seActive) {
+        s_seH = tgt;
+        s_seV = 0.0f;
+        return tgt;
+    }
+
+    dt = cg.frametime / 1000.0f;
+    if (dt < 0.0f) {
+        dt = 0.0f;
+    } else if (dt > 0.05f) {
+        dt = 0.05f; // a hitch must not overshoot (same clamp as the other integrators in this file)
+    }
+    w = pRate->value;
+    if (w < 4.0f) {
+        w = 4.0f;
+    } else if (w > 80.0f) {
+        w = 80.0f;
+    }
+    h = dt * 0.25f;
+    for (k = 0; k < 4; k++) {
+        a = w * w * (tgt - s_seH) - 2.0f * w * s_seV;
+        s_seV += a * h;
+        s_seH += s_seV * h;
+    }
+    if (fabs(tgt - s_seH) < 0.05f && fabs(s_seV) < 2.0f) {
+        s_seH      = tgt;
+        s_seV      = 0.0f;
+        s_seActive = 0;
+    }
+    return s_seH;
+}
+
+static void CG_StanceEyeProbe(float fTarg, float fPrev)
+{
+    static cvar_t *pDbg = NULL;
+
+    if (!pDbg) {
+        pDbg = cgi.Cvar_Get("cg_eyeDebug", "0", 0);
+    }
+    if (!pDbg->integer) {
+        return;
+    }
+    cgi.Printf(
+        "^~^~^ EYEH t=%d ft=%d pmf=0x%x vh=%d svh=%d oz=%.2f eh=%.2f act=%d targ=%.2f prev=%.2f cur=%.2f walk=%d "
+        "vel=%.1f bob=%.2f\n",
+        cg.time,
+        cg.frametime,
+        cg.predicted_player_state.pm_flags,
+        cg.predicted_player_state.viewheight,
+        cg.snap ? cg.snap->ps.viewheight : -1,
+        cg.predicted_player_state.origin[2],
+        s_seH,
+        s_seActive,
+        fTarg,
+        fPrev,
+        cg.fCurrentViewHeight,
+        cg.predicted_player_state.walking,
+        VectorLength(cg.predicted_player_state.velocity),
+        cg.fCurrentViewBobAmp
+    );
+}
+
 void CG_OffsetFirstPersonView(refEntity_t *pREnt, qboolean bUseWorldPosition)
 {
     // HZM coop [user 2026-08-02] bug-1291 - eased 0..1 low-health limp envelope, driven by the
@@ -2432,7 +2536,7 @@ void CG_OffsetFirstPersonView(refEntity_t *pREnt, qboolean bUseWorldPosition)
     if (bUseWorldPosition) {
         iMask = MASK_VIEWSOLID;
     } else {
-        float  fTargHeight;
+        float  fTargHeight, fPrevH;
         float  fHeightDelta, fHeightChange;
         float  fPhase, fVel;
         vec3_t vDelta;
@@ -2441,8 +2545,9 @@ void CG_OffsetFirstPersonView(refEntity_t *pREnt, qboolean bUseWorldPosition)
 
         origin[0]    = cg.predicted_player_state.origin[0];
         origin[1]    = cg.predicted_player_state.origin[1];
-        fTargHeight  = cg.predicted_player_state.origin[2] + cg.predicted_player_state.viewheight;
+        fTargHeight  = cg.predicted_player_state.origin[2] + CG_StanceEyeHeight();
         fHeightDelta = fTargHeight - cg.fCurrentViewHeight;
+        fPrevH       = cg.fCurrentViewHeight;
 
         if (fabs(fHeightDelta) < 0.1 || !cg.fCurrentViewHeight) {
             cg.fCurrentViewHeight = fTargHeight;
@@ -2466,6 +2571,7 @@ void CG_OffsetFirstPersonView(refEntity_t *pREnt, qboolean bUseWorldPosition)
 
             cg.fCurrentViewHeight += fHeightChange;
         }
+        CG_StanceEyeProbe(fTargHeight, fPrevH);
 
         origin[2]      = cg.fCurrentViewHeight;
         vPivotPoint[0] = cg.refdefViewAngles[0];
