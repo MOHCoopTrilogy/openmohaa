@@ -44,6 +44,9 @@ UIBindButton::UIBindButton()
     , m_bindindex(-1)
     , m_alternate(qfalse)
     , m_mat(NULL)
+    , m_emptykey("textures/bind/emptykey")
+    , m_keyartonly(false)
+    , m_textfg(false)
 {}
 
 UIBindButton::UIBindButton(str entersound, str activesound)
@@ -51,6 +54,9 @@ UIBindButton::UIBindButton(str entersound, str activesound)
     , m_bindindex(-1)
     , m_alternate(qfalse)
     , m_mat(NULL)
+    , m_emptykey("textures/bind/emptykey")
+    , m_keyartonly(false)
+    , m_textfg(false)
 {
     m_entersound  = entersound;
     m_activesound = activesound;
@@ -174,18 +180,18 @@ void UIBindButton::DrawUnpressed(void)
 
     str s = uWinMan.GetKeyStringForCommand(m_bindcommand, m_bindindex, m_alternate, NULL, NULL);
 
-    m_font->setColor(m_background_color);
+    m_font->setColor(m_textfg ? m_foreground_color : m_background_color); // [HZM E4]
 
     if (str::cmp(s, m_last_keyname)) {
-        m_mat = uWinMan.RegisterShader("textures/bind/" + s);
+        m_mat = m_keyartonly ? NULL : uWinMan.RegisterShader("textures/bind/" + s);
         if (m_mat) {
             if (m_mat->GetMaterial()) {
                 m_material = m_mat;
             } else {
-                m_material = uWinMan.RegisterShader("textures/bind/emptykey");
+                m_material = uWinMan.RegisterShader(m_emptykey);
             }
         } else {
-            m_material = uWinMan.RegisterShader("textures/bind/emptykey");
+            m_material = uWinMan.RegisterShader(m_emptykey);
         }
 
         m_last_keyname = s;

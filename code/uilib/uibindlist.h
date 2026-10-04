@@ -33,6 +33,11 @@ class UIFakkBindList : public UIWidget
     int                   m_activerow;
     int                   m_activeitem;
     bind_t               *m_bind;
+    // [HZM E4] the look keywords, held until Filename() loads the bind file and builds the cells
+    str                   m_hzmLabelShader;
+    str                   m_hzmKeyShader;
+    int                   m_hzmTextFg;
+    int                   m_hzmHeaderFix;
 
 public:
     CLASS_PROTOTYPE(UIFakkBindList);
@@ -47,6 +52,10 @@ protected:
     void FrameInitialized(void) override;
     void Filename(Event *ev);
     void StopBind(Event *ev);
+    void LabelShaderEv(Event *ev); // [HZM E4]
+    void KeyShaderEv(Event *ev);
+    void TextFgEv(Event *ev);
+    void HeaderFixEv(Event *ev);
 
 public:
     UIFakkBindList();
@@ -65,6 +74,9 @@ public:
 class UIFakkBindListLabel : public UILabel
 {
     UIFakkBindList *m_list;
+
+public:
+    bool m_textfg; // [HZM E4] print the title in the foreground colour
 
 public:
     CLASS_PROTOTYPE(UIFakkBindListLabel);

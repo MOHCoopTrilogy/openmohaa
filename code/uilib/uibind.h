@@ -34,6 +34,11 @@ class UIBindButton : public UIButton
     UIReggedMaterial *m_mat;
 
 public:
+    str  m_emptykey;     // [HZM E4] the key-cell art
+    bool m_keyartonly;   // [HZM E4] never use the per-key textures/bind/<KEY> art
+    bool m_textfg;       // [HZM E4] print the key in the foreground colour
+
+public:
     CLASS_PROTOTYPE(UIBindButton);
 
 public:

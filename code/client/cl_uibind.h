@@ -76,6 +76,12 @@ public:
     UIReggedMaterial        *headermats[3];
     UIReggedMaterial        *fillmaterial;
     Container<bind_item_t *> binds;
+    // [HZM E4] optional per-file look (a War Room twin loads its own BIND file); defaults = retail
+    str                      labelshader;
+    str                      keyshader;
+    bool                     keyshaderset;
+    bool                     textfg;
+    bool                     headerfix;
 
 public:
     bind_t();

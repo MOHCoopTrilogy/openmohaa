@@ -349,7 +349,7 @@ void UISlider::LayoutSliderThumbShader(Event *ev)
         m_thumbmaterial_pressed = uWinMan.RegisterShader(pressedShader);
     }
 
-    m_sliderwidth = uii.Rend_GetShaderWidth(m_thumbmaterial->GetMaterial());
+    m_sliderwidth = uii.Rend_GetShaderWidth(m_thumbmaterial->GetMaterial()) / UI_HDTexelScale(shader); // [HZM E3]
     m_initialized = qfalse;
 }
 
@@ -365,7 +365,7 @@ void UISlider::LayoutSliderLeftShader(Event *ev)
         m_prev_arrow_material_pressed = uWinMan.RegisterShader(pressedShader);
     }
 
-    m_arrow_width = uii.Rend_GetShaderWidth(m_prev_arrow_material->GetMaterial());
+    m_arrow_width = (int)(uii.Rend_GetShaderWidth(m_prev_arrow_material->GetMaterial()) / UI_HDTexelScale(shader)); // [HZM E3]
     m_initialized = qfalse;
 }
 
@@ -381,7 +381,7 @@ void UISlider::LayoutSliderRightShader(Event *ev)
         m_next_arrow_material_pressed = uWinMan.RegisterShader(pressedShader);
     }
 
-    m_arrow_width = uii.Rend_GetShaderWidth(m_next_arrow_material->GetMaterial());
+    m_arrow_width = (int)(uii.Rend_GetShaderWidth(m_next_arrow_material->GetMaterial()) / UI_HDTexelScale(shader)); // [HZM E3]
     m_initialized = qfalse;
 }
 

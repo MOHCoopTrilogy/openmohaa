@@ -41,10 +41,20 @@ Event EV_UIFakkBindList_StopBind
     "stops trying to bind a key to a command"
 );
 
+// [HZM E4] the War Room look of a bind list, as .urc widget keywords (an exe without them ignores them)
+Event EV_UIFakkBindList_LabelShader("bindlabelshader", EV_DEFAULT, "s", "material", "[HZM E4] action-cell art");
+Event EV_UIFakkBindList_KeyShader("bindkeyshader", EV_DEFAULT, "s", "material", "[HZM E4] key-cell art, no per-key art");
+Event EV_UIFakkBindList_TextFg("bindtextfg", EV_DEFAULT, "i", "on", "[HZM E4] cell text in the foreground colour");
+Event EV_UIFakkBindList_HeaderFix("bindheaderfix", EV_DEFAULT, "i", "on", "[HZM E4] header 2 over its own column");
+
 CLASS_DECLARATION(UIWidget, UIFakkBindList, NULL) {
-    {&EV_UIFakkBindList_Filename, &UIFakkBindList::Filename},
-    {&EV_UIFakkBindList_StopBind, &UIFakkBindList::StopBind},
-    {NULL,                        NULL                     }
+    {&EV_UIFakkBindList_Filename,    &UIFakkBindList::Filename     },
+    {&EV_UIFakkBindList_StopBind,    &UIFakkBindList::StopBind     },
+    {&EV_UIFakkBindList_LabelShader, &UIFakkBindList::LabelShaderEv},
+    {&EV_UIFakkBindList_KeyShader,   &UIFakkBindList::KeyShaderEv  },
+    {&EV_UIFakkBindList_TextFg,      &UIFakkBindList::TextFgEv     },
+    {&EV_UIFakkBindList_HeaderFix,   &UIFakkBindList::HeaderFixEv  },
+    {NULL,                           NULL                          }
 };
 
 UIFakkBindList::UIFakkBindList()
@@ -57,6 +67,29 @@ UIFakkBindList::UIFakkBindList()
     m_activeitem   = 2;
     m_presskey_wid = NULL;
     m_presskey_mat = uWinMan.RegisterShader("textures/menu/presskey");
+    m_hzmTextFg    = -1; // [HZM E4] unset = retail
+    m_hzmHeaderFix = -1;
+}
+
+// [HZM E4] widget keywords; applied to the bind data in Filename(), before the cells are built
+void UIFakkBindList::LabelShaderEv(Event *ev)
+{
+    m_hzmLabelShader = ev->GetString(1);
+}
+
+void UIFakkBindList::KeyShaderEv(Event *ev)
+{
+    m_hzmKeyShader = ev->GetString(1);
+}
+
+void UIFakkBindList::TextFgEv(Event *ev)
+{
+    m_hzmTextFg = ev->GetInteger(1) != 0;
+}
+
+void UIFakkBindList::HeaderFixEv(Event *ev)
+{
+    m_hzmHeaderFix = ev->GetInteger(1) != 0;
 }
 
 UIFakkBindList::~UIFakkBindList()
@@ -71,6 +104,20 @@ void UIFakkBindList::Filename(Event *ev)
 {
     m_bind = new bind_t();
     CL_LoadBind(ev->GetString(1), m_bind);
+    // [HZM E4] the widget's look keywords (set before `filename` in the .urc)
+    if (m_hzmLabelShader.length()) {
+        m_bind->labelshader = m_hzmLabelShader;
+    }
+    if (m_hzmKeyShader.length()) {
+        m_bind->keyshader    = m_hzmKeyShader;
+        m_bind->keyshaderset = true;
+    }
+    if (m_hzmTextFg >= 0) {
+        m_bind->textfg = m_hzmTextFg != 0;
+    }
+    if (m_hzmHeaderFix >= 0) {
+        m_bind->headerfix = m_hzmHeaderFix != 0;
+    }
 
     m_scroll->setPageHeight((getSize().height - m_bind->commandheight) / m_bind->commandheight);
     m_scroll->setNumItems(m_bind->binds.NumObjects());
@@ -116,8 +163,9 @@ void UIFakkBindList::CreateBindWidgets(void)
         this, 0, 0, m_bind->commandwidth * m_vVirtualScale[0], m_bind->commandheight * m_vVirtualScale[1], 1
     );
     listlabel->setName(m_bind->headers[0]);
-    listlabel->setMaterial(uWinMan.RegisterShader("textures/bind/emptylabel"));
+    listlabel->setMaterial(uWinMan.RegisterShader(m_bind->labelshader)); // [HZM E4]
     listlabel->setTitle(m_bind->headers[0]);
+    listlabel->m_textfg = m_bind->textfg;
     listlabel->setForegroundColor(m_bind->titlefgcolor);
     listlabel->setBackgroundColor(m_bind->titlebgcolor, true);
 
@@ -132,15 +180,17 @@ void UIFakkBindList::CreateBindWidgets(void)
 
     listlabel->InitFrame(
         this,
-        m_bind->primarykeywidth * m_vVirtualScale[0],
+        // [HZM E4] bind_headerfix: over its own column (retail: x = primarykeywidth, i.e. inside column 1)
+        (m_bind->headerfix ? m_bind->commandwidth + m_bind->fillwidth : m_bind->primarykeywidth) * m_vVirtualScale[0],
         0,
         m_bind->primarykeywidth * m_vVirtualScale[0],
         m_bind->commandheight * m_vVirtualScale[1],
         1
     );
     listlabel->setName(m_bind->headers[1]);
-    listlabel->setMaterial(uWinMan.RegisterShader("textures/bind/emptykey"));
+    listlabel->setMaterial(uWinMan.RegisterShader(m_bind->keyshader)); // [HZM E4]
     listlabel->setTitle(m_bind->headers[1]);
+    listlabel->m_textfg = m_bind->textfg;
     listlabel->setForegroundColor(m_bind->titlefgcolor);
     listlabel->setBackgroundColor(m_bind->titlebgcolor, true);
 
@@ -162,8 +212,9 @@ void UIFakkBindList::CreateBindWidgets(void)
         1
     );
     listlabel->setName(m_bind->headers[2]);
-    listlabel->setMaterial(uWinMan.RegisterShader("textures/bind/emptykey"));
+    listlabel->setMaterial(uWinMan.RegisterShader(m_bind->keyshader)); // [HZM E4]
     listlabel->setTitle(m_bind->headers[2]);
+    listlabel->m_textfg = m_bind->textfg;
     listlabel->setForegroundColor(m_bind->titlefgcolor);
     listlabel->setBackgroundColor(m_bind->titlebgcolor, true);
 
@@ -258,8 +309,9 @@ void UIFakkBindList::CreateBindWidgets(void)
         listlabel->setName(bi->name);
         listlabel->setForegroundColor(m_bind->inactivefgcolor);
         listlabel->setBackgroundColor(m_bind->inactivebgcolor, true);
-        listlabel->setMaterial(uWinMan.RegisterShader("textures/bind/emptylabel"));
+        listlabel->setMaterial(uWinMan.RegisterShader(m_bind->labelshader)); // [HZM E4]
         listlabel->setTitle(bi->name);
+        listlabel->m_textfg = m_bind->textfg;
         m_widgetlist.AddObject(listlabel);
 
         //
@@ -281,6 +333,9 @@ void UIFakkBindList::CreateBindWidgets(void)
         );
         button->setForegroundColor(m_bind->inactivefgcolor);
         button->setBackgroundColor(m_bind->inactivebgcolor, true);
+        button->m_emptykey   = m_bind->keyshader; // [HZM E4]
+        button->m_keyartonly = m_bind->keyshaderset;
+        button->m_textfg     = m_bind->textfg;
         m_widgetlist.AddObject(button);
 
         //
@@ -303,6 +358,9 @@ void UIFakkBindList::CreateBindWidgets(void)
         );
         button->setForegroundColor(m_bind->inactivefgcolor);
         button->setBackgroundColor(m_bind->inactivebgcolor, true);
+        button->m_emptykey   = m_bind->keyshader; // [HZM E4]
+        button->m_keyartonly = m_bind->keyshaderset;
+        button->m_textfg     = m_bind->textfg;
         m_widgetlist.AddObject(button);
     }
 
@@ -791,7 +849,8 @@ UIFakkBindListLabel::UIFakkBindListLabel()
 
 UIFakkBindListLabel::UIFakkBindListLabel(UIFakkBindList *list)
 {
-    m_list = list;
+    m_list   = list;
+    m_textfg = false;
 }
 
 void UIFakkBindListLabel::Pressed(Event *ev)
@@ -807,7 +866,7 @@ void UIFakkBindListLabel::Draw(void)
         return;
     }
 
-    m_font->setColor(m_background_color);
+    m_font->setColor(m_textfg ? m_foreground_color : m_background_color); // [HZM E4]
 
     UIRect2D frame = getClientFrame();
     m_font->PrintJustified(

@@ -34,6 +34,11 @@ bind_t::bind_t()
     alternatekeyheight = 20;
     fillwidth          = 16;
     fillmaterial       = NULL;
+    labelshader        = "textures/bind/emptylabel"; // [HZM E4]
+    keyshader          = "textures/bind/emptykey";
+    keyshaderset       = false;
+    textfg             = false;
+    headerfix          = false;
 
     for (i = 0; i < ARRAY_LEN(headermats); i++) {
         headermats[i] = NULL;
