@@ -228,6 +228,74 @@ qboolean CG_AdsCleanRig(vec3_t org, vec3_t axis[3])
     AxisCopy(s_mAdsCleanAxis, axis);
     return qtrue;
 }
+// HZM coop [pistolkick 2026-09-29] PISTOL ADS MUZZLE FLIP - state and per-gun strength.
+// Aimed fire holds the static `charge` pose for EVERY gun (player_Torso.st ATTACK_*_PRIMARY_AIM, bug-074: the
+// viewmodelanim token set is fixed, so there is no aimed-fire clip), which leaves the recoil layer in
+// CG_OffsetFirstPersonView as the only visible ADS kick. That layer was written for shouldered long guns: on a
+// pistol its grip-pivot turn barely moves sights that sit right above the grip, it keeps 35% under ADS, and it
+// decays in ~3 frames - so aimed handgun fire read as no kick at all while retail's own HIP clip (fire_colt.skc)
+// flips the gun 18.7 deg. The flip channel below gives aimed pistol fire its own muzzle-up kick.
+// Relative strength: free-recoil energy of the cartridge in that gun, with a bump for a high bore axis and a cut for
+// a muzzle-heavy suppressor. Keyed on the DISPLAY name with any " (Finish)" suffix stripped (TRAPS: weapon variant
+// suffixes); an unlisted pistol gets cg_adsPistolKickOther.
+static float s_pkPos  = 0.0f; // flip, degrees (critically damped spring; >= 0 by construction)
+static float s_pkVel  = 0.0f; // its rate, degrees/s
+static int   s_pkTime = 0;    // cg.time of the last integration step
+static float CG_PistolAdsKickScale(const char *wpn)
+{
+    static const struct {
+        const char *name;
+        float       scale;
+    } kTab[] = {
+        {"Colt 45",              1.00f}, // .45 ACP, 1.1 kg: the reference
+        {"Silenced Colt .45",    0.80f},
+        {"Webley Revolver",      1.10f}, // .455 Webley, high bore axis
+        {"S&W M10 .38",          0.70f}, // .38 Special
+        {"Nagant Revolver",      0.65f}, // 7.62x38R
+        {"Walther P38",          0.85f}, // 9x19
+        {"Silenced Walther P38", 0.70f},
+        {"Luger P08",            0.80f}, // 9x19, low bore axis (toggle)
+        {"Silenced Luger P08",   0.65f},
+        {"Mauser C96",           0.95f}, // 7.63x25, very high bore axis
+        {"TT-33 Tokarev",        0.90f}, // 7.62x25, snappy
+        {"Silenced TT-33",       0.75f},
+        {"Walther PPK",          0.65f}, // .32 ACP in a 0.6 kg gun
+        {"Beretta",              0.60f}, // .380 ACP (M1934)
+        {"Silenced Beretta",     0.50f},
+        {"Nambu Type 14",        0.55f}, // 8x22 Nambu
+        {"Welrod",               0.40f}, // .32 ACP, integral suppressor
+        {"Hi-Standard Silenced", 0.25f}, // .22 LR, suppressed: the lightest kick, still visible
+        {"Bombing Run",          0.00f}, // coop binoculars item (weapontype pistol, never fires a round)
+    };
+    char        base[64];
+    const char *p;
+    int         n, i;
+
+    if (!wpn) {
+        wpn = "";
+    }
+    p = strstr(wpn, " (");
+    n = p ? (int)(p - wpn) : (int)strlen(wpn);
+    if (n > (int)sizeof(base) - 1) {
+        n = (int)sizeof(base) - 1;
+    }
+    memcpy(base, wpn, n);
+    base[n] = 0;
+    for (i = 0; i < (int)(sizeof(kTab) / sizeof(kTab[0])); i++) {
+        if (!Q_stricmp(base, kTab[i].name)) {
+            return kTab[i].scale;
+        }
+    }
+    return cgi.Cvar_Get("cg_adsPistolKickOther", "0.8", 0)->value;
+}
+// 1 when the flip channel owns this gun's AIMED kick (a pistol, cg_adsPistolKick > 0), else 0
+static float CG_PistolAdsKickOwns(int iClass)
+{
+    if (!(iClass & WEAPON_CLASS_PISTOL)) {
+        return 0.0f;
+    }
+    return (cgi.Cvar_Get("cg_adsPistolKick", "1", 0)->value > 0.0f) ? 1.0f : 0.0f;
+}
 // HZM coop [user 2026-08-21] "slight fov snap when shooting". A small, fast fov widening on
 // discharge. Set by the shot detector, consumed in CG_CalcFov. Kept SMALL and SHORT: fov is the
 // most sickness-prone channel there is, and a slow fov move reads as a zoom rather than a kick.
@@ -2968,8 +3036,74 @@ void CG_OffsetFirstPersonView(refEntity_t *pREnt, qboolean bUseWorldPosition)
                     if (fMax > RECOIL_MAX_UNITS) {
                         fMax = RECOIL_MAX_UNITS;
                     }
-                    s_recoil += pRecoil->value * fClassKick * fBreath * fHip * (float)(s_lastClip - iClip);
+                    // HZM coop [pistolkick 2026-09-29] an AIMED pistol shot kicks through the muzzle-flip channel
+                    // below instead (cg_adsPistolKick 0 = this layer exactly as before)
+                    s_recoil += pRecoil->value * fClassKick * fBreath * fHip * (float)(s_lastClip - iClip)
+                                * (1.0f - CG_PistolAdsKickOwns(iClass) * CG_AdsPoseFactor());
                     if (s_recoil > fMax) { s_recoil = fMax; }
+                }
+            }
+            // HZM coop [pistolkick 2026-09-29] PISTOL ADS MUZZLE FLIP, state. A critically damped spring driven by one
+            // impulse per shot: it peaks 1/w after the shot (38 ms at w 26), never overshoots below rest and returns
+            // exactly to 0, so repeated fire cannot drift the pose. Integrated on elapsed game time, dt clamped, in
+            // fixed 4 ms substeps (TRAPS procedural-motion rule 1: no time*frequency phase). The impulse is taken in
+            // any pose; the OUTPUT below is weighted by the ADS pose, so hip fire is unchanged.
+            {
+                static cvar_t *pPkOn = NULL, *pPkDeg = NULL, *pPkRate = NULL, *pPkDbg = NULL;
+                float          fW, fDtPk;
+
+                if (!pPkOn) {
+                    pPkOn   = cgi.Cvar_Get("cg_adsPistolKick", "1", 0);        // scale; 0 = today's behaviour
+                    pPkDeg  = cgi.Cvar_Get("cg_adsPistolKickDeg", "4.0", 0);   // peak flip of one Colt .45 shot, deg
+                    pPkRate = cgi.Cvar_Get("cg_adsPistolKickRate", "26", 0);   // spring w, rad/s (peak at 1/w)
+                    pPkDbg  = cgi.Cvar_Get("cg_adsPistolKickDebug", "0", 0);   // harness probe, ships off
+                }
+                fW = pPkRate->value;
+                if (fW < 4.0f) {
+                    fW = 4.0f;
+                } else if (fW > 150.0f) {
+                    fW = 150.0f; // the 4 ms substep stays stable (w*h < 2) with a wide margin
+                }
+                if (iWpn != s_lastWpn || cg.time < s_pkTime || cg.time - s_pkTime > 250) {
+                    s_pkPos = 0.0f; // a new gun, a map restart, or back from a gap (3P, death, cutscene): at rest
+                    s_pkVel = 0.0f;
+                    s_pkTime = cg.time;
+                }
+                if (pPkOn->value > 0.0f && (iClass & WEAPON_CLASS_PISTOL) && iWpn >= 0 && iWpn == s_lastWpn
+                    && s_lastClip >= 0 && iClip < s_lastClip && (s_lastClip - iClip) <= 4) {
+                    const char *szPkWpn = CG_ConfigString(CS_WEAPONS + iWpn);
+                    float       fGun    = CG_PistolAdsKickScale(szPkWpn);
+                    float       fAmp    = pPkDeg->value * pPkOn->value * fGun * (s_breathSteady ? 0.5f : 1.0f) * fBrShove;
+                    // sustained fire saturates at about two shots' worth instead of stacking without bound
+                    float       fRoom   = (fAmp > 0.01f) ? 1.0f - s_pkPos / (2.0f * fAmp) : 0.0f;
+                    if (fRoom < 0.0f) {
+                        fRoom = 0.0f;
+                    }
+                    s_pkVel += fAmp * fRoom * fW * 2.7182818f; // from rest this peaks at exactly fAmp
+                    if (pPkDbg->integer) {
+                        cgi.Printf("^~^~^ PISTOLKICK shot t=%d wpn='%s' gun=%.2f amp=%.3f room=%.3f pose=%.3f steady=%d brace=%.2f\n",
+                                   cg.time, szPkWpn ? szPkWpn : "", fGun, fAmp, fRoom, CG_AdsPoseFactor(),
+                                   (int)s_breathSteady, fBrShove);
+                    }
+                }
+                fDtPk = (s_pkTime > 0 && cg.time > s_pkTime) ? (cg.time - s_pkTime) / 1000.0f : 0.0f;
+                if (fDtPk > 0.1f) {
+                    fDtPk = 0.1f;
+                }
+                s_pkTime = cg.time;
+                // [weaponview 2026-10-04] EXACT critically damped step (closed form), not 4 ms explicit substeps: the
+                // substepped integrator lost ~19% of every peak at w 26 (simulated 0.808; measured in engine Colt 3.26,
+                // P38 2.77, Hi-Standard 0.80 deg against 4.0 / 3.4 / 1.0). x(t) = (x0 + c t) e^-wt, c = v0 + w x0, so
+                // one kick of v0 = A w e from rest peaks at exactly A, at t = 1/w, for any frame time.
+                if (fDtPk > 0.0f) {
+                    float c  = s_pkVel + fW * s_pkPos;
+                    float ex = (float)exp(-fW * fDtPk);
+                    s_pkVel  = (s_pkVel - fW * c * fDtPk) * ex;
+                    s_pkPos  = (s_pkPos + c * fDtPk) * ex;
+                }
+                if (s_pkPos < 0.0005f && s_pkPos > -0.0005f && s_pkVel < 0.01f && s_pkVel > -0.01f) {
+                    s_pkPos = 0.0f;
+                    s_pkVel = 0.0f;
                 }
             }
             s_lastClip = iClip;
@@ -3113,6 +3247,74 @@ void CG_OffsetFirstPersonView(refEntity_t *pREnt, qboolean bUseWorldPosition)
                     s_recoil -= s_recoil * (cg.frametime / 1000.0f) * fRec;
                     if (s_recoil < 0.002f) {
                         s_recoil = 0.0f;
+                    }
+                }
+            }
+
+            // HZM coop [pistolkick 2026-09-29] PISTOL ADS MUZZLE FLIP, output. The whole first-person rig - both hands, and
+            // the gun riding tag_weapon_right - turns muzzle-up about a WRIST point cg_adsPistolKickPivot units behind the
+            // grip, then shifts slightly up and back toward the eye. The same rig-rotation recipe as the climb above
+            // (bug-2562) and the weapon lag (bug-2502), so the hands cannot leave the gun; the pivot is an explicit point,
+            // and the origin shift that rotation causes is ALWAYS registered in s_vFeelExempt, so the 9u feel budget cannot
+            // scale it and slide the grip. Not bug-2462's all-or-nothing gate: this shift sweeps through any threshold on
+            // every shot, and a gate would pop the rig on the crossing frame. It is bounded by the 9 deg clamp and points
+            // forward-down (the rig origin sits below the grip), away from the eye. Applied after the clean-rig capture,
+            // so the ironsights rig/sight solve never sees (or cancels) it. Weighted by the ADS pose: zero at the hip.
+            // Visual only - the camera and the shot are untouched.
+            {
+                float fPkDeg = s_pkPos * CG_AdsPoseFactor();
+
+                if (fPkDeg > 9.0f) {
+                    fPkDeg = 9.0f;
+                } else if (fPkDeg < -2.0f) {
+                    fPkDeg = -2.0f;
+                }
+                if ((fPkDeg > 0.01f || fPkDeg < -0.01f) && pREnt->tiki) {
+                    static cvar_t *pPkUp = NULL, *pPkBack = NULL, *pPkPiv = NULL, *pPkDbg2 = NULL;
+                    static int     s_iPkTag = -2, s_iPkTiki = 0;
+                    vec3_t         vPiv, vRel, vTmp, vOld, vShift;
+                    float          fBackPk, fShift;
+                    int            iPk;
+
+                    if (!pPkUp) {
+                        pPkUp   = cgi.Cvar_Get("cg_adsPistolKickUp", "0.06", 0);   // units of lift per degree of flip
+                        pPkBack = cgi.Cvar_Get("cg_adsPistolKickBack", "0.14", 0); // units toward the eye per degree
+                        pPkPiv  = cgi.Cvar_Get("cg_adsPistolKickPivot", "2.5", 0); // the wrist: units behind the grip
+                        pPkDbg2 = cgi.Cvar_Get("cg_adsPistolKickDebug", "0", 0);
+                    }
+                    if (s_iPkTiki != (int)(size_t)pREnt->tiki) {
+                        s_iPkTag  = cgi.Tag_NumForName(pREnt->tiki, "tag_weapon_right");
+                        s_iPkTiki = (int)(size_t)pREnt->tiki;
+                    }
+                    if (s_iPkTag >= 0) {
+                        orientation_t oPk = cgi.TIKI_Orientation(pREnt, s_iPkTag);
+
+                        VectorCopy(pREnt->origin, vPiv);
+                        for (iPk = 0; iPk < 3; iPk++) {
+                            VectorMA(vPiv, oPk.origin[iPk], pREnt->axis[iPk], vPiv);
+                        }
+                        VectorMA(vPiv, -pPkPiv->value, mat[0], vPiv);
+                        VectorCopy(pREnt->origin, vOld);
+                        VectorSubtract(pREnt->origin, vPiv, vRel);
+                        RotatePointAroundVector(vTmp, mat[1], vRel, -fPkDeg); // negative = muzzle UP (see the climb above)
+                        VectorAdd(vPiv, vTmp, pREnt->origin);
+                        for (iPk = 0; iPk < 3; iPk++) {
+                            RotatePointAroundVector(vTmp, mat[1], pREnt->axis[iPk], -fPkDeg);
+                            VectorCopy(vTmp, pREnt->axis[iPk]);
+                        }
+                        VectorSubtract(pREnt->origin, vOld, vShift);
+                        fShift = VectorLength(vShift);
+                        VectorAdd(s_vFeelExempt, vShift, s_vFeelExempt);
+                        fBackPk = fPkDeg * pPkBack->value;
+                        if (fBackPk > RECOIL_MAX_BACK) {
+                            fBackPk = RECOIL_MAX_BACK;
+                        }
+                        VectorMA(pREnt->origin, fPkDeg * pPkUp->value, mat[2], pREnt->origin);
+                        VectorMA(pREnt->origin, -fBackPk, mat[0], pREnt->origin);
+                        if (pPkDbg2->integer >= 2) {
+                            cgi.Printf("^~^~^ PISTOLKICK frame t=%d pose=%.3f deg=%.3f shift=%.2f lever=%.1f\n", cg.time,
+                                       CG_AdsPoseFactor(), fPkDeg, fShift, VectorLength(vRel));
+                        }
                     }
                 }
             }
