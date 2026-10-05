@@ -123,8 +123,11 @@ static qboolean CG_HzmForeignLocalSound(server_sound_t *sound)
         CG_HzmFLDebug(sound, "off", CG_ConfigString(CS_SOUNDS + idx));
         return qfalse;
     }
-    if (sound->entity_number >= 0 && sound->entity_number < cgs.maxclients
-        && sound->entity_number != cg.snap->ps.clientNum) {
+    // A PLAYER entity, bots included. Not `< cgs.maxclients`: playerbots get client slots ABOVE sv_maxclients
+    // (the proof run's bots were entity 8+ with sv_maxclients 8), which that test missed.
+    if (sound->entity_number >= 0 && sound->entity_number < MAX_GENTITIES
+        && sound->entity_number != cg.snap->ps.clientNum
+        && cg_entities[sound->entity_number].currentState.eType == ET_PLAYER) {
         cs = CG_ConfigString(CS_SOUNDS + idx);
         if (CG_HzmSoundIsBody(cs, &fMax)) {
             fMin = sound->min_dist;
