@@ -224,7 +224,7 @@ static qboolean QDM_ChanTargetZero(const qdmChan_t *c)
 // ------------------------------------------------------------------------------------------------ cvars
 static cvar_t *qdm_on, *qdm_dbg;
 static cvar_t *qdm_aside, *qdm_asideMs, *qdm_raise, *qdm_raiseMs, *qdm_holster, *qdm_holsterMs;
-static cvar_t *qdm_regrip, *qdm_regripMs, *qdm_refuseMs;
+static cvar_t *qdm_regrip, *qdm_regripMs, *qdm_refuseMs, *qdm_lead, *qdm_leadMs;
 
 static void QDM_Cvars(void)
 {
@@ -249,6 +249,10 @@ static void QDM_Cvars(void)
     // the primary coming back up from the support side
     qdm_regrip   = cgi.Cvar_Get("coop_qdrawRegrip", "30 30 10 0 3 -2", 0);
     qdm_regripMs = cgi.Cvar_Get("coop_qdrawRegripMs", "250", 0);
+    // the release lead: how far toward the regrip-start pose the parked primary comes before the swap (fraction of
+    // coop_qdrawRegrip; 0 = all the way into the hands' pose) and how fast
+    qdm_lead     = cgi.Cvar_Get("coop_qdrawLead", "0", 0);
+    qdm_leadMs   = cgi.Cvar_Get("coop_qdrawLeadMs", "100", 0);
     // a press the server refused (no loaded pistol, mid-reload past clip_fill, ...): bring the gun back after this
     qdm_refuseMs = cgi.Cvar_Get("coop_qdrawRefuseMs", "220", 0);   // + the current ping
 }
@@ -654,12 +658,15 @@ void CG_QDMotion_ViewModel(refEntity_t *arms)
             QDM_ChanTarget(&qdm.pistol, d, qdm_holsterMs->value);
             // ...and at the same instant the parked primary starts back up from the support side toward the regrip
             // pose, so the two cross: the pistol leaves at the lower right while the primary rises at the lower left
-            // (toward HALF the regrip offset: the primary is entering the frame edge by the time the swap lands)
+            // (toward coop_qdrawLead x the regrip offset. Run qd8: 0.45 (qd7) left 8 empty frames on an AIMED release,
+            // where the base pose is the aim pose at the eye, 0.2 left 5, 0 over 100 ms leaves ONE at the hip and aimed:
+            // the primary reaches the frame edge as the swap lands. The lead is stretched by the ping above 80 ms (a listen host is far below it) so on
+            // a remote client the hand-less parked gun arrives WITH the swap instead of waiting for it in view.)
             QDM_Dof(qdm_regrip, d, z);
             for (k = 0; k < 6; k++) {
-                d[k] *= 0.45f;
+                d[k] *= qdm_lead->value;
             }
-            QDM_ChanTarget(&qdm.aside, d, qdm_holsterMs->value * 1.6f);
+            QDM_ChanTarget(&qdm.aside, d, qdm_leadMs->value + (cg.snap->ping > 80 ? (cg.snap->ping < 380 ? cg.snap->ping - 80 : 300) : 0));
             qdm.holsterOn = 1;
         }
     }
