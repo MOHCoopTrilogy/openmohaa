@@ -15,7 +15,7 @@ typedef struct {
 static const adsSight_t s_adsSights[] = {
     {"models/weapons/arisaka.tik", "Arisaka Type 99", {44.0557f, -0.9035f, -4.6376f}, {3.5564f, -0.9035f, -4.3424f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 0.000f}, // arisaka_type_99
     {"models/weapons/bar.tik", "BAR", {35.6267f, -0.7789f, -4.2493f}, {-0.3181f, -0.7833f, -4.3841f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 0.000f}, // bar
-    {"models/weapons/bar_bar1918.tik", "BAR (M1918 WWI)", {35.6064f, -1.2984f, -5.4866f}, {-0.7600f, -1.2984f, -5.1210f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 0.000f}, // bar_wwi
+    {"models/weapons/bar_bar1918.tik", "Lewis Gun", {35.6064f, -1.2984f, -5.4866f}, {-0.7600f, -1.2984f, -5.1210f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 0.000f}, // bar_wwi
     {"models/weapons/bar_bar1918a.tik", "BAR (M1918 Classic)", {39.5157f, -0.7207f, -4.5786f}, {-1.8449f, -0.7590f, -4.2070f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 0.000f}, // bar_m1918a
     {"models/weapons/bar_bar1918a1.tik", "BAR (M1918A1)", {39.5157f, -0.7207f, -4.5786f}, {-1.8449f, -0.7590f, -4.2070f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 0.000f}, // bar_m1918a
     {"models/weapons/bar_bar1918a2.tik", "BAR (M1918A2)", {39.5157f, -0.7207f, -4.5786f}, {-1.8449f, -0.7590f, -4.2070f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 0.000f}, // bar_m1918a
@@ -46,7 +46,7 @@ static const adsSight_t s_adsSights[] = {
     {"models/weapons/colt45_camo_winter.tik", "Colt 45 (Winter)", {10.4327f, -0.7252f, -3.4478f}, {0.5056f, -0.7574f, -3.1925f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 0.000f}, // colt_45
     {"models/weapons/colt45_camo_woodland.tik", "Colt 45 (Woodland)", {10.4327f, -0.7252f, -3.4478f}, {0.5056f, -0.7574f, -3.1925f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 0.000f}, // colt_45
     {"models/weapons/colt45_chrome.tik", "Colt 45 (Chrome)", {10.4327f, -0.7252f, -3.4478f}, {0.5056f, -0.7574f, -3.1925f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 0.000f}, // colt_45
-    {"models/weapons/colt45_colt1911w.tik", "Colt 45 (M1911 WWI)", {12.3699f, -0.7518f, -5.1841f}, {1.9802f, -0.7098f, -4.9767f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 0.000f}, // colt_45_m1911_wwi
+    {"models/weapons/colt45_colt1911w.tik", "Webley Mk VI", {12.3699f, -0.7518f, -5.1841f}, {1.9802f, -0.7098f, -4.9767f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 0.000f}, // colt_45_m1911_wwi
     {"models/weapons/colt45_coltpa.tik", "Colt 45 (Pacific)", {10.8861f, -0.6965f, -3.3219f}, {0.7817f, -0.6896f, -3.4430f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 0.000f}, // colt_45_pacific
     {"models/weapons/colt45_covert.tik", "Colt 45 (M1911 Covert)", {10.4327f, -0.7252f, -3.4478f}, {0.5056f, -0.7574f, -3.1925f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 0.000f}, // colt_45
     {"models/weapons/colt45_drbond.tik", "Colt 45 (1911 Classic)", {10.4327f, -0.7252f, -3.4478f}, {0.5056f, -0.7574f, -3.1925f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 0.000f}, // colt_45
