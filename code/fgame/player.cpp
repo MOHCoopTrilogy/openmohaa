@@ -16430,7 +16430,9 @@ void Player::CoopNadeUp()
 // MEASURED, from the retail SKC headers (duration = frameTime * (numFrames - 1); every clip here
 // reports flags=0x00, so the TAF_DELTADRIVEN branch of tiki_anim.cpp:283-284 does not apply):
 //
-//     quick draw           0.250   coop_qdrawDelay - an authored number, see CoopSetDrawDelay
+//     quick draw           0.180   coop_qdrawDelay - an authored number, see CoopSetDrawDelay
+//                                  ([user 2026-10-05] 0.25 -> 0.18 with the new draw motion, cg_qdrawmotion.c; the
+//                                  return 0.40 -> 0.25 and the minimum hold 0.60 -> 0.30 in the same change)
 //     mg    -> pistol      0.767   putaway_bar 0.300 + tps_pullout_colt 0.467   <- cheapest swap
 //     smg   -> pistol      0.933   lower_rifle_standplayer 0.467 + 0.467
 //     rifle -> pistol      1.067   lower_rifle_stand 0.600 + 0.467
@@ -16467,6 +16469,8 @@ static cvar_t *s_coop_qdrawParkOfs     = NULL;
 static cvar_t *s_coop_qdrawParkAng     = NULL;
 static cvar_t *s_coop_qdrawCooldown    = NULL;
 static cvar_t *s_coop_qdrawInterrupt   = NULL;
+static cvar_t *s_coop_qdrawReturnAnim  = NULL;
+static cvar_t *s_coop_qdrawDrawAnim    = NULL;
 
 // EVERY DEFAULT IS WRITTEN EXACTLY ONCE, HERE. Two Cvar_Get calls for one name with different
 // default strings ARE the bug (bugs 2171/2172/2175), so g_main.cpp calls this rather than
@@ -16480,9 +16484,9 @@ void CoopQDrawRegisterCvars(void)
     }
 
     s_coop_qdraw            = gi.Cvar_Get("coop_qdraw",            "1",         CVAR_ARCHIVE);
-    s_coop_qdrawDelay       = gi.Cvar_Get("coop_qdrawDelay",       "0.25",      CVAR_ARCHIVE);
-    s_coop_qdrawReturn      = gi.Cvar_Get("coop_qdrawReturn",      "0.40",      CVAR_ARCHIVE);
-    s_coop_qdrawMinHold     = gi.Cvar_Get("coop_qdrawMinHold",     "0.60",      CVAR_ARCHIVE);
+    s_coop_qdrawDelay       = gi.Cvar_Get("coop_qdrawDelay",       "0.18",      CVAR_ARCHIVE);
+    s_coop_qdrawReturn      = gi.Cvar_Get("coop_qdrawReturn",      "0.25",      CVAR_ARCHIVE);
+    s_coop_qdrawMinHold     = gi.Cvar_Get("coop_qdrawMinHold",     "0.30",      CVAR_ARCHIVE);
     s_coop_qdrawMaxHold     = gi.Cvar_Get("coop_qdrawMaxHold",     "12",        CVAR_ARCHIVE);
     s_coop_qdrawSticky      = gi.Cvar_Get("coop_qdrawSticky",      "0",         CVAR_ARCHIVE);
     s_coop_qdrawClasses     = gi.Cvar_Get("coop_qdrawClasses",     "14",        CVAR_ARCHIVE);
@@ -16494,6 +16498,17 @@ void CoopQDrawRegisterCvars(void)
     // 0 = the pre-decision behaviour, a flat refusal while mid-reload - kept as a ONE-FLIP REVERT
     // because the interrupt is the only part of this feature that reaches into the reload path.
     s_coop_qdrawInterrupt   = gi.Cvar_Get("coop_qdrawInterrupt",   "1",         CVAR_ARCHIVE);
+    // [user 2026-10-05, quick-draw motion] the primary's view clip on the way BACK. "pullout" played each long gun's
+    // raise clip from below - on the Garand a 1 s sideways sweep out of frame and back (run qd1 f101-f143) - after an
+    // empty quarter second. "idle" puts it straight into the hands, and the client (cg_qdrawmotion.c REGRIP) brings
+    // it up from the support side where it was put. Purely visual: the return delay (coop_qdrawReturn) is unchanged.
+    // Not archived, so a code default change always lands. "pullout" = the previous look.
+    s_coop_qdrawReturnAnim  = gi.Cvar_Get("coop_qdrawReturnAnim",  "idle",      0);
+    // ...and the PISTOL's on the way in: the 0.467 s pullout clip kept the pistol below the frame for its first
+    // ~0.13 s, so it was first seen ~0.2 s after the press and settled at ~0.38 s - later than its own 0.25 s
+    // fire-ready. "idle" + the client's raise (cg_qdrawmotion.c, a 0.18 s snap) puts it in the sight picture by
+    // its fire-ready. Visual only. "pullout" = the previous look.
+    s_coop_qdrawDrawAnim    = gi.Cvar_Get("coop_qdrawDrawAnim",    "idle",      0);
 }
 
 static float CoopQDrawClamp(cvar_t *pVar, float fLo, float fHi)
@@ -17041,10 +17056,11 @@ qboolean Player::CoopQDrawEnter()
     edict->s.eFlags &= ~EF_UNARMED;
 
     // Three args - player.h declares ViewModelAnim(str, qboolean, qboolean) with NO defaults.
+    // [quick-draw motion 2026-10-05] the clip is coop_qdrawDrawAnim (default "idle", see CoopQDrawRegisterCvars).
     // "pullout" is a symbolic index (VM_ANIM_PULLOUT); the client resolves the per-gun prefix from
     // activeItems[1], which is now the pistol, so this plays colt45_pullout / p38_pullout / etc.
     // with no new alias and no TIKI edit.
-    ViewModelAnim("pullout", qtrue, qfalse);
+    ViewModelAnim(s_coop_qdrawDrawAnim->string[0] ? s_coop_qdrawDrawAnim->string : "pullout", qtrue, qfalse);
     return qtrue;
 }
 
@@ -17164,7 +17180,7 @@ void Player::CoopQDrawExit(qboolean bDead, const char *szWhy)
     }
 
     UpdateCoopHolsteredWeapons();
-    ViewModelAnim("pullout", qtrue, qfalse);
+    ViewModelAnim(s_coop_qdrawReturnAnim->string[0] ? s_coop_qdrawReturnAnim->string : "pullout", qtrue, qfalse);
 
     // DELIBERATELY NOT auto-reloading the primary. "you have to switch back and reload your
     // primary" is the cost this entire feature is priced against; taking it away would make the

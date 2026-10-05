@@ -1999,6 +1999,7 @@ static float s_rigTgt[8], s_rigCur[8]; // rotvec (rad) + move (u), camera frame;
 static float s_rigOff[8], s_rigOffV[8];
 static qboolean s_rigTgtOk = qfalse, s_rigTgtLive = qfalse;
 static int   s_rigLastWpn = -2, s_rigLastRun = 0;
+static int   s_rigFreshGun = 0; // HZM coop [quick-draw motion 2026-10-05] the gun changed while aiming: no target yet
 
 // 0 = aim pose, 1 = hold (fire / rechamber: authored motion plays over the aligned pose), 2 = ease out
 static int CG_AdsAnimClass(void)
@@ -2099,6 +2100,18 @@ static void CG_AdsRigSolve(refEntity_t *pREnt)
         return; // own the gun (table/shift/crouch offset off) but leave the rig where the animation put it
     }
     wpnIdx = cg.snap->ps.activeItems[1];
+    // HZM coop [quick-draw motion 2026-10-05] A GUN CHANGED WHILE AIMING (the quick draw with the aim button held, or a
+    // switch with it held) has no aim pose of its own yet. Seeding from the first frame would take the target from
+    // the PULLOUT pose (gun low): the correction then faded in with the aim crossblend and carried the forearm through
+    // the camera (run qd2 f33-f46, a full-screen sleeve). So such a gun waits for its aim pose, and the correction is
+    // then eased in from zero by the follower. Starting ADS normally (this path not run for 250 ms) is untouched.
+    // cg_adsRigFreshGun 0 = the old seed.
+    if (wpnIdx != s_rigLastWpn && s_rigLastWpn >= 0 && cg.time >= s_rigLastRun && cg.time - s_rigLastRun <= 250
+        && cgi.Cvar_Get("cg_adsRigFreshGun", "1", 0)->integer) {
+        s_rigFreshGun = 1;
+    } else if (cg.time - s_rigLastRun > 250 || cg.time < s_rigLastRun) {
+        s_rigFreshGun = 0;
+    }
     if (wpnIdx != s_rigLastWpn || cg.time - s_rigLastRun > 250 || cg.time < s_rigLastRun) {
         s_rigTgtOk = qfalse; // new gun, or this path has not run for a while (3P, cutscene): re-seed
     }
@@ -2128,8 +2141,9 @@ static void CG_AdsRigSolve(refEntity_t *pREnt)
     }
 
     // ---- target: only from an AIM pose, and not while a fire/reload crossblend is still settling
-    if (!s_rigTgtOk || ((CG_VmHandFix() > 0.5f) ? (CG_VMAimWeight() > 0.999f && s_rigAnimCls == 0)
-                                                : (s_rigAnimCls == 0 && cg.time >= s_rigHoldUntil))) {
+    if ((!s_rigTgtOk && !(s_rigFreshGun && CG_VMAimWeight() < 0.999f))
+        || ((CG_VmHandFix() > 0.5f) ? (CG_VMAimWeight() > 0.999f && s_rigAnimCls == 0)
+                                    : (s_rigAnimCls == 0 && cg.time >= s_rigHoldUntil))) {
         or = cgi.TIKI_Orientation(pREnt, s_iTag);
         VectorCopy(pREnt->origin, G);
         for (i = 0; i < 3; i++) {
@@ -2218,7 +2232,14 @@ static void CG_AdsRigSolve(refEntity_t *pREnt)
             // harness to measure the sight-window clutter at several eye reliefs in-engine, hands included
             s_rigTgt[7] += cgi.Cvar_Get("cg_adsRigReliefBias", "0", 0)->value;
             if (s_rigTgt[7] > 4.0f) { s_rigTgt[7] = 4.0f; } else if (s_rigTgt[7] < -4.0f) { s_rigTgt[7] = -4.0f; }
-            if (!s_rigTgtOk || s_rigW < 0.001f) { // invisible (weight ~0): no history to keep continuous
+            if (!s_rigTgtOk && s_rigFreshGun && s_rigW >= 0.001f) {
+                // [quick-draw motion] the new gun's first aim pose: nothing applied yet, so ease in from zero
+                for (k = 0; k < 8; k++) {
+                    s_rigOff[k]  = -s_rigTgt[k];
+                    s_rigOffV[k] = 0.0f;
+                }
+                reseeded = qtrue;
+            } else if (!s_rigTgtOk || s_rigW < 0.001f) { // invisible (weight ~0): no history to keep continuous
                 for (k = 0; k < 8; k++) {
                     s_rigOff[k]  = 0.0f;
                     s_rigOffV[k] = 0.0f;
@@ -2230,8 +2251,9 @@ static void CG_AdsRigSolve(refEntity_t *pREnt)
                 }
                 reseeded = qtrue;
             }
-            s_rigTgtOk = qtrue;
-            updated    = qtrue;
+            s_rigTgtOk    = qtrue;
+            updated       = qtrue;
+            s_rigFreshGun = 0;
         }
     }
     s_rigTgtLive = updated;

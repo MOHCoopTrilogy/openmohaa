@@ -1449,6 +1449,12 @@ static float s_fAdsPose = 0.0f; // eased ADS pose factor (0 = hip, 1 = full sigh
 // (Player::TickCoopSidearm), because the left tag is shared: the 14 left-tag reload magazine props
 // (bug-2241) ride the same tag on the same parent, and re-placing one of those into the corner of
 // the frame would be a new bug of exactly the shape this one is.
+// HZM coop [user 2026-10-05] quick-draw motion, cg_qdrawmotion.c
+qboolean CG_QDMotion_Park(refEntity_t *ent, int iEntNum);
+void     CG_QDMotion_SampleHeld(refEntity_t *ent, int iEntNum);
+void     CG_QDMotion_ViewModel(refEntity_t *arms);
+void     CG_QDMotion_Note(int iEntNum, const char *szTag, int iParked);
+
 static qboolean CG_CoopQDrawIsParked(const entityState_t *s1)
 {
     static cvar_t *pOn = NULL;
@@ -3373,8 +3379,14 @@ void CG_ModelAnim(centity_t *cent, qboolean bDoShaderTime)
                 // on a map change - so a stale entnum from a draw that was active when the last
                 // map ended could otherwise match the HELD rifle on tag_weapon_right for the frames
                 // before the server's first publish from the -1 seed.
+                CG_QDMotion_Note(s1->number, szTagName, CG_CoopQDrawIsParked(s1)); // HZM coop [quick-draw motion] probe
                 if (CG_CoopQDrawIsParked(s1) && !Q_stricmp(szTagName, "tag_weapon_left")) {
-                    CG_CoopQDrawParkInView(&model, s1->number);
+                    // HZM coop [user 2026-10-05] quick-draw motion (cg_qdrawmotion.c); coop_qdrawMotion 0 = the shipped pose
+                    if (!CG_QDMotion_Park(&model, s1->number)) {
+                        CG_CoopQDrawParkInView(&model, s1->number);
+                    }
+                } else if (!Q_stricmp(szTagName, "tag_weapon_right")) {
+                    CG_QDMotion_SampleHeld(&model, s1->number); // HZM coop [quick-draw motion] where the primary was in the hands
                 }
             } else {
                 // Don't show the model at all
@@ -3925,6 +3937,7 @@ void CG_ModelAnim(centity_t *cent, qboolean bDoShaderTime)
             if (!(cg.predicted_player_state.pm_flags & PMF_CAMERA_VIEW)) {
                 if (cg.snap->ps.stats[STAT_HEALTH] > 0 && !cg_animationviewmodel->integer) {
                     CG_OffsetFirstPersonView(&model, qfalse);
+                    CG_QDMotion_ViewModel(&model); // HZM coop [quick-draw motion] pistol raise / primary regrip
                 }
 
                 AnglesToAxis(cg.refdefViewAngles, cg.refdef.viewaxis);

@@ -684,14 +684,19 @@ static void CG_CoopNadeUp_f(void)
 // The relay also fixes WHO the press belongs to: G_ConsoleCommand hardcodes ent = &g_entities[0]
 // (fgame/gamecmds.cpp:236), so a command that reached the server any other way would hand every
 // joiner's keypress to the host. The reliable-command path carries the real client.
+void CG_QDMotion_KeyDown(void); // HZM coop [quick-draw motion 2026-10-05] cg_qdrawmotion.c: the motion starts on the press
+void CG_QDMotion_KeyUp(void);
+
 static void CG_CoopSidearmDown_f(void)
 {
     cgi.SendClientCommand("+coopsidearm");
+    CG_QDMotion_KeyDown();
 }
 
 static void CG_CoopSidearmUp_f(void)
 {
     cgi.SendClientCommand("-coopsidearm");
+    CG_QDMotion_KeyUp();
 }
 
 // E2 [MP armories slice 2, F1] - "hzm_armory" console command.
