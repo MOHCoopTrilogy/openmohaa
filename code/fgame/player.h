@@ -376,6 +376,13 @@ public:
     float m_fCoopStress;      // eased composite 0..1
     int   m_iCoopSuppHits;    // near-miss events since the last probe print
     bool  m_bCoopSprinting;
+    // HZM coop [bug-3372] EXHAUSTION LATCH: set the moment the pool hits 0, cleared only once it has
+    // refilled to coop_sprintReArm AND the sprint key has been released since - so an empty pool ends the
+    // sprint state (3P SPRINT_FORWARD, 1P gun-lower) instead of flapping at 0 while Shift is held.
+    bool  m_bCoopSprintSpent;
+    bool  m_bCoopSprintSpentRel; // sprint key seen released since the latch was set
+    float m_fCoopSprintProbeTime; // SPRINTPROBE rate limiter (coop_sprintProbe)
+    float m_fCoopSprintLast;      // TickSprint elapsed-time stamp (it runs per usercmd - TRAPS, first entry)
     // HZM coop [user 2026-08-24] SPRINT-TO-SLIDE. Modelled on the sprint above, which is a pure
     // ps.speed change - no bbox surgery, so it cannot wedge the player in geometry. The duck is
     // the ENGINE's own, because holding crouch is what triggers the slide in the first place.
@@ -1150,6 +1157,7 @@ public:
     void PhysicsOff(Event *ev);
 
     void Think() override;
+    void PostAnimate(void) override; // HZM coop [bug-3372] sprint legs clip rate follows coop_sprintMult
     bool IsReady(void) const;
 
     void EventGetReady(Event *ev);

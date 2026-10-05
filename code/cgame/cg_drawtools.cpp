@@ -1863,7 +1863,7 @@ static void CG_DrawStaminaArc(void)
         return;
     }
 
-    raw = cg.snap->ps.stats[STAT_MGHEAT];
+    raw = cg.snap->ps.stats[STAT_MGHEAT] & 127; // [bug-3372] bit 128 = the sprint exhaustion latch
     if ((cg.snap->ps.pm_flags & PMF_TURRET) || raw <= 0) {
         frac = 1.0f;   // mounted (the stat is MG heat) or no data yet - a full, ordinary frame
     } else {
@@ -2415,7 +2415,7 @@ static void CG_UpdateHudFade(void)
     // Gated on PMF_TURRET because the stat carries MG heat while mounted (see bg_public.h).
     if (!(cg.snap->ps.pm_flags & PMF_TURRET)) {
         static int lastStamRaw = -1;
-        int        stamRaw     = cg.snap->ps.stats[STAT_MGHEAT];
+        int        stamRaw     = cg.snap->ps.stats[STAT_MGHEAT] & 127; // [bug-3372] bit 128 = sprint latch
 
         // [vet 2026-09-09] Wake on a CHANGE, not on "the value is not full". The original test
         // pinned the entire HUD awake for as long as the pool sat at anything other than exactly

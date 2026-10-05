@@ -3025,7 +3025,7 @@ void CG_OffsetFirstPersonView(refEntity_t *pREnt, qboolean bUseWorldPosition)
                 {
                     static cvar_t  *pShareB = NULL, *pReArmB = NULL;
                     static qboolean s_breathExhausted = qfalse;
-                    int             iStamRaw = cg.snap ? cg.snap->ps.stats[STAT_MGHEAT] : 0;
+                    int             iStamRaw = cg.snap ? (cg.snap->ps.stats[STAT_MGHEAT] & 127) : 0; // 128 = sprint latch
 
                     if (!pShareB) {
                         pShareB = cgi.Cvar_Get("coop_breathShareStamina", "1", CVAR_ARCHIVE);
@@ -4869,14 +4869,32 @@ void CG_OffsetFirstPersonView(refEntity_t *pREnt, qboolean bUseWorldPosition)
                     bWantSprint = qtrue;
                 }
 
-                // mirror the server stamina drain/regen so the lower stops when the pool is exhausted
-                if (dt > 0.0f && dt < 0.5f) {
-                    if (bWantSprint && s_spStam > 0.0f) {
-                        s_spStam -= dt;
-                        if (s_spStam < 0.0f) { s_spStam = 0.0f; }
-                    } else if (!bWantSprint) {
-                        s_spStam += dt * fRegen;
-                        if (s_spStam > fMaxStam) { s_spStam = fMaxStam; }
+                // [bug-3372] FOLLOW THE SERVER, not a re-simulation of it. The mirror below drained at a
+                // flat 1/s, but the server drains at (1 + heft * coop_heftStamina)/s (and, until this fix, per
+                // usercmd), also spends the pool on jumps, slides, vaults and the breath hold, and latches an
+                // empty pool - so after a sprint the server had dropped the player to run speed while this
+                // envelope still held the gun in the sprint carry: "the sprint animation keeps playing at a
+                // slow speed". STAT_MGHEAT carries the pool (1..101 while off a turret, bug-2555) and, in bit
+                // 128, the server's exhaustion latch (Player::TickSprint m_bCoopSprintSpent) - so the client
+                // decides nothing itself. The flat-rate mirror stays only for a server without the stat (raw 0).
+                {
+                    int iStatRaw = cg.snap ? cg.snap->ps.stats[STAT_MGHEAT] : 0;
+                    int iStamRaw = iStatRaw & 127;
+
+                    if (iStamRaw > 0 && cg.snap && !(cg.snap->ps.pm_flags & PMF_TURRET)) {
+                        s_spStam = (float)(iStamRaw - 1) / 100.0f * fMaxStam; // CG_GetStamina reads the real pool too
+                        if ((iStatRaw & 128) || s_spStam <= 0.0f) { bWantSprint = qfalse; }
+                    } else {
+                        // legacy mirror of the server drain/regen
+                        if (dt > 0.0f && dt < 0.5f) {
+                            if (bWantSprint && s_spStam > 0.0f) {
+                                s_spStam -= dt;
+                                if (s_spStam < 0.0f) { s_spStam = 0.0f; }
+                            } else if (!bWantSprint) {
+                                s_spStam += dt * fRegen;
+                                if (s_spStam > fMaxStam) { s_spStam = fMaxStam; }
+                            }
+                        }
                     }
                 }
 

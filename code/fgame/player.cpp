@@ -2298,6 +2298,10 @@ Player::Player()
     m_fCoopStress     = 0.0f;
     m_iCoopSuppHits   = 0;
     m_bCoopSprinting  = false;
+    m_bCoopSprintSpent    = false;
+    m_bCoopSprintSpentRel = true;
+    m_fCoopSprintProbeTime = 0.0f;
+    m_fCoopSprintLast      = 0.0f;
     m_fCoopSlideNext  = 0;
     m_bCoopSliding    = false;
     m_bCoopNadeHeld   = false;
@@ -4926,7 +4930,7 @@ void Player::ClientMove(usercmd_t *ucmd)
             // players - most of what they were feeling was that. 1.15 verified in live play. Lowering
             // the multiplier scales every class down together and leaves the weight spread
             // (coop_weaponMoveByClass 0.98..0.74) intact, which is the part they wanted kept.
-            cvar_t *pMult = gi.Cvar_Get("coop_sprintMult", "1.05", CVAR_ARCHIVE);
+            cvar_t *pMult = gi.Cvar_Get("coop_sprintMult", "1.15", CVAR_ARCHIVE);
             float   mult  = pMult ? pMult->value : 1.3f;
             if (mult < 1.0f) { mult = 1.0f; } // sprint is never slower than run
             client->ps.speed = sv_runspeed->value * mult;
@@ -5184,7 +5188,7 @@ void Player::ClientMove(usercmd_t *ucmd)
             // never at or above this player's own sprint
             {
                 static cvar_t *pCap = NULL;
-                cvar_t        *pSM  = gi.Cvar_Get("coop_sprintMult", "1.05", CVAR_ARCHIVE);
+                cvar_t        *pSM  = gi.Cvar_Get("coop_sprintMult", "1.15", CVAR_ARCHIVE);
                 float          fSprint;
                 if (!pCap) { pCap = gi.Cvar_Get("coop_adsFloorCap", "0.85", CVAR_ARCHIVE); }
                 fSprint = sv_runspeed->value * sv_dmspeedmult->value * fWm
@@ -5255,6 +5259,32 @@ void Player::ClientMove(usercmd_t *ucmd)
             currentState_Legs ? currentState_Legs->getName() : "?",
             currentState_Torso ? currentState_Torso->getName() : "?"
         );
+    }
+
+    // HZM coop [bug-3372] SPRINTPROBE: 4x/sec while moving forward, the sprint decision, the pool, the
+    // final speed and the legs state + clip + clip time (two consecutive lines give the clip's playback
+    // rate). coop_sprintProbe 1 enables; flags 0, so it can never fossilise in a config.
+    {
+        static cvar_t *s_pSprintProbe = NULL;
+        if (!s_pSprintProbe) { s_pSprintProbe = gi.Cvar_Get("coop_sprintProbe", "0", 0); }
+        if (s_pSprintProbe->integer && last_ucmd.forwardmove > 0
+            && (level.time - m_fCoopSprintProbeTime >= 0.25f || m_fCoopSprintProbeTime > level.time)) {
+            int iLs = m_iPartSlot[legs];
+            m_fCoopSprintProbeTime = level.time;
+            gi.Printf(
+                "^~^~^ SPRINTPROBE t=%.2f spr=%d spent=%d stam=%.2f speed=%d vel=%.0f key=%d legs='%s' clip='%s' ct=%.3f\n",
+                level.time,
+                m_bCoopSprinting ? 1 : 0,
+                m_bCoopSprintSpent ? 1 : 0,
+                m_fCoopStamina,
+                client->ps.speed,
+                sqrt(velocity[0] * velocity[0] + velocity[1] * velocity[1]),
+                (last_ucmd.buttons & BUTTON_RUN) ? 0 : 1,
+                currentState_Legs ? currentState_Legs->getName() : "?",
+                (iLs >= 0 && iLs < MAX_FRAMEINFOS) ? AnimName(iLs) : "?",
+                (iLs >= 0 && iLs < MAX_FRAMEINFOS) ? edict->s.frameInfo[iLs].time : -1.0f
+            );
+        }
     }
 
     client->ps.gravity = sv_gravity->value * gravity;
@@ -9395,7 +9425,9 @@ void Player::UpdateStats(void)
         iStam = (int)(m_fCoopStamina / fMax * 100.0f + 0.5f);
         if (iStam < 0)   { iStam = 0; }
         if (iStam > 100) { iStam = 100; }
-        client->ps.stats[STAT_MGHEAT] = iStam + 1;
+        // [bug-3372] bit 128 = the sprint EXHAUSTION LATCH (m_bCoopSprintSpent), so the 1P gun-lower
+        // follows the server's decision instead of re-deriving it. Readers mask with & 127 (1..101 below).
+        client->ps.stats[STAT_MGHEAT] = (iStam + 1) | (m_bCoopSprintSpent ? 128 : 0);
     }
 
     //
@@ -17352,6 +17384,45 @@ void Player::TickSlide()
     }
 }
 
+//====
+// HZM coop [bug-3372] SPRINT CLIP RATE. Player animations advance at their native rate whatever
+// the movement speed (Animate::PostAnimate adds level.frametime), so raising coop_sprintMult without
+// this would skate the feet. coop_sprintAnimRef is the multiplier the sprint clips were signed off at
+// (1.12, autoexec 2026-08-23 - "verified in live play"); the legs slot playing a coop_sprint* clip is
+// advanced by the extra (mult / ref - 1) * frametime before the normal advance, so its cadence scales
+// with the speed. Only the CURRENT legs slot, and only a sprint clip, so the crossblend-out of the
+// previous state and every other clip are untouched. coop_sprintAnimRef 0 = off (native rate).
+//====
+void Player::PostAnimate(void)
+{
+    static cvar_t *pRef = NULL;
+    static cvar_t *pSM  = NULL;
+    int            slot;
+
+    if (!pRef) {
+        pRef = gi.Cvar_Get("coop_sprintAnimRef", "1.12", CVAR_ARCHIVE);
+        pSM  = gi.Cvar_Get("coop_sprintMult", "1.15", CVAR_ARCHIVE);
+    }
+
+    slot = m_iPartSlot[legs];
+    if (m_bCoopSprinting && pRef->value > 0.01f && edict->tiki && slot >= 0 && slot < MAX_FRAMEINFOS
+        && edict->s.frameInfo[slot].weight > 0.0f && !(animFlags[slot] & (ANIM_PAUSED | ANIM_SYNC))
+        && animtimes[slot] > 0.0f) {
+        const char *name = AnimName(slot);
+        float       rate = Q_clamp_float(pSM->value / pRef->value, 0.75f, 1.5f);
+
+        if (name && !Q_stricmpn(name, "coop_sprint", 11) && (rate > 1.001f || rate < 0.999f)) {
+            float t = edict->s.frameInfo[slot].time + level.frametime * (rate - 1.0f);
+            if (t < 0.0f) { t = 0.0f; }
+            // no wrap here: Animate::PostAnimate's own advance wraps the loop, raises ANIM_FINISHED and
+            // takes the root-motion delta across the boundary exactly as it does at native rate
+            edict->s.frameInfo[slot].time = t;
+        }
+    }
+
+    Animate::PostAnimate();
+}
+
 void Player::TickSprint()
 {
     float timeHeld;
@@ -17387,7 +17458,11 @@ void Player::TickSprint()
         cvar_t *pRegen   = gi.Cvar_Get("coop_sprintRegen", "0.6", CVAR_ARCHIVE);
         float   maxStam  = pStamina ? pStamina->value : 5.0f;
         float   regen    = pRegen ? pRegen->value : 0.6f;
-        float   dt       = level.frametime;
+        // [bug-3372] ELAPSED time, not level.frametime: TickSprint runs from ClientThink, once per
+        // USERCMD (TRAPS, first entry), so integrating frametime drained and refilled the pool at a rate
+        // that scaled with the client's fps (60 fps on sv_fps 40 = 1.5x). Clamped like the stress/brace
+        // envelopes so a hitch cannot dump the pool; level.time restarting on a map load gives dt 0.
+        float   dt       = level.time - m_fCoopSprintLast;
         qboolean enabled = (pOn && pOn->integer) ? qtrue : qfalse;
         qboolean aiming;
         qboolean walkKey;
@@ -17395,7 +17470,9 @@ void Player::TickSprint()
         qboolean wantSprint;
 
         if (maxStam < 0.1f) { maxStam = 0.1f; }
+        m_fCoopSprintLast = level.time;
         if (dt < 0.0f || dt > 0.5f) { dt = 0.0f; } // clamp pauses / map loads
+        if (dt > 0.25f) { dt = 0.25f; }
 
         // clamp the (possibly spawn-seeded huge) pool to the current max
         if (m_fCoopStamina > maxStam) { m_fCoopStamina = maxStam; }
@@ -17435,6 +17512,33 @@ void Player::TickSprint()
         // effectively stationary, gear-rattle loop, stamina drain, and the sprint speed re-base
         // fighting the crawl multiplier. Prone crawling is never a sprint.
         if (m_bCoopProne) { wantSprint = qfalse; }
+
+        // [bug-3372] EXHAUSTION LATCH. Before this, an empty pool only failed the "stamina > 0"
+        // test frame by frame: the sprint flag dropped, but nothing remembered WHY, so the first sliver of
+        // pool (any refill, or the client mirror, which drains at a different rate and never saw the
+        // jump/slide/vault/breath spends) put the player straight back into SPRINT. The user saw the sprint
+        // cycle keep playing at run speed. Same latch recipe as the breath hold (coop_breathReArm): an
+        // empty pool latches, and the latch lets go only once the pool is back to coop_sprintReArm of max
+        // AND the sprint key has been released since (a fresh press). While latched you RUN, and the pool
+        // refills even with the key still held - you are not sprinting, so there is nothing to "pump".
+        {
+            static cvar_t *pReArm = NULL;
+            float          fReArm;
+            if (!pReArm) { pReArm = gi.Cvar_Get("coop_sprintReArm", "0.2", CVAR_ARCHIVE); }
+            fReArm = Q_clamp_float(pReArm->value, 0.0f, 1.0f);
+            if (!m_bCoopSprintSpent && m_fCoopStamina <= 0.0f) {
+                m_bCoopSprintSpent    = true;
+                m_bCoopSprintSpentRel = false;
+            }
+            if (m_bCoopSprintSpent) {
+                if (!walkKey || deadflag) { m_bCoopSprintSpentRel = true; }
+                if (m_bCoopSprintSpentRel && m_fCoopStamina > 0.0f && m_fCoopStamina >= maxStam * fReArm) {
+                    m_bCoopSprintSpent = false;
+                }
+            }
+        }
+        if (m_bCoopSprintSpent) { wantSprint = qfalse; }
+
         if (wantSprint && m_fCoopStamina > 0.0f) {
             m_bCoopSprinting = true;
             // [weight 9] the only weight cue that changes what you DO rather than what you feel:
@@ -17446,7 +17550,11 @@ void Player::TickSprint()
                 fDrain = dt * (1.0f + CoopActiveHeft() * pSD->value);
                 m_fCoopStamina -= fDrain;
             }
-            if (m_fCoopStamina < 0.0f) { m_fCoopStamina = 0.0f; }
+            if (m_fCoopStamina <= 0.0f) {
+                m_fCoopStamina        = 0.0f;
+                m_bCoopSprintSpent    = true; // [bug-3372] this frame is the last sprint frame
+                m_bCoopSprintSpentRel = false;
+            }
             m_fCoopStaminaHold = level.time + CoopStaminaDelay();
         } else {
             // [weight 7] READY-UP. The animation of bringing the weapon back down out of a sprint
