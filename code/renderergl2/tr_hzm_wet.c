@@ -24,10 +24,10 @@ non-Omaha map whatever the switch says, so turning the option on mid-map works a
   * the SKY colours the wet film reflects: zenith = the 1x1 mip of the sky box's up face, horizon = the mean of the
     four side faces' 1x1 mips. The shader then fogs them exactly as gl2 fogs the visible sky (r_globalFogSky), so on
     the 25 fogged maps the reflection is the fog colour, as the player's own sky is.
-  * a 256^2 tileable band-limited puddle mask (integer-frequency cosines, so periodic by construction) and the mask
-    value at its 25% quantile (the puddle coverage at level 1).
-  * for the WATER pass (tr_hzm_water.c), only on a map with allowlisted water: the soft occlusion copy, then
-    R_HZMWaterBuild. R_HZMWetTagShader also tags those shaders (shader->hzmWater).
+  * a 256^2 tileable band-limited noise (integer-frequency cosines, so periodic by construction): puddle zones, puddle
+    detail and a 2-D jitter (R_HZMWetBuildNoise), and the puddle mask value at its 20% quantile (coverage at level 1).
+  * for the WATER pass (tr_hzm_water.c), only on a map with allowlisted water: R_HZMWaterBuild (it reads the same
+    occlusion map). R_HZMWetTagShader also tags those shaders (shader->hzmWater).
 
 APPLIED ONLY WHERE IT IS SAFE (RB_HZMWetUniforms, vet.md B2): the main lit pass of the WORLD entity, the FIRST stage
 of the shader, opaque (no blend bits, sort <= SS_OPAQUE), not water/slime, a lit lightall permutation, a surface the
@@ -39,9 +39,9 @@ MATERIAL CLASS from the BSP shader lump's surface-type bits (qcommon/surfaceflag
 infoParms[] never parses them into shader->surfaceFlags (vet.md B3):
   never  (carpet paper foliage snow)            untouched
   sealed (metal glass grill)                    darken 0.94, rough 0.50, no sheen and no glint (thin rails crawled)
-  wood                                          0.72 / 0.42
-  porous (rock dirt sand gravel mud grass puddle) 0.60 / 0.60, puddles
-  generic (unflagged plaster, brick, concrete)  0.70 / 0.44, puddles
+  wood                                          0.66 / 0.42
+  porous (rock dirt sand gravel mud grass puddle) 0.55 / 0.60, puddles
+  generic (unflagged plaster, brick, concrete)  0.62 / 0.44, puddles
 ===========================================================================
 */
 
@@ -60,6 +60,13 @@ image_t *R_CreateImage2( const char *name, byte *pic, int width, int height, GLe
 #ifndef GL_RED
 #define GL_RED 0x1903
 #endif
+#ifndef GL_RG16
+#define GL_RG16 0x822C
+#endif
+#ifndef GL_RG
+#define GL_RG 0x8227
+#endif
+#define HZM_CLAMPI( v, lo, hi ) ( ( v ) < ( lo ) ? ( lo ) : ( ( v ) > ( hi ) ? ( hi ) : ( v ) ) )
 
 #define HZM_WET_TAGGED     0x00000001   // the BSP drew this shader on a world surface (never a real type bit)
 #define HZM_WET_TYPEMASK   ( SURF_PAPER | SURF_WOOD | SURF_METAL | SURF_ROCK | SURF_DIRT | SURF_GRILL | SURF_GRASS \
@@ -68,17 +75,20 @@ image_t *R_CreateImage2( const char *name, byte *pic, int width, int height, GLe
 #define HZM_OCC_CELL       8.0f
 #define HZM_OCC_MAXTEXELS  ( 2048.0f * 2048.0f )
 #define HZM_NOISE_SIZE     256
-#define HZM_PUDDLE_COVER   0.25f
+#define HZM_PUDDLE_COVER   0.20f   // [waterfix 2026-10-05] 0.25 -> 0.20, and the mask now mixes in a 73-146 u detail band
 
 static cvar_t *r_hzmWet;
 static cvar_t *r_hzmWetNow;
 static cvar_t *r_hzmPuddleNow;
+static cvar_t *r_hzmWetDebug;
 
 // per-class material: darken at full wetness, wet roughness, puddles allowed, sealed (no sheen/glint)
 static const float s_hzmClassMat[4][4] = {
-	{ 0.70f, 0.44f, 1.0f, 0.0f },   // 0 generic
-	{ 0.60f, 0.60f, 1.0f, 0.0f },   // 1 porous
-	{ 0.72f, 0.42f, 0.0f, 0.0f },   // 2 wood
+	// [waterfix 2026-10-05] darker wet albedo (0.70/0.60/0.72 -> 0.62/0.55/0.66): real wet ground goes darker and more
+	// saturated, not whiter (the shader adds the saturation)
+	{ 0.62f, 0.44f, 1.0f, 0.0f },   // 0 generic
+	{ 0.55f, 0.60f, 1.0f, 0.0f },   // 1 porous
+	{ 0.66f, 0.42f, 0.0f, 0.0f },   // 2 wood
 	{ 0.94f, 0.50f, 0.0f, 1.0f },   // 3 sealed
 };
 
@@ -88,6 +98,9 @@ static void R_HZMWetCvars( void )
 	r_hzmWet       = ri.Cvar_Get( "r_hzmWet",       "-1", 0 );
 	r_hzmWetNow    = ri.Cvar_Get( "r_hzmWetNow",    "0",  0 );
 	r_hzmPuddleNow = ri.Cvar_Get( "r_hzmPuddleNow", "0",  0 );
+	// [waterfix 2026-10-05] 1 = paint every wet-eligible pixel: red sheltered, green exposed with the sky reflection
+	// visible, blue puddle (surfaces left untinted are not eligible). A test view; flags 0, never saved.
+	r_hzmWetDebug  = ri.Cvar_Get( "r_hzmWetDebug",  "0",  0 );
 }
 
 static int HZM_WetClass( int bits )
@@ -311,96 +324,75 @@ static void HZM_OccWalk( dheader_t *header, hzmOccGrid_t *g, vec3_t mins, vec3_t
 
 /*
 ================
-the water pass's SOFT copy (tools/ww_look.py build_occlusion occ_soft): empty cells floored at the lowest real height
-- 512 u, then a Gaussian of sigma 48 u, so a ship's flared hull or a quay lip over the water fades the reflection over
-~100 u instead of drawing a line, while the U-boat pens stay fully roofed. Built on a 4x coarser grid (a 4x4 mean,
-then the Gaussian in coarse cells) with the same origin as the fine map.
+[waterfix 2026-10-05] the BLURRED height copy (the occlusion texture's g channel), read only by the reflection-ray
+taps. A ray tap on the sharp raster flips from open to blocked within one 8 u cell where it crosses a wall's
+footprint, so every tap drew a ruled line parallel to each wall at its own distance (seen on the m3l2 canal). On the
+blurred heights a wall rises over ~2 sigma and the reflection fades into it. Never used for the straight-up
+exposure test: blurred HEIGHTS raise every bank over the ground or water beside it (the v1.10.3 soft map's fault).
+Built at half resolution (2x2 mean, empty cells = the lowest occluder), Gaussian sigma 40 u, bilinear back up.
 ================
 */
-static void R_HZMWaterBuildSoftOcclusion( const hzmOccGrid_t *g )
+static float *HZM_OccBlurred( const hzmOccGrid_t *g, float floorZ )
 {
-	enum { F = 4 };
-	float			lo = 1e9f, hi = -1e9f, floorZ, cell = g->cell * F, sigma = 48.0f / ( g->cell * F ), wsum = 0.0f, zr;
-	float			*S, *T, w[32];
-	unsigned short	*pix;
-	int				sx = ( ( g->nx + F - 1 ) / F + 1 ) & ~1, sy = ( g->ny + F - 1 ) / F;     // sx even: 4-byte rows
-	int				i, j, x, y, r, n = sx * sy;
-	image_t			*img;
+	int		nx2 = ( g->nx + 1 ) / 2, ny2 = ( g->ny + 1 ) / 2, i, j, k, r;
+	float	*A = ri.Malloc( nx2 * ny2 * sizeof( float ) );
+	float	*T = ri.Malloc( nx2 * ny2 * sizeof( float ) );
+	float	*out = ri.Malloc( g->nx * g->ny * sizeof( float ) );
+	float	w[33], wsum = 0.0f, sigma = 40.0f / ( 2.0f * g->cell );
 
-	for ( i = 0; i < g->nx * g->ny; i++ ) {
-		if ( g->H[i] > -1e8f ) {
-			lo = MIN( lo, g->H[i] );
-			hi = MAX( hi, g->H[i] );
-		}
-	}
-	if ( lo > hi ) {
-		return;
-	}
-	floorZ = lo - 512.0f;
-
-	// 4x4 mean (cells past the fine grid's edge read as floor)
-	S = ri.Malloc( n * sizeof( float ) );
-	T = ri.Malloc( n * sizeof( float ) );
-	for ( y = 0; y < sy; y++ ) {
-		for ( x = 0; x < sx; x++ ) {
+	for ( j = 0; j < ny2; j++ ) {
+		for ( i = 0; i < nx2; i++ ) {
 			float acc = 0.0f;
-			for ( j = 0; j < F; j++ ) {
-				for ( i = 0; i < F; i++ ) {
-					int		fx = x * F + i, fy = y * F + j;
-					float	h = ( fx < g->nx && fy < g->ny ) ? g->H[fy * g->nx + fx] : floorZ;
-					acc += ( h > -1e8f ) ? h : floorZ;
-				}
+			int c;
+			for ( c = 0; c < 4; c++ ) {
+				int ii = MIN( 2 * i + ( c & 1 ), g->nx - 1 ), jj = MIN( 2 * j + ( c >> 1 ), g->ny - 1 );
+				acc += MAX( g->H[jj * g->nx + ii], floorZ );
 			}
-			S[y * sx + x] = acc / ( F * F );
+			A[j * nx2 + i] = acc * 0.25f;
 		}
 	}
-
-	// separable Gaussian, clamp-to-edge
-	r = MIN( 15, (int)ceil( 3.0f * sigma ) );
-	for ( i = -r; i <= r; i++ ) {
-		w[i + r] = expf( -0.5f * ( i * i ) / MAX( sigma * sigma, 1e-4f ) );
-		wsum += w[i + r];
+	r = MIN( 16, (int)ceilf( 3.0f * sigma ) );
+	for ( k = -r; k <= r; k++ ) {
+		w[k + r] = expf( -0.5f * ( k * k ) / MAX( sigma * sigma, 1e-4f ) );
+		wsum += w[k + r];
 	}
-	for ( i = 0; i <= 2 * r; i++ ) {
-		w[i] /= wsum;
+	for ( k = 0; k <= 2 * r; k++ ) {
+		w[k] /= wsum;
 	}
-	for ( y = 0; y < sy; y++ ) {
-		for ( x = 0; x < sx; x++ ) {
+	for ( j = 0; j < ny2; j++ ) {
+		for ( i = 0; i < nx2; i++ ) {
 			float acc = 0.0f;
-			for ( i = -r; i <= r; i++ ) {
-				acc += w[i + r] * S[y * sx + MAX( 0, MIN( sx - 1, x + i ) )];
+			for ( k = -r; k <= r; k++ ) {
+				acc += w[k + r] * A[j * nx2 + HZM_CLAMPI( i + k, 0, nx2 - 1 )];
 			}
-			T[y * sx + x] = acc;
+			T[j * nx2 + i] = acc;
 		}
 	}
-	for ( y = 0; y < sy; y++ ) {
-		for ( x = 0; x < sx; x++ ) {
+	for ( j = 0; j < ny2; j++ ) {
+		for ( i = 0; i < nx2; i++ ) {
 			float acc = 0.0f;
-			for ( i = -r; i <= r; i++ ) {
-				acc += w[i + r] * T[MAX( 0, MIN( sy - 1, y + i ) ) * sx + x];
+			for ( k = -r; k <= r; k++ ) {
+				acc += w[k + r] * T[HZM_CLAMPI( j + k, 0, ny2 - 1 ) * nx2 + i];
 			}
-			S[y * sx + x] = acc;
+			A[j * nx2 + i] = acc;
 		}
 	}
+	for ( j = 0; j < g->ny; j++ ) {
+		float fy = Com_Clamp( 0.0f, (float)( ny2 - 1 ), ( j + 0.5f ) * 0.5f - 0.5f );
+		int   y0 = MIN( (int)fy, ny2 - 1 ), y1 = MIN( y0 + 1, ny2 - 1 );
+		float ty = fy - y0;
+		for ( i = 0; i < g->nx; i++ ) {
+			float fx = Com_Clamp( 0.0f, (float)( nx2 - 1 ), ( i + 0.5f ) * 0.5f - 0.5f );
+			int   x0 = MIN( (int)fx, nx2 - 1 ), x1 = MIN( x0 + 1, nx2 - 1 );
+			float tx = fx - x0;
+			float a = A[y0 * nx2 + x0] + ( A[y0 * nx2 + x1] - A[y0 * nx2 + x0] ) * tx;
+			float b = A[y1 * nx2 + x0] + ( A[y1 * nx2 + x1] - A[y1 * nx2 + x0] ) * tx;
+			out[j * g->nx + i] = a + ( b - a ) * ty;
+		}
+	}
+	ri.Free( A );
 	ri.Free( T );
-
-	zr = MAX( hi + 64.0f - floorZ, 1.0f );
-	pix = ri.Malloc( n * sizeof( unsigned short ) );
-	for ( i = 0; i < n; i++ ) {
-		pix[i] = (unsigned short)( Com_Clamp( 0.0f, 1.0f, ( S[i] - floorZ ) / zr ) * 65535.0f + 0.5f );
-	}
-	ri.Free( S );
-
-	img = R_CreateImage2( "*hzmRainOccSoft", NULL, sx, sy, GL_RGBA16, 0, IMGTYPE_COLORALPHA,
-	                      IMGFLAG_NO_COMPRESSION | IMGFLAG_CLAMPTOEDGE | IMGFLAG_NOLIGHTSCALE, GL_R16 );
-	qglTextureSubImage2DEXT( img->texnum, GL_TEXTURE_2D, 0, 0, 0, sx, sy, GL_RED, GL_UNSIGNED_SHORT, pix );
-	ri.Free( pix );
-	GL_CheckErrors();
-
-	tr.hzmRainOccSoftImage = img;
-	VectorSet4( tr.hzmRainOccSoftXform, g->x0, g->y0, 1.0f / ( sx * cell ), 1.0f / ( sy * cell ) );
-	tr.hzmRainOccSoftZ[0] = floorZ;
-	tr.hzmRainOccSoftZ[1] = zr;
+	return out;
 }
 
 static void R_HZMWetBuildOcclusion( dheader_t *header )
@@ -409,6 +401,7 @@ static void R_HZMWetBuildOcclusion( dheader_t *header )
 	hzmOccGrid_t	g;
 	float			w, h, zmin, zmax, zr;
 	unsigned short	*pix;
+	float			*B;
 	int				i, n;
 	image_t			*img;
 
@@ -435,24 +428,26 @@ static void R_HZMWetBuildOcclusion( dheader_t *header )
 		g.H[i] = -1e9f;
 	}
 	HZM_OccWalk( header, &g, NULL, NULL );
-	if ( tr.hzmWaterWorld ) {
-		R_HZMWaterBuildSoftOcclusion( &g );
-	}
 
 	zmin = mins[2] - 64.0f;
 	zmax = maxs[2] + 64.0f;
 	zr = zmax - zmin;
-	pix = ri.Malloc( n * sizeof( unsigned short ) );
+	B = HZM_OccBlurred( &g, mins[2] );
+	pix = ri.Malloc( n * 2 * sizeof( unsigned short ) );
 	for ( i = 0; i < n; i++ ) {
 		float v = ( g.H[i] < zmin ) ? 0.0f : ( g.H[i] - zmin ) / zr;
-		pix[i] = (unsigned short)( Com_Clamp( 0.0f, 1.0f, v ) * 65535.0f + 0.5f );
+		float b = ( B[i] - zmin ) / zr;
+		pix[i * 2 + 0] = (unsigned short)( Com_Clamp( 0.0f, 1.0f, v ) * 65535.0f + 0.5f );
+		pix[i * 2 + 1] = (unsigned short)( Com_Clamp( 0.0f, 1.0f, b ) * 65535.0f + 0.5f );
 	}
+	ri.Free( B );
 	ri.Free( g.H );
 
-	// storage only (pic NULL), then a 16-bit single-channel upload: R_CreateImage2's upload path is RGBA8/RGBA16
+	// storage only (pic NULL), then a 16-bit two-channel upload (R_CreateImage2's upload path is RGBA8/RGBA16):
+	// r = the sharp max height, g = its blurred copy (HZM_OccBlurred) for the reflection-ray taps
 	img = R_CreateImage2( "*hzmRainOcc", NULL, g.nx, g.ny, GL_RGBA16, 0, IMGTYPE_COLORALPHA,
-	                      IMGFLAG_NO_COMPRESSION | IMGFLAG_CLAMPTOEDGE | IMGFLAG_NOLIGHTSCALE, GL_R16 );
-	qglTextureSubImage2DEXT( img->texnum, GL_TEXTURE_2D, 0, 0, 0, g.nx, g.ny, GL_RED, GL_UNSIGNED_SHORT, pix );
+	                      IMGFLAG_NO_COMPRESSION | IMGFLAG_CLAMPTOEDGE | IMGFLAG_NOLIGHTSCALE, GL_RG16 );
+	qglTextureSubImage2DEXT( img->texnum, GL_TEXTURE_2D, 0, 0, 0, g.nx, g.ny, GL_RG, GL_UNSIGNED_SHORT, pix );
 	ri.Free( pix );
 	GL_CheckErrors();
 
@@ -528,53 +523,85 @@ static void R_HZMWetBuildSky( void )
 	}
 }
 
-static void R_HZMWetBuildNoise( void )
+// one band-limited tileable field: a sum of cosines with INTEGER wave vectors (kmin..kmax cycles per tile, so periodic
+// by construction), amplitude k^-0.9, deterministic phases; normalised to 0..1. cos(a + b) is expanded into per-row and
+// per-column tables, so a 256^2 field costs 2 multiplies per wave per texel instead of a cosf.
+static void HZM_NoiseField( float *out, unsigned int seed, float kmin, float kmax )
 {
-	// band-limited, tileable: a sum of cosines with INTEGER wave vectors (3..12 cycles per tile), amplitude k^-0.9,
-	// deterministic phases - the C twin of tools/ww_look.py make_puddle_noise (its FFT form, low bands cut)
 	enum { N = HZM_NOISE_SIZE, WAVES = 48 };
 	static const float twoPi = 6.28318530718f;
-	float		kx[WAVES], ky[WAVES], amp[WAVES], ph[WAVES];
-	float		*f, lo = 1e9f, hi = -1e9f;
-	byte		*pic;
-	unsigned int seed = 0x31u, hist[256];
-	int			i, x, y, acc;
+	static float cx[WAVES][N], sx[WAVES][N], cy[WAVES][N], sy[WAVES][N];
+	float		amp[WAVES], lo = 1e9f, hi = -1e9f;
+	int			i, x, y;
 
 	for ( i = 0; i < WAVES; ) {
 		int a, b;
-		float k;
-		seed = seed * 1664525u + 1013904223u; a = (int)( ( seed >> 16 ) % 25u ) - 12;
-		seed = seed * 1664525u + 1013904223u; b = (int)( ( seed >> 16 ) % 25u ) - 12;
+		float k, ph;
+		seed = seed * 1664525u + 1013904223u; a = (int)( ( seed >> 16 ) % 81u ) - 40;
+		seed = seed * 1664525u + 1013904223u; b = (int)( ( seed >> 16 ) % 81u ) - 40;
 		k = sqrtf( (float)( a * a + b * b ) );
-		if ( k < 3.0f || k > 12.0f ) {
+		if ( k < kmin || k > kmax ) {
 			continue;
 		}
 		seed = seed * 1664525u + 1013904223u;
-		kx[i] = (float)a; ky[i] = (float)b; amp[i] = powf( k, -0.9f );
-		ph[i] = ( ( seed >> 8 ) & 0xffff ) / 65536.0f * twoPi;
+		amp[i] = powf( k, -0.9f );
+		ph = ( ( seed >> 8 ) & 0xffff ) / 65536.0f * twoPi;
+		for ( x = 0; x < N; x++ ) {
+			cx[i][x] = cosf( twoPi * a * x / N + ph );
+			sx[i][x] = sinf( twoPi * a * x / N + ph );
+			cy[i][x] = cosf( twoPi * b * x / N );
+			sy[i][x] = sinf( twoPi * b * x / N );
+		}
 		i++;
 	}
-	f = ri.Malloc( N * N * sizeof( float ) );
 	for ( y = 0; y < N; y++ ) {
 		for ( x = 0; x < N; x++ ) {
 			float v = 0.0f;
 			for ( i = 0; i < WAVES; i++ ) {
-				v += amp[i] * cosf( twoPi * ( kx[i] * x + ky[i] * y ) / N + ph[i] );
+				v += amp[i] * ( cx[i][x] * cy[i][y] - sx[i][x] * sy[i][y] );
 			}
-			f[y * N + x] = v;
+			out[y * N + x] = v;
 			lo = MIN( lo, v );
 			hi = MAX( hi, v );
 		}
 	}
-	pic = ri.Malloc( N * N * 4 );
-	Com_Memset( hist, 0, sizeof( hist ) );
 	for ( i = 0; i < N * N; i++ ) {
-		byte v = (byte)( ( f[i] - lo ) / MAX( hi - lo, 1e-6f ) * 255.0f + 0.5f );
-		pic[i * 4 + 0] = pic[i * 4 + 1] = pic[i * 4 + 2] = v;
-		pic[i * 4 + 3] = 255;
-		hist[v]++;
+		out[i] = ( out[i] - lo ) / MAX( hi - lo, 1e-6f );
+	}
+}
+
+static void R_HZMWetBuildNoise( void )
+{
+	// [waterfix 2026-10-05] four independent channels, one fetch in lightall:
+	//   r = the puddle ZONES, 3..12 cycles per 2048 u tile (170-680 u) - the original mask
+	//   g = puddle DETAIL, 14..28 cycles (73-146 u): mixed in at 40 %, it breaks the zones into scattered puddles with
+	//       irregular rims instead of 3-12 m sheets
+	//   b, a = a smooth JITTER vector, 16..40 cycles (51-128 u): rotates / scales the exposure taps and the reflection
+	//       ray steps, so no shelter edge is a ruled line
+	// Puddle coverage at level 1 is the HZM_PUDDLE_COVER quantile of the mix the shader forms (0.6 r + 0.4 g).
+	enum { N = HZM_NOISE_SIZE };
+	static const struct { unsigned int seed; float kmin, kmax; } ch[4] = {
+		{ 0x31u, 3.0f, 12.0f }, { 0x5au, 14.0f, 28.0f }, { 0x77u, 16.0f, 40.0f }, { 0x93u, 16.0f, 40.0f },
+	};
+	float		*f;
+	byte		*pic;
+	unsigned int hist[256];
+	int			i, c, acc;
+
+	f = ri.Malloc( N * N * sizeof( float ) );
+	pic = ri.Malloc( N * N * 4 );
+	for ( c = 0; c < 4; c++ ) {
+		HZM_NoiseField( f, ch[c].seed, ch[c].kmin, ch[c].kmax );
+		for ( i = 0; i < N * N; i++ ) {
+			pic[i * 4 + c] = (byte)( f[i] * 255.0f + 0.5f );
+		}
 	}
 	ri.Free( f );
+	Com_Memset( hist, 0, sizeof( hist ) );
+	for ( i = 0; i < N * N; i++ ) {
+		int v = (int)( 0.6f * pic[i * 4 + 0] + 0.4f * pic[i * 4 + 1] + 0.5f );
+		hist[MIN( v, 255 )]++;
+	}
 	for ( i = 0, acc = 0; i < 256; i++ ) {
 		acc += hist[i];
 		if ( acc >= (int)( HZM_PUDDLE_COVER * N * N ) ) {
@@ -631,7 +658,6 @@ void R_HZMWetBuild( dheader_t *header )
 	tr.hzmWetReady = qfalse;
 	tr.hzmRainOccImage = NULL;
 	tr.hzmWetNoiseImage = NULL;
-	tr.hzmRainOccSoftImage = NULL;
 	tr.hzmWaterWorld = 0;
 	tr.hzmOmahaWorld = HZM_WaterWetOmahaMap( tr.world->baseName );
 	if ( tr.hzmOmahaWorld ) {
@@ -661,7 +687,7 @@ void R_HZMWetBuild( dheader_t *header )
 
 	tr.hzmWetReady = ( tr.hzmRainOccImage && tr.hzmWetNoiseImage ) ? qtrue : qfalse;
 
-	R_HZMWaterBuild();     // tr_hzm_water.c: after the sky, sun and soft occlusion above
+	R_HZMWaterBuild();     // tr_hzm_water.c: after the sky, sun and occlusion above
 }
 
 /*
@@ -733,7 +759,7 @@ void RB_HZMWetUniforms( shaderProgram_t *sp, const shaderCommands_t *input, cons
 		wet[0] = Com_Clamp( 0.0f, 1.0f, r_hzmWetNow->value ) * fade;
 		wet[1] = Com_Clamp( 0.0f, 1.0f, r_hzmPuddleNow->value ) * fade;
 		wet[2] = (float)fmod( backEnd.refdef.floatTime, 3600.0 );
-		wet[3] = ( wet[0] > 0.0005f || wet[1] > 0.0005f ) ? 1.0f : 0.0f;
+		wet[3] = ( wet[0] > 0.0005f || wet[1] > 0.0005f ) ? ( r_hzmWetDebug->integer ? 2.0f : 1.0f ) : 0.0f;
 
 		if ( wet[3] > 0.0f ) {
 			vec4_t occz;
@@ -741,7 +767,7 @@ void RB_HZMWetUniforms( shaderProgram_t *sp, const shaderCommands_t *input, cons
 			occz[0] = tr.hzmRainOccZ[0];
 			occz[1] = tr.hzmRainOccZ[1];
 			occz[2] = tr.hzmPuddleQ;
-			occz[3] = 0.45f;     // lightmap sheen (plan D6, kept)
+			occz[3] = 0.25f;     // lightmap sheen (plan D6, kept; waterfix 2026-10-05 0.45 -> 0.25, it whitened the ground)
 			GLSL_SetUniformVec4( sp, UNIFORM_HZMWETMAT, s_hzmClassMat[cls] );
 			GLSL_SetUniformVec4( sp, UNIFORM_HZMWETOCC, tr.hzmRainOccXform );
 			GLSL_SetUniformVec4( sp, UNIFORM_HZMWETOCCZ, occz );

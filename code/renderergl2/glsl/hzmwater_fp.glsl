@@ -4,14 +4,14 @@
 uniform vec3      u_ViewOrigin;
 uniform vec4      u_HzmWater;       // master fade, time mod 3600, lightmap reference (0 = no lightmap gate), glint on
 uniform vec4      u_HzmWetOcc;      // occlusion map world->uv (x0, y0, 1/width, 1/height)
-uniform vec4      u_HzmWetOccZ;     // the SOFT map's zmin, zrange
+uniform vec4      u_HzmWetOccZ;     // its zmin, zrange
 uniform vec4      u_HzmWetSkyZ;     // sky zenith rgb
 uniform vec4      u_HzmWetSkyH;     // sky horizon rgb
 uniform vec4      u_HzmWetSun;      // toward-sun xyz, sun present
 uniform vec4      u_HzmWetSunCol;   // sun rgb
 uniform vec4      u_GlobalFogColor;
 uniform vec4      u_GlobalFogParams;
-uniform sampler2D u_HzmOccMap;      // the SOFT (sigma 48 u) copy of the rain-occlusion map
+uniform sampler2D u_HzmOccMap;      // the rain-occlusion map (8 u top-down max height: r sharp, g blurred; tr_hzm_wet.c)
 uniform sampler2D u_HzmRippleMap;   // 256^2 tileable ripple normals, RGBA8 UNCOMPRESSED with mips (Toksvig reads |n|)
 uniform sampler2D u_LightMap;       // the water shader's own lightmap, when it has one
 
@@ -33,14 +33,40 @@ void main()
 	float t    = u_HzmWater.y;
 	vec3  s1   = texture2D(u_HzmRippleMap, P.xy / 384.0 + vec2(0.012, 0.006) * t).xyz * 2.0 - vec3(1.0);
 	vec3  s2   = texture2D(u_HzmRippleMap, (P.xy + vec2(37.0, -91.0)) / 144.0 + vec2(-0.018, 0.011) * t).xyz * 2.0 - vec3(1.0);
-	float occ  = texture2D(u_HzmOccMap, (P.xy - u_HzmWetOcc.xy) * u_HzmWetOcc.zw).r * u_HzmWetOccZ.y + u_HzmWetOccZ.x;
 	float lmg  = 1.0;
+	float lmb  = 1.0;
 	if (u_HzmWater.z > 0.0)
 	{
 		// no glint in the water's own baked shadow; relative to this shader's brightest water on the map
 		float lum = dot(texture2D(u_LightMap, var_LightTex).rgb, vec3(0.299, 0.587, 0.114));
 		lmg = smoothstep(0.45 * u_HzmWater.z, 0.85 * u_HzmWater.z, lum);
+		lmb = clamp(lum / u_HzmWater.z, 0.0, 1.0);     // [waterfix] how lit this water is: dims the blocked-ray stand-in
 	}
+
+	// [waterfix 2026-10-05] where the reflected sky is blocked. This used a Gaussian-blurred (sigma 48 u) copy of the
+	// height map tested straight up: blurring HEIGHTS raised every bank and quay wall over the water beside it, so the
+	// reflection died along canals and near banks and only open water kept it, and the fade traced each wall's outline.
+	// Now the reflected ray itself is marched through the map's BLURRED channel (g, sigma 40 u: on the sharp raster
+	// each tap drew a ruled line parallel to every wall it crossed) at 40, 140 and 380 u, wide soft compares: under a roof
+	// or a bridge, toward a hull or the far quay wall the water shows its own colour (what it would mirror there is
+	// scenery, not sky); open water beside a bank keeps its sky. The ray takes a quarter of the ripple tilt, so the edge
+	// of a mirrored wall is gently broken up the way a real one is, never a ruled line. Fetched before the discard.
+	vec3  Rg  = reflect(-E, normalize(vec3((s1.xy * amp1 + s2.xy * amp2) * 0.25, 1.0)));
+	float sk  = 1.0;
+	if (u_HzmWetOccZ.y > 0.0)
+	{
+		vec2  uv = u_HzmWetOcc.zw;
+		// relative to the blurred height over the water point itself: a bank's blur lift beside the water does not
+		// block a ray that runs away from the bank
+		float h0 = max(texture2D(u_HzmOccMap, (P.xy - u_HzmWetOcc.xy) * uv).g * u_HzmWetOccZ.y + u_HzmWetOccZ.x, P.z);
+		float ha = texture2D(u_HzmOccMap, (P.xy + Rg.xy * 40.0 - u_HzmWetOcc.xy) * uv).g * u_HzmWetOccZ.y + u_HzmWetOccZ.x;
+		float hb = texture2D(u_HzmOccMap, (P.xy + Rg.xy * 140.0 - u_HzmWetOcc.xy) * uv).g * u_HzmWetOccZ.y + u_HzmWetOccZ.x;
+		float hc = texture2D(u_HzmOccMap, (P.xy + Rg.xy * 380.0 - u_HzmWetOcc.xy) * uv).g * u_HzmWetOccZ.y + u_HzmWetOccZ.x;
+		sk = (1.0 - 0.8 * smoothstep(8.0, 60.0, ha - h0 - Rg.z * 40.0))
+		   * (1.0 - 0.8 * smoothstep(12.0, 100.0, hb - h0 - Rg.z * 140.0))
+		   * (1.0 - 0.8 * smoothstep(20.0, 160.0, hc - h0 - Rg.z * 380.0));
+	}
+	float e   = sk;
 
 	// horizontal, from above only: sloped or vertical 'water' faces and cull-none undersides get nothing
 	if (var_NormalZ < 0.7 || u_ViewOrigin.z < P.z)
@@ -54,10 +80,10 @@ void main()
 	float var = amp1 * amp1 * (1.0 - l1) / l1 + amp2 * amp2 * (1.0 - l2) / l2;
 	vec3  N   = normalize(vec3(s1.xy * amp1 + s2.xy * amp2, 1.0));
 
-	// Schlick, water F0 0.02, capped; no sky where a roof or hull is above the water
-	float e   = smoothstep(-48.0, 2.0, P.z + 8.0 - occ + 2.0);
+	// Schlick, water F0 0.02, capped. [waterfix] no longer x e: where the ray is blocked the water still reflects -
+	// the scenery's dim stand-in below - instead of nothing
 	float ndv = max(dot(N, E), 0.001);
-	float F   = min(0.02 + 0.98 * pow(1.0 - ndv, 5.0), 0.60) * e;
+	float F   = min(0.02 + 0.98 * pow(1.0 - ndv, 5.0), 0.60);
 
 	// the sky it reflects, fogged exactly as gl2 fogs the visible sky at zFar (r_globalFogSky)
 	vec3 R = reflect(-E, N);
@@ -75,6 +101,7 @@ void main()
 		f = clamp(clamp((dp - u_GlobalFogParams.z) * u_GlobalFogParams.w, 0.0, 1.0) * u_GlobalFogColor.a, 0.0, 1.0);
 	}
 	env = mix(env, u_GlobalFogColor.rgb, haze);
+	env = mix(env * (0.55 * lmb), env, e);     // [waterfix] blocked ray: a dim stand-in for the mirrored bank / wall / hull
 
 	// sun / moon glint: roughness floor 0.26 widened by Toksvig variance, range and haze (a fogged sky has no crisp
 	// disc to reflect) - a narrower lobe is single-pixel sparkle in motion

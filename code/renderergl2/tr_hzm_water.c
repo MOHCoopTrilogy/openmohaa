@@ -3,8 +3,8 @@
 HZM coop - WATER PASS for allowlisted world water (r_hzmWater). docs/proposals/water_wetness_2026-09-27 (plan.md W3).
 
 WHAT. One extra draw over a real water surface, after its retail stages and before the fog pass: a Fresnel sky
-reflection with two world-space ripple layers, a soft sun/moon glint, and nothing where a roof, hull or quay lip is
-over the water. glsl/hzmwater_fp.glsl is the look; the offline twin that fixed every constant is tools/ww_look.py
+reflection with two world-space ripple layers, a soft sun/moon glint, and no sky where the reflected ray runs into a
+roof, a hull or a quay wall. glsl/hzmwater_fp.glsl is the look; the offline twin that fixed every constant is tools/ww_look.py
 hzm_water (lookdev/RUBRIC.md: no added sparkle, seams <= 1.07, far field stable, motion checked).
 
 WHERE (the vet's rules, all enforced here or in the shader):
@@ -30,7 +30,7 @@ BUILT ONCE PER MAP LOAD (R_HZMWaterBuild, from R_HZMWetBuild), only on a non-Oma
   * per allowlisted shader NAME, the 90th percentile of its own lightmap's luminance over its surfaces (read back
     from the lightmap texture the shader samples, so overbright, r_mergeLightmaps and HDR lightmaps are all already
     applied): the glint is gated relative to that, so no glint in the water's own baked shadow (vet #13).
-  * the SOFT occlusion copy is built by tr_hzm_wet.c beside the rain-occlusion map (it needs the raw height grid).
+  * the occlusion is tr_hzm_wet.c's rain-occlusion map itself (the sigma-48 soft copy is gone, waterfix 2026-10-05).
 ===========================================================================
 */
 
@@ -422,13 +422,15 @@ void RB_HZMWaterPass( int deformGen, const vec5_t deformParams )
 	water[3] = 1.0f;
 	GLSL_SetUniformVec4( sp, UNIFORM_HZMWATER, water );
 
-	if ( tr.hzmRainOccSoftImage ) {
-		occz[0] = tr.hzmRainOccSoftZ[0];
-		occz[1] = tr.hzmRainOccSoftZ[1];
-		GLSL_SetUniformVec4( sp, UNIFORM_HZMWETOCC, tr.hzmRainOccSoftXform );
+	// [waterfix 2026-10-05] the SHARP rain-occlusion map; the shader marches the reflected ray through it (the old
+	// Gaussian-blurred height copy raised every bank over the water beside it and killed the reflection along canals)
+	if ( tr.hzmRainOccImage ) {
+		occz[0] = tr.hzmRainOccZ[0];
+		occz[1] = tr.hzmRainOccZ[1];
+		GLSL_SetUniformVec4( sp, UNIFORM_HZMWETOCC, tr.hzmRainOccXform );
 	} else {
 		static const vec4_t open = { 0.0f, 0.0f, 0.0f, 0.0f };
-		occz[0] = -1e6f;     // nothing on this map shelters anything: every texel reads as open sky
+		occz[0] = -1e6f;     // nothing on this map shelters anything: zrange 0 makes the shader skip the march
 		occz[1] = 0.0f;
 		GLSL_SetUniformVec4( sp, UNIFORM_HZMWETOCC, open );
 	}
@@ -445,7 +447,7 @@ void RB_HZMWaterPass( int deformGen, const vec5_t deformParams )
 	// the fog colour a SRC_ALPHA/ONE_MINUS_SRC_ALPHA draw would get; the shader applies it premultiplied itself
 	RB_SetGlobalFogUniforms( sp, GLS_SRCBLEND_SRC_ALPHA | GLS_DSTBLEND_ONE_MINUS_SRC_ALPHA, qfalse );
 
-	GL_BindToTMU( tr.hzmRainOccSoftImage ? tr.hzmRainOccSoftImage : tr.whiteImage, TB_HZMRAINOCC );
+	GL_BindToTMU( tr.hzmRainOccImage ? tr.hzmRainOccImage : tr.whiteImage, TB_HZMRAINOCC );
 	GL_BindToTMU( tr.hzmRippleImage, TB_HZMWETNOISE );
 	GL_BindToTMU( lm ? lm : tr.whiteImage, TB_LIGHTMAP );
 

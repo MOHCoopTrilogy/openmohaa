@@ -2760,9 +2760,6 @@ typedef struct {
     qboolean hzmWaterReady;
     int hzmWaterWorld;					// allowlisted water surfaces in the loaded BSP (0 = build nothing)
     image_t *hzmRippleImage;
-    image_t *hzmRainOccSoftImage;		// sigma 48 u copy of the rain-occlusion map (tr_hzm_wet.c)
-    vec4_t hzmRainOccSoftXform;
-    vec2_t hzmRainOccSoftZ;
     shaderProgram_t hzmWaterShader[2];	// [1] = USE_DEFORM_VERTEXES, the fogShader split
     // HZM coop [2026-09-27] realistic lightning (tr_hzm_lightning.c). In tr so R_Init's memset clears all of it: the
     // program and the bolt image are created on the first lit frame and GLSL_ShutdownGPUShaders / the image shutdown
