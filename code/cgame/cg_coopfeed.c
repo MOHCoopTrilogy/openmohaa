@@ -84,7 +84,7 @@ void CG_CoopFeedInit(void)
     s_cvFeed  = cgi.Cvar_Get("coop_feed", "1", CVAR_ARCHIVE);
     s_cvHints = cgi.Cvar_Get("coop_hints", "1", CVAR_ARCHIVE);
     s_cvX     = cgi.Cvar_Get("coop_feedX", "22", CVAR_ARCHIVE);
-    s_cvY     = cgi.Cvar_Get("coop_feedY", "104", CVAR_ARCHIVE);
+    s_cvY     = cgi.Cvar_Get("coop_feedY", "116", CVAR_ARCHIVE); // clear of the item counters above the health panel (run 4)
     s_cvDebug = cgi.Cvar_Get("coop_feedDebug", "0", 0);
     cgi.Cvar_Get("coop_hintSeen", "", CVAR_ARCHIVE);
     cgi.Cvar_Get("coop_hintSeen2", "", CVAR_ARCHIVE);
