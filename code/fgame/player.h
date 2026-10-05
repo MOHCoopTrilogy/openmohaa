@@ -528,6 +528,15 @@ public:
     // HZM coop [user 08-02]: DBNO state published to the engine so turret/vehicle mount can
     // refuse a downed player. Mirrors the coop_setcover setter directly below.
     bool  m_bCoopDbno;
+    // HZM coop [user 2026-10-05] BLEED-OUT RING: the script's countdown, published on the player's own
+    // entityState (beam_entnum, unused on ET_PLAYER) so the downed player AND teammates can draw it. See
+    // Player::TickCoopBleed for the packing and the self-expiring lease.
+    float m_fCoopBleedLeft;
+    float m_fCoopBleedTotal;
+    float m_fCoopBleedStamp;
+    bool  m_bCoopBleedPaused;
+    bool  m_bCoopBleedBcast;
+    int   m_iCoopBleedFlare;
     bool  m_bCoopCoverRequested; // player asked for cover (toggled by coop_setcover)
     bool  m_bCoopCoverWall;      // requested + standing back-to-wall pose valid this frame
     bool  m_bCoopCoverLow;       // requested + crouched low-cover pose valid this frame
@@ -1084,6 +1093,10 @@ public:
     void       EventCoopKillWall(Event *ev);   // HZM coop - wall probe v5: live kill of aimed invisible brush (killwall)
     void       EventCoopMarkWall(Event *ev);   // HZM coop - wall probe v5: forensic aim-trace report (markwall)
     void       EventCoopSetDbno(Event *ev);    // HZM coop [user 08-02] - DBNO state on/off (coop_setdbno, from dbno.scr)
+    void       EventCoopSetBleed(Event *ev);   // HZM coop [user 2026-10-05] - bleed-out countdown (coop_setbleed, dbno.scr)
+    void       EventCoopBleedFlare(Event *ev); // HZM coop [user 2026-10-05] - crawl-penalty flare (coop_bleedflare)
+    void       CoopBleedClear(void);
+    void       TickCoopBleed(void);
     void       EventCoopSetCover(Event *ev);   // HZM coop - take-cover request on/off (coop_setcover, from takecover.scr)
     void       EventGetCoopCover(Event *ev);   // HZM coop - cover state getter (coop_incover: 0/1/2/3)
     void       Score(Event *ev);

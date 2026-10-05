@@ -1376,6 +1376,22 @@ Event EV_Player_CoopSetDbno // HZM coop - DBNO state [user 08-02]
      "active",
      "HZM coop - publish DBNO (down-but-not-out) state to the engine so turret mount can refuse it"
 );
+Event EV_Player_CoopSetBleed // HZM coop [user 2026-10-05] - bleed-out ring
+(
+    "coop_setbleed",
+     EV_DEFAULT,
+     "ffI",
+     "remaining total paused",
+     "HZM coop - publish the DBNO bleed-out countdown (seconds left, total, 1 = paused) for the HUD ring; total <= 0 clears"
+);
+Event EV_Player_CoopBleedFlare // HZM coop [user 2026-10-05] - bleed-out ring flare
+(
+    "coop_bleedflare",
+     EV_DEFAULT,
+     NULL,
+     NULL,
+     "HZM coop - flash the bleed-out ring (moving while downed accelerated the bleed)"
+);
 Event EV_Player_CoopSetCover // HZM coop - TAKE COVER [214]
 (
     "coop_setcover",
@@ -2136,6 +2152,8 @@ CLASS_DECLARATION(Sentient, Player, "player") {
     {&EV_Player_CoopKillWall,             &Player::EventCoopKillWall            }, // HZM coop - wall probe v5
     {&EV_Player_CoopMarkWall,             &Player::EventCoopMarkWall            }, // HZM coop - wall probe v5
     {&EV_Player_CoopSetDbno,              &Player::EventCoopSetDbno             }, // HZM coop - DBNO state [user 08-02]
+    {&EV_Player_CoopSetBleed,             &Player::EventCoopSetBleed            }, // HZM coop - bleed-out ring [user 2026-10-05]
+    {&EV_Player_CoopBleedFlare,           &Player::EventCoopBleedFlare          }, // HZM coop - bleed-out ring [user 2026-10-05]
     {&EV_Player_CoopSetCover,             &Player::EventCoopSetCover            }, // HZM coop - take cover [214]
     {&EV_Player_GetCoopCover,             &Player::EventGetCoopCover            }, // HZM coop - take cover [214]
     {&EV_Player_GetReady,                 &Player::EventGetReady                },
@@ -2422,6 +2440,12 @@ Player::Player()
     m_fCoopPeekFrac    = 0.0f;     // HZM coop - eased peek step-out fraction [216]
     m_bCoopGearLoop  = false; // HZM coop - gear rattle off
     m_bCoopDbno           = false;   // HZM coop [user 08-02]
+    m_fCoopBleedLeft      = 0.0f;    // HZM coop [user 2026-10-05] bleed-out ring - player memory is not zeroed
+    m_fCoopBleedTotal     = 0.0f;
+    m_fCoopBleedStamp     = 0.0f;
+    m_bCoopBleedPaused    = false;
+    m_bCoopBleedBcast     = false;
+    m_iCoopBleedFlare     = 0;
     m_fCoopCoverAutoDwell = 0.0f; // HZM coop [user 2026-08-09] auto-cover dwell/backoff
     m_vCoopRecoilOwed     = Vector(0, 0, 0);
     m_iCoopSpeedBase      = 0;   // [vet] was never assigned anywhere - the SPEEDPROBE read it raw
@@ -9429,6 +9453,8 @@ void Player::UpdateStats(void)
         client->ps.stats[STAT_MGHEAT] = (iStam + 1) | (m_bCoopSprintSpent ? 128 : 0);
     }
 
+    TickCoopBleed(); // HZM coop [user 2026-10-05] bleed-out ring
+
     //
     // set boss health
     //
@@ -13825,6 +13851,119 @@ void Player::EventCoopSetDbno(Event *ev)
     if (m_bCoopDbno) {
         RemoveFromVehiclesAndTurrets();
     }
+    if (!m_bCoopDbno) {
+        CoopBleedClear(); // HZM coop [user 2026-10-05] up again (or dead): the ring goes with the state
+    }
+}
+
+/*
+=================
+HZM coop [user 2026-10-05] BLEED-OUT RING - server side.
+
+dbno.scr owns the countdown (whole seconds, a crawl penalty, a pause while a medkit channels) and calls
+coop_setbleed once a second. The engine only republishes it, so the script stays the single authority.
+
+THE WIRE. entityState.beam_entnum is networked for every entity (16 bits, msg.cpp entity tables) and only
+ever READ for ET_BEAM (cg_ents.c CG_Beam); nothing writes it on a player. Using it costs no protocol change
+and no new field, and because it is ENTITY state it reaches teammates (their medic icon + mini ring) and
+arrives whole in a late joiner's first snapshot - a stufftext or a playerState stat could do neither.
+    bits 0-7   remaining / total, 0..255
+    bits 8-14  total seconds, 1..127 (0 = no bleed-out: everything else is ignored)
+    bit  15    flare toggle - flips on every coop_bleedflare, so a lost snapshot cannot eat the edge
+Ship game.dll and cgame.dll together (an old cgame ignores the field; an old game.dll leaves it 0).
+
+SMOOTHING. Between the script's 1 s ticks the remaining time is extrapolated (never by more than 1 s, never
+while paused), so the ring drains continuously instead of stepping once a second.
+
+THE LEASE. Every DBNO exit in the script (revive, team revive, AI medic, medkit, bled out, give up,
+spectate, respawn, disconnect) would otherwise have to remember to clear this. Instead the publish expires:
+no coop_setbleed for 2.5 s, or deadflag, and the ring is gone - a forgotten exit costs 2.5 s, never a ring
+stuck on screen (the bug-2906 lesson, without the resend machinery).
+
+BROADCAST while bleeding, so a teammate behind a wall or a closed door still receives the entity and can
+draw the medic icon (cgame limits it to a short range). Only the bit this code added is removed again.
+=================
+*/
+void Player::CoopBleedClear(void)
+{
+    m_fCoopBleedTotal    = 0.0f;
+    m_fCoopBleedLeft     = 0.0f;
+    m_bCoopBleedPaused   = false;
+    edict->s.beam_entnum = 0;
+    if (m_bCoopBleedBcast) {
+        edict->r.svFlags &= ~SVF_BROADCAST;
+        m_bCoopBleedBcast = false;
+    }
+}
+
+void Player::EventCoopSetBleed(Event *ev)
+{
+    float fRem = ev->GetFloat(1);
+    float fTot = ev->GetFloat(2);
+
+    if (fTot <= 0.0f || fRem < 0.0f || deadflag) {
+        CoopBleedClear();
+        return;
+    }
+    if (fRem > fTot) {
+        fRem = fTot;
+    }
+    m_fCoopBleedLeft   = fRem;
+    m_fCoopBleedTotal  = fTot;
+    m_bCoopBleedPaused = (ev->NumArgs() >= 3 && ev->GetInteger(3)) ? true : false;
+    m_fCoopBleedStamp  = level.time;
+    if (!(edict->r.svFlags & SVF_BROADCAST)) {
+        edict->r.svFlags |= SVF_BROADCAST;
+        m_bCoopBleedBcast = true;
+    }
+    TickCoopBleed();
+}
+
+void Player::EventCoopBleedFlare(Event *ev)
+{
+    m_iCoopBleedFlare ^= 1;
+    TickCoopBleed();
+}
+
+void Player::TickCoopBleed(void)
+{
+    float fAge, fEst;
+    int   iTot, iQ;
+
+    if (m_fCoopBleedTotal <= 0.0f) {
+        if (edict->s.beam_entnum || m_bCoopBleedBcast) {
+            CoopBleedClear();
+        }
+        return;
+    }
+
+    fAge = level.time - m_fCoopBleedStamp;
+    if (fAge > 2.5f || fAge < -0.5f || deadflag) {
+        CoopBleedClear(); // the lease ran out, or the player died: never leave a ring behind
+        return;
+    }
+
+    fEst = m_fCoopBleedLeft;
+    if (!m_bCoopBleedPaused && fAge > 0.0f) {
+        fEst -= (fAge < 1.0f) ? fAge : 1.0f;
+    }
+    if (fEst < 0.0f) {
+        fEst = 0.0f;
+    }
+
+    iTot = (int)(m_fCoopBleedTotal + 0.5f);
+    if (iTot < 1) {
+        iTot = 1;
+    } else if (iTot > 127) {
+        iTot = 127;
+    }
+    iQ = (int)(fEst / m_fCoopBleedTotal * 255.0f + 0.5f);
+    if (iQ < 0) {
+        iQ = 0;
+    } else if (iQ > 255) {
+        iQ = 255;
+    }
+    edict->s.beam_entnum = iQ | (iTot << 8) | ((m_iCoopBleedFlare & 1) << 15);
 }
 
 void Player::EventCoopSetCover(Event *ev)

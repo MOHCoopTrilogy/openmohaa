@@ -673,6 +673,9 @@ const adsGunTune_t *CG_FindAdsTune(const char *wpn);
     void  CG_OffsetFirstPersonView(refEntity_t *pREnt, qboolean bUseWorldPosition);
     qboolean CG_AimingDownSights(void); // HZM coop - RMB-held iron-sight ADS gate (zoom + 3rd->1st person)
     qboolean CG_CoopHardcoreActive(void); // HZM coop - Hardcore host rule active (serverinfo g_coopHardcore + coop session)
+    void  CG_DrawCoopBleed(void); // HZM coop [user 2026-10-05] bleed-out ring + teammate medic icons (cg_coopbleed.c)
+    void  CG_CoopBleedPostFx(float *pHealthFrac, float *pSuppress); // HZM coop - bleed-out drives the low-health/tunnel post-FX
+    qboolean CG_CoopAimPoint(float *pX, float *pY); // HZM coop - the crosshair's real screen point this frame (cg_drawtools.cpp)
     qboolean CG_MpRealismOffActive(int iBit); // HZM MP - host realism toggle active for this bit (MP only; 0 in coop)
     qboolean CG_AdsForceFirstPerson(void); // HZM coop - staged 3P ADS: "render FIRST person this frame" (camera + own-model draw MUST both use this)
     void  CG_AdsFactorAdvance(void); // HZM coop - advance the ONE ADS ease; called once per frame from CG_DrawActiveFrame BEFORE any consumer

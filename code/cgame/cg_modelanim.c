@@ -284,7 +284,8 @@ projection drifted off to the side and mis-scaled). bEnemy selects the swastika 
 (axis) vs the allied star sprite. Anchored to the head tag + 20 units, same as players.
 ===============
 */
-/* iconType: 0 = allied star, 1 = axis swastika, 2 = officer eagle (Reichsadler) */
+/* iconType: 0 = allied star, 1 = axis swastika, 2 = officer eagle (Reichsadler),
+ *           3 = surrendered German (star | eagle split diagonally) [user 2026-10-05] */
 static void CG_ActorOverheadIcon(refEntity_t *pModel, int iconType)
 {
     int         i, iTag;
@@ -293,7 +294,9 @@ static void CG_ActorOverheadIcon(refEntity_t *pModel, int iconType)
     refEntity_t iconEnt;
     const char *sprName;
 
-    if (iconType == 2) {
+    if (iconType == 3) {
+        sprName = "textures/hud/coop_surrender_icon.spr";
+    } else if (iconType == 2) {
         sprName = "textures/hud/coop_officer_icon.spr";
     } else if (iconType == 1) {
         sprName = "textures/hud/coop_axis_icon.spr";
@@ -352,6 +355,11 @@ static void CG_ActorOverheadIcon(refEntity_t *pModel, int iconType)
         fAlpha = (fDist - 72.0f) / 184.0f;
     } else {
         fAlpha = 0.0f;
+    }
+    // HZM coop [user 2026-10-05] the surrendered marker is range-limited like the downed-teammate icon
+    // (cg_coopbleed.c): full to 1000u, gone by 1200u. A world sprite is depth-tested, so never through walls.
+    if (iconType == 3 && fDist > 1000.0f) {
+        fAlpha *= (fDist < 1200.0f) ? (1200.0f - fDist) / 200.0f : 0.0f;
     }
     iconEnt.shaderRGBA[3] = (int)(fAlpha * 255.0f);
 
@@ -3578,7 +3586,10 @@ void CG_ModelAnim(centity_t *cent, qboolean bDoShaderTime)
              * ever applied to map light entities otherwise - which can never carry
              * RF_COOP_BOSS, so this combination is unambiguous. Conversion removes the bit
              * and flips the team, after which the star draws through the normal path. */
-            iconType = 0; /* surrendered -> allied star, despite EF_AXIS */
+            /* [user 2026-10-05] now its OWN icon: the star and the German eagle split diagonally,
+             * "this one is surrendering" rather than "this one is ours" - he becomes ours when
+             * recruited, which clears the bit and flips EF_AXIS, so the plain star takes over. */
+            iconType = 3; /* surrendered -> star|eagle split, despite EF_AXIS */
         } else if (cent->currentState.eFlags & EF_AXIS) {
             iconType = 1; /* axis -> swastika */
         } else {

@@ -7652,7 +7652,10 @@ static int CG_CalcFov(void)
         // DBNO carry-over: a downed player's health is reset to 100 (reads as 'full'), so force the injury to
         // near-max while downed - the screen should be a bleeding-out haze. dbno.scr flags it per-client via
         // coop_dbnoView (1 = down, 0 = up/revived/dead), stuffed exactly like the DBNO audio fade.
-        if (pDbnoV && pDbnoV->integer) { frac = 0.02f; }
+        if (pDbnoV && pDbnoV->integer) {
+            frac = 0.02f;
+            CG_CoopBleedPostFx(&frac, NULL); // HZM coop [user 2026-10-05] ramps with the bleed-out instead
+        }
         cgi.Cvar_Set("r_ppHealthFrac", va("%g", frac));
     }
 
@@ -7781,7 +7784,13 @@ static int CG_CalcFov(void)
                 }
             }
 
-            cgi.Cvar_Set("r_ppSuppress", va("%g", s_coopSuppress));
+            {
+                // HZM coop [user 2026-10-05] bleeding out closes the same tunnel (published only - the
+                // bleed value never feeds s_coopSuppress, so it cannot linger through its decay)
+                float fSupOut = s_coopSuppress;
+                if (bAlive) { CG_CoopBleedPostFx(NULL, &fSupOut); }
+                cgi.Cvar_Set("r_ppSuppress", va("%g", fSupOut));
+            }
 
             // HZM coop [user 08-02] ON-HIT BLOOD decay + publish. Shares this block's dt and
             // health read. coop_hitBloodFade defaults slower than suppression's 1.4s so the

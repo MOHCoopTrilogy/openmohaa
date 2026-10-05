@@ -1461,6 +1461,16 @@ static qboolean CG_CoopCineHudActive(void)
 // CG_DrawCrosshair - which is defined above it - writes the aim point every frame.
 static float s_coopAimX = -1.0f, s_coopAimY = -1.0f;
 static int   s_coopAimSet = 0;
+// HZM coop [user 2026-10-05] the bleed-out ring (cg_coopbleed.c) centres on the same real aim point
+qboolean CG_CoopAimPoint(float *pX, float *pY)
+{
+    if (!s_coopAimSet || cg.time - s_coopAimSet >= 500) {
+        return qfalse;
+    }
+    *pX = s_coopAimX;
+    *pY = s_coopAimY;
+    return qtrue;
+}
 static int   s_coopHitTime = 0;
 static qboolean s_coopHitKill = qfalse;
 
@@ -3935,6 +3945,7 @@ void CG_Draw2D(void)
         CG_DrawCrosshair();
         CG_DrawBracePip();      // HZM coop - gun-brace indicator, drawn over the crosshair
         CG_DrawHitMarker();     // HZM coop - hit/kill confirmation at the true aim point
+        CG_DrawCoopBleed();     // HZM coop [user 2026-10-05] bleed-out ring + teammate medic icons (cg_coopbleed.c)
     }
     CG_DrawDamageIndicator();
     CG_DrawCoopIcons();
