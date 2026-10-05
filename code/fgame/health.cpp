@@ -123,6 +123,21 @@ void Health::PickupHealth(Event *ev)
     // against the accumulated-damage gore counter; skin tier re-evaluates and can drop)
     player->CoopGoreHeal(amount / 100.0 * player->max_health);
 
+    // HZM coop [user 2026-10-05] HUD declutter: in a coop session a feed-capable client (cgame/cg_coopfeed.c advertises
+    // cg_hzmFeed in its userinfo) gets this as a quiet personal event-feed line (category 2) instead of the old box.
+    {
+        ScriptVariable *pCoop = level.vars ? level.vars->GetVariable("coop_mainScriptLoaded") : NULL;
+        char            ui[MAX_INFO_STRING];
+        int             cn = player->edict - g_entities;
+        gi.GetUserinfo(cn, ui, sizeof(ui));
+        if (g_gametype->integer != GT_SINGLE_PLAYER && pCoop && pCoop->GetType() != VARIABLE_NONE
+            && Info_ValueForKey(ui, "cg_hzmFeed")[0] == '1') {
+            gi.SendServerCommand(
+                cn, "print \"" HUD_MESSAGE_YELLOW "~f2:hp~%s\n\"", gi.LV_ConvertString(va("Recovered %d Health", amount))
+            );
+            return;
+        }
+    }
     gi.SendServerCommand(
         player->edict - g_entities,
         "print \"" HUD_MESSAGE_YELLOW "%s\n\"",

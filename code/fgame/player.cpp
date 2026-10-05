@@ -11622,6 +11622,47 @@ void Player::Leave_DM_Team(Event *ev)
 #endif
 }
 
+// HZM coop [user 2026-10-05] HUD declutter - join announcements in a COOP session.
+// Coop = the coop framework loaded this map (level var coop_mainScriptLoaded, tested by TYPE never value, as
+// CoopMpPlayerHit does). The MP framework refuses to start when coop is loaded, so an MP session never has it.
+extern qboolean g_hzmCarriedClient[MAX_CLIENTS];
+
+static bool HZM_CoopJoinSession(void)
+{
+    ScriptVariable *pCoop;
+
+    if (g_gametype->integer == GT_SINGLE_PLAYER || !level.vars) {
+        return false;
+    }
+    pCoop = level.vars->GetVariable("coop_mainScriptLoaded");
+    return (pCoop && pCoop->GetType() != VARIABLE_NONE) ? true : false;
+}
+
+// A genuinely new player: the event feed for a client whose cgame advertises cg_hzmFeed (cgame/cg_coopfeed.c),
+// the vanilla chat-white line for any other.
+static void HZM_CoopJoinAnnounce(const char *text)
+{
+    int  i;
+    char ui[MAX_INFO_STRING];
+
+    if (g_protocol < protocol_e::PROTOCOL_MOHTA_MIN) {
+        G_PrintToAllClients(va("%s\n", text), 2);
+        return;
+    }
+    for (i = 0; i < game.maxclients; i++) {
+        gentity_t *ent = &g_entities[i];
+        if (!ent->inuse || !ent->entity || !ent->client) {
+            continue;
+        }
+        gi.GetUserinfo(i, ui, sizeof(ui));
+        if (Info_ValueForKey(ui, "cg_hzmFeed")[0] == '1') {
+            gi.SendServerCommand(i, "print \"" HUD_MESSAGE_WHITE "~f1:join~%s\n\"", text);
+        } else {
+            gi.SendServerCommand(i, "print \"" HUD_MESSAGE_CHAT_WHITE "%s\n\"", text);
+        }
+    }
+}
+
 void Player::Join_DM_Team(Event *ev)
 {
     teamtype_t  team;
@@ -11723,7 +11764,16 @@ void Player::Join_DM_Team(Event *ev)
 
         G_PrintfClient(edict, "%s\n", join_message);
 
-        G_PrintToAllClients(va("%s %s\n", client->pers.netname, join_message), 2);
+        // HZM coop [user 2026-10-05] in coop every player re-joins a team on every map load, so this broadcast
+        // fired once per player per map. A client carried over from the previous map is not news; a new one goes
+        // to the event feed. Non-coop servers keep the vanilla line.
+        if (HZM_CoopJoinSession()) {
+            if (!g_hzmCarriedClient[edict - g_entities]) {
+                HZM_CoopJoinAnnounce(va("%s %s", client->pers.netname, join_message));
+            }
+        } else {
+            G_PrintToAllClients(va("%s %s\n", client->pers.netname, join_message), 2);
+        }
     }
 }
 

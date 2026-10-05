@@ -27,6 +27,7 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 #include "cg_local.h"
 #include "../fgame/bg_voteoptions.h"
 #include "cg_servercmds_filter.h"
+qboolean CG_CoopFeedIntercept(const char *msg); // HZM coop [user 2026-10-05] event feed (cg_coopfeed.c)
 
 /*
 ================
@@ -453,6 +454,11 @@ static void CG_ServerCommand(qboolean modelOnly)
     }
 
     if (!strcmp(cmd, "print") || !strcmp(cmd, "hudprint")) {
+        // HZM coop [user 2026-10-05] HUD declutter: a ~f-tagged coop print belongs to the event feed
+        // (cg_coopfeed.c), which echoes it to the console itself - never to the old message box.
+        if (CG_CoopFeedIntercept(cgi.Argv(1))) {
+            return;
+        }
         cgi.Printf("%s", cgi.Argv(1));
         if (!strcmp(cmd, "hudprint")) {
             CG_HudPrint_f();

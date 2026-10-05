@@ -1832,6 +1832,8 @@ Placement is cvar-driven because the URC-rect to screen-pixel transform was neve
 rebuilding the client for each nudge is a bad loop. Defaults are the computed values.
 =================
 */
+extern "C" void CG_DrawCoopFeed(qboolean cineHide); // HZM coop [user 2026-10-05] event feed (cg_coopfeed.c)
+
 static void CG_DrawStaminaArc(void)
 {
     static qhandle_t hFrame = 0;
@@ -3951,6 +3953,7 @@ void CG_Draw2D(void)
     CG_DrawCoopIcons();
     CG_DrawMGHeat();
     CG_DrawStaminaArc();
+    CG_DrawCoopFeed(CG_CoopCineHudActive()); // HZM coop [user 2026-10-05] event feed, bottom-left above health
     CG_DrawMagazines();
     CG_SeedAdsTuneFromBaked(); // seed live cvars from the baked table so tune mode doesn't snap the gun
     CG_DrawAdsTune();

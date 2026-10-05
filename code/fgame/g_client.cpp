@@ -893,6 +893,9 @@ to the server machine, but qfalse on map changes and tournement
 restarts.
 ============
 */
+// HZM coop [user 2026-10-05] see G_ClientConnect / Player::Join_DM_Team
+qboolean g_hzmCarriedClient[MAX_CLIENTS];
+
 const char *G_ClientConnect(int clientNum, qboolean firstTime, qboolean differentMap)
 {
     char      *ip, *port, *value;
@@ -959,6 +962,10 @@ const char *G_ClientConnect(int clientNum, qboolean firstTime, qboolean differen
     }
 
     G_ClientUserinfoChanged(ent, userinfo);
+
+    // HZM coop [user 2026-10-05] HUD declutter: a client reconnected by a map change (firstTime == qfalse) is
+    // "carried over" - Player::Join_DM_Team does not re-announce it in a coop session.
+    g_hzmCarriedClient[clientNum] = firstTime ? qfalse : qtrue;
 
 #if 0
 	if( isBot )

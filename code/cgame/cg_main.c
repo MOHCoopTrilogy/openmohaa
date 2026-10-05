@@ -24,6 +24,7 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 // Init functions for the cgame
 
 #include "cg_local.h"
+void CG_CoopFeedInit(void); // HZM coop [user 2026-10-05] event feed (cg_coopfeed.c)
 #include <stddef.h> // HZM coop [SEC2] offsetof
 #include "cg_parsemsg.h"
 #include "cg_archive.h"
@@ -993,6 +994,7 @@ void CG_Init(clientGameImport_t *imported, int serverMessageNum, int serverComma
         // HZM coop [2026-09-27] realistic lightning: registers its cvars and clears r_hzmLtState (vet V10), before any
         // configstring of the new gamestate is processed
         CG_HzmLt_Init();
+        CG_CoopFeedInit(); // HZM coop [user 2026-10-05] event feed: cvars + the cg_hzmFeed userinfo capability
         // [user 2026-09-06, bug-2507] the drowning air ramp is inverted the same way: 1.0 = full
         // air = no effect. coop_uwAir is the server-stuffed input, r_ppUnderwaterAir the
         // cgame-eased publish (cg_view.c CG_CalcFov) - a server dying mid-ramp must not leave
