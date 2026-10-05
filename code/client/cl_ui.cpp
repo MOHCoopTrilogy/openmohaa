@@ -6488,7 +6488,7 @@ a missing or unreadable file (e.g. a pure server without the coop pak) keeps the
 ====================
 */
 #define HZM_LOADHINTS_AUTO 1 // ui_loadHints -1 means this. ON: user decision 2026-09-26 (ship all 60 hints).
-#define LOADHINTS_MAX      128
+#define LOADHINTS_MAX      256 // [2026-10-05] was 128 - the file reached it; an older exe just shows the first 128
 #define LOADHINT_LEN       128
 
 static struct {
