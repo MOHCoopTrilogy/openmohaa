@@ -3561,6 +3561,20 @@ void Player::Dead(Event *ev)
     }
 }
 
+//[2026-10-05 user: "when you play a male character sometimes the injured sound is a girl. That should only play if
+// you are playing a girl character."] The female (Manon) voice keys off m_voiceType == PVT_ALLIED_MANON, but under
+// the Breakthrough protocol (com_target_game 2, the coop launch) EventSetVoiceType maps "manon" to PVT_NONE_SET -
+// only american/british/russian/german/italian exist there - so a Manon model fell through to the MALE pain/death
+// pool. Key the player's own pain/death voice off the MODEL as well. manon_pain/manon_death are defined `always` in
+// ubersound/coop_pain.scr on her one real take each (retail voice letter 'n').
+static bool Player_UsesFemaleVoice(Player *p, int voiceType)
+{
+    if (voiceType == PVT_ALLIED_MANON) {
+        return true;
+    }
+    return p->model.length() && Q_stristr(p->model.c_str(), "manon") != NULL;
+}
+
 void Player::Killed(Event *ev)
 {
     Entity *attacker;
@@ -3705,16 +3719,8 @@ void Player::Killed(Event *ev)
     PostEvent(EV_Player_Dead, 5.0f);
     ZoomOff();
 
-    if (g_voiceChat->integer) {
-        if (m_voiceType == PVT_ALLIED_MANON) {
-            //
-            // manon_death doesn't exist in 2.0 anymore.
-            // The code is left just in case
-            //
-            Sound("manon_death", CHAN_VOICE, -1.0f, 160, NULL, -1.0f, 1, 0, 1, 1200);
-        } else {
-            Sound("player_death");
-        }
+    if (Player_UsesFemaleVoice(this, m_voiceType)) {
+        Sound("manon_death");
     } else {
         Sound("player_death");
     }
@@ -3992,15 +3998,8 @@ void Player::Pain(Event *ev)
         }
     }
 
-    if (g_voiceChat->integer) {
-        if (m_voiceType == PVT_ALLIED_MANON) {
-            //
-            // Should have been removed since 2.0
-            //
-            Sound("manon_pain", CHAN_DIALOG, -1, 160, NULL, -1, 1, 0, 1, 1200);
-        } else {
-            Sound(pszPain);
-        }
+    if (Player_UsesFemaleVoice(this, m_voiceType)) {
+        Sound("manon_pain");
     } else {
         Sound(pszPain);
     }
