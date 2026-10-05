@@ -9661,6 +9661,7 @@ void CG_DrawActiveFrame(int serverTime, int frameTime, stereoFrame_t stereoView,
     if (!cg.hyperspace) {
         CG_AddPacketEntities(); // after calcViewValues, so predicted player state is correct
         CG_AddMarks();
+        CG_AddFootprints(); // HZM coop footprints (own pool, own toggle)
     }
 
     // finish up the rest of the refdef

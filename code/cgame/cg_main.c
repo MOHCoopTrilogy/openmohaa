@@ -770,6 +770,7 @@ void CG_GameStateReceived(void)
     }
 
     CG_InitMarks();
+    CG_InitFootprints(); // HZM coop footprints
 
     CG_RegisterSounds();
 
@@ -801,6 +802,7 @@ void CG_ServerRestarted(void)
     CG_RestartCommandManager();
     // get rid of left over decals from the last game
     CG_InitMarks();
+    CG_InitFootprints(); // HZM coop footprints
     // clear all the swipes
     CG_ClearSwipes();
     // Reset tempmodels

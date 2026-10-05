@@ -776,6 +776,9 @@ void CG_Footstep(const char *szTagName, centity_t *ent, refEntity_t *pREnt, int 
         return;
     }
 
+    // HZM coop footprints (cg_footprints.c): reuses this ground trace
+    CG_FootprintStep(szTagName, ent, pREnt, iRunning, &trace);
+
     CG_FootstepMain(&trace, iRunning, iEquipment);
 }
 

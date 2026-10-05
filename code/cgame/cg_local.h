@@ -854,6 +854,12 @@ const adsGunTune_t *CG_FindAdsTune(const char *wpn);
     // cg_marks.c
     //
     void CG_InitMarks(void);
+
+    // cg_footprints.c - HZM coop footprints in snow / mud / soft dirt
+    void CG_InitFootprints(void);
+    void CG_AddFootprints(void);
+    void CG_FootprintFill_f(void);
+    void CG_FootprintStep(const char *szTagName, centity_t *ent, refEntity_t *pREnt, int iRunning, const trace_t *trace);
     void CG_AddMarks(void);
     void CG_ImpactMark(
         qhandle_t    markShader,

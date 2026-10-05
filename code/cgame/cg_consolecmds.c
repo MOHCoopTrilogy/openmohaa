@@ -713,6 +713,7 @@ static void CG_HzmArmory_f(void)
 }
 
 static consoleCommand_t commands[] = {
+    {"footprintfill",          &CG_FootprintFill_f         }, // HZM coop footprints: QA/perf helper
     {"shoulderswap",           &CG_AdsSwapShoulder_f       },
     {"useweaponclass",         &CG_UseWeaponClass_f        },
     {"weapnext",               &CG_NextWeapon_f            },
