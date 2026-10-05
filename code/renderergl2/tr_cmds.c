@@ -365,6 +365,9 @@ void RE_BeginFrame( stereoFrame_t stereoFrame ) {
 	tr.frameCount++;
 	tr.frameSceneNum = 0;
 
+	// HZM gl2 MSAA (plan P2a): apply r_msaaBypass (the HOME key, live) - new path at >= 2 samples only
+	R_MsaaBeginFrame();
+
 	//
 	// do overdraw measurement
 	//
@@ -598,6 +601,8 @@ void RE_EndFrame( int *frontEndMsec, int *backEndMsec ) {
 	if ( !tr.registered ) {
 		return;
 	}
+	// HZM gl2 graphics probes: the A/B label (r_gfxLabel), drawn last so it sits over the HUD and menus.
+	R_GfxLabelDraw();
 	cmd = R_GetCommandBufferReserved( sizeof( *cmd ), 0 );
 	if ( !cmd ) {
 		return;
@@ -605,6 +610,9 @@ void RE_EndFrame( int *frontEndMsec, int *backEndMsec ) {
 	cmd->commandId = RC_SWAP_BUFFERS;
 
 	R_IssueRenderCommands( qtrue );
+
+	// HZM gl2 graphics probes: per-frame drawsurf / static-surface / bone high-water (before the counters reset).
+	R_GfxProbe_EndFrame();
 
 	// HZM coop - gore tier 4 (UV wounds): every skel surface of the frame has
 	// been CPU-skinned and ray-tested by now, so the globally best triangle

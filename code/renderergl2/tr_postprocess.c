@@ -167,7 +167,8 @@ void RB_ToneMapMeasureLevels(FBO_t *hdrFbo, ivec4_t hdrBox)
 
 		VectorSet4(dstBox, 0, 0, size, size);
 
-		FBO_Blit(hdrFbo, hdrBox, NULL, tr.textureScratchFbo[0], dstBox, &tr.calclevels4xShader[0], NULL, 0);
+		// HZM gl2 MSAA (plan P2b, ME-F2): the linear resolve when this post chain made one (else hdrFbo, as today)
+		FBO_Blit(R_MsaaLinearSource(hdrFbo), hdrBox, NULL, tr.textureScratchFbo[0], dstBox, &tr.calclevels4xShader[0], NULL, 0);
 
 		srcFbo = tr.textureScratchFbo[0];
 		dstFbo = tr.textureScratchFbo[1];
@@ -414,7 +415,7 @@ void RB_GlobalFog(FBO_t *srcFbo, ivec4_t srcBox, FBO_t *dstFbo, ivec4_t dstBox)
 	// scene colour arrives on TB_COLORMAP via FBO_Blit(src); depth goes on TB_LEVELSMAP.
 	// GLSL_SetUniform* upload straight to the program object (qglProgramUniform*EXT), so
 	// setting them before FBO_Blit's internal bind is fine.
-	GL_BindToTMU(tr.renderDepthImage, TB_LEVELSMAP);
+	GL_BindToTMU(R_MsaaDepthMinMaxOr(tr.renderDepthImage), TB_LEVELSMAP);   // HZM MSAA P2b: (min, max) when resolved
 	GLSL_SetUniformVec4(&tr.globalFogShader, UNIFORM_VIEWINFO,     viewInfo);
 	GLSL_SetUniformVec4(&tr.globalFogShader, UNIFORM_FOGCOLORMASK, fogColor);
 	GLSL_SetUniformVec4(&tr.globalFogShader, UNIFORM_FOGDISTANCE,  fogDist);
@@ -901,7 +902,7 @@ void RB_HZMBloom(FBO_t *srcFbo, ivec4_t srcBox)
 
 		// 1) bright-pass the scene into the half-res target (threshold rides u_Color.x; u_Color.z 0 = mode 0)
 		VectorSet4(color, r_ppBloomThreshold->value, 0.0f, 0.0f, 1.0f);
-		FBO_Blit(srcFbo, srcBox, NULL, tr.quarterFbo[0], quarterBox, &tr.bloomBrightShader, color, 0);
+		FBO_Blit(R_MsaaLinearSource(srcFbo), srcBox, NULL, tr.quarterFbo[0], quarterBox, &tr.bloomBrightShader, color, 0);   // HZM MSAA P2b
 
 		// 2) horizontal then vertical 9-tap Gaussian, ping-ponging between the two half-res targets
 		VectorSet2(dir, 1.0f, 0.0f);
@@ -937,7 +938,7 @@ void RB_HZMBloom(FBO_t *srcFbo, ivec4_t srcBox)
 	// the Hable-domain proxy reads the smoothed auto-exposure luminance; FBO_Blit does not touch
 	// TB_LEVELSMAP, so this bind survives into the bright pass. Harmless on the grade domain.
 	GL_BindToTMU(tr.calcLevelsImage, TB_LEVELSMAP);
-	FBO_Blit(srcFbo, srcBox, NULL, b0, bloomBox, &tr.bloomBrightShader, color, 0);
+	FBO_Blit(R_MsaaLinearSource(srcFbo), srcBox, NULL, b0, bloomBox, &tr.bloomBrightShader, color, 0);   // HZM MSAA P2b
 
 	// separable blur on the 16F pair (u_dir rides u_InvTexRes via FBO_Blit's srcTexScale, as in mode 0)
 	VectorSet2(dir, 1.0f, 0.0f);
@@ -1738,7 +1739,8 @@ void RB_HZMDof(FBO_t *srcFbo, ivec4_t srcBox)
 	FBO_BlitFromTexture(tr.renderDepthImage, srcTexCoords, NULL, tr.hdrDepthFbo, NULL, NULL, NULL, 0);
 
 	// 2) half-res copy of the scene, then the same separable Gaussian bloom uses
-	FBO_Blit(srcFbo, srcBox, NULL, tr.quarterFbo[0], quarterBox, NULL, NULL, 0);
+	//    (HZM gl2 MSAA P2b: the linear resolve when there is one, so out-of-focus highlights keep their energy)
+	FBO_Blit(R_MsaaLinearSource(srcFbo), srcBox, NULL, tr.quarterFbo[0], quarterBox, NULL, NULL, 0);
 
 	VectorSet2(dir, 1.0f, 0.0f);
 	FBO_Blit(tr.quarterFbo[0], quarterBox, dir, tr.quarterFbo[1], quarterBox, &tr.bloomBlurShader, NULL, 0);
@@ -1757,6 +1759,22 @@ void RB_HZMDof(FBO_t *srcFbo, ivec4_t srcBox)
 
 	FBO_Blit(tr.quarterFbo[0], quarterBox, NULL, srcFbo, srcBox, &tr.dofShader, color,
 		GLS_SRCBLEND_SRC_ALPHA | GLS_DSTBLEND_ONE_MINUS_SRC_ALPHA);
+
+	// HZM gl2 MSAA (plan P2b.1): on the shader-resolve path bloom reads the LINEAR copy (R_MsaaLinearSource), which
+	// this composite used to miss - so bloom bloomed the sharp, pre-DoF frame, while the legacy path blooms the frame
+	// AFTER this composite (the extra soft glow around sky gaps and bright edges, HALO m3l2 3071 vs legacy 1696).
+	// Composite the same blur, with the same circle of confusion, into the linear copy too. Off the new path, or
+	// with the HOME bypass, R_MsaaLinearSource returns srcFbo and nothing extra runs (bypass stays today's image).
+	{
+		FBO_t *lin = R_MsaaLinearSource(srcFbo);
+
+		if (lin && lin != srcFbo)
+		{
+			GL_BindToTMU(tr.hdrDepthImage, TB_LIGHTMAP);
+			FBO_Blit(tr.quarterFbo[0], quarterBox, NULL, lin, srcBox, &tr.dofShader, color,
+				GLS_SRCBLEND_SRC_ALPHA | GLS_DSTBLEND_ONE_MINUS_SRC_ALPHA);
+		}
+	}
 
 	FBO_SetHzmParams(NULL);
 }
@@ -2022,7 +2040,7 @@ void RB_HZMExtraFx(FBO_t *srcFbo, ivec4_t srcBox)
 		// contract RB_GlobalFog and RB_HZMDof both rely on.
 		// FBO_SetHzmParams is NOT automatic - FBO_BlitFromTexture pushes a file-static that the
 		// last effect left behind unless we bracket the blit, exactly as RB_HZMDof does.
-		GL_BindToTMU(depthOk ? tr.renderDepthImage : tr.whiteImage, TB_LEVELSMAP);
+		GL_BindToTMU(depthOk ? R_MsaaDepthMinMaxOr(tr.renderDepthImage) : tr.whiteImage, TB_LEVELSMAP);   // HZM MSAA P2b
 		GLSL_SetUniformVec4(&tr.underwaterShader, UNIFORM_VIEWINFO,     viewInfo);
 		GLSL_SetUniformVec4(&tr.underwaterShader, UNIFORM_FOGDISTANCE,  absorb);
 		GLSL_SetUniformVec4(&tr.underwaterShader, UNIFORM_FOGCOLORMASK, silt);

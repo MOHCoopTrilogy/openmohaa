@@ -1,3 +1,105 @@
+#if defined(USE_SHADOW_STABLE)
+// HZM gl2 STABLE SUN SHADOWS (plan P3 + shadows plan B0, tr_hzm_sunstable.c). The mask carries only V_entity: three
+// camera-centred RADIAL cascades of entity casters (B0: the world casts only through W, which lightall samples per
+// pixel). Radial select with a blend band, a fixed Poisson kernel per cascade (no screen noise, so nothing crawls),
+// hardware 2x2 PCF (the depth images are LINEAR while stable), a light-axis constant bias. 1.0 beyond cascade 2.
+// u_HzmShadowKernel.w 5 = r_shadowDebug 5: V_world instead (W, image 4), for the freeze captures (vet R8).
+// NOTE keep this file free of double quotes - stringify wraps each line in a C string.
+uniform sampler2D u_ScreenDepthMap;
+uniform sampler2DShadow u_ShadowMap;
+uniform sampler2DShadow u_ShadowMap2;
+uniform sampler2DShadow u_ShadowMap3;
+uniform sampler2DShadow u_ShadowMap4;
+uniform mat4   u_ShadowMvp;
+uniform mat4   u_ShadowMvp2;
+uniform mat4   u_ShadowMvp3;
+uniform mat4   u_ShadowMvp4;
+uniform vec3   u_ViewOrigin;
+uniform vec4   u_ViewInfo; // zfar / znear, zfar
+uniform vec4   u_HzmShadowSplits; // R0 R1 R2 band
+uniform vec4   u_HzmShadowKernel; // PCF radius (uv) c0 c1 c2, debug mode
+uniform vec4   u_HzmShadowBias;   // depth bias c0 c1 c2, W bias
+
+varying vec2   var_DepthTex;
+varying vec3   var_ViewDir;
+
+#define DEPTH_MAX_ERROR 0.000000059604644775390625
+
+float HzmTap(sampler2DShadow m, vec3 c)
+{
+	return vec4(shadow2D(m, c)).r;
+}
+
+float HzmPcf(sampler2DShadow m, vec3 s, float r)
+{
+	float v = HzmTap(m, vec3(s.xy + vec2(-0.7071, -0.7071) * r, s.z));
+	v += HzmTap(m, vec3(s.xy + vec2( 0.7071, -0.7071) * r, s.z));
+	v += HzmTap(m, vec3(s.xy + vec2(-0.7071,  0.7071) * r, s.z));
+	v += HzmTap(m, vec3(s.xy + vec2( 0.7071,  0.7071) * r, s.z));
+	v += HzmTap(m, vec3(s.xy + vec2( 0.0,  -0.35) * r, s.z));
+	v += HzmTap(m, vec3(s.xy + vec2( 0.35,  0.0) * r, s.z));
+	v += HzmTap(m, vec3(s.xy + vec2( 0.0,   0.35) * r, s.z));
+	v += HzmTap(m, vec3(s.xy + vec2(-0.35,  0.0) * r, s.z));
+	return v * 0.125;
+}
+
+// cascade coordinates in [0,1]; w < 0 = the point is outside the cascade box
+vec4 HzmCascadePos(mat4 mvp, vec4 p, float bias)
+{
+	vec4 s = mvp * p;
+	s.xyz = s.xyz / s.w;
+	float inside = (all(lessThan(abs(s.xyz), vec3(1.0)))) ? 1.0 : -1.0;
+	return vec4(s.xyz * 0.5 + vec3(0.5) - vec3(0.0, 0.0, bias), inside);
+}
+
+float getLinearDepth(sampler2D depthMap, vec2 tex, float zFarDivZNear)
+{
+	float sampleZDivW = texture2D(depthMap, tex).r - DEPTH_MAX_ERROR;
+	return 1.0 / mix(zFarDivZNear, 1.0, sampleZDivW);
+}
+
+void main()
+{
+	float result = 1.0;
+	float depth = getLinearDepth(u_ScreenDepthMap, var_DepthTex, u_ViewInfo.x);
+
+	if (depth < 0.999)
+	{
+		vec4 P = vec4(u_ViewOrigin + var_ViewDir * (depth - 0.5 / u_ViewInfo.x), 1.0);
+
+		if (u_HzmShadowKernel.w > 4.5)
+		{
+			vec4 w = HzmCascadePos(u_ShadowMvp4, P, u_HzmShadowBias.w);
+			result = (w.w > 0.0) ? HzmPcf(u_ShadowMap4, w.xyz, 0.0) : 1.0;
+		}
+		else
+		{
+			float d = length(P.xyz - u_ViewOrigin);
+			float band = u_HzmShadowSplits.w;
+			vec4 c0 = HzmCascadePos(u_ShadowMvp,  P, u_HzmShadowBias.x);
+			vec4 c1 = HzmCascadePos(u_ShadowMvp2, P, u_HzmShadowBias.y);
+			vec4 c2 = HzmCascadePos(u_ShadowMvp3, P, u_HzmShadowBias.z);
+			float v2 = (c2.w > 0.0 && d < u_HzmShadowSplits.z) ? HzmPcf(u_ShadowMap3, c2.xyz, u_HzmShadowKernel.z) : 1.0;
+			// the far edge of cascade 2 fades out to 1.0 over the band
+			v2 = mix(v2, 1.0, smoothstep(u_HzmShadowSplits.z * (1.0 - band), u_HzmShadowSplits.z, d));
+			float v1 = v2;
+			if (c1.w > 0.0 && d < u_HzmShadowSplits.y)
+			{
+				v1 = HzmPcf(u_ShadowMap2, c1.xyz, u_HzmShadowKernel.y);
+				v1 = mix(v1, v2, smoothstep(u_HzmShadowSplits.y * (1.0 - band), u_HzmShadowSplits.y, d));
+			}
+			result = v1;
+			if (c0.w > 0.0 && d < u_HzmShadowSplits.x)
+			{
+				float v0 = HzmPcf(u_ShadowMap, c0.xyz, u_HzmShadowKernel.x);
+				result = mix(v0, v1, smoothstep(u_HzmShadowSplits.x * (1.0 - band), u_HzmShadowSplits.x, d));
+			}
+		}
+	}
+
+	gl_FragColor = vec4(vec3(result), 1.0);
+}
+#else
 uniform sampler2D u_ScreenDepthMap;
 
 uniform sampler2DShadow u_ShadowMap;
@@ -152,3 +254,4 @@ void main()
 
 	gl_FragColor = vec4(vec3(result), 1.0);
 }
+#endif

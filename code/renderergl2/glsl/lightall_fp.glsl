@@ -18,6 +18,16 @@ uniform sampler2D u_SpecularMap;
 
 #if defined(USE_SHADOWMAP)
 uniform sampler2D u_ShadowMap;
+// HZM gl2 stable sun shadows + B0 (plan P3, shadows vet section 7 D1-D3; tr_hzm_sunstable.c). u_HzmSunMaskOnly.x:
+// 0 = today (every program starts at 0, and every draw uploads 0 while r_shadowStable resolves to legacy),
+// 1 = B0 (the mask is V_entity only, V_world comes from W per pixel), 2 = B0 off the main view (no sun shadow),
+// 3 = B0 where the mask does not describe this surface (not in the z-prepass): V_world only.
+uniform sampler2DShadow u_HzmSunWorldMap;
+uniform mat4      u_HzmSunWorldMvp;
+uniform vec4      u_HzmSunMaskOnly;   // mode, normal offset (u), W bias (depth units, + = occluded), half a W texel (uv)
+#if defined(MSAA_DEPTH_MINMAX)
+uniform vec4      u_HzmShadowMatch;   // HZM gl2 MSAA P4c: on, depth-slope factor (0 = off, today)
+#endif
 #endif
 
 #if defined(USE_CUBEMAP)
@@ -48,6 +58,12 @@ uniform vec4      u_CubeMapInfo;
 uniform int       u_AlphaTest;
 
 varying vec4      var_TexCoords;
+#if defined(USE_LIGHTMAP) && defined(USE_MSAA_CENTROID)
+centroid varying vec2 var_HzmLmCentroid;   // HZM gl2 MSAA P4b (lightall_vp)
+#define HZM_LMCOORD var_HzmLmCentroid
+#else
+#define HZM_LMCOORD var_TexCoords.zw
+#endif
 
 varying vec4      var_Color;
 #if (defined(USE_LIGHT) && !defined(USE_FAST_LIGHT))
@@ -162,7 +178,16 @@ void ApplySoftParticle(inout vec3 rgb, inout float a)
 		return;
 	}
 
+#if defined(MSAA_DEPTH_MINMAX)
+	// HZM gl2 MSAA (plan P2b, MH-B1) two-surface fade: under MSAA the bound snapshot holds the edge pixel's nearest (r)
+	// and farthest (g) depth. A particle behind the nearest surface is hidden on those samples by the multisample
+	// depth test anyway, so it fades against the far one. g is 0 on a single-sample snapshot (the HOME bypass),
+	// which keeps today's r exactly.
+	vec2  zmm = texture2D(u_ScreenDepthMap, gl_FragCoord.xy * u_InvTexRes).rg;
+	float zs  = (zmm.g > 0.0 && gl_FragCoord.z > zmm.r) ? zmm.g : zmm.r;
+#else
 	float zs = texture2D(u_ScreenDepthMap, gl_FragCoord.xy * u_InvTexRes).r;
+#endif
 	float ds = u_SoftParticle.z / min(u_SoftParticle.y + (2.0 * zs - 1.0), -1e-6);
 	float df = u_SoftParticle.z / min(u_SoftParticle.y + (2.0 * gl_FragCoord.z - 1.0), -1e-6);
 	float k  = clamp((ds - df) * u_SoftParticle.x, 0.0, 1.0);
@@ -721,7 +746,7 @@ void main()
 	lightColor = var_Color.rgb;
 
 #if defined(USE_LIGHTMAP)
-	vec4 lightmapColor = texture2D(u_LightMap, var_TexCoords.zw);
+	vec4 lightmapColor = texture2D(u_LightMap, HZM_LMCOORD);
   #if defined(RGBM_LIGHTMAP)
 	lightmapColor.rgb *= lightmapColor.a;
   #endif
@@ -785,11 +810,26 @@ void main()
 		if (alpha < 0.5)
 			discard;
 	}
+#if defined(MSAA_DEPTH_MINMAX)
+	else if (u_AlphaTest >= 4)
+	{
+		// HZM gl2 MSAA P4a (MH-B2): alpha-to-coverage. The coverage ramp is a pixel wide in alpha (fwidth), capped
+		// so a nomip cutout cannot smear; 4 centres it on the old 0.5 threshold, 5 (light / unknown matte) keeps
+		// it on the opaque side so no texel more contaminated than today's test ever shows
+		float hzmA2c = (alpha - 0.5) / max(min(fwidth(alpha), 0.5), 0.0001);
+		if (u_AlphaTest == 4)
+			hzmA2c += 0.5;
+		hzmA2c = clamp(hzmA2c, 0.0, 1.0);
+		if (hzmA2c <= 0.0)
+			discard;
+		alpha = hzmA2c;
+	}
+#endif
 
 #if defined(USE_LIGHT) && !defined(USE_FAST_LIGHT)
 	L = var_LightDir.xyz;
   #if defined(USE_DELUXEMAP)
-	L += (texture2D(u_DeluxeMap, var_TexCoords.zw).xyz - vec3(0.5)) * u_EnableTextures.y;
+	L += (texture2D(u_DeluxeMap, HZM_LMCOORD).xyz - vec3(0.5)) * u_EnableTextures.y;
   #endif
 	float sqrLightDist = dot(L, L);
 	L /= sqrt(sqrLightDist);
@@ -834,20 +874,91 @@ void main()
   #if defined(USE_SHADOWMAP) 
 	vec2 shadowTex = gl_FragCoord.xy * r_FBufScale;
 	float shadowValue = texture2D(u_ShadowMap, shadowTex).r;
+#if defined(MSAA_DEPTH_MINMAX)
+	// HZM gl2 MSAA P4c (ME-F4): the mask holds each pixel's NEAREST sample. A fragment behind that depth by more than
+	// its own slope belongs to the farther surface of an edge pixel: take the 4-neighbour mask texel whose depth is
+	// closest to its own. Searched only then, so interior pixels (and foliage) cost one extra fetch.
+	if (u_HzmShadowMatch.x > 0.5)
+	{
+		vec2  hzmT   = gl_FragCoord.xy * u_InvTexRes;
+		float hzmFz  = gl_FragCoord.z;
+		float hzmEps = u_HzmShadowMatch.y * fwidth(hzmFz) + 0.0000001;
+		float hzmZ0  = texture2D(u_ScreenDepthMap, hzmT).r;
+		if (hzmFz > hzmZ0 + hzmEps)
+		{
+			float hzmBest = hzmFz - hzmZ0;
+			vec2  hzmPick = vec2(0.0);
+			float hzmZn   = texture2D(u_ScreenDepthMap, hzmT + vec2(u_InvTexRes.x, 0.0)).r;
+			if (abs(hzmFz - hzmZn) < hzmBest) { hzmBest = abs(hzmFz - hzmZn); hzmPick = vec2( 1.0,  0.0); }
+			hzmZn = texture2D(u_ScreenDepthMap, hzmT - vec2(u_InvTexRes.x, 0.0)).r;
+			if (abs(hzmFz - hzmZn) < hzmBest) { hzmBest = abs(hzmFz - hzmZn); hzmPick = vec2(-1.0,  0.0); }
+			hzmZn = texture2D(u_ScreenDepthMap, hzmT + vec2(0.0, u_InvTexRes.y)).r;
+			if (abs(hzmFz - hzmZn) < hzmBest) { hzmBest = abs(hzmFz - hzmZn); hzmPick = vec2( 0.0,  1.0); }
+			hzmZn = texture2D(u_ScreenDepthMap, hzmT - vec2(0.0, u_InvTexRes.y)).r;
+			if (abs(hzmFz - hzmZn) < hzmBest) { hzmBest = abs(hzmFz - hzmZn); hzmPick = vec2( 0.0, -1.0); }
+			shadowValue = texture2D(u_ShadowMap, (gl_FragCoord.xy + hzmPick) * r_FBufScale).r;
+		}
+	}
+#endif
 	// HZM [bug-3171] the sun mask means 'open to the sky' only on a surface that FACES the sun. Facing away, it reads
 	// the wall's own sun-side face through the shadow bias (a thin wall's interior face reads lit), so the flash lit
 	// interior walls whose rays to the sun AND to the strike enter the wall itself. Gated on the geometric normal,
 	// before the sun N.L below (the flash comes from the strike, not the sun).
 	hzmLtVis = shadowValue * smoothstep(0.02, 0.20, dot(normalize(surfNormal), normalize(var_PrimaryLightDir.xyz)));
+	float hzmSunVis;          // HZM gl2 P3: the sun visibility the primary-light specular below uses
 
+	if (u_HzmSunMaskOnly.x > 1.5 && u_HzmSunMaskOnly.x < 2.5)
+	{
+		// B0, not the main view (portal sky, mirror, cube bake - vet L4): no sun shadow at all
+		shadowValue = 1.0;
+		hzmLtVis = smoothstep(0.02, 0.20, dot(normalize(surfNormal), normalize(var_PrimaryLightDir.xyz)));   // bug-3171 gate
+		hzmSunVis = 1.0;
+	}
+	else if (u_HzmSunMaskOnly.x > 0.5)
+	{
+		// B0 (D1): V_world from W at this pixel, looked up off the FACE normal (derivative normal: it agrees with W's
+		// winding, L2) by ~1 W texel (L1, S2), with an occluded-leaning bias; 4 bilinear PCF taps (kernel 3)
+		vec3  hzmL  = normalize(var_PrimaryLightDir.xyz);
+		vec3  hzmNf = normalize(cross(dFdx(viewDir), dFdy(viewDir)));
+		if (dot(hzmNf, surfNormal) < 0.0)
+			hzmNf = -hzmNf;
+		vec4  hzmW  = u_HzmSunWorldMvp * vec4(u_ViewOrigin - viewDir + hzmNf * u_HzmSunMaskOnly.y, 1.0);
+		vec3  hzmWs = hzmW.xyz * (0.5 / hzmW.w) + vec3(0.5);
+		float hzmZ  = hzmWs.z + u_HzmSunMaskOnly.z;
+		float hzmO  = u_HzmSunMaskOnly.w;
+		float hzmVw = 0.25 * (vec4(shadow2D(u_HzmSunWorldMap, vec3(hzmWs.xy + vec2(-hzmO, -hzmO), hzmZ))).r
+		                    + vec4(shadow2D(u_HzmSunWorldMap, vec3(hzmWs.xy + vec2( hzmO, -hzmO), hzmZ))).r
+		                    + vec4(shadow2D(u_HzmSunWorldMap, vec3(hzmWs.xy + vec2(-hzmO,  hzmO), hzmZ))).r
+		                    + vec4(shadow2D(u_HzmSunWorldMap, vec3(hzmWs.xy + vec2( hzmO,  hzmO), hzmZ))).r);
+		if (any(lessThan(hzmWs.xy, vec2(0.0))) || any(greaterThan(hzmWs.xy, vec2(1.0))))
+			hzmVw = 1.0;
+		float hzmVe = (u_HzmSunMaskOnly.x > 2.5) ? 1.0 : shadowValue;
+		hzmLtVis = hzmVw * hzmVe * smoothstep(0.02, 0.20, dot(hzmNf, hzmL));   // bug-3171 gate, on the face normal
+    #if defined(USE_LIGHT_VECTOR)
+		// D3: in shade (Vw 0) the grid alone, as gl1; in sun, today's Ve * N.L
+		shadowValue = 1.0 - hzmVw * (1.0 - hzmVe * clamp(dot(N, var_PrimaryLightDir.xyz), 0.0, 1.0));
+		hzmSunVis = hzmVw * hzmVe;
+    #else
+		// world stages (vet R1): the lightmap already carries N.L and the world's own shadow. Entity shadows only
+		// where W says the sun reaches, and only on faces that face it
+		float hzmF = smoothstep(0.0, 0.1, dot(hzmNf, hzmL));
+		shadowValue = mix(1.0, 1.0 - hzmVw * (1.0 - hzmVe), hzmF);
+		hzmSunVis = hzmF * hzmVw * hzmVe;
+    #endif
+	}
+	else
+	{
 	// surfaces not facing the light are always shadowed
 	shadowValue *= clamp(dot(N, var_PrimaryLightDir.xyz), 0.0, 1.0);
+	hzmSunVis = shadowValue;
+	}
 
     #if defined(SHADOWMAP_MODULATE)
 	// HZM coop [2026-09-28] storm darkness: .b / .r is the SUN'S VISIBILITY (1 = the map's sun; tr_scene.c lowers .b
 	// under a storm deck). Only the sun's share fades: a shadowed texel keeps its ambient share, nothing brightens.
-	float hzmSunVis = (u_PrimaryLightAmbient.r > 0.0) ? clamp(u_PrimaryLightAmbient.b / u_PrimaryLightAmbient.r, 0.0, 1.0) : 1.0;
-	lightColor *= shadowValue * (1.0 - u_PrimaryLightAmbient.r) * hzmSunVis + u_PrimaryLightAmbient.r;
+	// (gfx tree: named hzmStormVis here - the gfx P3 B0 block above already declares hzmSunVis, the specular's visibility)
+	float hzmStormVis = (u_PrimaryLightAmbient.r > 0.0) ? clamp(u_PrimaryLightAmbient.b / u_PrimaryLightAmbient.r, 0.0, 1.0) : 1.0;
+	lightColor *= shadowValue * (1.0 - u_PrimaryLightAmbient.r) * hzmStormVis + u_PrimaryLightAmbient.r;
     #endif
   #endif
 
@@ -993,7 +1104,7 @@ void main()
 	lightColor = u_PrimaryLightColor;
 
     #if defined(USE_SHADOWMAP)
-	lightColor *= shadowValue;
+	lightColor *= hzmSunVis;   // HZM gl2 P3: == shadowValue unless B0 is on (vet R4: no glints in baked shadow)
     #endif
 
 	// enable when point lights are supported as primary lights

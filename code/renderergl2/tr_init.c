@@ -465,6 +465,10 @@ static void InitOpenGL( void )
 	{
 		GLint		temp;
 		
+		// HZM gl2 MSAA (plan P2a, ME-F15): the new path asks for a single-sample window. Decided from the cvars
+		// alone (there is no context yet); the legacy path keeps r_ext_multisample, as today.
+		glimp_windowSamplesOverride = R_MsaaNewPathRequested() ? 0 : -1;
+
 		GLimp_Init( qfalse );
 		GLimp_InitExtraExtensions();
 
@@ -1255,6 +1259,15 @@ void GL_SetDefaultState( void )
 	qglEnable( GL_SCISSOR_TEST );
 	qglDisable( GL_CULL_FACE );
 	qglDisable( GL_BLEND );
+
+	// HZM gl2 MSAA (plan P2a, ME-F10): alpha-to-coverage / alpha-to-one are raw GL state that survives R_Init on a
+	// map load (the context is kept), so force both off here; GL_State's GLS_ALPHA_TO_COVERAGE bit starts clear.
+	qglDisable( GL_SAMPLE_ALPHA_TO_COVERAGE );
+	if ( !qglesMajorVersion )
+		qglDisable( GL_SAMPLE_ALPHA_TO_ONE );
+	// HZM gl2 MSAA P4a: the NV driver dithers alpha-to-coverage by default (a crawling screen-door on foliage); off
+	if ( qglAlphaToCoverageDitherControlNV )
+		qglAlphaToCoverageDitherControlNV( 0x934F );   // GL_ALPHA_TO_COVERAGE_DITHER_DISABLE_NV
 
 	if (glRefConfig.seamlessCubeMap)
 		qglEnable(GL_TEXTURE_CUBE_MAP_SEAMLESS);
@@ -2113,6 +2126,15 @@ void R_Register( void )
 	ri.Cmd_AddCommand( "minimize", GLimp_Minimize );
 	ri.Cmd_AddCommand( "gfxmeminfo", GfxMemInfo_f );
 	ri.Cmd_AddCommand( "exportCubemaps", R_ExportCubemaps_f );
+	// HZM gl2 graphics probes (tr_gfxprobe.c, MSAA/shadow plan P0): r_gfxProbe, r_glDebug, r_gfxLabel,
+	// r_shadowFitYaw/Offset, ROM r_displayHz/r_vsyncActive, and the gfxprobe/gfxwcrc/gfxresettiming commands.
+	R_GfxProbe_Register();
+	// HZM gl2 stable sun shadows + B0 + E1 (tr_hzm_sunstable.c, plan P3): r_shadowStable and its knobs,
+	// r_hzmSunStaticCasters, r_hzmPshadowCharGate. Resets the per-map state (every R_Init).
+	R_SunStable_Register();
+	// HZM gl2 MSAA core (tr_msaa.c, plan P2a): r_msaaOverride, r_msaaBypass, the dev-only Auto/fallback cvars,
+	// ROM r_msaaActive/r_gpuVramMB/r_msaaForcedOff, and the V3-C1 archived-switch check.
+	R_Msaa_Register();
 	ri.Cmd_AddCommand( "hzmtlprobe", R_HZM_TerrainLProbe_f ); // HZM [bug-3064] diagnostic, inert unless typed
 
 	//
@@ -2393,12 +2415,24 @@ void R_Init( void ) {
 
 	InitOpenGL();
 
+	// HZM gl2 graphics probes: registration bookkeeping, GPU timer queries, the KHR_debug callback when the
+	// context was created with r_glDebug 1, and ROM r_vsyncActive.
+	R_GfxProbe_InitGL();
+
+	// HZM gl2 MSAA (plan P2a, ME-F7): decide the path and the sample count before any image, FBO or GLSL program
+	// exists - the images are sized for it, the FBOs are built for it, and MSAA-only GLSL defines depend on it.
+	R_DecideMsaa();
+
 	R_InitImages();
 
 	if (glRefConfig.framebufferObject)
 		FBO_Init();
 
 	GLSL_InitGPUShaders();
+
+	// HZM gl2 MSAA (plan P2a, ME-F3): an MSAA program that failed to build re-initialises in place at 0 (no
+	// ri.Error, no drop to the menu); then ROM r_msaaActive is published and the ^~^~^ MSAA line printed.
+	R_Msaa_AfterGLSL();
 
 	R_InitVaos();
 
@@ -2433,6 +2467,9 @@ void R_Init( void ) {
 
 	// print info
 	GfxInfo_f();
+	// HZM gl2: ^~^~^ GFXBUILD - which renderer build actually loaded (a failed renderer_<name>.dll load
+	// silently falls back to opengl1, so every test run checks for this line).
+	R_GfxProbe_AfterInit();
 	ri.Printf( PRINT_ALL, "----- finished R_Init -----\n" );
 }
 
@@ -2463,6 +2500,7 @@ void RE_Shutdown( qboolean destroyWindow ) {
 	ri.Cmd_RemoveCommand( "minimize" );
 	ri.Cmd_RemoveCommand( "gfxmeminfo" );
 	ri.Cmd_RemoveCommand( "exportCubemaps" );
+	R_GfxProbe_Shutdown();
 	ri.Cmd_RemoveCommand( "hzmtlprobe" );
 
 
@@ -2538,6 +2576,9 @@ void RE_BeginRegistration(glconfig_t* glconfigOut) {
     // R_GoreLevelReset only touches zeroed statics, and ri.Hunk_Clear (Z_FreeTags) is engine-side,
     // so on a reload it correctly reclaims the PREVIOUS image's allocations that nothing points at.
     R_IssuePendingRenderCommands();
+
+    // HZM gl2 graphics probes: the previous registration ends here - print what it saw (probe on only).
+    R_GfxProbe_Reregister();
 
     // HZM [user 08-02]: GPU-OBJECT TEARDOWN on re-registration. ri.Hunk_Clear() below frees
     // the CPU-side structs, but GL objects are driver-side handles - deleting the image_t

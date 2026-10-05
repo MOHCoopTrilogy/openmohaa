@@ -179,4 +179,14 @@ static ID_INLINE int HZM_DlightFlareClassOf( int type ) {
 	return ( type & HZM_DLIGHT_CLASS_MASK ) ? HZM_FLARE_CLASS_SEARCHLIGHT : HZM_FLARE_CLASS_HEADLIGHT;
 }
 
+/*
+===========================================================================
+4) PHASE S-b [2026-09-26] - renderer_opengl2 ONLY, built in the ISOLATED gfx tree (openmohaa-hzm-gfx) on top of the
+   MSAA/shadow work and merged into main with it at P6 (docs/proposals/headlights_2026-09-25/, the S-b plan). cgame
+   never reads these. Flip here and rebuild the renderer, only after the user's test of the gfx build that carries them.
+===========================================================================
+*/
+#define HZM_SOFTEDGE_AUTO       0   // r_hzmSoftEdge       -1 means this. S3b: qer_hzmSoftEdge surfaces depth-fade.
+#define HZM_SPOTSHADOW_AUTO     0   // r_hzmSpotShadows    -1 means this. S4: spot (headlight) dlight shadows.
+
 #endif // HZM_LIGHT_RESTORE_H

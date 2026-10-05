@@ -1048,14 +1048,23 @@ void R_AddSkelSurfaces(trRefEntity_t *ent)
             if (ent->e.renderfx & RF_NOSHADOW) {
                 return;
             }
-            if (lvl < 0 || lvl > r_charShadowCascade->integer) {
-                return;
-            }
-            if (r_charShadowDist->value > 0.0f) {
-                vec3_t d;
-                VectorSubtract(ent->e.origin, tr.refdef.vieworg, d);
-                if (DotProduct(d, d) > r_charShadowDist->value * r_charShadowDist->value) {
+            // HZM gl2 bug-3009 (E1 / C0, r_hzmPshadowCharGate, plan_P3_addendum_B0 section 2): the cascade-level and
+            // distance tests are for SUN cascades only. With the gate on, every other depth view admits characters -
+            // the dlight pshadows (VPF_PSHADOW) and r_shadows 4 (VPF_NONE extra, tr_main.c) alike; keyed on "not a
+            // sun cascade", not on the VPF_PSHADOW flag, which r_shadows 4 never sets. RF_NOSHADOW above still holds.
+            // Gate off (-1 = auto 0): exactly as before.
+            if (lvl >= 0 || !R_PshadowCharGate()) {
+                // P3: the stable cascades are RADIAL - admission by distance only (r_charShadowDist); the level cap
+                // would drop every soldier past cascade 1's radius
+                if (lvl < 0 || (!(tr.viewParms.flags & VPF_SUNSTABLE) && lvl > r_charShadowCascade->integer)) {
                     return;
+                }
+                if (r_charShadowDist->value > 0.0f) {
+                    vec3_t d;
+                    VectorSubtract(ent->e.origin, tr.refdef.vieworg, d);
+                    if (DotProduct(d, d) > r_charShadowDist->value * r_charShadowDist->value) {
+                        return;
+                    }
                 }
             }
         }
@@ -2084,7 +2093,9 @@ void RB_StaticMesh(staticSurface_t *staticSurf)
     //
     // Process LOD
     //
-    if (skelmodel->pLOD && r_staticlod->integer) {
+    // HZM gl2 P3: W is baked at FULL detail - the LOD here reads the main view's lodpercentage, which would make W's
+    // content depend on where the camera was when it was baked
+    if (skelmodel->pLOD && r_staticlod->integer && !(backEnd.viewParms.flags & VPF_SUNWORLD)) {
         float lod_val;
 
         lod_val = backEnd.currentStaticModel->lodpercentage[0];

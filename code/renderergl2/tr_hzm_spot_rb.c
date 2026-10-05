@@ -38,6 +38,12 @@ cvar_t	*r_hzmFlareIntensity1;
 cvar_t	*r_hzmFlareNear;
 cvar_t	*r_hzmFlareFade;
 cvar_t	*r_hzmFlareBudget;
+static cvar_t	*r_hzmFlareProbe;	// P2b gate #5: test-only per-flare probe, flags 0, default 0
+cvar_t	*r_hzmSoftEdge;			// Phase S-b S3b
+cvar_t	*r_hzmSoftEdgeScale;
+cvar_t	*r_hzmSpotShadows;		// Phase S-b S4
+cvar_t	*r_hzmSpotShadowCasters;
+cvar_t	*r_hzmSpotShadowReach;
 
 // tr_scene.c's slot counters (plain globals there)
 extern int	r_numdlights;
@@ -78,6 +84,16 @@ void R_HZM_SpotRegister( void ) {
 	r_hzmFlareNear       = ri.Cvar_Get( "r_hzmFlareNear",       "150",   0 );
 	r_hzmFlareFade       = ri.Cvar_Get( "r_hzmFlareFade",       "0.12",  0 );
 	r_hzmFlareBudget     = ri.Cvar_Get( "r_hzmFlareBudget",     "0.0075", 0 );
+	// P2b gate #5 (MSAA): once a second per lamp flare - query counts, visibility, intensity before/after the budget.
+	// Test-only, flags 0, never archived; 0 = not one extra instruction on the flare path.
+	r_hzmFlareProbe      = ri.Cvar_Get( "r_hzmFlareProbe",      "0",     0 );
+	// Phase S-b [2026-09-26] (gfx tree): S3b soft beam edges - flags 0, "-1" = auto, like every switch above
+	r_hzmSoftEdge        = ri.Cvar_Get( "r_hzmSoftEdge",        "-1",    0 );
+	r_hzmSoftEdgeScale   = ri.Cvar_Get( "r_hzmSoftEdgeScale",   "1",     0 );
+	// Phase S-b [2026-09-26] (gfx tree): S4 spot shadows
+	r_hzmSpotShadows       = ri.Cvar_Get( "r_hzmSpotShadows",       "-1",  0 );
+	r_hzmSpotShadowCasters = ri.Cvar_Get( "r_hzmSpotShadowCasters", "2",   0 );
+	r_hzmSpotShadowReach   = ri.Cvar_Get( "r_hzmSpotShadowReach",   "600", 0 );
 	// the handshake (vet F3): ROM so nobody sets it by hand, FORCED so a stale value from a previous renderer can
 	// never survive (Cvar_Set is Cvar_Set2(force) - qcommon/cvar.c)
 	r_hzmSpotProtocol    = ri.Cvar_Get( "r_hzmSpotProtocol",    "0",     CVAR_ROM );
@@ -388,7 +404,51 @@ static float RB_HZM_FlareFog( float depth ) {
 typedef struct {
 	float	x, y, half;
 	float	color[3];
+	int		slot;		// r_hzmFlareProbe: which tr.hzmFlareState
+	float	inten;		// r_hzmFlareProbe: intensity before the frame budget
 } hzmFlareDraw_t;
+
+static GLuint	s_hzmProbeA[HZM_FLARE_SLOTS], s_hzmProbeB[HZM_FLARE_SLOTS];	// the last query counts read
+static int		s_hzmProbeLast;
+
+static void RB_HZM_FlareProbe( const hzmFlareDraw_t *draw, int ndraw, float budgetSum ) {
+	int		i, k, t;
+	float	scale = 1.0f;
+
+	if ( !r_hzmFlareProbe || !r_hzmFlareProbe->integer ) {
+		return;
+	}
+	t = ri.Milliseconds();
+	if ( t >= s_hzmProbeLast && t - s_hzmProbeLast < 1000 ) {
+		return;
+	}
+	s_hzmProbeLast = t;
+	if ( r_hzmFlareBudget && r_hzmFlareBudget->value > 0.0f && budgetSum > r_hzmFlareBudget->value ) {
+		scale = r_hzmFlareBudget->value / budgetSum;
+	}
+	ri.Printf( PRINT_ALL, "^~^~^ FLAREPROBE t=%d msaa=%d bypass=%d fbo=%s drawn=%d budgetSum=%.5f budget=%.5f scale=%.4f\n",
+		backEnd.refdef.time, tr.msaaSamples, tr.msaaBypassActive ? 1 : 0, glState.currentFBO ? glState.currentFBO->name : "default",
+		ndraw, budgetSum, r_hzmFlareBudget ? r_hzmFlareBudget->value : 0.0f, scale );
+	for ( i = 0; i < HZM_FLARE_SLOTS; i++ ) {
+		const hzmFlareState_t *s = &tr.hzmFlareState[i];
+		int					d = -1;
+
+		if ( !s->inUse ) {
+			continue;
+		}
+		for ( k = 0; k < ndraw; k++ ) {
+			if ( draw[k].slot == i ) {
+				d = k;
+				break;
+			}
+		}
+		ri.Printf( PRINT_ALL, "^~^~^ FLAREPROBE f slot=%d id=%d class=%d org=(%.0f %.0f %.0f) a=%u b=%u target=%.3f vis=%.3f "
+			"presence=%.3f inten=%.4f final=%.4f x=%.0f y=%.0f half=%.1f\n", i, s->req.id, s->req.flareClass,
+			s->req.origin[0], s->req.origin[1], s->req.origin[2], s_hzmProbeA[i], s_hzmProbeB[i], s->target, s->vis, s->presence,
+			d >= 0 ? draw[d].inten : 0.0f, d >= 0 ? draw[d].inten * scale : 0.0f, d >= 0 ? draw[d].x : -1.0f,
+			d >= 0 ? draw[d].y : -1.0f, d >= 0 ? draw[d].half : 0.0f );
+	}
+}
 
 void RB_HZM_SpotFlares( void ) {
 	const hzmFlare_t	*req = backEnd.refdef.hzmFlares;
@@ -489,6 +549,8 @@ void RB_HZM_SpotFlares( void ) {
 			qglGetQueryObjectuiv( tr.hzmFlareQuery[i][slot][0], GL_QUERY_RESULT, &a );
 			qglGetQueryObjectuiv( tr.hzmFlareQuery[i][slot][1], GL_QUERY_RESULT, &b );
 			s->pending[slot] = qfalse;
+			s_hzmProbeA[i] = a;
+			s_hzmProbeB[i] = b;
 			s->target = ( b > 0 ) ? ( ( a >= b ) ? 1.0f : (float)a / (float)b ) : 0.0f;
 			s->measured = qtrue;
 		}
@@ -650,8 +712,11 @@ void RB_HZM_SpotFlares( void ) {
 		draw[ndraw].color[0] = inten * tint[0];
 		draw[ndraw].color[1] = inten * tint[1];
 		draw[ndraw].color[2] = inten * tint[2];
+		draw[ndraw].slot = i;
+		draw[ndraw].inten = inten;
 		ndraw++;
 	}
+	RB_HZM_FlareProbe( draw, ndraw, budgetSum );
 	if ( !ndraw ) {
 		return;
 	}
@@ -710,4 +775,78 @@ void RB_HZM_SpotFlares( void ) {
 
 	GL_SetProjectionMatrix( oldprojection );
 	GL_SetModelviewMatrix( oldmodelview );
+}
+
+/*
+===========================================================================
+PHASE S-b [2026-09-26] - built in the ISOLATED gfx tree, merged into main with the MSAA/shadow work at P6.
+
+S3b SOFT BEAM EDGES (r_hzmSoftEdge, -1 = HZM_SOFTEDGE_AUTO). A shader carrying `qer_hzmSoftEdge <dist>` (the headlight
+fog beam, scripts/coop_headlights.shader) fades out within <dist> x r_hzmSoftEdgeScale units of the scene behind it,
+so the cone no longer ends in a hard line where it meets the ground, a wall or a soldier. It IS a soft particle: the
+same u_SoftParticle uniform, the same ApplySoftParticle in generic_fp/lightall_fp (no GLSL change, no new permutation),
+the same snapshot recipe (RB_HZM_SceneDepthSnapshot) - only taken earlier, at the first soft-edge surface of the main
+list (RB_HZM_SoftEdgeSnapshotAt), after every opaque surface. Needs r_softParticles (it allocates hdrDepthImage at
+launch); off with it, like every soft particle. Never on an Omaha BSP. MSAA: exactly the soft particles' behaviour -
+per pixel from the one-sample snapshot under today's MSAA, the two-surface (min, max) fade once P2 lands, because P2
+replaces RB_HZM_SceneDepthSnapshot / RB_HZM_BindSceneDepth / ApplySoftParticle and this code calls those.
+===========================================================================
+*/
+qboolean R_HZM_SoftEdgeOn( void ) {
+	if ( !HZM_ResolveAutoSwitch( r_hzmSoftEdge ? r_hzmSoftEdge->integer : -1, HZM_SOFTEDGE_AUTO ) ) {
+		return qfalse;
+	}
+	if ( !r_softParticles || !r_softParticles->integer || !tr.hdrDepthImage ) {
+		return qfalse;
+	}
+	return R_HZM_LightRestoreProtectedWorld() ? qfalse : qtrue;
+}
+
+/*
+=============
+RB_HZM_SoftEdgeDistance - the fade distance for the draw being set up, 0 = not a soft-edge draw (then the caller keeps
+its sprite-only rules). Main-list only: a sprite keeps r_softParticleDistance.
+=============
+*/
+float RB_HZM_SoftEdgeDistance( void ) {
+	float d;
+
+	if ( backEnd.inSpriteList || !tess.shader || !( tess.shader->hzmSoftEdge > 0.0f ) ) {
+		return 0.0f;
+	}
+	if ( !backEnd.softDepthValid || backEnd.projection2D || !tr.hdrDepthImage || backEnd.viewParms.targetFbo
+		|| ( backEnd.viewParms.flags & ( VPF_DEPTHSHADOW | VPF_SHADOWMAP | VPF_PSHADOW ) ) ) {
+		return 0.0f;
+	}
+	if ( backEnd.currentEntity && backEnd.currentEntity != &tr.worldEntity
+		&& ( backEnd.currentEntity->e.renderfx & RF_DEPTHHACK ) ) {
+		return 0.0f;
+	}
+	if ( !R_HZM_SoftEdgeOn() ) {
+		return 0.0f;
+	}
+	d = tess.shader->hzmSoftEdge * ( ( r_hzmSoftEdgeScale && r_hzmSoftEdgeScale->value > 0.0f ) ? r_hzmSoftEdgeScale->value
+	                                                                                           : 1.0f );
+	return ( d < 1.0f ) ? 1.0f : d;
+}
+
+/*
+=============
+R_HZM_SpotShadowsOn
+
+S4 SPOT SHADOWS (r_hzmSpotShadows, -1 = HZM_SPOTSHADOW_AUTO). The headlights send their cone with hzm_dlight_noshadow
+(vet F9: a 1100 u light would out-rank every muzzle flash). While this is on, tr_main.c R_RenderDlightShadowMaps lets a
+READY spot cast anyway, through the existing r_hzmDlightShadows pshadow system: ranked apart, at most ONE light slot and
+only when r_hzmDlightShadowLights >= 2, built first (stable maps), r_hzmSpotShadowCasters casters, never the lamp's own
+vehicle, only casters its cone and pool reach, shadow length capped at r_hzmSpotShadowReach. On receive, pshadow_fp
+masks the shadow by the SAME cone x attenuation law as the lit pool, so it never darkens ground the headlight does not
+light. Needs spots on (not Omaha) and r_hzmDlightShadows. MSAA-agnostic: the maps are their own single-sample FBOs and
+the receive pass is a per-sample depth-EQUAL blend into the scene target.
+=============
+*/
+qboolean R_HZM_SpotShadowsOn( void ) {
+	if ( !HZM_ResolveAutoSwitch( r_hzmSpotShadows ? r_hzmSpotShadows->integer : -1, HZM_SPOTSHADOW_AUTO ) ) {
+		return qfalse;
+	}
+	return R_HZM_SpotsOn();
 }

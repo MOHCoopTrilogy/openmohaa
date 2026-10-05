@@ -578,6 +578,9 @@ enum
 	// sizes the per-stage bundle[] and tess texcoords[] arrays and MUST stay 7; NUM_TEXTURE_UNITS
 	// only sizes the DSA texture bind cache (tr_dsa.c), so widening that to 8 is safe.
 	TB_SCREENDEPTH = 7,
+	// HZM gl2 stable sun shadows + B0 (plan P3, shadows vet section 7 D1): W, the static world cascade, is sampled per
+	// pixel in lightall on unit 8. B0 resolves to legacy below 9 units (R_SunStable_Resolve).
+	TB_SUNWORLD    = 8,
 	// HZM rain wetness (tr_hzm_wet.c, water_wetness_2026-09-27 plan W4). Unit 8 is RESERVED for the shadows plan's
 	// TB_SUNWORLD (docs/proposals/shadows_2026-09-26/vet.md) - do not take it. NUM_TEXTURE_UNITS only sizes the DSA
 	// bind cache (tr_dsa.c); GL 3.x guarantees 16 fragment units.
@@ -758,6 +761,9 @@ typedef struct shader_s {
 	qboolean	noSoftParticles;		// [HZM soft particles] shader asked for "nosoftparticles": never
 										// depth-fade this shader's sprites (first-person smoke wisps in front
 										// of the viewmodel, or any emitter that must stay hard-edged).
+	float		hzmSoftEdge;			// [HZM S3b] "qer_hzmSoftEdge <dist>": a MODEL or world surface that fades
+										// out within <dist> u of the scene depth behind it, like a soft particle
+										// (the headlight fog beam). 0 = off. gl1 and every older gl2 skip qer*.
 
 	int         vertexAttribs;          // not all shaders will need all data to be gathered
 
@@ -1070,6 +1076,9 @@ typedef enum
 	//   uniforms start at 0 and GLSL_SetUniformVec4 caches from 0, so zero MUST be the inert value (plan finding 5).
 	UNIFORM_HZMLIGHTSPOT,
 
+	// HZM gl2 [2026-09-26] S4 spot shadows (gfx tree). Appended LAST, per the rule above (P2/P4 append after it).
+	//   u_HzmPshadowSpot = (spot apex, light radius) for the pshadow receive pass; w 0 = not a spot = no mask.
+	UNIFORM_HZMPSHADOWSPOT,
 	// HZM rain wetness (tr_hzm_wet.c). Appended LAST, per the rule above; rows in the same order in uniformsInfo[].
 	//   u_HzmWet = (film, puddle, time mod 3600, on). on == 0 = the lightall wet branch is skipped: ALL ZERO is inert.
 	UNIFORM_HZMWET,
@@ -1107,6 +1116,17 @@ typedef enum
 	UNIFORM_HZMLTWORLD,
 	UNIFORM_HZMLTBOLT,
 	UNIFORM_HZMLTPARAMS,
+	// HZM gl2 stable sun shadows + B0 (plan P3, tr_hzm_sunstable.c). Appended LAST, rows in the same order in
+	// uniformsInfo[]. u_HzmSunMaskOnly.x == 0 (every program's start value, and what every draw uploads while
+	// r_shadowStable resolves to legacy) keeps lightall exactly today's.
+	UNIFORM_HZMSUNWORLDMAP,   // sampler2DShadow, TB_SUNWORLD (lightall)
+	UNIFORM_HZMSUNWORLDMVP,   // W's world -> clip (lightall)
+	UNIFORM_HZMSUNMASKONLY,   // (mode, normal offset u, W bias, half a W texel uv) (lightall)
+	UNIFORM_HZMSHADOWSPLITS,  // (R0, R1, R2, blend band) (stable mask)
+	UNIFORM_HZMSHADOWKERNEL,  // (PCF radius uv c0, c1, c2, debug mode) (stable mask)
+	UNIFORM_HZMSHADOWBIAS,    // (bias c0, c1, c2, W bias) in depth units (stable mask)
+	// HZM gl2 MSAA P4c (r_msaaShadowMatch): (on, depth-slope factor, 0, 0) - lightall, zero-neutral
+	UNIFORM_HZMSHADOWMATCH,
 
 	UNIFORM_COUNT
 } uniform_t;
@@ -1217,6 +1237,15 @@ typedef struct {
     // HZM gl2 [2026-09-26] Phase S2: this scene's lamp flares (tr_hzm_spot_rb.c R_HZM_SpotFinishScene)
     int numHzmFlares;
     struct hzmFlare_s *hzmFlares;
+
+    // HZM gl2 stable sun shadows + B0 (plan P3, tr_hzm_sunstable.c). hzmSunActive is cleared by RE_BeginScene for
+    // EVERY scene and set only by R_SunStable_Frame, so HUD/menu scenes and the legacy path never see the rest.
+    int     hzmSunActive;
+    vec4_t  hzmSunSplits;       // R0, R1, R2, blend band
+    vec4_t  hzmSunKernel;       // PCF radius (uv) for cascades 0..2, w = debug mode (5 = V_world)
+    vec4_t  hzmSunBias;         // compare bias (depth units) for cascades 0..2, w = W bias
+    vec4_t  hzmSunMaskOnly;     // lightall: on, normal offset (u), W bias, half a W texel (uv)
+    float   hzmSunDepthRange[3];
 } trRefdef_t;
 
 
@@ -1283,7 +1312,11 @@ typedef enum {
 	// the feature off no view ever carries this bit and every test on it is dead.
 	// Needed because a pshadow view and a sun cascade are both VPF_DEPTHSHADOW with
 	// shadowCascade 0 vs >0, and the caster-admission rule differs between them.
-	VPF_PSHADOW         = 0x100
+	VPF_PSHADOW         = 0x100,
+	// HZM gl2 stable sun shadows (plan P3, tr_hzm_sunstable.c). Set only while r_shadowStable resolves on, so with
+	// the switch at 0 no view carries either bit and every test on them is dead.
+	VPF_SUNWORLD        = 0x200,    // the W bake (static world cascade, own arrays)
+	VPF_SUNSTABLE       = 0x400     // a per-frame radial entity-only cascade
 } viewParmFlags_t;
 
 typedef struct {
@@ -1314,6 +1347,11 @@ typedef struct {
 	// 0 = not a sun-cascade shadow view, 1..4 = R_RenderSunShadowMaps level+1. Every
 	// other view setup does Com_Memset(&parms,0,...) so 0 is the reliable default.
 	int			shadowCascade;
+
+	// HZM gl2 stable sun shadows (P3): the W bake's face mode (1 = back faces, 2 = + sun-facing pushed back) and its
+	// push-back glPolygonOffset (factor, units). 0 in every other view.
+	int			hzmWFaces;
+	float		hzmWPush[2];
 
 	//
 	// OPENMOHAA-specific stuff
@@ -1810,6 +1848,11 @@ typedef struct pshadow_s
 	vec3_t lightOrigin;
 	float  lightRadius;
 	cplane_t cullPlane;
+
+	// HZM gl2 [2026-09-26] S4 spot shadows (R_FinalizeDlightPshadow): the cone mask for pshadow_fp. ALL ZERO for every
+	// other pshadow - both builders memset the struct - which is the inert value (no mask, the receive pass unchanged).
+	vec4_t hzmSpotApex;		// the spot's apex (world), its light radius
+	vec4_t hzmSpotCone;		// cone axis * k (world), cosOuter - R_HZM_SpotUniformVec
 } pshadow_t;
 
 
@@ -2124,8 +2167,17 @@ void		R_Modellist_f (void);
 #define	MAX_SKINS				1024
 
 
-#define	MAX_DRAWSURFS			0x10000
+// HZM gl2 (shadow plan P1a, SE#13/V3-C6.4): 0x10000 -> 0x20000. The list is shared by EVERY view of a frame
+// (dlight shadows, 3 cascades, the far cascade, then the main view), and with r_shadowHarden 1 the views before
+// the main view may fill only HALF of it - so at 0x20000 that half is exactly the whole of today's list, and no
+// view can lose a surface that fits today. PROVISIONAL: the plan sizes this as the P0 per-frame high-water after
+// a plain map change + 25%, rounded up to a power of two; confirm with ^~^~^ SHADOWBUDGET (frame_hw ds < 50%).
+// Derived, grep the VALUE too (T4): DRAWSURF_MASK, backEndData_t::drawSurfs, R_RadixSort's static scratch.
+#define	MAX_DRAWSURFS			0x20000
 #define	DRAWSURF_MASK			(MAX_DRAWSURFS-1)
+#if (MAX_DRAWSURFS & (MAX_DRAWSURFS - 1)) != 0
+	#error "MAX_DRAWSURFS must be a power of two: R_AddDrawSurf wraps with DRAWSURF_MASK when r_shadowHarden is 0"
+#endif
 
 /*
 
@@ -2264,6 +2316,7 @@ typedef struct {
 	
 	qboolean framebufferMultisample;
 	qboolean framebufferBlit;
+	qboolean textureMultisample;   // HZM MSAA P2a: GL 3.2 / ARB_texture_multisample, qglTexImage2DMultisample loaded
 
 	qboolean depthClamp;
 	qboolean seamlessCubeMap;
@@ -2359,6 +2412,13 @@ typedef struct {
 	qboolean    inSpriteList;
 	qboolean    spriteDepthHack;
 
+	// HZM gl2 MSAA (plan P2b, tr_msaa.c). msaaLinearValid: this post chain's MRT colour resolve wrote
+	// tr.sceneLinearImage, so bloom / DoF / the exposure measure read it (R_MsaaLinearSource); cleared at the head and
+	// the end of RB_PostProcess. msaaMinMaxFrame: tr.frameCount + 1 of the last shader depth resolve, so the (min, max)
+	// readers (soft particles, underwater, fog) never bind a stale tr.msaaDepthMinMaxImage.
+	qboolean    msaaLinearValid;
+	int         msaaMinMaxFrame;
+
 	//
 	// OPENMOHAA-specific stuff
 	//
@@ -2379,6 +2439,7 @@ typedef struct {
     cStaticModelUnpacked_t* currentStaticModel;
     float shaderStartTime;
     int dsStreamVert;
+    int hzmWPass;   // HZM gl2 stable shadows: 1/2 = the W bake's first/second (sun-facing) depth pass, 0 otherwise
 } backEndState_t;
 
 /*
@@ -2437,6 +2498,10 @@ typedef struct {
 	image_t                 *bloomImage[2];   // HZM exposure-aware bloom (r_ppBloomMode 1): RGBA16F, DISPLAY/2
 	image_t                 *displayImage;    // HZM render scale: RGBA8 at DISPLAY size, backs renderFbo when scaled
 	image_t                 *displayScratchImage; // HZM render scale: RGBA8 at DISPLAY size, RCAS ping target
+	image_t                 *sceneColorMSImage;    // HZM MSAA P2a: GL_TEXTURE_2D_MULTISAMPLE scene colour (new path)
+	image_t                 *sceneDepthMSImage;    // HZM MSAA P2a: GL_TEXTURE_2D_MULTISAMPLE scene depth (new path)
+	image_t                 *sceneLinearImage;     // HZM MSAA P2a alloc, P2b use: RGBA16F linear colour resolve (bloom/DoF/levels)
+	image_t                 *msaaDepthMinMaxImage; // HZM MSAA P2a alloc, P2b use: RG32F (min,max) depth resolve
 	image_t					*calcLevelsImage;
 	image_t					*targetLevelsImage;
 	image_t					*fixedLevelsImage;
@@ -2457,6 +2522,15 @@ typedef struct {
 	FBO_t					*sceneFbo;
 	FBO_t					*displayScratchFbo;
 	FBO_t					*msaaResolveFbo;
+	// HZM gl2 MSAA (plan P2a, tr_msaa.c). msaaSceneFbo / msaaResolveSSFbo are the new path's canonical multisample
+	// scene target and its single-sample resolve target; sceneFbo / msaaResolveFbo point at them, or - while
+	// r_msaaBypass is on - at (msaaResolveSSFbo, NULL), which is today's MSAA-0 wiring. msaaDepthResolveFbo is the
+	// P2b depth-resolve target (colour msaaDepthMinMaxImage, depth renderDepthImage).
+	FBO_t					*msaaSceneFbo;
+	FBO_t					*msaaResolveSSFbo;
+	FBO_t					*msaaDepthResolveFbo;
+	FBO_t					*msaaColorResolveFbo;  // HZM MSAA P2b: MRT target - colour0 renderImage, colour1 sceneLinearImage
+	FBO_t					*msaaLinearFbo;        // HZM MSAA P2b: sceneLinearImage alone, as a blit SOURCE for bloom/DoF/levels
 	FBO_t					*sunRaysFbo;
 	FBO_t					*depthFbo;
 	FBO_t					*pshadowFbos[MAX_DRAWN_PSHADOWS];
@@ -2537,8 +2611,11 @@ typedef struct {
 	shaderProgram_t filmgrainShader;    // HZM NEW: film grain (r_ppFilmGrain)
 	shaderProgram_t frostShader;        // HZM NEW: frost/ice crystals while it snows (r_ppFrost)
 	shaderProgram_t globalFogShader;
+	shaderProgram_t msaaResolveDepthShader;   // HZM MSAA P2a: built on the new path at >= 2 samples only (P2b draws it)
+	shaderProgram_t msaaResolveColorShader;   // HZM MSAA P2b: the tone-exact MRT colour resolve (same condition)
 	shaderProgram_t calclevels4xShader[2];
 	shaderProgram_t shadowmaskShader;
+	shaderProgram_t shadowmaskStableShader;   // HZM gl2 P3: USE_SHADOW_STABLE, TRY-built (0 = stable resolves to legacy)
 	shaderProgram_t ssaoShader;
 	shaderProgram_t depthBlurShader[4];
 	shaderProgram_t testcubeShader;
@@ -2555,6 +2632,17 @@ typedef struct {
 	qboolean				renderScaleActive;
 	qboolean				fsrEasuAvailable;
 	qboolean				rcasActive;
+
+	// HZM gl2 MSAA (plan P2a, tr_msaa.c; decided by R_DecideMsaa before any image exists, reset with tr at R_Init).
+	// msaaNewPath: r_msaaOverride chose the new path. msaaSamples: its resolved count (always 0 on the legacy path,
+	// whose count stays r_ext_framebuffer_multisample). displaySplit: renderFbo is a separate single-sample DISPLAY
+	// FBO because of MSAA (the render-scale split has renderScaleActive). msaaBypassActive: r_msaaBypass as applied
+	// at the last RE_BeginFrame. msaaCompileFailed: an MSAA program failed to build (R_Msaa_AfterGLSL re-inits at 0).
+	qboolean				msaaNewPath;
+	int						msaaSamples;
+	qboolean				displaySplit;
+	qboolean				msaaBypassActive;
+	qboolean				msaaCompileFailed;
 
 
 	// -----------------------------------------
@@ -2909,6 +2997,18 @@ qboolean RB_HZM_SpotSphereLight( const dlight_t *dl, const sphereor_t *sph, cons
 void     R_HZM_FlareInitQueries( void );
 void     R_HZM_FlareShutdownQueries( void );
 void     RB_HZM_SpotFlares( void );
+// HZM gl2 [2026-09-26] PHASE S-b (gfx tree; renderercommon/hzm_light_restore.h section 4)
+extern  cvar_t  *r_hzmSoftEdge;         // S3b: -1 auto (HZM_SOFTEDGE_AUTO), 0/1; also needs r_softParticles
+extern  cvar_t  *r_hzmSoftEdgeScale;    // S3b: x every shader's qer_hzmSoftEdge distance (tuning, default 1)
+qboolean R_HZM_SoftEdgeOn( void );                          // tr_hzm_spot_rb.c
+float    RB_HZM_SoftEdgeDistance( void );                   // > 0: THIS draw fades within that many u
+qboolean RB_HZM_SceneDepthSnapshot( void );                 // tr_backend.c: the one scene-depth snapshot
+void     RB_HZM_BindSceneDepth( void );                     // tr_backend.c: ... bound on TB_SCREENDEPTH
+void     RB_HZM_SoftEdgeSnapshotAt( int entityNum, qboolean bStaticModel ); // tr_backend.c: the S3b hoist
+extern  cvar_t  *r_hzmSpotShadows;      // S4: -1 auto (HZM_SPOTSHADOW_AUTO), 0/1; also needs r_hzmDlightShadows + spots
+extern  cvar_t  *r_hzmSpotShadowCasters;// S4: casters the spot's shadow may take (of r_hzmDlightShadowCasters)
+extern  cvar_t  *r_hzmSpotShadowReach;  // S4: cap on a spot shadow's length, u
+qboolean R_HZM_SpotShadowsOn( void );                       // tr_hzm_spot_rb.c
 
 // HZM gl2 [2026-09-27] FOG-OWNED LOD + fog-faded SSAO (docs/proposals/fog_lod_pop_2026-09-27, plan pieces B + A).
 // tr_hzm_lodfog.c is pure (arguments only; docs/tools/hzm_lodfog_selftest), tr_hzm_lodfog_rb.c is the glue.
@@ -3420,6 +3520,13 @@ void	GL_Cull( int cullType );
 #define GLS_DEPTHFUNC_EQUAL						0x00020000
 #define GLS_DEPTHFUNC_GREATER                   0x00040000
 #define GLS_DEPTHFUNC_BITS                      0x00060000
+
+// HZM gl2 MSAA (plan P2a). Two free bits (between DEPTHMASK 0x100 and POLYMODE 0x1000), neither part of any
+// existing mask, so nothing that builds or compares state words today can see them; GL_State handles both.
+// ALWAYS is a bit of its own because both DEPTHFUNC bits together (0x60000) decode as EQUAL in GL_State (ME-F5).
+// Set only by the MSAA code (P2b depth resolve, P4a alpha-to-coverage).
+#define GLS_ALPHA_TO_COVERAGE                   0x00000200
+#define GLS_DEPTHFUNC_ALWAYS                    0x00000400
 
 #define GLS_ATEST_GT_0							0x10000000
 #define GLS_ATEST_LT_80							0x20000000
@@ -4401,6 +4508,127 @@ void RE_TakeVideoFrame( int width, int height,
 
 void R_ConvertTextureFormat( const byte *in, int width, int height, GLenum format, GLenum type, byte *out );
 
+// HZM gl2 graphics probes (tr_gfxprobe.c) - MSAA / stable-shadow plan, phase P0. Inert at default:
+// r_gfxProbe 0, r_glDebug 0, r_gfxLabel 0, r_shadowFitYaw 0, r_shadowFitOffset 0. Only the one-line
+// ^~^~^ GFXBUILD stamp prints unconditionally, at every R_Init.
+extern cvar_t *r_gfxProbe;
+extern cvar_t *r_glDebug;
+extern cvar_t *r_gfxLabel;
+extern cvar_t *r_shadowFitYaw;
+extern cvar_t *r_shadowFitOffset;
+extern const char hzmGfxDefaultsMarker[];
+enum { GFXVIEW_C0, GFXVIEW_C1, GFXVIEW_C2, GFXVIEW_C3, GFXVIEW_MAIN, GFXVIEW_DLS };
+enum { GPUMARK_FRAME_BEGIN, GPUMARK_SUN_B, GPUMARK_SUN_E, GPUMARK_SHOTH_B, GPUMARK_SHOTH_E,
+       GPUMARK_MAIN_B, GPUMARK_MAIN_E, GPUMARK_POST_B, GPUMARK_POST_E, GPUMARK_FRAME_END, GPUMARK_COUNT };
+void R_GfxProbe_Register(void);
+void R_GfxProbe_Reregister(void);
+void R_GfxProbe_InitGL(void);
+void R_GfxProbe_AfterInit(void);
+void R_GfxProbe_Shutdown(void);
+void R_GfxProbe_WorldLoaded(const char *name);
+void R_GfxProbe_StaticOverflow(const char *model);
+void R_GfxProbe_ViewBegin(int kind);
+void R_GfxProbe_ViewEnd(int kind);
+const refdef_t *R_GfxProbe_FitRefdef(const refdef_t *fd, refdef_t *scratch);
+int  R_GfxProbe_FreezeTime(int t);
+void R_GfxProbe_EndFrame(void);
+void R_GfxProbe_GpuMark(int kind);
+void R_GfxProbe_BackendFrameEnd(void);
+void R_GfxLabelDraw(void);
+int  R_StaticModelSurfCapacity(void);
+void RB_SetGL2D(void);
+
+// HZM gl2 shadow hardening (plan P1a, r_shadowHarden, flags 0, 0 before the flip). With it 0 every path
+// below is byte-for-byte today's; with it 1:
+//   - the drawsurf list stops at its capacity instead of wrapping over views already issued (drops are
+//     counted into ^~^~^ SHADOWBUDGET), and views that run before the main view may fill only half of it;
+//   - depth-only (VPF_DEPTHSHADOW) views stop ADDING surfaces their only pass would skip anyway, through the
+//     same predicate RB_DepthFillSkip uses, so they cost no drawsurf and no static-model slot;
+//   - the legacy far cascade is re-baked when a cvar that changes its casters changes (SE#4);
+//   - FBO_Init clears the shadow maps and mask; r_FBufScale is scene-normalised (ME-F12).
+extern cvar_t *r_shadowHarden;
+
+// HZM gl2 stable sun shadows + B0 + E1 (plan P3, tr_hzm_sunstable.c - its header comment is the reference)
+#define HZM_PSHADOWCHARGATE_AUTO 0   // r_hzmPshadowCharGate -1 means this (bug-3009 / C0 / E1)
+extern cvar_t *r_shadowStable;
+extern cvar_t *r_shadowSlopeBias;
+extern cvar_t *r_hzmPshadowCharGate;
+void     R_SunStable_Register(void);
+void     R_SunStable_WorldLoaded(const char *name);
+qboolean R_SunStable_Resolve(void);
+qboolean R_SunStable_Frame(const refdef_t *fitFd);
+qboolean R_SunStable_LegacyNeedsFar(void);
+qboolean R_SunStable_StaticInWorld(void);
+qboolean R_SunStable_FarIsW(void);
+qboolean R_PshadowCharGate(void);
+void     R_SunWorld_AddTerrainProxy(void);
+staticSurface_t *R_SunWorld_StaticSlot(void);
+qboolean R_SunWorld_StaticWanted(int staticIndex);
+qboolean R_SunStable_IsFoliageStatic(int staticIndex);
+void     RB_SunStable_Mask(vec4_t quadVerts[4], vec2_t texCoords[4], const vec4_t viewInfo);
+void     RB_SunStable_Lightall(shaderProgram_t *sp, const shaderCommands_t *input);
+void     R_GfxProbe_WBaked(void);
+extern cvar_t *r_shadowFboDummy;
+extern qboolean r_drawSurfNoWrap;   // latched from r_shadowHarden at the top of every RE_RenderScene
+extern int      r_drawSurfCap;      // current add limit (MAX_DRAWSURFS, or half of it before the main view)
+extern int      r_drawSurfDrops;    // surfaces refused this frame
+void     R_DepthViewAllows(int viewFlags, int shadowCascade, qboolean *allowChars, qboolean *allowCutout);
+qboolean R_DepthViewSkips(const shader_t *shader, const trRefEntity_t *entities, int entityNum,
+                          qboolean allowChars, qboolean allowCutout);
+qboolean R_DepthViewSkipsFrontend(const shader_t *shader);
+qboolean R_ShadowFarInputsChanged(void);
+void     R_GfxReadBuffer(GLenum mode);   // glReadBuffer, loaded on first use (not in the qgl table)
+
+// HZM gl2 MSAA core (plan P2a, tr_msaa.c - the header comment there is the reference)
+#ifndef GL_TEXTURE_2D_MULTISAMPLE
+#define GL_TEXTURE_2D_MULTISAMPLE           0x9100
+#endif
+#ifndef GL_SAMPLE_ALPHA_TO_COVERAGE
+#define GL_SAMPLE_ALPHA_TO_COVERAGE         0x809E
+#endif
+#ifndef GL_SAMPLE_ALPHA_TO_ONE
+#define GL_SAMPLE_ALPHA_TO_ONE              0x809F
+#endif
+typedef void (APIENTRY *hzmTexImage2DMultisample_t)(GLenum target, GLsizei samples, GLenum internalformat,
+                                                     GLsizei width, GLsizei height, GLboolean fixedsamplelocations);
+typedef void (APIENTRY *hzmAlphaToCoverageDitherControlNV_t)(GLenum mode);
+extern hzmTexImage2DMultisample_t          qglTexImage2DMultisample;          // NULL = the new MSAA path is unavailable
+extern hzmAlphaToCoverageDitherControlNV_t qglAlphaToCoverageDitherControlNV; // NULL = no NV dither control (P4a)
+extern cvar_t *r_msaaOverride;
+extern cvar_t *r_msaaBypass;
+// HZM gl2 MSAA P4 shader features (flags 0, default 1, NEVER archived - V3-C2): read per draw / at R_Init
+extern cvar_t *r_alphaToCoverage;   // P4a, live
+extern cvar_t *r_msaaCentroid;      // P4b, read at R_Init (GLSL defines)
+extern cvar_t *r_msaaShadowMatch;   // P4c, live
+int  R_HzmLightMatte(const byte *pic, int width, int height);
+int  RB_MsaaA2CStageMode(const shaderStage_t *pStage);
+void RB_MsaaShadowMatch(shaderProgram_t *sp);
+extern cvar_t *r_msaaDebugFailCompile;
+void        R_Msaa_Register(void);
+qboolean    R_MsaaNewPathRequested(void);
+void        R_DecideMsaa(void);
+qboolean    R_MsaaInitSceneFbos(int hdrFormat);
+void        R_MsaaBeginFrame(void);
+qboolean    R_MsaaSceneIsMultisampled(void);
+const char *R_MsaaLabel(void);
+void        R_Msaa_AfterGLSL(void);
+image_t    *R_CreateImageMS(const char *name, int width, int height, int internalFormat);   // tr_image.c
+// HZM gl2 MSAA (plan P2b) shader resolves. All inert unless R_MsaaResolvesActive(): the new path at >= 2 samples, the
+// HOME bypass off, and both resolve programs and targets present. Otherwise every call site keeps its blit / today.
+typedef void (APIENTRY *hzmDrawBuffers_t)(GLsizei n, const GLenum *bufs);
+typedef void (APIENTRY *hzmBindFragDataLocation_t)(GLuint program, GLuint color, const GLchar *name);
+extern hzmDrawBuffers_t          qglDrawBuffers;            // GL 2.0; NULL = no MRT colour resolve (blit fallback)
+extern hzmBindFragDataLocation_t qglBindFragDataLocation;   // GL 3.0; NULL = no MRT colour resolve (blit fallback)
+qboolean    R_MsaaResolvesActive(void);
+void        RB_MSAAResolveDepth(void);
+void        RB_MSAAResolveColor(qboolean withAO, int mode, const int *viewRect);
+int         R_MsaaToneResolveMode(void);
+FBO_t      *R_MsaaLinearSource(FBO_t *src);
+image_t    *R_MsaaDepthMinMaxOr(image_t *fallback);
+// renderer_reinit plan 6, rule 1: the flags-0 cvars tr_msaa.c reads ONLY at R_Init (NULL-terminated). A renderer
+// kept across map loads must snapshot their modificationCount. The ROM outputs (r_msaaActive, r_gpuVramMB,
+// r_msaaForcedOff) are deliberately absent; r_msaaBypass is live (read per frame).
+extern const char *const hzmMsaaInitReadCvars[];
 // HZM rain wetness - tr_hzm_wet.c (docs/proposals/water_wetness_2026-09-27)
 void R_HZMWetBuild( dheader_t *header );
 void R_HZMWetTagShader( shader_t *sh, int surfaceFlags );

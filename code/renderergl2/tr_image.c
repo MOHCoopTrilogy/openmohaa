@@ -284,6 +284,10 @@ void R_ImageList_f( void ) {
 		if (image->flags & IMGFLAG_MIPMAP)
 			estSize += estSize / 2;
 
+		// HZM gl2 MSAA (plan P2a): a multisample texture stores every sample
+		if ((image->flags & IMGFLAG_MULTISAMPLE) && tr.msaaSamples > 1)
+			estSize *= tr.msaaSamples;
+
 		sizeSuffix = "b ";
 		displaySize = estSize;
 
@@ -2201,6 +2205,55 @@ static void Upload32(byte *data, int x, int y, int width, int height, GLenum pic
 
 /*
 ================
+R_AllocImageSlot
+
+HZM gl2 MSAA (plan P2a): the ONE place an image_t slot is allocated and its texture name generated. R_CreateImage2
+and R_CreateImageMS both come here, so a change of allocation class (the renderer_reinit plan moves image_t off the
+hunk) has a single site, and no image can escape it.
+================
+*/
+static image_t *R_AllocImageSlot( const char *name ) {
+	image_t *image;
+
+	if ( tr.numImages == MAX_DRAWIMAGES ) {
+		ri.Error( ERR_DROP, "R_CreateImage: MAX_DRAWIMAGES hit (%d) creating %s", MAX_DRAWIMAGES, name );
+	}
+
+	image = tr.images[tr.numImages] = ri.Hunk_Alloc( sizeof( image_t ), h_low );
+	qglGenTextures(1, &image->texnum);
+	tr.numImages++;
+	// HZM gl2 [bug-2997]: never silent before the cap ERR_DROPs a map (TRAPS T3/T4). tr.numImages restarts at every
+	// registration (R_InitImages), so this prints at most once per map.
+	if ( tr.numImages == ( MAX_DRAWIMAGES * 9 ) / 10 ) {
+		ri.Printf( PRINT_WARNING, "^~^~^ IMAGECAP %d of MAX_DRAWIMAGES %d images registered (90%%) at %s\n",
+		           tr.numImages, MAX_DRAWIMAGES, name );
+	}
+	return image;
+}
+
+/*
+================
+R_CreateImageMS
+
+HZM gl2 MSAA (plan P2a, ME-F8): a tr.images entry backed by a GL_TEXTURE_2D_MULTISAMPLE. Only the slot and the
+texture name are made here; the storage (and its sample count) is specified by tr_msaa.c, which may re-specify it
+(the F9 fallback halves the samples). No texture parameters: a multisample texture has none.
+================
+*/
+image_t *R_CreateImageMS( const char *name, int width, int height, int internalFormat ) {
+	image_t *image = R_AllocImageSlot( name );
+
+	Q_strncpyz( image->imgName, name, sizeof( image->imgName ) );
+	image->type           = IMGTYPE_COLORALPHA;
+	image->flags          = IMGFLAG_MULTISAMPLE | IMGFLAG_NO_COMPRESSION | IMGFLAG_CLAMPTOEDGE;
+	image->width          = image->uploadWidth  = width;
+	image->height         = image->uploadHeight = height;
+	image->internalFormat = internalFormat;
+	return image;
+}
+
+/*
+================
 R_CreateImage2
 
 This is the only way any image_t are created
@@ -2228,19 +2281,7 @@ image_t *R_CreateImage2( const char *name, byte *pic, int width, int height, GLe
 		isLightmap = qtrue;
 	}
 
-	if ( tr.numImages == MAX_DRAWIMAGES ) {
-		ri.Error( ERR_DROP, "R_CreateImage: MAX_DRAWIMAGES hit (%d) creating %s", MAX_DRAWIMAGES, name );
-	}
-
-	image = tr.images[tr.numImages] = ri.Hunk_Alloc( sizeof( image_t ), h_low );
-	qglGenTextures(1, &image->texnum);
-	tr.numImages++;
-	// HZM gl2 [bug-2997]: never silent before the cap ERR_DROPs a map (TRAPS T3/T4). tr.numImages restarts at every
-	// registration (R_InitImages), so this prints at most once per map.
-	if ( tr.numImages == ( MAX_DRAWIMAGES * 9 ) / 10 ) {
-		ri.Printf( PRINT_WARNING, "^~^~^ IMAGECAP %d of MAX_DRAWIMAGES %d images registered (90%%) at %s\n",
-		           tr.numImages, MAX_DRAWIMAGES, name );
-	}
+	image = R_AllocImageSlot( name );   // HZM gl2 MSAA (plan P2a): the one slot allocator (cap check, IMAGECAP)
 
 	image->type = type;
 	image->flags = flags;
@@ -2249,6 +2290,10 @@ image_t *R_CreateImage2( const char *name, byte *pic, int width, int height, GLe
 
 	image->width = width;
 	image->height = height;
+	// HZM gl2 MSAA (plan P4a): classify the matte once, while the RGBA texels are at hand
+	image->hzmLightMatte = -1;
+	if (pic && rgba8 && type == IMGTYPE_COLORALPHA && !cubemap && !isLightmap)
+		image->hzmLightMatte = R_HzmLightMatte(pic, width, height);
 	// HZM gl2 (bug-2227): S and T are resolved SEPARATELY now. IMGFLAG_CLAMPTOEDGE still means
 	// "clamp both", which is what every other caller in the renderer wants; the two _X/_Y flags come
 	// from MOHAA's clampmapx / clampmapy and clamp one axis while the other keeps repeating.
@@ -3642,6 +3687,12 @@ void R_CreateBuiltinImages( void ) {
 			tr.displayImage = R_CreateImage("*display", NULL, dispW, dispH, IMGTYPE_COLORALPHA, IMGFLAG_NO_COMPRESSION | IMGFLAG_CLAMPTOEDGE, GL_RGBA8);
 			tr.displayScratchImage = R_CreateImage("*displayScratch", NULL, dispW, dispH, IMGTYPE_COLORALPHA, IMGFLAG_NO_COMPRESSION | IMGFLAG_CLAMPTOEDGE, GL_RGBA8);
 		}
+		else if (tr.displaySplit)
+		{
+			// HZM gl2 MSAA (plan P2a, MH-C12): the new path at >= 2 samples presents through a single-sample
+			// DISPLAY target too (tr_fbo.c), so the HUD is never multisampled. No RCAS scratch: nothing is scaled.
+			tr.displayImage = R_CreateImage("*display", NULL, dispW, dispH, IMGTYPE_COLORALPHA, IMGFLAG_NO_COMPRESSION | IMGFLAG_CLAMPTOEDGE, GL_RGBA8);
+		}
 
 		tr.renderImage = R_CreateImage("_render", NULL, width, height, IMGTYPE_COLORALPHA, IMGFLAG_NO_COMPRESSION | IMGFLAG_CLAMPTOEDGE, hdrFormat);
 
@@ -3663,6 +3714,15 @@ void R_CreateBuiltinImages( void ) {
 			tr.sunRaysImage = R_CreateImage("*sunRays", NULL, width, height, IMGTYPE_COLORALPHA, IMGFLAG_NO_COMPRESSION | IMGFLAG_CLAMPTOEDGE, rgbFormat);
 
 		tr.renderDepthImage  = R_CreateImage("*renderdepth",  NULL, width, height, IMGTYPE_COLORALPHA, IMGFLAG_NO_COMPRESSION | IMGFLAG_CLAMPTOEDGE, GL_DEPTH_COMPONENT24);
+
+		// HZM gl2 MSAA (plan P2a allocation, P2b use), new path at >= 2 samples only: the linear colour resolve that
+		// feeds bloom / DoF / levels (ME-F2), and the (min,max) depth resolve for underwater, legacy fog and soft
+		// particles (ME-F11) - a dedicated image, because hdrDepthImage already has four writers.
+		if (tr.displaySplit && glRefConfig.textureFloat)
+		{
+			tr.sceneLinearImage     = R_CreateImage("*sceneLinear",     NULL, width, height, IMGTYPE_COLORALPHA, IMGFLAG_NO_COMPRESSION | IMGFLAG_CLAMPTOEDGE, GL_RGBA16F_ARB);
+			tr.msaaDepthMinMaxImage = R_CreateImage("*msaaDepthMinMax", NULL, width, height, IMGTYPE_COLORALPHA, IMGFLAG_NO_COMPRESSION | IMGFLAG_CLAMPTOEDGE, GL_RG32F);
+		}
 		tr.textureDepthImage = R_CreateImage("*texturedepth", NULL, PSHADOW_MAP_SIZE, PSHADOW_MAP_SIZE, IMGTYPE_COLORALPHA, IMGFLAG_NO_COMPRESSION | IMGFLAG_CLAMPTOEDGE, GL_DEPTH_COMPONENT24);
 
 		{

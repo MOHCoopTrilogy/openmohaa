@@ -57,6 +57,8 @@ void GL_BindToTMU( image_t *image, int tmu )
 	{
 		if (image->flags & IMGFLAG_CUBEMAP)
 			target = GL_TEXTURE_CUBE_MAP;
+		else if (image->flags & IMGFLAG_MULTISAMPLE)
+			target = GL_TEXTURE_2D_MULTISAMPLE;   // HZM gl2 MSAA (plan P2a): sampler2DMS in the P2b resolves
 
 		image->frameUsed = tr.frameCount;
 		texture = image->texnum;
@@ -116,9 +118,13 @@ void GL_State( unsigned long stateBits )
 	//
 	// check depthFunc bits
 	//
-	if ( diff & GLS_DEPTHFUNC_BITS )
+	if ( diff & ( GLS_DEPTHFUNC_BITS | GLS_DEPTHFUNC_ALWAYS ) )
 	{
-		if ( stateBits & GLS_DEPTHFUNC_EQUAL )
+		if ( stateBits & GLS_DEPTHFUNC_ALWAYS )
+		{
+			qglDepthFunc( GL_ALWAYS );   // HZM gl2 MSAA (plan P2a, ME-F5): its own bit; 0x60000 decodes as EQUAL
+		}
+		else if ( stateBits & GLS_DEPTHFUNC_EQUAL )
 		{
 			qglDepthFunc( GL_EQUAL );
 		}
@@ -268,6 +274,27 @@ void GL_State( unsigned long stateBits )
 		else
 		{
 			qglEnable( GL_DEPTH_TEST );
+		}
+	}
+
+	//
+	// HZM gl2 MSAA (plan P2a infrastructure; only P4a sets it): alpha-to-coverage
+	//
+	if ( diff & GLS_ALPHA_TO_COVERAGE )
+	{
+		// P4a: alpha-to-one with it, so the colour buffer's alpha stays 1 and a later DST_ALPHA blend never sees
+		// coverage values (research step 6)
+		if ( stateBits & GLS_ALPHA_TO_COVERAGE )
+		{
+			qglEnable( GL_SAMPLE_ALPHA_TO_COVERAGE );
+			if ( !qglesMajorVersion )
+				qglEnable( GL_SAMPLE_ALPHA_TO_ONE );
+		}
+		else
+		{
+			qglDisable( GL_SAMPLE_ALPHA_TO_COVERAGE );
+			if ( !qglesMajorVersion )
+				qglDisable( GL_SAMPLE_ALPHA_TO_ONE );
 		}
 	}
 
@@ -491,22 +518,12 @@ static qboolean RB_IsCharacterSkelEntity(int entityNum)
 // path and the slow path) were ~50 lines apart, and changing only one of them yields
 // shadows that appear and vanish with draw-surf batching order - an intermittent bug that
 // is close to impossible to attribute later. Now they cannot diverge.
+// HZM gl2 shadow hardening (plan P1a): the body now lives in R_DepthViewSkips (tr_main.c), shared with the
+// frontend so shadow views stop ADDING what this pass skips. Same tests, same order.
 static qboolean RB_DepthFillSkip(const shader_t *shader, int entityNum,
                                  qboolean allowChars, qboolean allowCutout)
 {
-	if (!shader || shader->sort == SS_PORTAL) {
-		return qfalse;
-	}
-	if (shader->sort != SS_OPAQUE) {
-		return qtrue;                       // genuinely translucent: never a depth writer
-	}
-	if (shader->hasAlphaTest && !allowCutout) {
-		return qtrue;                       // bug-gl2-foliage-white (main prepass only)
-	}
-	if (RB_IsCharacterSkelEntity(entityNum) && !allowChars) {
-		return qtrue;                       // bug-gl2-invisible-live-char-depthprepass
-	}
-	return qfalse;
+	return R_DepthViewSkips(shader, backEnd.refdef.entities, entityNum, allowChars, allowCutout);
 }
 
 // r_shadowDebug 3 accounting: how many character surfaces actually reached the cascade
@@ -780,12 +797,8 @@ void RB_RenderDrawSurfList( drawSurf_t *drawSurfs, int numDrawSurfs ) {
 	// false and allowChars is byte-for-byte the r_charShadows expression it was.
 	// The main-view z-prepass can still never set it - that view carries no VPF_ flags at
 	// all - which is the invariant the comment above demands.
-	allowChars   = (qboolean)(isShadowView
-	                          && (( r_charShadows->integer && backEnd.viewParms.shadowCascade > 0 )
-	                              || (( backEnd.viewParms.flags & VPF_PSHADOW )
-	                                  && r_hzmDlightShadowChars && r_hzmDlightShadowChars->integer )));
-	allowCutout  = (qboolean)(isShadowView && r_charShadows->integer
-	                          && r_shadowCastFoliage->integer);
+	// (the expressions live in R_DepthViewAllows, shared with the frontend - plan P1a)
+	R_DepthViewAllows(backEnd.viewParms.flags, backEnd.viewParms.shadowCascade, &allowChars, &allowCutout);
 
 	if (backEnd.depthFill && isShadowView) {
 		rb_shadowCharsDrawn = 0;
@@ -851,6 +864,12 @@ void RB_RenderDrawSurfList( drawSurf_t *drawSurfs, int numDrawSurfs ) {
 			) ) {
 			if (oldShader != NULL) {
 				RB_EndSurface();
+			}
+			// HZM gl2 [2026-09-26] S3b: the first qer_hzmSoftEdge surface of this view takes the scene-depth snapshot
+			// HERE - tess is empty, and every opaque surface (characters and cutout foliage included) sorts before a
+			// blended one, so the snapshot is the finished opaque scene. The sprite list takes its own again later.
+			if ( shader->hzmSoftEdge > 0.0f && !backEnd.softDepthValid && !backEnd.depthFill ) {
+				RB_HZM_SoftEdgeSnapshotAt( entityNum, bStaticModel );
 			}
 			RB_BeginSurface( shader, fogNum, cubemapIndex );
 			backEnd.pc.c_surfBatches++;
@@ -1115,7 +1134,7 @@ void RB_RenderDrawSurfList( drawSurf_t *drawSurfs, int numDrawSurfs ) {
 	// drawsurf count, because R_AddDrawSurf masks and WRAPS silently on overflow and - since
 	// shadow views run before the main view - an overflow makes the MAIN view sort zero
 	// surfaces and draw nothing.
-	if (backEnd.depthFill && isShadowView && r_shadowDebug->integer >= 3) {
+	if (backEnd.depthFill && isShadowView && r_shadowDebug->integer == 3) {
 		ri.Printf(PRINT_ALL,
 			"^~^~^ SHADOWCAST cascade=%d surfs=%d chars=%d skipped=%d drawSurfTotal=%d\n",
 			backEnd.viewParms.shadowCascade - 1, numDrawSurfs,
@@ -1567,6 +1586,7 @@ RB_DrawSurfs
 const void	*RB_DrawSurfs( const void *data ) {
 	const drawSurfsCommand_t	*cmd;
 	qboolean isShadowView;
+	int gpuMarkKind;
 
 	// HZM gl2 (bug #73): a real scene rendered this frame - the sceneless-frame
 	// stale-FBO clear (R_Ensure2DClear) must not fire.
@@ -1583,6 +1603,13 @@ const void	*RB_DrawSurfs( const void *data ) {
 	backEnd.viewParms = cmd->viewParms;
 
 	isShadowView = !!(backEnd.viewParms.flags & VPF_DEPTHSHADOW);
+
+	// HZM gl2 graphics probes: GPU timestamps per view class (r_gfxProbe 1 only).
+	gpuMarkKind = isShadowView ? (backEnd.viewParms.shadowCascade > 0 ? GPUMARK_SUN_B : GPUMARK_SHOTH_B)
+	            : ((backEnd.refdef.rdflags & RDF_NOWORLDMODEL) ? -1 : GPUMARK_MAIN_B);
+	if (gpuMarkKind >= 0) {
+		R_GfxProbe_GpuMark(gpuMarkKind);
+	}
 
 	// HZM gl2 SSAO black-screen fix: invalidate last frame's AO at the start of every real
 	// (non-shadow) view. Only the pass that actually writes tr.screenSsaoFbo may set this back
@@ -1621,13 +1648,27 @@ const void	*RB_DrawSurfs( const void *data ) {
 
 		backEnd.depthFill = qtrue;
 		qglColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
+		// HZM gl2 P3: the W bake is one view with one or two depth passes (r_shadowWFaces, vet section 7 D2)
+		backEnd.hzmWPass = (backEnd.viewParms.flags & VPF_SUNWORLD) ? 1 : 0;
 		RB_RenderDrawSurfList( cmd->drawSurfs, cmd->numDrawSurfs );
+		if ((backEnd.viewParms.flags & VPF_SUNWORLD) && backEnd.viewParms.hzmWFaces == 2)
+		{
+			backEnd.hzmWPass = 2;
+			RB_RenderDrawSurfList( cmd->drawSurfs, cmd->numDrawSurfs );
+		}
+		backEnd.hzmWPass = 0;
 		qglColorMask(!backEnd.colorMask[0], !backEnd.colorMask[1], !backEnd.colorMask[2], !backEnd.colorMask[3]);
 		backEnd.depthFill = qfalse;
 
 		if (!isShadowView)
 		{
-			if (tr.msaaResolveFbo)
+			if (R_MsaaResolvesActive() && backEnd.viewParms.targetFbo == NULL)
+			{
+				// HZM gl2 MSAA (plan P2b): the shader depth resolve - the NEAREST sample into renderDepthImage (the
+				// shadow mask below is right for the foreground), and (min, max) into msaaDepthMinMaxImage
+				RB_MSAAResolveDepth();
+			}
+			else if (tr.msaaResolveFbo)
 			{
 				// If we're using multisampling, resolve the depth first
 				FBO_FastBlit(tr.sceneFbo, NULL, tr.msaaResolveFbo, NULL, GL_DEPTH_BUFFER_BIT, GL_NEAREST);   // HZM render scale: scene is the MSAA target
@@ -1689,6 +1730,13 @@ const void	*RB_DrawSurfs( const void *data ) {
 
 				GL_State(GLS_DEPTHTEST_DISABLE);
 
+				if (backEnd.refdef.hzmSunActive)
+				{
+					// HZM gl2 stable sun shadows + B0 (plan P3): radial entity cascades only; r_shadowBlur is ignored
+					RB_SunStable_Mask(quadVerts, texCoords, viewInfo);
+				}
+				else
+				{
 				GLSL_BindProgram(&tr.shadowmaskShader);
 
 				GL_BindToTMU(tr.renderDepthImage, TB_COLORMAP);
@@ -1758,6 +1806,7 @@ const void	*RB_DrawSurfs( const void *data ) {
 
 					RB_InstantQuad2(quadVerts, texCoords);
 				}
+				}   // HZM gl2 P3: end of the legacy mask
 			}
 
 			// HZM gl2 SSAO BLACK-SCREEN FIX (bug-1177 follow-up): the SSAO GENERATION pass used to
@@ -1790,6 +1839,16 @@ const void	*RB_DrawSurfs( const void *data ) {
 		if (r_drawSun->integer)
 		{
 			RB_DrawSun(0.1, tr.sunShader);
+		}
+
+		// HZM gl2 MSAA (plan P2b, ME-F13): resolve the FINISHED opaque depth once per view, before the sun-rays mask and
+		// the flares read renderDepthImage. The legacy blit path left them the prepass depth, which lacks the
+		// alpha-tested world and characters (they never enter the prepass), so a flare behind foliage stayed lit.
+		if (R_MsaaResolvesActive() && backEnd.viewParms.targetFbo == NULL
+		    && !( backEnd.refdef.rdflags & RDF_NOWORLDMODEL ))
+		{
+			RB_MSAAResolveDepth();
+			SetViewportAndScissor();
 		}
 
 		if (glRefConfig.framebufferObject && r_drawSunRays->integer)
@@ -1839,6 +1898,10 @@ const void	*RB_DrawSurfs( const void *data ) {
 	backEnd.viewParms.isMirror = qfalse;
 	backEnd.viewParms.flags = 0;
 
+	if (gpuMarkKind >= 0) {
+		R_GfxProbe_GpuMark(gpuMarkKind + 1);
+	}
+
 	return (const void *)(cmd + 1);
 }
 
@@ -1881,6 +1944,13 @@ const void	*RB_DrawBuffer( const void *data ) {
 			qglDisable(GL_SCISSOR_TEST);
 			qglClearColor(0.0f, 0.0f, 0.0f, 1.0f);
 			qglClear(GL_COLOR_BUFFER_BIT);
+			// HZM gl2 MSAA (plan P2a): with the display split the world scene has a buffer of its own. Clear it too,
+			// as the MSAA-0 pipeline does (there sceneFbo IS renderFbo), so the bypass and override 0 match even
+			// where the world leaves holes. New path only - the render-scale path is left exactly as it is.
+			if (tr.msaaNewPath && tr.sceneFbo && tr.sceneFbo != tr.renderFbo) {
+				FBO_Bind(tr.sceneFbo);
+				qglClear(GL_COLOR_BUFFER_BIT);
+			}
 			FBO_Bind(NULL);
 		}
 	}
@@ -1924,6 +1994,11 @@ void RB_ShowImages( void ) {
 
 	for ( i=0 ; i<tr.numImages ; i++ ) {
 		image = tr.images[i];
+
+		// HZM gl2 MSAA (plan P2a, ME-F8): a multisample texture cannot be drawn as a 2D image
+		if (image->flags & IMGFLAG_MULTISAMPLE) {
+			continue;
+		}
 
 		w = glConfig.vidWidth / 20;
 		h = glConfig.vidHeight / 15;
@@ -2066,7 +2141,7 @@ const void	*RB_SwapBuffers( const void *data ) {
 
 	if (glRefConfig.framebufferObject)
 	{
-		if (tr.msaaResolveFbo && r_hdr->integer && !tr.renderScaleActive)   // HZM render scale: when scaled, renderFbo is already single-sampled display
+		if (tr.msaaResolveFbo && r_hdr->integer && !tr.renderScaleActive && !tr.displaySplit)   // HZM render scale / MSAA display split: renderFbo is then already the single-sampled display
 		{
 			// Resolving an RGB16F MSAA FBO to the screen messes with the brightness, so resolve to an RGB16F FBO first
 			FBO_FastBlit(tr.renderFbo, NULL, tr.msaaResolveFbo, NULL, GL_COLOR_BUFFER_BIT, GL_NEAREST);
@@ -2083,6 +2158,9 @@ const void	*RB_SwapBuffers( const void *data ) {
 		// of the frame in RB_DrawBuffer, which prevents the ghost just as well and leaves the
 		// presented image readable.
 	}
+
+	// HZM gl2 graphics probes: frame-end timestamp + readback of older frames, WCRC, glGetError drain.
+	R_GfxProbe_BackendFrameEnd();
 
 	if ( !glState.finishCalled ) {
 		qglFinish();
@@ -2146,6 +2224,7 @@ const void *RB_PostProcess(const void *data)
 	ivec4_t srcBox, dstBox;
 	qboolean autoExposure;
 	qboolean bloomPreMeasured = qfalse;   // HZM exposure-aware bloom (bug-1149): measured before bloom in mode 1
+	qboolean msaaShaderResolved = qfalse; // HZM gl2 MSAA (plan P2b): this chain began with the shader resolves
 	static cvar_t *r_ppBloomModeBE = NULL, *r_ppBloomBE = NULL;
 
 	// finish any 2D drawing if needed
@@ -2161,16 +2240,28 @@ const void *RB_PostProcess(const void *data)
 	{
 		// HZM render scale: even with post-processing off, the scaled scene still has to reach the
 		// display FBO, or the HUD / present would draw over an empty native buffer.
-		if (glRefConfig.framebufferObject && tr.renderScaleActive
+		// HZM gl2 MSAA (plan P2a): the same holds for the MSAA display split at scale 1.0 - a plain copy.
+		if (glRefConfig.framebufferObject && (tr.renderScaleActive || tr.displaySplit)
 		    && tr.sceneFbo && tr.renderFbo && tr.sceneFbo != tr.renderFbo)
 		{
 			FBO_t *rsSrc = tr.sceneFbo;
-			if (tr.msaaResolveFbo)
+			if (R_MsaaResolvesActive())
+			{
+				// HZM gl2 MSAA (plan P2b): no tone stage runs with post-processing off - the per-sample clamp
+				// resolve is what the display shows (and what gl1's clamped multisample buffer gives)
+				RB_MSAAResolveColor(qfalse, 1, NULL);
+				backEnd.msaaLinearValid = qfalse;
+				rsSrc = tr.msaaResolveFbo;
+			}
+			else if (tr.msaaResolveFbo)
 			{
 				FBO_FastBlit(tr.sceneFbo, NULL, tr.msaaResolveFbo, NULL, GL_COLOR_BUFFER_BIT, GL_NEAREST);
 				rsSrc = tr.msaaResolveFbo;
 			}
-			RB_RenderScaleResample(rsSrc);
+			if (tr.renderScaleActive)
+				RB_RenderScaleResample(rsSrc);
+			else
+				FBO_FastBlit(rsSrc, NULL, tr.renderFbo, NULL, GL_COLOR_BUFFER_BIT, GL_NEAREST);
 		}
 		return (const void *)(cmd + 1);
 	}
@@ -2181,13 +2272,40 @@ const void *RB_PostProcess(const void *data)
 		backEnd.viewParms = cmd->viewParms;
 	}
 
+	R_GfxProbe_GpuMark(GPUMARK_POST_B);
+
 	// HZM render scale: the post chain runs on the SCENE buffer (S); the final resample brings it
 	// to the DISPLAY buffer (dstFbo). At scale 1.0 sceneFbo == renderFbo, so srcFbo == dstFbo and
 	// the pipeline is byte-identical (no resample runs).
 	srcFbo = tr.sceneFbo ? tr.sceneFbo : tr.renderFbo;
 	dstFbo = tr.renderFbo;
 
-	if (tr.msaaResolveFbo)
+	backEnd.msaaLinearValid = qfalse;
+	msaaShaderResolved = qfalse;
+
+	if (R_MsaaResolvesActive())
+	{
+		// HZM gl2 MSAA (plan P2b, ME-F2): depth resolve -> SSAO generation (depth only) -> ONE MRT colour resolve that
+		// applies the AO per sample before the tone-exact clamp and also writes the linear copy bloom, DoF and the
+		// exposure measure read. The separate AO composite below is skipped. ao = 1 when AO did not run (bug-1211).
+		int     viewRect[4];
+		ivec4_t aoBox;
+		qboolean aoOn;
+
+		viewRect[0] = aoBox[0] = backEnd.viewParms.viewportX;
+		viewRect[1] = aoBox[1] = backEnd.viewParms.viewportY;
+		viewRect[2] = aoBox[2] = backEnd.viewParms.viewportWidth;
+		viewRect[3] = aoBox[3] = backEnd.viewParms.viewportHeight;
+
+		RB_MSAAResolveDepth();
+		RB_HZMSsao(tr.msaaResolveFbo, aoBox);
+		aoOn = (qboolean)((r_ssao->integer || (r_ppSSAO && r_ppSSAO->integer)) && backEnd.ssaoValid
+		                  && tr.screenSsaoImage && tr.screenSsaoFbo);
+		RB_MSAAResolveColor(aoOn, R_MsaaToneResolveMode(), viewRect);
+		srcFbo = tr.msaaResolveFbo;
+		msaaShaderResolved = qtrue;
+	}
+	else if (tr.msaaResolveFbo)
 	{
 		// Resolve the MSAA before anything else
 		// Can't resolve just part of the MSAA FBO, so multiple views will suffer a performance hit here
@@ -2212,7 +2330,10 @@ const void *RB_PostProcess(const void *data)
 	srcBox[2] = backEnd.viewParms.viewportWidth;
 	srcBox[3] = backEnd.viewParms.viewportHeight;
 
-	RB_HZMSsao(srcFbo, srcBox);
+	if (!msaaShaderResolved)   // HZM gl2 MSAA (plan P2b): already generated, before the colour resolve
+	{
+		RB_HZMSsao(srcFbo, srcBox);
+	}
 
 	// HZM gl2 (bug-1177): the NULL tests are MANDATORY, not defensive dressing - the lines below
 	// dereference tr.screenSsaoImage->width/height with no check of their own, so this is the exact
@@ -2221,7 +2342,8 @@ const void *RB_PostProcess(const void *data)
 	// actually wrote tr.screenSsaoFbo this frame, which turns any future failure of the generation
 	// side into "AO silently does nothing" instead of "the screen is black".
 	if ((r_ssao->integer || (r_ppSSAO && r_ppSSAO->integer)) && backEnd.ssaoValid
-	    && tr.screenSsaoImage && tr.screenSsaoFbo)
+	    && tr.screenSsaoImage && tr.screenSsaoFbo
+	    && !msaaShaderResolved)   // HZM gl2 MSAA (plan P2b): the MRT resolve already applied the AO per sample
 	{
 		// HZM render scale: screenSsaoImage is SCENE/2 and the viewport is SCENE-sized, so use scene dims.
 		srcBox[0] = backEnd.viewParms.viewportX      * tr.screenSsaoImage->width  / (float)tr.sceneWidth;
@@ -2263,6 +2385,7 @@ const void *RB_PostProcess(const void *data)
 		{
 			RB_GlobalFog(srcFbo, srcBox, tr.globalFogFbo, srcBox);
 			FBO_FastBlit(tr.globalFogFbo, srcBox, srcFbo, srcBox, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+			backEnd.msaaLinearValid = qfalse;   // HZM MSAA P2b: the fog went onto the tone input only - bloom reads it
 		}
 
 		// HZM gl2 POST-FX PORT (bug-1149): gl1 applies bloom BEFORE its tonemap/grade
@@ -2360,6 +2483,8 @@ const void *RB_PostProcess(const void *data)
 		FBO_FastBlit(srcFbo, srcBox, dstFbo, dstBox, GL_COLOR_BUFFER_BIT, GL_NEAREST);
 	}
 
+	backEnd.msaaLinearValid = qfalse;   // HZM gl2 MSAA (plan P2b): the linear copy belongs to this post chain only
+
 #if 0
 	if (0)
 	{
@@ -2429,7 +2554,17 @@ const void *RB_PostProcess(const void *data)
 	// four cascade depth maps into the top-left corner - the single cheapest way to confirm what
 	// is (or is not) being written into them. Character silhouettes appearing in cascades 0/1 is
 	// the money shot for this whole feature.
-	if (r_shadowDebug->integer >= 1 && r_sunlightMode->integer)
+	// HZM gl2 graphics probes: r_shadowDebug 4 = the resolved shadow mask FULL SCREEN, nothing over it
+	// (tests T1-T3 diff these captures). 1-3 keep their corner thumbnails.
+	// HZM gl2 P3: 5 = the same full-screen mask, carrying V_world (W) while stable is on (vet R8)
+	if ((r_shadowDebug->integer == 4 || r_shadowDebug->integer == 5) && r_sunlightMode->integer && tr.screenShadowImage)
+	{
+		ivec4_t dstBox;
+		VectorSet4(dstBox, 0, 0, glConfig.vidWidth, glConfig.vidHeight);
+		FBO_BlitFromTexture(tr.screenShadowImage, NULL, NULL, dstFbo, dstBox, NULL, NULL, 0);
+	}
+
+	if (r_shadowDebug->integer >= 1 && r_shadowDebug->integer <= 3 && r_sunlightMode->integer)
 	{
 		ivec4_t dstBox;
 		VectorSet4(dstBox, 0, glConfig.vidHeight - 128, 128, 128);
@@ -2444,7 +2579,7 @@ const void *RB_PostProcess(const void *data)
 
 	// r_shadowDebug 2: the resolved screen-space shadowmask. If this is uniformly white the
 	// chain is dead upstream (VPF_USESUNLIGHT / the depth-fill gate), not at the casters.
-	if (r_shadowDebug->integer >= 2 && r_sunlightMode->integer && tr.screenShadowImage)
+	if (r_shadowDebug->integer >= 2 && r_shadowDebug->integer <= 3 && r_sunlightMode->integer && tr.screenShadowImage)
 	{
 		ivec4_t dstBox;
 		VectorSet4(dstBox, 0, glConfig.vidHeight - 256, 256, 128);
@@ -2494,6 +2629,8 @@ const void *RB_PostProcess(const void *data)
 		}
 	}
 #endif
+
+	R_GfxProbe_GpuMark(GPUMARK_POST_E);
 
 	return (const void *)(cmd + 1);
 }
@@ -2658,6 +2795,83 @@ void RE_StretchRaw2 (int x, int y, int w, int h, int cols, int rows, int compone
 
 /*
 ==================
+RB_HZM_SceneDepthSnapshot
+
+HZM gl2 SOFT PARTICLES + [2026-09-26] S3b: THE scene-depth snapshot - blit renderDepthImage (resolving the MS depth
+first when multisampling) into hdrDepthImage and restore the scene target, viewport and scissor. Moved here verbatim
+from RB_SpriteSurfs so the sprite list and the soft-edge hoist (RB_HZM_SoftEdgeSnapshotAt) share ONE copy: the gfx P2
+MSAA core replaces the body of THIS function with its post-opaque (min, max) depth resolve (plan_graphics_final.md P2b,
+MH-B1 two-surface fade), and both callers follow. Sets backEnd.softDepthValid; false = not taken (UI 3D view, or no
+hdrDepth target because r_softParticles/SSAO/DoF are all off at launch).
+==================
+*/
+qboolean RB_HZM_SceneDepthSnapshot( void ) {
+	FBO_t	*oldFbo;
+	vec4_t	srcTexCoords;
+
+	if ( ( backEnd.refdef.rdflags & RDF_NOWORLDMODEL ) || !tr.hdrDepthFbo ) {
+		return qfalse;
+	}
+	oldFbo = glState.currentFBO;
+
+	if (R_MsaaResolvesActive() && backEnd.viewParms.targetFbo == NULL) {
+		RB_MSAAResolveDepth();   // HZM gl2 MSAA (plan P2b, MH-B1): (min, max) for the two-surface soft-particle fade
+	} else if (tr.msaaResolveFbo) {
+		FBO_FastBlit(tr.sceneFbo, NULL, tr.msaaResolveFbo, NULL, GL_DEPTH_BUFFER_BIT, GL_NEAREST);
+	}
+
+	VectorSet4(srcTexCoords, 0.0f, 0.0f, 1.0f, 1.0f);
+	FBO_BlitFromTexture(tr.renderDepthImage, srcTexCoords, NULL, tr.hdrDepthFbo, NULL, NULL, NULL, 0);
+
+	// restore the scene render target and this view's viewport/scissor for the draws that follow
+	FBO_Bind(oldFbo ? oldFbo : (tr.sceneFbo ? tr.sceneFbo : tr.renderFbo));
+	SetViewportAndScissor();
+
+	backEnd.softDepthValid = qtrue;
+	return qtrue;
+}
+
+/*
+==================
+RB_HZM_BindSceneDepth - the snapshot on TB_SCREENDEPTH (P2 binds its own depth image here)
+==================
+*/
+void RB_HZM_BindSceneDepth( void ) {
+	if (backEnd.softDepthValid && tr.hdrDepthImage) {
+		// HZM gl2 MSAA (plan P2b): the (min, max) image when a shader depth resolve made this snapshot; its r is the
+		// same nearest depth hdrDepthImage holds, and MSAA_DEPTH_MINMAX shaders also read its g
+		GL_BindToTMU(R_MsaaDepthMinMaxOr(tr.hdrDepthImage), TB_SCREENDEPTH);
+	}
+}
+
+/*
+==================
+RB_HZM_SoftEdgeSnapshotAt
+
+HZM gl2 [2026-09-26] S3b: called from RB_RenderDrawSurfList, between batches, for the first qer_hzmSoftEdge surface of
+a view. Only for the scene views a soft particle may fade in (no shadow / pshadow / cubemap target, no 2D, no UI 3D
+view) and never for an RF_DEPTHHACK entity (its compressed depth range would compare wrong). The snapshot resets the
+projection to the view's (SetViewportAndScissor); the batch loop may be mid weapon-projection, so it is put back.
+==================
+*/
+void RB_HZM_SoftEdgeSnapshotAt( int entityNum, qboolean bStaticModel ) {
+	mat4_t	projection;
+
+	if ( !R_HZM_SoftEdgeOn() || backEnd.projection2D || backEnd.viewParms.targetFbo
+		|| ( backEnd.viewParms.flags & ( VPF_DEPTHSHADOW | VPF_SHADOWMAP | VPF_PSHADOW ) ) ) {
+		return;
+	}
+	if ( !bStaticModel && entityNum >= 0 && entityNum < backEnd.refdef.num_entities
+		&& ( backEnd.refdef.entities[entityNum].e.renderfx & RF_DEPTHHACK ) ) {
+		return;
+	}
+	Mat4Copy( glState.projection, projection );
+	RB_HZM_SceneDepthSnapshot();
+	GL_SetProjectionMatrix( projection );
+}
+
+/*
+==================
 RB_RenderSpriteSurfList
 ==================
 */
@@ -2680,9 +2894,7 @@ void RB_RenderSpriteSurfList(drawSurf_t* drawSurfs, int numDrawSurfs) {
 	// below so RF_DEPTHHACK muzzle flashes are excluded. inSpriteList is cleared at the end.
 	backEnd.inSpriteList = qtrue;
 	backEnd.spriteDepthHack = qfalse;
-	if (backEnd.softDepthValid && tr.hdrDepthImage) {
-		GL_BindToTMU(tr.hdrDepthImage, TB_SCREENDEPTH);
-	}
+	RB_HZM_BindSceneDepth();
 
 	oldShader = NULL;
     depthRange = qfalse;
@@ -2776,25 +2988,10 @@ const void* RB_SpriteSurfs(const void* data) {
     // the feature off, on an RDF_NOWORLDMODEL (UI 3D) view, or before any world surface exists.
     // Mirrors the SSAO/DoF snapshot recipe in RB_DrawSurfs (blit renderDepthImage -> hdrDepthFbo,
     // resolving MS depth first when multisampling).
+    // (S3b: the snapshot itself lives in RB_HZM_SceneDepthSnapshot, shared with the soft-edge hoist)
     backEnd.softDepthValid = qfalse;
-    if (r_softParticles && r_softParticles->integer && cmd->numDrawSurfs > 0
-        && !(backEnd.refdef.rdflags & RDF_NOWORLDMODEL) && tr.hdrDepthFbo)
-    {
-        FBO_t *oldFbo = glState.currentFBO;
-        vec4_t srcTexCoords;
-
-        if (tr.msaaResolveFbo) {
-            FBO_FastBlit(tr.sceneFbo, NULL, tr.msaaResolveFbo, NULL, GL_DEPTH_BUFFER_BIT, GL_NEAREST);
-        }
-
-        VectorSet4(srcTexCoords, 0.0f, 0.0f, 1.0f, 1.0f);
-        FBO_BlitFromTexture(tr.renderDepthImage, srcTexCoords, NULL, tr.hdrDepthFbo, NULL, NULL, NULL, 0);
-
-        // restore the scene render target and this view's viewport/scissor for the sprite draws
-        FBO_Bind(oldFbo ? oldFbo : (tr.sceneFbo ? tr.sceneFbo : tr.renderFbo));
-        SetViewportAndScissor();
-
-        backEnd.softDepthValid = qtrue;
+    if (r_softParticles && r_softParticles->integer && cmd->numDrawSurfs > 0) {
+        RB_HZM_SceneDepthSnapshot();
     }
 
 	//RB_SetupFog();

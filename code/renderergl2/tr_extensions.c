@@ -190,6 +190,43 @@ void GLimp_InitExtraExtensions(void)
 		ri.Printf(PRINT_ALL, result[2], extension);
 	}
 
+	// HZM gl2 MSAA (plan P2a, ME-F8): OpenGL 3.2 - GL_ARB_texture_multisample, the new MSAA path's scene target.
+	// Optional: without it qglTexImage2DMultisample stays NULL and R_DecideMsaa keeps MSAA off on the new path.
+	extension = "GL_ARB_texture_multisample";
+	glRefConfig.textureMultisample = qfalse;
+	qglTexImage2DMultisample = NULL;
+	if (q_gl_version_at_least_3_2 || SDL_GL_ExtensionSupported(extension))
+	{
+		qglTexImage2DMultisample = (hzmTexImage2DMultisample_t)SDL_GL_GetProcAddress("glTexImage2DMultisample");
+		glRefConfig.textureMultisample = (qboolean)(qglTexImage2DMultisample != NULL);
+
+		ri.Printf(PRINT_ALL, result[glRefConfig.textureMultisample ? 1 : 2], extension);
+	}
+	else
+	{
+		ri.Printf(PRINT_ALL, result[2], extension);
+	}
+
+	// HZM gl2 MSAA (plan P2b): the MRT colour resolve needs glDrawBuffers (GL 2.0) and glBindFragDataLocation (GL 3.0).
+	// Neither is in the qgl table; NULL means the new path keeps its blit resolves.
+	qglDrawBuffers = (hzmDrawBuffers_t)SDL_GL_GetProcAddress("glDrawBuffers");
+	qglBindFragDataLocation = q_gl_version_at_least_3_0
+		? (hzmBindFragDataLocation_t)SDL_GL_GetProcAddress("glBindFragDataLocation") : NULL;
+
+	// HZM gl2 MSAA (plan P4a, loaded in P2a): GL_NV_alpha_to_coverage_dither_control - A2C without NVIDIA's
+	// dither pattern. Optional; NULL = the driver default.
+	extension = "GL_NV_alpha_to_coverage_dither_control";
+	qglAlphaToCoverageDitherControlNV = NULL;
+	if (SDL_GL_ExtensionSupported(extension))
+	{
+		qglAlphaToCoverageDitherControlNV = (hzmAlphaToCoverageDitherControlNV_t)SDL_GL_GetProcAddress("glAlphaToCoverageDitherControlNV");
+		ri.Printf(PRINT_ALL, result[qglAlphaToCoverageDitherControlNV ? 1 : 2], extension);
+	}
+	else
+	{
+		ri.Printf(PRINT_ALL, result[2], extension);
+	}
+
 	// OpenGL 3.0 - GL_ARB_vertex_array_object
 	extension = "GL_ARB_vertex_array_object";
 	glRefConfig.vertexArrayObject = qfalse;

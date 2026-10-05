@@ -335,6 +335,11 @@ static void ComputeDeformValues(int *deformGen, vec5_t deformParams)
 {
 	// u_DeformGen
 	*deformGen = DGEN_NONE;
+	// HZM gl2 P3 (bug-3244): W bakes the REST pose (what the lightmap compiler saw), never a time-dependent deform
+	if (backEnd.viewParms.flags & VPF_SUNWORLD)
+	{
+		return;
+	}
 	if(!ShaderRequiresCPUDeforms(tess.shader))
 	{
 		deformStage_t  *ds;
@@ -547,6 +552,10 @@ static qboolean RB_DistFadeConstAlpha( const shaderStage_t *pStage, float *alpha
 	VectorSubtract( modelOrigin, backEnd.viewParms.or.origin, org );
 
 	lenSqr = VectorLengthSquared( org );
+	// HZM gl2 P3: the W bake measures from no camera - it takes the near state (see tr_staticmodels.cpp)
+	if ( backEnd.viewParms.flags & VPF_SUNWORLD ) {
+		lenSqr = 0.0f;
+	}
 	fNear  = tess.shader->fDistNear;
 	fRange = tess.shader->fDistRange;
 	fFar   = tess.shader->fDistNear + tess.shader->fDistRange;
@@ -1289,6 +1298,10 @@ static void ProjectPshadowVBOGLSL( void ) {
 		GLSL_SetUniformVec3(sp, UNIFORM_LIGHTUP, vector);
 
 		GLSL_SetUniformFloat(sp, UNIFORM_LIGHTRADIUS, radius);
+
+		// HZM gl2 [2026-09-26] S4: the spot cone mask - all zero for every non-spot shadow, where pshadow_fp skips it
+		GLSL_SetUniformVec4(sp, UNIFORM_HZMLIGHTSPOT, ps->hzmSpotCone);
+		GLSL_SetUniformVec4(sp, UNIFORM_HZMPSHADOWSPOT, ps->hzmSpotApex);
 	  
 		// include GLS_DEPTHFUNC_EQUAL so alpha tested surfaces don't add light
 		// where they aren't rendered
@@ -1565,6 +1578,7 @@ void RB_SetSoftParticleUniforms( shaderProgram_t *sp, int stateBits )
 	int    blendSrcBits, blendDstBits;
 	int    mode;
 	const float *m;
+	float  softEdge;
 
 	if ( !r_softParticles || !r_softParticles->integer ) {
 		return;
@@ -1572,7 +1586,13 @@ void RB_SetSoftParticleUniforms( shaderProgram_t *sp, int stateBits )
 
 	VectorSet4( sp4, 0.0f, 0.0f, 0.0f, 0.0f );	// mode 0 = off
 
-	if ( !backEnd.inSpriteList || !backEnd.softDepthValid || backEnd.spriteDepthHack
+	// HZM gl2 [2026-09-26] S3b: a qer_hzmSoftEdge surface in the MAIN list (the headlight fog beam) is served exactly
+	// like an emitter sprite, at its own distance, once RB_HZM_SoftEdgeSnapshotAt has taken this view's snapshot.
+	// 0 whenever r_hzmSoftEdge resolves off - then this is the unchanged sprite-only gate.
+	softEdge = RB_HZM_SoftEdgeDistance();
+	if ( softEdge > 0.0f ) {
+		RB_HZM_BindSceneDepth();
+	} else if ( !backEnd.inSpriteList || !backEnd.softDepthValid || backEnd.spriteDepthHack
 		|| backEnd.projection2D || !tr.hdrDepthImage ) {
 		goto upload;
 	}
@@ -1615,8 +1635,8 @@ void RB_SetSoftParticleUniforms( shaderProgram_t *sp, int stateBits )
 		mode = 4;
 	}
 
-	sp4[0] = 1.0f / ( ( r_softParticleDistance && r_softParticleDistance->value > 0.0f )
-		? r_softParticleDistance->value : 24.0f );
+	sp4[0] = 1.0f / ( ( softEdge > 0.0f ) ? softEdge : ( ( r_softParticleDistance && r_softParticleDistance->value > 0.0f )
+		? r_softParticleDistance->value : 24.0f ) );
 	sp4[1] = m[10];
 	sp4[2] = m[14];
 	sp4[3] = (float)mode;
@@ -1653,6 +1673,7 @@ static void RB_IterateStagesGeneric( shaderCommands_t *input )
 		vec4_t texMatrix[8];
 		qboolean stageCharLit;
 		qboolean useSunShadow;
+		int      stageA2C;   // HZM gl2 MSAA P4a
 
 		if ( !pStage )
 		{
@@ -1847,12 +1868,18 @@ static void RB_IterateStagesGeneric( shaderCommands_t *input )
 		// is the unlit gun-shaped hole on the main menu, and the weapons-bar bleed.
 		// backEnd.projection2D is gl2's `in2D`: set by Set2DWindow/RB_SetGL2D, cleared by
 		// RB_BeginDrawingView, so 3D (including the armory's RDF_HUD model preview) is untouched.
+		// HZM gl2 MSAA P4a (r_alphaToCoverage): 0 unless this cutout draws into the multisampled scene
+		stageA2C = RB_MsaaA2CStageMode(pStage);
 		if (backEnd.projection2D) {
 			GL_State( pStage->stateBits | GLS_DEPTHTEST_DISABLE );
 		} else {
-			GL_State( pStage->stateBits );
+			GL_State( pStage->stateBits | ( stageA2C ? GLS_ALPHA_TO_COVERAGE : 0 ) );
 		}
-		if ((pStage->stateBits & GLS_ATEST_BITS) == GLS_ATEST_GT_0)
+		if (stageA2C)
+		{
+			GLSL_SetUniformInt(sp, UNIFORM_ALPHATEST, stageA2C);
+		}
+		else if ((pStage->stateBits & GLS_ATEST_BITS) == GLS_ATEST_GT_0)
 		{
 			GLSL_SetUniformInt(sp, UNIFORM_ALPHATEST, 1);
 		}
@@ -2203,6 +2230,10 @@ static void RB_IterateStagesGeneric( shaderCommands_t *input )
 				// FIXME: screenShadowImage is NULL if no framebuffers
 				if (tr.screenShadowImage)
 					GL_BindToTMU(tr.screenShadowImage, TB_SHADOWMAP);
+				// HZM gl2 P3 B0 (D1): W on TB_SUNWORLD + u_HzmSunMaskOnly; uploads 0 (= today) while legacy
+				RB_SunStable_Lightall(sp, input);
+				// HZM gl2 MSAA P4c: edge-sample mask matching; uploads 0 (= today) off the new path
+				RB_MsaaShadowMatch(sp);
 				GLSL_SetUniformVec3(sp, UNIFORM_PRIMARYLIGHTAMBIENT, backEnd.refdef.sunAmbCol);
 				if (r_pbr->integer)
 				{
@@ -2953,7 +2984,14 @@ void RB_StageIteratorGeneric( void )
 		return;
 	}
 
-	if (tess.useInternalVao)
+	// HZM gl2 P3 (D2, r_shadowWFaces 2): the W bake's second pass draws the sun-facing side of one-sided surfaces;
+	// two-sided members were already drawn, pushed back, in the first pass (S1)
+	if (backEnd.hzmWPass == 2 && input->shader->cullType == CT_TWO_SIDED)
+	{
+		return;
+	}
+
+	if (tess.useInternalVao && !(backEnd.viewParms.flags & VPF_SUNWORLD))   // HZM gl2 P3 (bug-3244): W = rest pose
 	{
 		RB_DeformTessGeometry();
 	}
@@ -3040,7 +3078,8 @@ void RB_StageIteratorGeneric( void )
 	{
 		qboolean cullFront = (input->shader->cullType == CT_FRONT_SIDED);
 
-		if ( backEnd.viewParms.flags & VPF_DEPTHSHADOW )
+		// HZM gl2 P3: ...except the W bake's second (sun-facing) pass
+		if ( ( backEnd.viewParms.flags & VPF_DEPTHSHADOW ) && backEnd.hzmWPass != 2 )
 			cullFront = !cullFront;
 
 		if ( backEnd.viewParms.isMirror )
@@ -3080,7 +3119,24 @@ void RB_StageIteratorGeneric( void )
 		// shadowed as the camera moves. Only touches the VPF_DEPTHSHADOW pass, not the normal
 		// z-prepass or the main scene draw.
 		qboolean shadowBias = (qboolean)((backEnd.viewParms.flags & VPF_DEPTHSHADOW) && !input->shader->polygonOffset);
-		if ( shadowBias )
+		if ( shadowBias && ( backEnd.viewParms.flags & VPF_SUNWORLD ) )
+		{
+			// HZM gl2 P3: W. Two-sided members (S1) and the sun-facing pass (D2) are pushed back ~r_shadowWPush
+			// W texels, so a sunlit receiver never cancels its own entity shadow; the back faces keep today's bias.
+			qglEnable( GL_POLYGON_OFFSET_FILL );
+			if ( backEnd.hzmWPass == 2 || input->shader->cullType == CT_TWO_SIDED )
+				qglPolygonOffset( backEnd.viewParms.hzmWPush[0], backEnd.viewParms.hzmWPush[1] );
+			else
+				qglPolygonOffset( r_shadowMapBiasFactor->value, r_shadowMapBiasUnits->value );
+		}
+		else if ( shadowBias && ( backEnd.viewParms.flags & VPF_SUNSTABLE ) )
+		{
+			// HZM gl2 P3: the stable cascades hold entities only (B0) and no world receiver is in them, so one
+			// small slope bias for every caster (r_shadowSlopeBias)
+			qglEnable( GL_POLYGON_OFFSET_FILL );
+			qglPolygonOffset( r_shadowSlopeBias->value, 1.0f );
+		}
+		else if ( shadowBias )
 		{
 			// HZM gl2 real character shadows: skinned organic geometry with animated normals
 			// is a completely different acne surface from the thin world trim
@@ -3156,7 +3212,8 @@ void RB_StageIteratorGeneric( void )
 			// and qglReadPixels per character model (pipeline stall = the user's frame spikes)
 			qboolean       pixOn = (qboolean)(skdiagGate->integer > 0 && pixHm > 0 && pixHm < MAX_MOD_KNOWN && !backEnd.depthFill
 		                        && !(backEnd.viewParms.flags & (VPF_SHADOWMAP | VPF_DEPTHSHADOW))
-		                        && g_pixFlushed[pixHm] < 6);
+		                        && g_pixFlushed[pixHm] < 6
+		                        && !R_MsaaSceneIsMultisampled());   // ME-F18: glReadPixels on a multisample FBO is illegal
 
 		if (pixOn) {
 			int f = tr.frame_skel_index;

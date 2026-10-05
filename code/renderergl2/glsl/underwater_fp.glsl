@@ -163,7 +163,14 @@ void main()
 	if (u_ViewInfo.z > 0.5)
 	{
 		// sample depth at the REFRACTED coordinate so it belongs to the colour we fetch below
+#if defined(MSAA_DEPTH_MINMAX)
+		// HZM gl2 MSAA (plan P2b, ME-F11): the farthest surface of an edge pixel (g), so the water behind a
+		// silhouette keeps its murk; g is 0 on a single-sample depth (the HOME bypass), which keeps today's r.
+		vec2 zmm = texture2D(u_LevelsMap, uv).rg;
+		zw = (zmm.g > 0.0) ? zmm.g : zmm.r;
+#else
 		zw = texture2D(u_LevelsMap, uv).r;
+#endif
 
 		float denom = u_ViewInfo.x + (2.0 * zw - 1.0);
 

@@ -35,6 +35,12 @@ int             g_nStaticSurfaces;
 staticSurface_t g_staticSurfaces[MAX_STATIC_MODELS_SURFS];
 qboolean        g_bInfostaticmodels = qfalse;
 
+// HZM gl2 graphics probes: the per-frame static-surface capacity, for ^~^~^ SHADOWBUDGET.
+int R_StaticModelSurfCapacity(void)
+{
+    return MAX_STATIC_MODELS_SURFS;
+}
+
 /*
 ==============
 R_InitStaticModels
@@ -406,7 +412,18 @@ void R_AddStaticModelSurfaces(void)
         // HZM foliage shadows: this model's shadow (canopy + trunk) is baked into the lightmap - keep it out of the
         // per-frame sun cascades / dlight shadow maps, or its trunk casts twice and the hard trunk/branch bars (the
         // leaves never cast at r_shadowCastFoliage 0) come back: the user's "square shadows" on m3l3.
-        if (SM->hzmFoliage && (tr.viewParms.flags & VPF_DEPTHSHADOW)) {
+        // gfx P3 (B0, vet R2): ...except W, which must hold exactly what the lightmap baked - the patched canopy included
+        if (SM->hzmFoliage && (tr.viewParms.flags & VPF_DEPTHSHADOW) && !(tr.viewParms.flags & VPF_SUNWORLD)) {
+            continue;
+        }
+
+        // HZM gl2 P3: W holds only the static models whose shadow the lightmap holds (tr_hzm_sunstable.c)
+        if ((tr.viewParms.flags & VPF_SUNWORLD) && !R_SunWorld_StaticWanted(i)) {
+            continue;
+        }
+        // ...and the stable per-frame cascades never take a FOLIAGE static model: its shadow is either baked (fshadow
+        // patch -> W) or was never baked (retail); casting it per frame gave the m3l3 'square' trunk/branch bars
+        if ((tr.viewParms.flags & VPF_SUNSTABLE) && R_SunStable_IsFoliageStatic(i)) {
             continue;
         }
 
@@ -467,16 +484,37 @@ void R_AddStaticModelSurfaces(void)
                 surface = skelmodel->pSurfaces;
                 for (j = 0; j < skelmodel->numSurfaces;
                      j++, ofsStaticData += surface->numVerts, surface = surface->pNext, dsurf++) {
-                    if (g_nStaticSurfaces >= MAX_STATIC_MODELS_SURFS) {
+                    // HZM gl2 shadow hardening (r_shadowHarden 1, plan SE#14): a depth-only view skips what
+                    // its only pass would skip BEFORE taking a slot from the per-frame static budget, which
+                    // every view shares and the main view (added last) used to lose.
+                    if (r_drawSurfNoWrap && (tr.viewParms.flags & VPF_DEPTHSHADOW)
+                        && R_DepthViewSkipsFrontend(tr.shaders[dsurf->hShader[0]])) {
+                        continue;
+                    }
+
+                    if (tr.viewParms.flags & VPF_SUNWORLD) {
+                        // HZM gl2 P3: the W bake draws from W's own exactly-sized pool (tr_hzm_sunstable.c), never
+                        // the per-frame one every view shares; full means W-DROP (asserted by the bake)
+                        s_surface = R_SunWorld_StaticSlot();
+                        if (!s_surface) {
+                            continue;
+                        }
+                    } else if (g_nStaticSurfaces >= MAX_STATIC_MODELS_SURFS) {
                         ri.Printf(
                             PRINT_DEVELOPER,
                             "^~^~^ ERROR: MAX_STATIC_MODELS_SURFS exceeded - surface of '%s' skipped\n",
                             tiki->a->name
                         );
+                        // HZM gl2 (shadow plan SE#14): the developer-only line above hid this in normal
+                        // play - trees and props silently vanish from the MAIN view, which is added last.
+                        // One PRINT_ALL ^~^~^ SHADOWBUDGET STATIC-OVERFLOW line per map, plus a counter.
+                        R_GfxProbe_StaticOverflow(tiki->a->name);
                         continue;
                     }
 
-                    s_surface                = &g_staticSurfaces[g_nStaticSurfaces++];
+                    if (!(tr.viewParms.flags & VPF_SUNWORLD)) {
+                        s_surface            = &g_staticSurfaces[g_nStaticSurfaces++];
+                    }
                     s_surface->ident         = SF_TIKI_STATIC;
                     s_surface->ofsStaticData = ofsStaticData;
                     s_surface->surface       = surface;
@@ -533,6 +571,22 @@ void R_AddStaticModelSurfaces(void)
 
                             lodHandled = qtrue;
                         }
+                    }
+
+                    if (tr.viewParms.flags & VPF_SUNWORLD) {
+                        // HZM gl2 P3: W bakes the NEAR state of a distance-faded static model - the mesh, never its
+                        // far impostor - whatever the distance to W's (arbitrary) origin; the backend's constant
+                        // fade takes the same near state (tr_shade.c RB_DistFadeConstAlpha)
+                        const int ag = shader->stages[0] ? shader->stages[0]->alphaGen : 0;
+                        if (ag == AGEN_ONE_MINUS_DIST_FADE || ag == AGEN_ONE_MINUS_TIKI_DIST_FADE) {
+                            continue;
+                        }
+                        // ...and never an autoSprite impostor card (it would face W's origin)
+                        if (shader->numDeforms && (shader->deforms[0].deformation == DEFORM_AUTOSPRITE
+                                                   || shader->deforms[0].deformation == DEFORM_AUTOSPRITE2)) {
+                            continue;
+                        }
+                        lodHandled = qtrue;
                     }
 
                     if (!lodHandled && shader->numUnfoggedPasses == 1 && !r_nocull->integer) {

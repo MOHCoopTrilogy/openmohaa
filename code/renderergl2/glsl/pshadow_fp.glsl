@@ -5,8 +5,29 @@ uniform vec3      u_LightUp;
 uniform vec3      u_LightRight;
 uniform vec4      u_LightOrigin;
 uniform float     u_LightRadius;
+
+// HZM gl2 [2026-09-26] S4 SPOT SHADOWS: a headlight (spot) shadow exists only where the spot actually lights - inside
+// its cone and its pool - by the SAME law as the pool (tr_hzm_spot.c R_HZM_SpotAttenuation x R_HZM_SpotConeDir,
+// lightall HzmSpotCone). u_HzmPshadowSpot = (apex, light radius), u_HzmLightSpot = (cone axis * k, cosOuter). ALL ZERO
+// for every other shadow (muzzle flashes, explosions): the mask is then exactly 1.0 and nothing is discarded.
+uniform vec4      u_HzmPshadowSpot;
+uniform vec4      u_HzmLightSpot;
 varying vec3      var_Position;
 varying vec3      var_Normal;
+
+float HzmSpotShadowMask(vec3 pos)
+{
+	if (u_HzmPshadowSpot.w <= 0.0)
+		return 1.0;
+	vec3 toPos = pos - u_HzmPshadowSpot.xyz;
+	float d2 = max(dot(toPos, toPos), 1.0);
+	float att = clamp(0.5 * u_HzmPshadowSpot.w * u_HzmPshadowSpot.w / d2 - 0.5, 0.0, 1.0);
+	float k = length(u_HzmLightSpot.xyz);
+	if (k <= 0.0)
+		return att;
+	float t = clamp((dot(toPos, u_HzmLightSpot.xyz) / (k * sqrt(d2)) - u_HzmLightSpot.w) * k, 0.0, 1.0);
+	return att * t * t * (3.0 - 2.0 * t);
+}
 
 void main()
 {
@@ -51,6 +72,15 @@ void main()
 #endif
 
 	intensity *= fade;
+
+	float spotMask = HzmSpotShadowMask(var_Position);
+#if defined(USE_DISCARD)
+	if (spotMask <= 0.0)
+	{
+		discard;
+	}
+#endif
+	intensity *= spotMask;
 
 	float part;
 #if defined(USE_PCF)

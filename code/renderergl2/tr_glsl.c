@@ -79,6 +79,8 @@ extern const char *fallbackShader_globalfog_fp;
 extern const char *fallbackShader_fsr_easu_fp;      // HZM render scale: AMD FSR 1 EASU
 extern const char *fallbackShader_fsr_rcas_fp;      // HZM render scale: AMD FSR 1 RCAS
 extern const char *fallbackShader_fsr_downscale_fp; // HZM render scale: SSAA tent downsample
+extern const char *fallbackShader_msaa_depthresolve_fp; // HZM MSAA P2a: min/max depth resolve (P2b draws it)
+extern const char *fallbackShader_msaa_colorresolve_fp; // HZM MSAA P2b: tone-exact MRT colour resolve
 
 typedef struct uniformInfo_s
 {
@@ -221,6 +223,8 @@ static uniformInfo_t uniformsInfo[] =
 	// HZM gl2 [2026-09-26] Phase S1 spot cone - see UNIFORM_HZMLIGHTSPOT. Kept LAST, in enum order.
 	{ "u_HzmLightSpot",    GLSL_VEC4 },
 
+	// HZM gl2 [2026-09-26] S4 spot shadows - see UNIFORM_HZMPSHADOWSPOT. Kept LAST, in enum order.
+	{ "u_HzmPshadowSpot",  GLSL_VEC4 },
 	// HZM rain wetness - see UNIFORM_HZMWET. Kept LAST, in enum order.
 	{ "u_HzmWet",          GLSL_VEC4 },
 	{ "u_HzmWetMat",       GLSL_VEC4 },
@@ -246,6 +250,14 @@ static uniformInfo_t uniformsInfo[] =
 	{ "u_HzmLtWorld",      GLSL_VEC4 },
 	{ "u_HzmLtBolt",       GLSL_VEC4 },
 	{ "u_HzmLtParams",     GLSL_VEC4 },
+	// HZM gl2 stable sun shadows + B0 (plan P3) - see UNIFORM_HZMSUNWORLDMAP. Kept LAST, in enum order.
+	{ "u_HzmSunWorldMap",  GLSL_INT },
+	{ "u_HzmSunWorldMvp",  GLSL_MAT16 },
+	{ "u_HzmSunMaskOnly",  GLSL_VEC4 },
+	{ "u_HzmShadowSplits", GLSL_VEC4 },
+	{ "u_HzmShadowKernel", GLSL_VEC4 },
+	{ "u_HzmShadowBias",   GLSL_VEC4 },
+	{ "u_HzmShadowMatch",  GLSL_VEC4 },   // HZM gl2 MSAA P4c
 };
 
 // HZM gl2 [2026-09-26] vet_phaseS F10: this table is indexed by uniform_t and GLSL_InitUniforms walks it to
@@ -492,6 +504,14 @@ static void GLSL_GetShaderHeader( GLenum shaderType, const GLchar *extra, char *
 
 	fbufWidthScale = 1.0f / ((float)glConfig.vidWidth);
 	fbufHeightScale = 1.0f / ((float)glConfig.vidHeight);
+	// HZM gl2 shadow hardening (r_shadowHarden 1 at R_Init, plan ME-F12): lightall reads the SCENE-sized
+	// shadow mask with gl_FragCoord * r_FBufScale, and the scene renders at r_renderScale, so normalise by the
+	// scene size (R_InitImages set it before GLSL init). At scale 1.0 the two are identical.
+	if (r_shadowHarden && r_shadowHarden->integer && tr.sceneWidth > 0 && tr.sceneHeight > 0)
+	{
+		fbufWidthScale = 1.0f / ((float)tr.sceneWidth);
+		fbufHeightScale = 1.0f / ((float)tr.sceneHeight);
+	}
 	Q_strcat(dest, size,
 			 va("#ifndef r_FBufScale\n#define r_FBufScale vec2(%f, %f)\n#endif\n", fbufWidthScale, fbufHeightScale));
 
@@ -517,6 +537,14 @@ static void GLSL_GetShaderHeader( GLenum shaderType, const GLchar *extra, char *
 	Q_strcat(dest, size, "#line 0\n");
 }
 
+// HZM gl2 MSAA (plan P2a, ME-F3): while set, a compile or link failure returns 0 instead of ri.Error(ERR_DROP).
+// Only GLSL_TryInitGPUShader sets it, for programs the renderer can run without (the MSAA ones).
+static qboolean s_glslTry = qfalse;
+// HZM gl2 MSAA (plan P2b): when set, the program has a second fragment output of this name; it is bound to colour 1
+// (and out_Color to colour 0) before the link. NULL for every other program, so nothing else changes.
+static const char *s_glslFragData1 = NULL;
+void GLSL_DeleteGPUShader(shaderProgram_t *program);
+
 static int GLSL_CompileGPUShader(GLuint program, GLuint *prevShader, const GLchar *buffer, int size, GLenum shaderType)
 {
 	GLint           compiled;
@@ -535,6 +563,11 @@ static int GLSL_CompileGPUShader(GLuint program, GLuint *prevShader, const GLcha
 	{
 		GLSL_PrintLog(shader, GLSL_PRINTLOG_SHADER_SOURCE, qfalse);
 		GLSL_PrintLog(shader, GLSL_PRINTLOG_SHADER_INFO, qfalse);
+		if (s_glslTry)
+		{
+			qglDeleteShader(shader);   // HZM MSAA P2a: a TRY build reports the failure to its caller
+			return 0;
+		}
 		ri.Error(ERR_DROP, "Couldn't compile shader");
 		return 0;
 	}
@@ -641,7 +674,7 @@ static int GLSL_LoadGPUShaderText(const char *name, const char *fallback,
 	return result;
 }
 
-static void GLSL_LinkProgram(GLuint program)
+static int GLSL_LinkProgram(GLuint program)
 {
 	GLint           linked;
 
@@ -651,8 +684,11 @@ static void GLSL_LinkProgram(GLuint program)
 	if(!linked)
 	{
 		GLSL_PrintLog(program, GLSL_PRINTLOG_PROGRAM_INFO, qfalse);
+		if (s_glslTry)
+			return 0;   // HZM MSAA P2a: a TRY build reports the failure to its caller
 		ri.Error(ERR_DROP, "shaders failed to link");
 	}
+	return 1;
 }
 
 static void GLSL_ShowProgramUniforms(GLuint program)
@@ -696,6 +732,11 @@ static int GLSL_InitGPUShader2(shaderProgram_t * program, const char *name, int 
 	if (!(GLSL_CompileGPUShader(program->program, &program->vertexShader, vpCode, strlen(vpCode), GL_VERTEX_SHADER)))
 	{
 		ri.Printf(PRINT_ALL, "GLSL_InitGPUShader2: Unable to load \"%s\" as GL_VERTEX_SHADER\n", name);
+		if (s_glslTry)
+		{
+			GLSL_DeleteGPUShader(program);   // HZM MSAA P2a: zero the struct too, so no stale program id survives
+			return 0;
+		}
 		qglDeleteProgram(program->program);
 		return 0;
 	}
@@ -705,6 +746,11 @@ static int GLSL_InitGPUShader2(shaderProgram_t * program, const char *name, int 
 		if(!(GLSL_CompileGPUShader(program->program, &program->fragmentShader, fpCode, strlen(fpCode), GL_FRAGMENT_SHADER)))
 		{
 			ri.Printf(PRINT_ALL, "GLSL_InitGPUShader2: Unable to load \"%s\" as GL_FRAGMENT_SHADER\n", name);
+			if (s_glslTry)
+			{
+				GLSL_DeleteGPUShader(program);   // HZM MSAA P2a: also frees the vertex shader already attached
+				return 0;
+			}
 			qglDeleteProgram(program->program);
 			return 0;
 		}
@@ -755,7 +801,22 @@ static int GLSL_InitGPUShader2(shaderProgram_t * program, const char *name, int 
 	if(attribs & ATTR_TANGENT2)
 		qglBindAttribLocation(program->program, ATTR_INDEX_TANGENT2, "attr_Tangent2");
 
-	GLSL_LinkProgram(program->program);
+	if (s_glslFragData1)
+	{
+		if (!qglBindFragDataLocation)
+		{
+			GLSL_DeleteGPUShader(program);   // HZM MSAA P2b: an MRT program without the entry point is a TRY failure
+			return 0;
+		}
+		qglBindFragDataLocation(program->program, 0, "out_Color");
+		qglBindFragDataLocation(program->program, 1, s_glslFragData1);
+	}
+
+	if (!GLSL_LinkProgram(program->program))
+	{
+		GLSL_DeleteGPUShader(program);   // HZM MSAA P2a: only a TRY build gets here (otherwise ri.Error)
+		return 0;
+	}
 
 	return 1;
 }
@@ -815,6 +876,53 @@ static int GLSL_InitGPUShader(shaderProgram_t * program, const char *name,
 	result = GLSL_InitGPUShader2(program, name, attribs, vpCode, fragmentShader ? fpCode : NULL);
 
 	return result;
+}
+
+// HZM gl2 MSAA (plan P2a, ME-F3): GLSL_InitGPUShader that returns 0 on a compile or link failure instead of
+// ri.Error - for programs the renderer can run without, so a driver that rejects them costs MSAA, not the session.
+static int GLSL_TryInitGPUShader(shaderProgram_t * program, const char *name,
+	int attribs, qboolean fragmentShader, const GLchar *extra, qboolean addHeader,
+	const char *fallback_vp, const char *fallback_fp)
+{
+	int result;
+
+	s_glslTry = qtrue;
+	result = GLSL_InitGPUShader(program, name, attribs, fragmentShader, extra, addHeader, fallback_vp, fallback_fp);
+	s_glslTry = qfalse;
+	return result;
+}
+
+// HZM gl2 MSAA (plan P2b): the multisample (min, max) depth readers - soft particles (generic, lightall), underwater
+// and the screen fog. Their MSAA code sits behind MSAA_DEPTH_MINMAX, which is added (to a COPY of the caller's
+// defines) only on the new path at >= 2 samples, so MSAA-off sources are unchanged. A program built with it is TRY-built:
+// 1 = built, 2 = failed with the define (tr.msaaCompileFailed; R_Msaa_AfterGLSL re-initialises at 0, so the caller only
+// skips its uniform setup), 0 = the ordinary failure (the caller's ri.Error, as today).
+static int GLSL_InitGPUShaderMsaaDepth(shaderProgram_t * program, const char *name,
+	int attribs, qboolean fragmentShader, const GLchar *extra, qboolean addHeader,
+	const char *fallback_vp, const char *fallback_fp)
+{
+	char defs[1024];
+
+	if (!(tr.msaaNewPath && tr.msaaSamples >= 2))
+	{
+		return GLSL_InitGPUShader(program, name, attribs, fragmentShader, extra, addHeader, fallback_vp, fallback_fp);
+	}
+
+	Q_strncpyz(defs, extra ? extra : "", sizeof(defs));
+	Q_strcat(defs, sizeof(defs), "#define MSAA_DEPTH_MINMAX\n");
+	// HZM gl2 MSAA P4b (ME-F16, r_msaaCentroid, read at R_Init): centroid lightmap/deluxe coordinates. Only lightall
+	// reads the define; the diffuse UVs stay centre-sampled (centroid breaks their derivatives, i.e. mip selection)
+	if (r_msaaCentroid && r_msaaCentroid->integer)
+	{
+		Q_strcat(defs, sizeof(defs), "#define USE_MSAA_CENTROID\n");
+	}
+	if (GLSL_TryInitGPUShader(program, name, attribs, fragmentShader, defs, addHeader, fallback_vp, fallback_fp))
+	{
+		return 1;
+	}
+	tr.msaaCompileFailed = qtrue;
+	ri.Printf(PRINT_WARNING, "^~^~^ MSAA shader %s failed to build with MSAA_DEPTH_MINMAX at %d samples\n", name, tr.msaaSamples);
+	return 2;
 }
 
 void GLSL_InitUniforms(shaderProgram_t *program)
@@ -1162,6 +1270,7 @@ void GLSL_InitGPUShaders(void)
 	char extradefines[1024];
 	int attribs;
 	int numGenShaders = 0, numLightShaders = 0, numEtcShaders = 0;
+	int msaaBuilt;   // HZM MSAA P2b: GLSL_InitGPUShaderMsaaDepth's result
 
 	ri.Printf(PRINT_ALL, "------- GLSL_InitGPUShaders -------\n");
 
@@ -1218,9 +1327,14 @@ void GLSL_InitGPUShaders(void)
 		if (i & GENERICDEF_USE_RGBAGEN)
 			Q_strcat(extradefines, 1024, "#define USE_RGBAGEN\n");
 
-		if (!GLSL_InitGPUShader(&tr.genericShader[i], "generic", attribs, qtrue, extradefines, qtrue, fallbackShader_generic_vp, fallbackShader_generic_fp))
+		msaaBuilt = GLSL_InitGPUShaderMsaaDepth(&tr.genericShader[i], "generic", attribs, qtrue, extradefines, qtrue, fallbackShader_generic_vp, fallbackShader_generic_fp);
+		if (!msaaBuilt)
 		{
 			ri.Error(ERR_FATAL, "Could not load generic shader!");
+		}
+		if (msaaBuilt == 2)
+		{
+			continue;   // HZM MSAA P2b: MSAA-define failure - R_Msaa_AfterGLSL rebuilds everything at 0
 		}
 
 		GLSL_InitUniforms(&tr.genericShader[i]);
@@ -1458,9 +1572,14 @@ void GLSL_InitGPUShaders(void)
 			attribs |= ATTR_BONE_INDEXES | ATTR_BONE_WEIGHTS;
 		}
 
-		if (!GLSL_InitGPUShader(&tr.lightallShader[i], "lightall", attribs, qtrue, extradefines, qtrue, fallbackShader_lightall_vp, fallbackShader_lightall_fp))
+		msaaBuilt = GLSL_InitGPUShaderMsaaDepth(&tr.lightallShader[i], "lightall", attribs, qtrue, extradefines, qtrue, fallbackShader_lightall_vp, fallbackShader_lightall_fp);
+		if (!msaaBuilt)
 		{
 			ri.Error(ERR_FATAL, "Could not load lightall shader!");
+		}
+		if (msaaBuilt == 2)
+		{
+			continue;   // HZM MSAA P2b: MSAA-define failure - R_Msaa_AfterGLSL rebuilds everything at 0
 		}
 
 		GLSL_InitUniforms(&tr.lightallShader[i]);
@@ -1475,6 +1594,7 @@ void GLSL_InitGPUShaders(void)
 		GLSL_SetUniformInt(&tr.lightallShader[i], UNIFORM_SCREENDEPTHMAP, TB_SCREENDEPTH); // HZM soft particles
 		GLSL_SetUniformInt(&tr.lightallShader[i], UNIFORM_HZMOCCMAP,   TB_HZMRAINOCC);  // HZM rain wetness
 		GLSL_SetUniformInt(&tr.lightallShader[i], UNIFORM_HZMWETNOISE, TB_HZMWETNOISE); // HZM rain wetness
+		GLSL_SetUniformInt(&tr.lightallShader[i], UNIFORM_HZMSUNWORLDMAP, TB_SUNWORLD); // HZM gl2 P3 B0 (D1)
 
 		GLSL_FinishGPUShader(&tr.lightallShader[i]);
 
@@ -1839,11 +1959,14 @@ void GLSL_InitGPUShaders(void)
 	attribs = ATTR_POSITION | ATTR_TEXCOORD;
 	extradefines[0] = 0;
 
-	if (!GLSL_InitGPUShader(&tr.underwaterShader, "underwater", attribs, qtrue, extradefines, qtrue, fallbackShader_tonemap_vp, fallbackShader_underwater_fp))
+	msaaBuilt = GLSL_InitGPUShaderMsaaDepth(&tr.underwaterShader, "underwater", attribs, qtrue, extradefines, qtrue, fallbackShader_tonemap_vp, fallbackShader_underwater_fp);
+	if (!msaaBuilt)
 	{
 		ri.Error(ERR_FATAL, "Could not load underwater shader!");
 	}
 
+	if (msaaBuilt != 2)   // HZM MSAA P2b: an MSAA-define failure leaves the program empty until the re-init at 0
+	{
 	GLSL_InitUniforms(&tr.underwaterShader);
 	GLSL_SetUniformInt(&tr.underwaterShader, UNIFORM_TEXTUREMAP, TB_COLORMAP);
 	// [UNDERWATER VOLUME v3] MANDATORY, NOT OPTIONAL. The pass now samples scene DEPTH as well,
@@ -1855,6 +1978,7 @@ void GLSL_InitGPUShaders(void)
 	// absence is visible in the log; do not delete this line on the strength of that.
 	GLSL_SetUniformInt(&tr.underwaterShader, UNIFORM_LEVELSMAP,  TB_LEVELSMAP);
 	GLSL_FinishGPUShader(&tr.underwaterShader);
+	}
 
 	// HZM [bug-2360] blood on the lens. Same shape as the underwater pass above: a full-screen blit
 	// over the tonemap vertex shader, one sampler, all parameters carried in u_Color.
@@ -1928,17 +2052,21 @@ void GLSL_InitGPUShaders(void)
 	attribs = ATTR_POSITION | ATTR_TEXCOORD;
 	extradefines[0] = '\0';
 
-	if (!GLSL_InitGPUShader(&tr.globalFogShader, "globalfog", attribs, qtrue, extradefines, qtrue, fallbackShader_globalfog_vp, fallbackShader_globalfog_fp))
+	msaaBuilt = GLSL_InitGPUShaderMsaaDepth(&tr.globalFogShader, "globalfog", attribs, qtrue, extradefines, qtrue, fallbackShader_globalfog_vp, fallbackShader_globalfog_fp);
+	if (!msaaBuilt)
 	{
 		ri.Error(ERR_FATAL, "Could not load globalfog shader!");
 	}
 
+	if (msaaBuilt != 2)   // HZM MSAA P2b: an MSAA-define failure leaves the program empty until the re-init at 0
+	{
 	GLSL_InitUniforms(&tr.globalFogShader);
 
 	GLSL_SetUniformInt(&tr.globalFogShader, UNIFORM_TEXTUREMAP, TB_COLORMAP);
 	GLSL_SetUniformInt(&tr.globalFogShader, UNIFORM_LEVELSMAP,  TB_LEVELSMAP);
 
 	GLSL_FinishGPUShader(&tr.globalFogShader);
+	}
 
 	numEtcShaders++;
 
@@ -2006,6 +2134,30 @@ void GLSL_InitGPUShaders(void)
 		GLSL_FinishGPUShader(&tr.shadowmaskShader);
 
 		numEtcShaders++;
+
+		// HZM gl2 stable sun shadows (plan P3): the radial entity-cascade mask. TRY-built for everyone: a driver that
+		// rejects it costs r_shadowStable (it resolves to legacy), never the session. Its knobs are uniforms (live).
+		extradefines[0] = '\0';
+		if (qglesMajorVersion < 3 && glRefConfig.shadowSamplers)
+		{
+			Q_strcat(extradefines, 1024, "#extension GL_EXT_shadow_samplers : enable\n");
+		}
+		Q_strcat(extradefines, 1024, "#define USE_SHADOW_STABLE\n");
+		if (GLSL_TryInitGPUShader(&tr.shadowmaskStableShader, "shadowmask_stable", attribs, qtrue, extradefines, qtrue, fallbackShader_shadowmask_vp, fallbackShader_shadowmask_fp))
+		{
+			GLSL_InitUniforms(&tr.shadowmaskStableShader);
+			GLSL_SetUniformInt(&tr.shadowmaskStableShader, UNIFORM_SCREENDEPTHMAP, TB_COLORMAP);
+			GLSL_SetUniformInt(&tr.shadowmaskStableShader, UNIFORM_SHADOWMAP,  TB_SHADOWMAP);
+			GLSL_SetUniformInt(&tr.shadowmaskStableShader, UNIFORM_SHADOWMAP2, TB_SHADOWMAP2);
+			GLSL_SetUniformInt(&tr.shadowmaskStableShader, UNIFORM_SHADOWMAP3, TB_SHADOWMAP3);
+			GLSL_SetUniformInt(&tr.shadowmaskStableShader, UNIFORM_SHADOWMAP4, TB_SHADOWMAP4);
+			GLSL_FinishGPUShader(&tr.shadowmaskStableShader);
+			numEtcShaders++;
+		}
+		else
+		{
+			ri.Printf(PRINT_WARNING, "^~^~^ SHADOWSTABLE mask shader failed to build - r_shadowStable resolves to legacy\n");
+		}
 	}
 
 
@@ -2088,6 +2240,50 @@ void GLSL_InitGPUShaders(void)
 	numEtcShaders++;
 #endif
 
+
+	// HZM gl2 MSAA (plan P2a, ME-F3). MSAA programs exist only on the new path at >= 2 samples, carry the sample
+	// count as a define, and are TRY-built: a failure sets tr.msaaCompileFailed and R_Init re-initialises in place
+	// at 0 (R_Msaa_AfterGLSL). Every program above is untouched, so MSAA-off sources stay byte-identical.
+	// r_msaaDebugFailCompile 1 injects an #error to prove that fallback.
+	if (tr.msaaNewPath && tr.msaaSamples >= 2)
+	{
+		attribs = ATTR_POSITION | ATTR_TEXCOORD;
+		extradefines[0] = '\0';
+		Q_strcat(extradefines, sizeof(extradefines), va("#define MSAA_SAMPLES %d\n", tr.msaaSamples));
+		if (r_msaaDebugFailCompile && r_msaaDebugFailCompile->integer)
+			Q_strcat(extradefines, sizeof(extradefines), "#error r_msaaDebugFailCompile\n");
+
+		if (GLSL_TryInitGPUShader(&tr.msaaResolveDepthShader, "msaa_depthresolve", attribs, qtrue, extradefines, qtrue, fallbackShader_texturecolor_vp, fallbackShader_msaa_depthresolve_fp))
+		{
+			GLSL_InitUniforms(&tr.msaaResolveDepthShader);
+			GLSL_SetUniformInt(&tr.msaaResolveDepthShader, UNIFORM_SCREENDEPTHMAP, TB_COLORMAP);
+			GLSL_FinishGPUShader(&tr.msaaResolveDepthShader);
+			numEtcShaders++;
+		}
+		else
+		{
+			tr.msaaCompileFailed = qtrue;
+			ri.Printf(PRINT_WARNING, "^~^~^ MSAA shader msaa_depthresolve failed to build at %d samples\n", tr.msaaSamples);
+		}
+
+		// P2b: the tone-exact MRT colour resolve (out_Color -> renderImage, out_Linear -> sceneLinearImage)
+		s_glslFragData1 = "out_Linear";
+		if (GLSL_TryInitGPUShader(&tr.msaaResolveColorShader, "msaa_colorresolve", attribs, qtrue, extradefines, qtrue, fallbackShader_texturecolor_vp, fallbackShader_msaa_colorresolve_fp))
+		{
+			GLSL_InitUniforms(&tr.msaaResolveColorShader);
+			GLSL_SetUniformInt(&tr.msaaResolveColorShader, UNIFORM_TEXTUREMAP, TB_COLORMAP);
+			GLSL_SetUniformInt(&tr.msaaResolveColorShader, UNIFORM_SCREENIMAGEMAP, TB_NORMALMAP);
+			GLSL_SetUniformInt(&tr.msaaResolveColorShader, UNIFORM_LEVELSMAP, TB_LEVELSMAP);
+			GLSL_FinishGPUShader(&tr.msaaResolveColorShader);
+			numEtcShaders++;
+		}
+		else
+		{
+			tr.msaaCompileFailed = qtrue;
+			ri.Printf(PRINT_WARNING, "^~^~^ MSAA shader msaa_colorresolve failed to build at %d samples\n", tr.msaaSamples);
+		}
+		s_glslFragData1 = NULL;
+	}
 
 	endTime = ri.Milliseconds();
 
@@ -2176,11 +2372,14 @@ void GLSL_ShutdownGPUShaders(void)
 	GLSL_DeleteGPUShader(&tr.filmgrainShader);
 	GLSL_DeleteGPUShader(&tr.frostShader);
 	GLSL_DeleteGPUShader(&tr.globalFogShader);
+	GLSL_DeleteGPUShader(&tr.msaaResolveDepthShader);   // HZM MSAA P2a (a no-op when it was never built)
+	GLSL_DeleteGPUShader(&tr.msaaResolveColorShader);   // HZM MSAA P2b (same)
 
 	for ( i = 0; i < 2; i++)
 		GLSL_DeleteGPUShader(&tr.calclevels4xShader[i]);
 
 	GLSL_DeleteGPUShader(&tr.shadowmaskShader);
+	GLSL_DeleteGPUShader(&tr.shadowmaskStableShader);   // HZM gl2 P3
 	GLSL_DeleteGPUShader(&tr.ssaoShader);
 
 	for ( i = 0; i < 4; i++)

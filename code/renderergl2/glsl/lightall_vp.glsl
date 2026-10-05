@@ -74,6 +74,11 @@ uniform float u_PrimaryLightRadius;
 #endif
 
 varying vec4   var_TexCoords;
+#if defined(USE_LIGHTMAP) && defined(USE_MSAA_CENTROID)
+// HZM gl2 MSAA P4b: the lightmap coordinate again, CENTROID-sampled, so an edge pixel never reads the lightmap from
+// outside its own triangle (seam halos); lightall_fp reads it instead of var_TexCoords.zw
+centroid varying vec2 var_HzmLmCentroid;
+#endif
 
 varying vec4   var_Color;
 #if defined(USE_LIGHT_VECTOR) && !defined(USE_FAST_LIGHT)
@@ -272,6 +277,9 @@ void main()
 
 #if defined(USE_LIGHTMAP)
 	var_TexCoords.zw = attr_TexCoord1.st;
+  #if defined(USE_MSAA_CENTROID)
+	var_HzmLmCentroid = attr_TexCoord1.st;
+  #endif
 #endif
 
 	var_Color = u_VertColor * attr_Color + u_BaseColor;

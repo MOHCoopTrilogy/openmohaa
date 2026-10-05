@@ -4085,6 +4085,10 @@ void RE_LoadWorldMap( const char *name ) {
     ri.UI_LoadResource("*115");
     R_VisDebugLoad(name);
     ri.UI_LoadResource("*116");
+    // HZM gl2 graphics probes: name the map for the ^~^~^ lines; ^~^~^ VRAM when=world (probe on only).
+    // HZM gl2 stable sun shadows (P3): latch f (SHADOWFIT), build the terrain proxy and W's own arrays
+    R_SunStable_WorldLoaded(name);
+    R_GfxProbe_WorldLoaded(name);
     //=========================
 }
 

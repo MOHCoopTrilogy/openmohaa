@@ -209,6 +209,8 @@ void FBO_AttachImage(FBO_t *fbo, image_t *image, GLenum attachment, GLuint cubem
 
 	if (image->flags & IMGFLAG_CUBEMAP)
 		target = GL_TEXTURE_CUBE_MAP_POSITIVE_X_ARB + cubemapside;
+	else if (image->flags & IMGFLAG_MULTISAMPLE)
+		target = GL_TEXTURE_2D_MULTISAMPLE;   // HZM gl2 MSAA (plan P2a): the new path's scene textures
 
 	qglNamedFramebufferTexture2DEXT(fbo->frameBuffer, attachment, target, image->texnum, 0);
 	index = attachment - GL_COLOR_ATTACHMENT0;
@@ -268,17 +270,23 @@ void FBO_Init(void)
 	if (r_hdr->integer && glRefConfig.textureFloat)
 		hdrFormat = GL_RGBA16F_ARB;
 
-	if (glRefConfig.framebufferMultisample)
-		qglGetIntegerv(GL_MAX_SAMPLES, &multisample);
+	// HZM gl2 MSAA (plan P2a, ME-F1): this block is today's legacy code verbatim - including the write-back that
+	// turns an unsupported value into an archived 0. The new path (r_msaaOverride numeric, tr_msaa.c) never reads
+	// or writes r_ext_framebuffer_multisample: its count is tr.msaaSamples, decided by R_DecideMsaa.
+	if (!tr.msaaNewPath)
+	{
+		if (glRefConfig.framebufferMultisample)
+			qglGetIntegerv(GL_MAX_SAMPLES, &multisample);
 
-	if (r_ext_framebuffer_multisample->integer < multisample)
-		multisample = r_ext_framebuffer_multisample->integer;
+		if (r_ext_framebuffer_multisample->integer < multisample)
+			multisample = r_ext_framebuffer_multisample->integer;
 
-	if (multisample < 2 || !glRefConfig.framebufferBlit)
-		multisample = 0;
+		if (multisample < 2 || !glRefConfig.framebufferBlit)
+			multisample = 0;
 
-	if (multisample != r_ext_framebuffer_multisample->integer)
-		ri.Cvar_SetValue("r_ext_framebuffer_multisample", (float)multisample);
+		if (multisample != r_ext_framebuffer_multisample->integer)
+			ri.Cvar_SetValue("r_ext_framebuffer_multisample", (float)multisample);
+	}
 	
 	// HZM render scale (r_renderScale): the world scene + post chain render into tr.sceneFbo at
 	// SCENE size (tr.renderImage was sized to round(vid * scale) in R_CreateBuiltinImages), while
@@ -297,6 +305,12 @@ void FBO_Init(void)
 		FBO_AttachImage(tr.msaaResolveFbo, tr.renderDepthImage, GL_DEPTH_ATTACHMENT, 0);
 		R_CheckFBO(tr.msaaResolveFbo);
 	}
+	else if (R_MsaaInitSceneFbos(hdrFormat))
+	{
+		// HZM gl2 MSAA (plan P2a): the new path at >= 2 samples - sceneFbo is the multisample-TEXTURE target and
+		// msaaResolveFbo its single-sample resolve (renderImage + renderDepthImage), as on the legacy path. At 0,
+		// or after the F9 fallback, it returns qfalse and the MSAA-0 branch below runs unchanged. Legacy: qfalse.
+	}
 	else if (r_hdr->integer)
 	{
 		tr.sceneFbo = FBO_Create("_scene", tr.renderImage->width, tr.renderImage->height);
@@ -310,16 +324,22 @@ void FBO_Init(void)
 	// still render at display size), plus a display-size scratch that the final resample / RCAS
 	// ping through. At scale 1.0 renderFbo simply ALIASES sceneFbo, so every renderFbo reference in
 	// the 2D / present / screenshot / MSAA-resolve paths keeps its exact meaning (byte-identical).
-	if (tr.renderScaleActive && tr.sceneFbo && tr.displayImage && tr.displayScratchImage)
+	// HZM gl2 MSAA (plan P2a, MH-C12): the new path at >= 2 samples splits the same way (tr.displaySplit), so the
+	// HUD/2D and the present are never multisampled; its display scratch exists only when scaled (RCAS). With
+	// displaySplit 0 this is exactly the render-scale condition (both display images exist whenever it is scaled).
+	if ((tr.renderScaleActive || tr.displaySplit) && tr.sceneFbo && tr.displayImage)
 	{
 		tr.renderFbo = FBO_Create("_render", tr.displayImage->width, tr.displayImage->height);
 		FBO_AttachImage(tr.renderFbo, tr.displayImage, GL_COLOR_ATTACHMENT0, 0);
 		FBO_CreateBuffer(tr.renderFbo, GL_DEPTH_COMPONENT24, 0, 0);
 		R_CheckFBO(tr.renderFbo);
 
-		tr.displayScratchFbo = FBO_Create("_displayScratch", tr.displayScratchImage->width, tr.displayScratchImage->height);
-		FBO_AttachImage(tr.displayScratchFbo, tr.displayScratchImage, GL_COLOR_ATTACHMENT0, 0);
-		R_CheckFBO(tr.displayScratchFbo);
+		if (tr.displayScratchImage)
+		{
+			tr.displayScratchFbo = FBO_Create("_displayScratch", tr.displayScratchImage->width, tr.displayScratchImage->height);
+			FBO_AttachImage(tr.displayScratchFbo, tr.displayScratchImage, GL_COLOR_ATTACHMENT0, 0);
+			R_CheckFBO(tr.displayScratchFbo);
+		}
 	}
 	else
 	{
@@ -381,14 +401,44 @@ void FBO_Init(void)
 
 	if (tr.sunShadowDepthImage[0])
 	{
+		// HZM gl2 (plan P1b, r_shadowFboDummy, flags 0, read at R_Init; 1 = today). The RGBA8 renderbuffer below
+		// is a full-size colour DUMMY nothing ever reads (r_shadowDebug blits the depth textures): at
+		// r_shadowMapSize 4096 that is 4 x 64 MiB = 256 MiB of VRAM. At 0 the cascade FBOs are depth-only, with
+		// DrawBuffer/ReadBuffer NONE so they are complete on strict drivers. Kept on Intel (the reason for the
+		// FIXME), and re-added on any FBO whose completeness check fails without it.
+		qboolean shadowDummy = (qboolean)( !r_shadowFboDummy || r_shadowFboDummy->integer || glRefConfig.intelGraphics );
+
 		for (i = 0; i < 4; i++)
 		{
 			tr.sunShadowFbo[i] = FBO_Create("_sunshadowmap", tr.sunShadowDepthImage[i]->width, tr.sunShadowDepthImage[i]->height);
 			// FIXME: this next line wastes 16mb with 4x1024x1024 sun shadow maps, skip if OpenGL 4.3+ or ARB_framebuffer_no_attachments
 			// This at least gets sun shadows working on older GPUs (Intel)
-			FBO_CreateBuffer(tr.sunShadowFbo[i], GL_RGBA8, 0, 0);
-			FBO_AttachImage(tr.sunShadowFbo[i], tr.sunShadowDepthImage[i], GL_DEPTH_ATTACHMENT, 0);
-			R_CheckFBO(tr.sunShadowFbo[i]);
+			if (shadowDummy)
+			{
+				FBO_CreateBuffer(tr.sunShadowFbo[i], GL_RGBA8, 0, 0);
+				FBO_AttachImage(tr.sunShadowFbo[i], tr.sunShadowDepthImage[i], GL_DEPTH_ATTACHMENT, 0);
+				R_CheckFBO(tr.sunShadowFbo[i]);
+			}
+			else
+			{
+				FBO_AttachImage(tr.sunShadowFbo[i], tr.sunShadowDepthImage[i], GL_DEPTH_ATTACHMENT, 0);
+				GL_BindFramebuffer(GL_FRAMEBUFFER, tr.sunShadowFbo[i]->frameBuffer);
+				qglDrawBuffer(GL_NONE);
+				R_GfxReadBuffer(GL_NONE);
+				if (!R_CheckFBO(tr.sunShadowFbo[i]))
+				{
+					ri.Printf(PRINT_ALL, "^~^~^ GFX shadow FBO %d incomplete without its colour dummy - re-adding it\n", i);
+					qglDrawBuffer(GL_COLOR_ATTACHMENT0);
+					R_GfxReadBuffer(GL_COLOR_ATTACHMENT0);
+					FBO_CreateBuffer(tr.sunShadowFbo[i], GL_RGBA8, 0, 0);
+					R_CheckFBO(tr.sunShadowFbo[i]);
+				}
+			}
+		}
+		if (!shadowDummy)
+		{
+			ri.Printf(PRINT_ALL, "^~^~^ GFX shadow FBOs depth-only (r_shadowFboDummy 0): %d x %dx%d colour dummies not allocated\n",
+				4, tr.sunShadowDepthImage[0]->width, tr.sunShadowDepthImage[0]->height);
 		}
 	}
 
@@ -397,6 +447,42 @@ void FBO_Init(void)
 		tr.screenShadowFbo = FBO_Create("_screenshadow", tr.screenShadowImage->width, tr.screenShadowImage->height);
 		FBO_AttachImage(tr.screenShadowFbo, tr.screenShadowImage, GL_COLOR_ATTACHMENT0, 0);
 		R_CheckFBO(tr.screenShadowFbo);
+	}
+
+	// HZM gl2 shadow hardening (r_shadowHarden 1 at R_Init, plan SE#5 / E3): the cascade depth maps and the
+	// screen mask were created with NULL data and never cleared until first rendered. Clear depth to 1.0 (no
+	// caster) and the mask to white (lit), with both write masks forced on - they are GL state that survives
+	// R_Init, because a map load keeps the context. Five clears per init.
+	if (r_shadowHarden && r_shadowHarden->integer)
+	{
+		// glClear honours the scissor test, and GL_SetDefaultState (run just before, in InitOpenGL) ENABLES it
+		// with whatever rectangle the last frame left - a display-sized rect would clear only part of a 4096^2
+		// cascade. Disable it for these clears and restore it exactly.
+		GLboolean scissorWasOn = GL_FALSE;
+		qglGetBooleanv(GL_SCISSOR_TEST, &scissorWasOn);
+		qglDisable(GL_SCISSOR_TEST);
+		GL_State(GLS_DEPTHMASK_TRUE);
+		qglColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+		qglClearDepth(1.0f);
+		for (i = 0; i < 4; i++)
+		{
+			if (tr.sunShadowFbo[i])
+			{
+				GL_BindFramebuffer(GL_FRAMEBUFFER, tr.sunShadowFbo[i]->frameBuffer);
+				qglClear(GL_DEPTH_BUFFER_BIT);
+			}
+		}
+		if (tr.screenShadowFbo)
+		{
+			GL_BindFramebuffer(GL_FRAMEBUFFER, tr.screenShadowFbo->frameBuffer);
+			qglClearColor(1.0f, 1.0f, 1.0f, 1.0f);
+			qglClear(GL_COLOR_BUFFER_BIT);
+			qglClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+		}
+		if (scissorWasOn)
+		{
+			qglEnable(GL_SCISSOR_TEST);
+		}
 	}
 
 	if (tr.textureScratchImage[0])

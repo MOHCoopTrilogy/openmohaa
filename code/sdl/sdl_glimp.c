@@ -74,6 +74,9 @@ int qglesMajorVersion, qglesMinorVersion;
 // procs were loaded, so the gl1 GLSL post-process layer can enable. False => post-FX disabled.
 qboolean glPostFxProcsLoaded = qfalse;
 
+// HZM gl2 MSAA (plan P2a, ME-F15): set by the gl2 renderer just before GLimp_Init; -1 = use r_ext_multisample
+int glimp_windowSamplesOverride = -1;
+
 void (APIENTRYP qglActiveTextureARB) (GLenum texture);
 void (APIENTRYP qglClientActiveTextureARB) (GLenum texture);
 void (APIENTRYP qglMultiTexCoord2fARB) (GLenum target, GLfloat s, GLfloat t);
@@ -707,6 +710,10 @@ static int GLimp_SetMode(int mode, qboolean fullscreen, qboolean noborder, qbool
 
 	stencilBits = r_stencilbits->value;
 	samples = r_ext_multisample->value;
+	// HZM gl2 MSAA (plan P2a, ME-F15): the new path renders the scene into multisample textures and presents a
+	// single-sample image, so it asks for a single-sample window whatever r_ext_multisample says
+	if ( glimp_windowSamplesOverride >= 0 )
+		samples = glimp_windowSamplesOverride;
 
 	numContexts = 0;
 
@@ -763,6 +770,14 @@ static int GLimp_SetMode(int mode, qboolean fullscreen, qboolean noborder, qbool
 		contexts[numContexts].majorVersion = 1;
 		contexts[numContexts].minorVersion = 1;
 		numContexts++;
+	}
+
+	// HZM gl2 graphics probes (MSAA/shadow plan): r_glDebug 1 asks for a DEBUG context so KHR_debug reports
+	// errors synchronously (tr_gfxprobe.c installs the callback). Must be set before SDL_CreateWindow and after
+	// SDL_GL_ResetAttributes above. Read by name, so this shared file adds no link dependency on either renderer.
+	if ( !fixedFunction && ri.Cvar_VariableIntegerValue( "r_glDebug" ) )
+	{
+		SDL_GL_SetAttribute( SDL_GL_CONTEXT_FLAGS, SDL_GL_CONTEXT_DEBUG_FLAG );
 	}
 
 	for (i = 0; i < 16; i++)
@@ -968,6 +983,27 @@ static int GLimp_SetMode(int mode, qboolean fullscreen, qboolean noborder, qbool
 		if( SDL_GL_SetSwapInterval( r_swapInterval->integer ) == -1 )
 		{
 			ri.Printf( PRINT_DEVELOPER, "SDL_GL_SetSwapInterval failed: %s\n", SDL_GetError( ) );
+		}
+
+		// HZM gl2 graphics probes (plan V3-B2): publish the display's real refresh and whether vsync is really
+		// live. glConfig.displayFrequency is only set fullscreen from r_displayRefresh, and r_swapInterval is a
+		// latched request, so neither tells the fps label its true cap. ROM, written at every window creation.
+		{
+			SDL_DisplayMode hzmMode;
+			int hzmHz = 0;
+			int hzmDisplay = SDL_GetWindowDisplayIndex( SDL_window );
+
+			if( hzmDisplay >= 0 && SDL_GetCurrentDisplayMode( hzmDisplay, &hzmMode ) == 0 )
+				hzmHz = hzmMode.refresh_rate;
+			if( hzmHz <= 0 && SDL_GetWindowDisplayMode( SDL_window, &hzmMode ) == 0 )
+				hzmHz = hzmMode.refresh_rate;
+			if( hzmHz <= 0 && hzmDisplay >= 0 && SDL_GetDesktopDisplayMode( hzmDisplay, &hzmMode ) == 0 )
+				hzmHz = hzmMode.refresh_rate;
+
+			ri.Cvar_Get( "r_displayHz", "0", CVAR_ROM );
+			ri.Cvar_Set( "r_displayHz", va( "%d", hzmHz ) );
+			ri.Cvar_Get( "r_vsyncActive", "0", CVAR_ROM );
+			ri.Cvar_Set( "r_vsyncActive", SDL_GL_GetSwapInterval() != 0 ? "1" : "0" );
 		}
 
 		SDL_GL_GetAttribute( SDL_GL_RED_SIZE, &realColorBits[0] );

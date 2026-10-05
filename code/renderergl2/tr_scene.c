@@ -384,6 +384,30 @@ void RE_AddAdditiveLightToScene( const vec3_t org, float intensity, float r, flo
 }
 
 
+/*
+=================
+R_ShadowFarInputsChanged
+
+HZM gl2 shadow hardening (plan SE#4). The legacy far cascade is re-rendered only when the sun direction changes,
+so every LIVE cvar that changes what it contains froze beyond ~512 u until the next map. With r_shadowHarden 1
+a change to any of them re-bakes it. Called only where the far cascade is decided; the signature is refreshed
+on every call, so it also tracks changes made while hardening was off.
+=================
+*/
+qboolean R_ShadowFarInputsChanged(void)
+{
+	static int lastSig = 0x7fffffff;
+	int sig = r_shadowCastFoliage->modificationCount
+	        + 7 * r_shadowMapBiasFactor->modificationCount
+	        + 31 * r_shadowMapBiasUnits->modificationCount
+	        + 127 * r_charShadows->modificationCount
+	        + 509 * r_drawstaticmodels->modificationCount;
+	qboolean changed = (qboolean)( sig != lastSig );
+
+	lastSig = sig;
+	return (qboolean)( changed && r_shadowHarden && r_shadowHarden->integer );
+}
+
 void RE_BeginScene(const refdef_t *fd)
 {
 	Com_Memcpy( tr.refdef.text, fd->text, sizeof( tr.refdef.text ) );
@@ -400,7 +424,9 @@ void RE_BeginScene(const refdef_t *fd)
 	VectorCopy( fd->viewaxis[1], tr.refdef.viewaxis[1] );
 	VectorCopy( fd->viewaxis[2], tr.refdef.viewaxis[2] );
 
-	tr.refdef.time = fd->time;
+	// HZM gl2 graphics probes: r_gfxProbe bit 2 pins renderer time, so repeated captures of a static view
+	// compare equal (shader animation, tcMods, deforms). Identity at default.
+	tr.refdef.time = R_GfxProbe_FreezeTime( fd->time );
 	tr.refdef.rdflags = fd->rdflags;
 
 	// copy the areamask data over and note if it has changed, which
@@ -426,6 +452,7 @@ void RE_BeginScene(const refdef_t *fd)
 	tr.refdef.sunDir[3] = 0.0f;
 	tr.refdef.sunCol[3] = 1.0f;
 	tr.refdef.sunAmbCol[3] = 1.0f;
+	tr.refdef.hzmSunActive = 0;   // HZM gl2 P3: only R_SunStable_Frame sets it, for this scene
 
 	VectorCopy(tr.sunDirection, tr.refdef.sunDir);
 	// HZM gl2 real character shadows: this is the FIRST of three r_depthPrepass gates on the
@@ -689,6 +716,12 @@ void RE_RenderScene( const refdef_t *fd ) {
 
 	RE_BeginScene(fd);
 
+	// HZM gl2 shadow hardening (r_shadowHarden, plan P1a): latch no-wrap for this scene, and let the views
+	// that run BEFORE the main view (dlight shadows, sun cascades) fill at most half the drawsurf list, so the
+	// main view can never be starved. Restored to the full list just before R_RenderView below.
+	r_drawSurfNoWrap = (qboolean)( r_shadowHarden && r_shadowHarden->integer );
+	r_drawSurfCap = r_drawSurfNoWrap ? MAX_DRAWSURFS / 2 : MAX_DRAWSURFS;
+
 	// SmileTheory: playing with shadow mapping
 	if (!( fd->rdflags & RDF_NOWORLDMODEL ) && tr.refdef.num_dlights && r_dlightMode->integer >= 2)
 	{
@@ -716,7 +749,9 @@ void RE_RenderScene( const refdef_t *fd ) {
 	// tr.refdef.num_pshadows at the 0 that RE_BeginScene set - i.e. exactly today.
 	if( !( fd->rdflags & RDF_NOWORLDMODEL ) && R_DlightShadowsActive() )
 	{
+		R_GfxProbe_ViewBegin(GFXVIEW_DLS);
 		R_RenderDlightShadowMaps(fd);
+		R_GfxProbe_ViewEnd(GFXVIEW_DLS);
 	}
 
 	// playing with even more shadows
@@ -740,11 +775,30 @@ void RE_RenderScene( const refdef_t *fd ) {
 	if(glRefConfig.framebufferObject && r_sunlightMode->integer && !( fd->rdflags & RDF_NOWORLDMODEL ) && (r_forceSun->integer || tr.sunShadows)
 	   && (r_depthPrepass->value || R_CharShadowsActive() || (r_shadowDebug && r_shadowDebug->integer)))
 	{
+		// HZM gl2 graphics probes: r_shadowFitYaw / r_shadowFitOffset perturb ONLY the view the cascade fit
+		// sees (test T1); at 0 this is fd itself. The ViewBegin/End pairs feed ^~^~^ SHADOWBUDGET/SHADOWTIME.
+		refdef_t fitScratch;
+		const refdef_t *fitFd = R_GfxProbe_FitRefdef(fd, &fitScratch);
+		// HZM gl2 shadow hardening (SE#4): evaluated EVERY frame (not inside the short-circuit below) so the
+		// input signature is always current; it can only answer qtrue with r_shadowHarden 1.
+		const qboolean farInputsChanged = R_ShadowFarInputsChanged();
+
+		// HZM gl2 stable sun shadows + B0 (r_shadowStable, plan P3): three radial ENTITY-ONLY cascades + the static
+		// world cascade W in image 3. qfalse whenever the switch is 0 or anything makes it invalid - then everything
+		// below runs exactly as before.
+		if (!R_SunStable_Frame(fitFd))
+		{
 		if (r_shadowCascadeZFar->integer != 0)
 		{
-			R_RenderSunShadowMaps(fd, 0);
-			R_RenderSunShadowMaps(fd, 1);
-			R_RenderSunShadowMaps(fd, 2);
+			R_GfxProbe_ViewBegin(GFXVIEW_C0);
+			R_RenderSunShadowMaps(fitFd, 0);
+			R_GfxProbe_ViewEnd(GFXVIEW_C0);
+			R_GfxProbe_ViewBegin(GFXVIEW_C1);
+			R_RenderSunShadowMaps(fitFd, 1);
+			R_GfxProbe_ViewEnd(GFXVIEW_C1);
+			R_GfxProbe_ViewBegin(GFXVIEW_C2);
+			R_RenderSunShadowMaps(fitFd, 2);
+			R_GfxProbe_ViewEnd(GFXVIEW_C2);
 		}
 		else
 		{
@@ -754,16 +808,23 @@ void RE_RenderScene( const refdef_t *fd ) {
 		}
 
 		// only rerender last cascade if sun has changed position
-		if (r_forceSun->integer == 2 || !VectorCompare(tr.refdef.sunDir, tr.lastCascadeSunDirection))
+		// HZM gl2 shadow hardening (SE#4): ...or, with r_shadowHarden 1, when a live cvar that changes what
+		// the far cascade CONTAINS was modified - before, those froze beyond ~512 u until the next map.
+		// HZM gl2 P3: ...or W occupied the image while stable was on (one-shot, set on the switch back)
+		if (r_forceSun->integer == 2 || !VectorCompare(tr.refdef.sunDir, tr.lastCascadeSunDirection)
+		    || farInputsChanged || R_SunStable_LegacyNeedsFar())
 		{
 			VectorCopy(tr.refdef.sunDir, tr.lastCascadeSunDirection);
-			R_RenderSunShadowMaps(fd, 3);
+			R_GfxProbe_ViewBegin(GFXVIEW_C3);
+			R_RenderSunShadowMaps(fitFd, 3);
+			R_GfxProbe_ViewEnd(GFXVIEW_C3);
 			Mat4Copy(tr.refdef.sunShadowMvp[3], tr.lastCascadeSunMvp);
 		}
 		else
 		{
 			Mat4Copy(tr.lastCascadeSunMvp, tr.refdef.sunShadowMvp[3]);
 		}
+		}   // HZM gl2 P3: end of the legacy branch
 	}
 
 	// playing with cube maps
@@ -900,7 +961,14 @@ void RE_RenderScene( const refdef_t *fd ) {
 	}
 	//=========================
 
+	r_drawSurfCap = MAX_DRAWSURFS;
+	if (!( fd->rdflags & RDF_NOWORLDMODEL )) {
+		R_GfxProbe_ViewBegin(GFXVIEW_MAIN);
+	}
 	R_RenderView( &parms );
+	if (!( fd->rdflags & RDF_NOWORLDMODEL )) {
+		R_GfxProbe_ViewEnd(GFXVIEW_MAIN);
+	}
 
 	if(!( fd->rdflags & RDF_NOWORLDMODEL ))
 		R_AddPostProcessCmd();

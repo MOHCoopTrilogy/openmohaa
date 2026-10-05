@@ -2654,6 +2654,16 @@ static qboolean ParseShader( char **text )
 
 			continue;
 		}
+		// HZM gl2 [2026-09-26] S3b: qer_hzmSoftEdge <dist> - see shader_t.hzmSoftEdge. Parsed BEFORE the generic qer
+		// skip below, which is exactly what keeps it invisible to gl1 and to every older gl2.
+		else if ( !Q_stricmp( token, "qer_hzmSoftEdge" ) ) {
+			token = COM_ParseExt( text, qfalse );
+			shader.hzmSoftEdge = token[0] ? atof( token ) : 0.0f;
+			if ( !( shader.hzmSoftEdge > 0.0f ) ) {
+				shader.hzmSoftEdge = 0.0f;
+			}
+			continue;
+		}
 		// skip stuff that only the QuakeEdRadient needs
 		else if ( !Q_stricmpn( token, "qer", 3 ) ) {
 			SkipRestOfLine( text );

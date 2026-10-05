@@ -79,7 +79,16 @@ void ApplySoftParticle(inout vec3 rgb, inout float a)
 		return;
 	}
 
+#if defined(MSAA_DEPTH_MINMAX)
+	// HZM gl2 MSAA (plan P2b, MH-B1) two-surface fade: under MSAA the bound snapshot holds the edge pixel's nearest (r)
+	// and farthest (g) depth. A particle behind the nearest surface is hidden on those samples by the multisample
+	// depth test anyway, so it fades against the far one. g is 0 on a single-sample snapshot (the HOME bypass),
+	// which keeps today's r exactly.
+	vec2  zmm = texture2D(u_ScreenDepthMap, gl_FragCoord.xy * u_InvTexRes).rg;
+	float zs  = (zmm.g > 0.0 && gl_FragCoord.z > zmm.r) ? zmm.g : zmm.r;
+#else
 	float zs = texture2D(u_ScreenDepthMap, gl_FragCoord.xy * u_InvTexRes).r;
+#endif
 	float ds = u_SoftParticle.z / min(u_SoftParticle.y + (2.0 * zs - 1.0), -1e-6);
 	float df = u_SoftParticle.z / min(u_SoftParticle.y + (2.0 * gl_FragCoord.z - 1.0), -1e-6);
 	float k  = clamp((ds - df) * u_SoftParticle.x, 0.0, 1.0);
@@ -143,6 +152,21 @@ void main()
 		if (alpha < 0.5)
 			discard;
 	}
+#if defined(MSAA_DEPTH_MINMAX)
+	else if (u_AlphaTest >= 4)
+	{
+		// HZM gl2 MSAA P4a (MH-B2): alpha-to-coverage. The coverage ramp is a pixel wide in alpha (fwidth), capped
+		// so a nomip cutout cannot smear; 4 centres it on the old 0.5 threshold, 5 (light / unknown matte) keeps
+		// it on the opaque side so no texel more contaminated than today's test ever shows
+		float hzmA2c = (alpha - 0.5) / max(min(fwidth(alpha), 0.5), 0.0001);
+		if (u_AlphaTest == 4)
+			hzmA2c += 0.5;
+		hzmA2c = clamp(hzmA2c, 0.0, 1.0);
+		if (hzmA2c <= 0.0)
+			discard;
+		alpha = hzmA2c;
+	}
+#endif
 
 	ApplySoftParticle(rgb, alpha);
 

@@ -1580,6 +1580,83 @@ static void R_RadixSort( drawSurf_t *source, int size )
 
 //==========================================================================================
 
+// HZM gl2 shadow hardening (r_shadowHarden, plan P1a). See tr_local.h.
+qboolean r_drawSurfNoWrap = qfalse;
+int      r_drawSurfCap = MAX_DRAWSURFS;
+int      r_drawSurfDrops = 0;
+
+/*
+=================
+R_DepthViewAllows / R_DepthViewSkips
+
+The ONE predicate for "a depth-only pass does not draw this surface". RB_DepthFillSkip (backend) and
+R_DepthViewSkipsFrontend (R_AddDrawSurf / static models, r_shadowHarden 1) both call it, so a shadow view can
+never add a surface its only pass would throw away - and the two can never diverge.
+allowChars / allowCutout can only be true for a VPF_DEPTHSHADOW view; the main-view prepass keeps both
+historical exclusions (bug-gl2-foliage-white, bug-gl2-invisible-live-char-depthprepass).
+=================
+*/
+void R_DepthViewAllows(int viewFlags, int shadowCascade, qboolean *allowChars, qboolean *allowCutout)
+{
+	qboolean isShadowView = (qboolean)((viewFlags & VPF_DEPTHSHADOW) != 0);
+
+	*allowChars  = (qboolean)(isShadowView
+	                          && (( r_charShadows->integer && shadowCascade > 0 )
+	                              || (( viewFlags & VPF_PSHADOW )
+	                                  && r_hzmDlightShadowChars && r_hzmDlightShadowChars->integer )
+	                              // HZM gl2 bug-3009 (E1): the frontend admits characters into every non-sun-cascade
+	                              // depth view while the gate is on (tr_model.cpp); this pass must draw them too, or
+	                              // r_shadows 4 (VPF_NONE extra) would still skip them here
+	                              || ( shadowCascade == 0 && R_PshadowCharGate() )
+	                              // HZM gl2 P3: W holds no entities, so its only "character" hits are static-model
+	                              // surfaces whose static index aliases a character's refentity slot - dropping those
+	                              // would make W depend on who stood where when it was baked
+	                              || ( viewFlags & VPF_SUNWORLD )));
+	*allowCutout = (qboolean)(isShadowView && ((r_charShadows->integer && r_shadowCastFoliage->integer)
+	                          // HZM gl2 P3 B0 (vet R2): alpha-tested world surfaces are baked, so they are in W
+	                          || (viewFlags & VPF_SUNWORLD)));
+}
+
+qboolean R_DepthViewSkips(const shader_t *shader, const trRefEntity_t *entities, int entityNum,
+                          qboolean allowChars, qboolean allowCutout)
+{
+	if (!shader || shader->sort == SS_PORTAL) {
+		return qfalse;
+	}
+	if (shader->sort != SS_OPAQUE) {
+		return qtrue;                       // genuinely translucent: never a depth writer
+	}
+	if (shader->hasAlphaTest && !allowCutout) {
+		return qtrue;                       // bug-gl2-foliage-white (main prepass only)
+	}
+	if (!allowChars && entities && entityNum >= 0 && entityNum < MAX_REFENTITIES) {
+		const trRefEntity_t *ce = &entities[entityNum];
+		if (ce->e.tiki && ce->e.tiki->a && ce->e.tiki->a->bIsCharacter) {
+			return qtrue;                   // bug-gl2-invisible-live-char-depthprepass
+		}
+	}
+	return qfalse;
+}
+
+// frontend form for the view being built: the entity number and shader are decomposed from the sort key
+// exactly as the backend will decompose them, so the verdict is the backend's own.
+qboolean R_DepthViewSkipsFrontend(const shader_t *shader)
+{
+	qboolean allowChars, allowCutout;
+	unsigned sort;
+	int entityNum;
+	const shader_t *sortedShader;
+
+	if (!(tr.viewParms.flags & VPF_DEPTHSHADOW) || !shader) {
+		return qfalse;
+	}
+	sort = (shader->sortedIndex << QSORT_SHADERNUM_SHIFT) | tr.shiftedEntityNum | tr.shiftedIsStatic;
+	entityNum = ( sort >> QSORT_REFENTITYNUM_SHIFT ) & REFENTITYNUM_MASK;
+	sortedShader = tr.sortedShaders[ ( sort >> QSORT_SHADERNUM_SHIFT ) & (MAX_SORTED_SHADERS-1) ];
+	R_DepthViewAllows(tr.viewParms.flags, tr.viewParms.shadowCascade, &allowChars, &allowCutout);
+	return R_DepthViewSkips(sortedShader, tr.refdef.entities, entityNum, allowChars, allowCutout);
+}
+
 /*
 =================
 R_AddDrawSurf
@@ -1588,6 +1665,19 @@ R_AddDrawSurf
 void R_AddDrawSurf( surfaceType_t *surface, shader_t *shader, 
 				   int fogIndex, int dlightMap, int pshadowMap, int cubemap ) {
 	int			index;
+
+	if ( r_drawSurfNoWrap ) {
+		// HZM gl2 shadow hardening: never wrap. A wrap overwrote the lists of views already sorted and
+		// issued (the frame's first views are the shadow cascades), and once a view's first index passed
+		// the end its own range went empty - the main view drew nothing.
+		if ( tr.refdef.numDrawSurfs >= r_drawSurfCap ) {
+			r_drawSurfDrops++;
+			return;
+		}
+		if ( ( tr.viewParms.flags & VPF_DEPTHSHADOW ) && R_DepthViewSkipsFrontend( shader ) ) {
+			return;
+		}
+	}
 
 	// instead of checking for overflow, we just mask the index
 	// so it wraps around
@@ -2314,6 +2404,11 @@ void R_RenderView (viewParms_t *parms) {
 	if ( numDrawSurfs > MAX_DRAWSURFS ) {
 		numDrawSurfs = MAX_DRAWSURFS;
 	}
+	// HZM gl2 shadow hardening: a view whose first index is already at the end sorts an EMPTY list (still
+	// cleared, never a negative count or a stale one). Unreachable with the no-wrap cap; kept as a guard.
+	if ( r_drawSurfNoWrap && firstDrawSurf > numDrawSurfs ) {
+		firstDrawSurf = numDrawSurfs;
+	}
 
 	R_SortDrawSurfs( tr.refdef.drawSurfs + firstDrawSurf, numDrawSurfs - firstDrawSurf,
         tr.refdef.spriteSurfs + firstSpriteSurf, tr.refdef.numSpriteSurfs - firstSpriteSurf
@@ -2783,9 +2878,20 @@ static void R_RenderPshadowMapRange( int firstShadow, int numShadows, int extraV
 				R_AddEntitySurface(shadow->entityNums[j]);
 			}
 
+			if ( r_drawSurfNoWrap ) {
+				// HZM gl2 shadow hardening: clamp the range; an exhausted list gives an empty (cleared) map
+				int lastDrawSurf = MIN( tr.refdef.numDrawSurfs, MAX_DRAWSURFS );
+				if ( firstDrawSurf > lastDrawSurf ) {
+					firstDrawSurf = lastDrawSurf;
+				}
+				R_SortDrawSurfs( tr.refdef.drawSurfs + firstDrawSurf, lastDrawSurf - firstDrawSurf,
+					tr.refdef.spriteSurfs + firstSpriteSurf, tr.refdef.numSpriteSurfs - firstSpriteSurf
+				);
+			} else {
 			R_SortDrawSurfs( tr.refdef.drawSurfs + firstDrawSurf, tr.refdef.numDrawSurfs - firstDrawSurf,
 				tr.refdef.spriteSurfs + firstSpriteSurf, tr.refdef.numSpriteSurfs - firstSpriteSurf
 			);
+			}
 
 			if (!glRefConfig.framebufferObject)
 				R_AddCapShadowmapCmd( i, -1 );
@@ -2902,7 +3008,7 @@ sphere no longer satisfies the two geometric requirements above, in which case t
 drops it - that is the post-merge re-check.
 =====================
 */
-static qboolean R_FinalizeDlightPshadow( pshadow_t *ps, const dlight_t *dl )
+static qboolean R_FinalizeDlightPshadow( pshadow_t *ps, const dlight_t *dl, qboolean spotMask )
 {
 	vec3_t up, dirToLight;
 	float  d, reach;
@@ -2926,6 +3032,11 @@ static qboolean R_FinalizeDlightPshadow( pshadow_t *ps, const dlight_t *dl )
 	// How far the light still reaches past that point - the shadow's length, and the
 	// radius pshadow_fp's `1 - dist^2/R^2` falloff uses.
 	reach = dl->radius - ( d - ps->viewRadius );
+	// HZM gl2 [2026-09-26] S4: a headlight reaches 1100 u, and the receive pass re-draws every world surface inside the
+	// slab - its shadow is capped (r_hzmSpotShadowReach), where the pool is faint anyway. Floored just below, as ever.
+	if ( spotMask && r_hzmSpotShadowReach && r_hzmSpotShadowReach->value > 0.0f && reach > r_hzmSpotShadowReach->value ) {
+		reach = r_hzmSpotShadowReach->value;
+	}
 	if ( reach < ps->viewRadius * 3.0f ) {
 		reach = ps->viewRadius * 3.0f;   // upstream's floor; also keeps the caster
 		                                 // (diameter 2*viewRadius) off the far plane
@@ -2949,6 +3060,17 @@ static qboolean R_FinalizeDlightPshadow( pshadow_t *ps, const dlight_t *dl )
 	ps->cullPlane.type = PLANE_NON_AXIAL;
 	SetPlaneSignbits( &ps->cullPlane );
 
+	// HZM gl2 [2026-09-26] S4: the cone mask pshadow_fp applies on receive - the shadow exists only where the spot
+	// actually lights (inside its cone, within its pool). Zero = no mask (every muzzle flash / explosion shadow).
+	if ( spotMask ) {
+		VectorCopy( dl->origin, ps->hzmSpotApex );
+		ps->hzmSpotApex[3] = dl->radius;
+		R_HZM_SpotUniformVec( dl, dl->hzmAxis, qfalse, ps->hzmSpotCone );
+	} else {
+		VectorSet4( ps->hzmSpotApex, 0.0f, 0.0f, 0.0f, 0.0f );
+		VectorSet4( ps->hzmSpotCone, 0.0f, 0.0f, 0.0f, 0.0f );
+	}
+
 	return qtrue;
 }
 
@@ -2967,6 +3089,10 @@ void R_RenderDlightShadowMaps(const refdef_t *fd)
 	int   firstShadow;
 	int   i, j, k, n;
 	int   numCandidateLights = 0;
+	// HZM gl2 [2026-09-26] S4 spot shadows
+	qboolean spotShadows;
+	int      spotCasters, bestSpot = -1, spotUsed = 0;
+	float    bestSpotScore = 0.0f;
 
 	if ( !R_DlightShadowsActive() ) {
 		return;
@@ -3013,6 +3139,15 @@ void R_RenderDlightShadowMaps(const refdef_t *fd)
 
 	allowChars = r_hzmDlightShadowChars->integer;
 
+	spotShadows = R_HZM_SpotShadowsOn();
+	spotCasters = r_hzmSpotShadowCasters ? r_hzmSpotShadowCasters->integer : 2;
+	if ( spotCasters < 1 ) {
+		spotCasters = 1;
+	}
+	if ( spotCasters > maxCasters ) {
+		spotCasters = maxCasters;
+	}
+
 	//
 	// 1. rank the scene's dlights and keep the best maxLights of them
 	//
@@ -3021,10 +3156,14 @@ void R_RenderDlightShadowMaps(const refdef_t *fd)
 		const dlight_t *dl = &tr.refdef.dlights[i];
 		vec3_t          diff;
 		float           dist, bright, score;
+		qboolean        isSpot;
 
 		// HZM gl2 [2026-09-25] Phase R3 NOSHADOW: a light flagged hzm_dlight_noshadow (the cgame headlights - no
 		// shipped light sets it) never takes a shadow slot, so a headlight cannot steal one from a muzzle flash.
-		if ( dl->type & hzm_dlight_noshadow ) {
+		// [2026-09-26] S4: while r_hzmSpotShadows is on a SPOT casts anyway, but is ranked APART (below) and can only
+		// ever hold ONE light slot, and only when there are two - it never takes a muzzle flash's last one.
+		isSpot = ( spotShadows && dl->hzmSpot == HZM_SPOT_READY ) ? qtrue : qfalse;
+		if ( ( dl->type & hzm_dlight_noshadow ) && !isSpot ) {
 			continue;
 		}
 
@@ -3053,6 +3192,14 @@ void R_RenderDlightShadowMaps(const refdef_t *fd)
 
 		// bigger, brighter and nearer wins
 		score = ( bright * dl->radius ) / ( dist + 1.0f );
+
+		if ( isSpot ) {
+			if ( score > bestSpotScore ) {
+				bestSpot      = i;
+				bestSpotScore = score;
+			}
+			continue;
+		}
 
 		// insertion sort, best first, truncated at maxLights. curIdx/curScore are the
 		// value being carried down the list; the outer loop's `i` is never touched.
@@ -3084,6 +3231,22 @@ void R_RenderDlightShadowMaps(const refdef_t *fd)
 		}
 	}
 
+	// HZM gl2 [2026-09-26] S4: the best spot takes light slot 0 - built first, so its shadow maps do not flicker with the
+	// muzzle flashes competing for the rest - and only when there are at least two slots (one stays a muzzle flash's)
+	if ( bestSpot >= 0 && maxLights >= 2 ) {
+		if ( numLights > maxLights - 1 ) {
+			numLights = maxLights - 1;
+		}
+		for ( j = numLights; j > 0; j-- ) {
+			lightOrder[j] = lightOrder[j - 1];
+			lightScore[j] = lightScore[j - 1];
+		}
+		lightOrder[0] = bestSpot;
+		lightScore[0] = bestSpotScore;
+		numLights++;
+		spotUsed = 1;
+	}
+
 	//
 	// 2. for each surviving light, collect casters and build the shadow list
 	//
@@ -3093,6 +3256,9 @@ void R_RenderDlightShadowMaps(const refdef_t *fd)
 		int lightFirst = tr.refdef.num_pshadows;
 		int lightCount = 0;
 		int writeIdx;
+		// HZM gl2 [2026-09-26] S4: this light is the spot ranked above (same test), with its own caster cap
+		const qboolean spotLight = ( spotShadows && dl->hzmSpot == HZM_SPOT_READY ) ? qtrue : qfalse;
+		const int      lightMaxCasters = spotLight ? spotCasters : maxCasters;
 
 		for ( i = 0; i < tr.refdef.num_entities; i++ )
 		{
@@ -3114,6 +3280,13 @@ void R_RenderDlightShadowMaps(const refdef_t *fd)
 			// vehicle would claim a 1200-unit shadow volume and R_PshadowSurface would
 			// then flag - and ProjectPshadowVBOGLSL re-draw - a large slice of the map.
 			if ( radius > dl->radius * 0.75f ) {
+				continue;
+			}
+
+			// HZM gl2 [2026-09-26] S4: never the lamp's own vehicle, and nothing its cone and pool do not reach
+			// (R_HZM_DlightFactorAt = attenuation x sphere-dilated cone, the lit pool's own law)
+			if ( spotLight && ( ent->e.entityNumber == dl->hzmOwner
+				|| R_HZM_DlightFactorAt( dl, ent->e.origin, radius ) < 0.01f ) ) {
 				continue;
 			}
 
@@ -3152,7 +3325,7 @@ void R_RenderDlightShadowMaps(const refdef_t *fd)
 			// whose shadow is largest and sharpest
 			shadow.sort = ( d * d ) / ( radius * radius );
 
-			for ( j = 0; j < maxCasters; j++ )
+			for ( j = 0; j < lightMaxCasters; j++ )
 			{
 				pshadow_t swap;
 
@@ -3237,7 +3410,7 @@ void R_RenderDlightShadowMaps(const refdef_t *fd)
 		writeIdx = lightFirst;
 		for ( i = lightFirst; i < lightFirst + lightCount; i++ )
 		{
-			if ( !R_FinalizeDlightPshadow( &tr.refdef.pshadows[i], dl ) ) {
+			if ( !R_FinalizeDlightPshadow( &tr.refdef.pshadows[i], dl, spotLight ) ) {
 				continue;
 			}
 			if ( writeIdx != i ) {
@@ -3267,10 +3440,10 @@ void R_RenderDlightShadowMaps(const refdef_t *fd)
 		{
 			lastPrint = tr.refdef.time;
 			ri.Printf( PRINT_ALL,
-				"^~^~^ DLSHADOW dlights=%d passed=%d used=%d maps=%d (cap %d) ents=%d\n",
+				"^~^~^ DLSHADOW dlights=%d passed=%d used=%d maps=%d (cap %d) ents=%d spot=%d\n",
 				tr.refdef.num_dlights, numCandidateLights, numLights,
 				tr.refdef.num_pshadows - firstShadow, maxShadows,
-				tr.refdef.num_entities );
+				tr.refdef.num_entities, spotUsed );
 		}
 	}
 }
@@ -3629,8 +3802,19 @@ void R_RenderSunShadowMaps(const refdef_t *fd, int level)
 
 			R_AddEntitySurfaces ();
 
+			if ( r_drawSurfNoWrap ) {
+				// HZM gl2 shadow hardening: there was NO clamp here - an overflow made the radix sort run past
+				// the end of the list. Clamp; an exhausted list gives an empty (cleared) map, never a stale one.
+				int lastDrawSurf = MIN( tr.refdef.numDrawSurfs, MAX_DRAWSURFS );
+				if ( firstDrawSurf > lastDrawSurf ) {
+					firstDrawSurf = lastDrawSurf;
+				}
+				R_SortDrawSurfs( tr.refdef.drawSurfs + firstDrawSurf, lastDrawSurf - firstDrawSurf,
+					tr.refdef.spriteSurfs + firstSpriteSurf, tr.refdef.numSpriteSurfs - firstSpriteSurf );
+			} else {
 			R_SortDrawSurfs( tr.refdef.drawSurfs + firstDrawSurf, tr.refdef.numDrawSurfs - firstDrawSurf,
 				tr.refdef.spriteSurfs + firstSpriteSurf, tr.refdef.numSpriteSurfs - firstSpriteSurf );
+			}
 		}
 
 		Mat4Multiply(tr.viewParms.projectionMatrix, tr.viewParms.world.modelMatrix, tr.refdef.sunShadowMvp[level]);

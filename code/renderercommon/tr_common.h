@@ -55,6 +55,9 @@ typedef enum
 	// the meaning of every flag word already in flight.
 	IMGFLAG_CLAMPTOEDGE_X  = 0x0100,   // clamp S only; T repeats
 	IMGFLAG_CLAMPTOEDGE_Y  = 0x0200,   // clamp T only; S repeats
+	// HZM gl2 MSAA (plan P2a): a GL_TEXTURE_2D_MULTISAMPLE image (tr_msaa.c). Never sampled as 2D, never given
+	// texture parameters; GL_BindToTMU / FBO_AttachImage pick the multisample target from this flag. Appended.
+	IMGFLAG_MULTISAMPLE    = 0x0400,
 } imgFlags_t;
 
 typedef struct image_s {
@@ -82,6 +85,10 @@ typedef struct image_s {
     int			wrapClampModeY;
 	int			r_sequence;
 	int			UseCount;
+	// HZM gl2 MSAA (plan P4a, MH-B2): what an RGBA cutout stores in its transparent texels. 1 = light (MOHAA's
+	// white-matte foliage, bug-gl2-foliage-white), 0 = dark, -1 = unknown (compressed upload, or not a cutout).
+	// Alpha-to-coverage uses the opaque-side ramp unless this is 0. Appended; gl1 never reads it.
+	int			hzmLightMatte;
 } image_t;
 
 // any change in the LIGHTMAP_* defines here MUST be reflected in
@@ -111,6 +118,9 @@ extern cvar_t *r_depthbits;			// number of desired depth bits
 extern cvar_t *r_colorbits;			// number of desired color bits, only relevant for fullscreen
 extern cvar_t *r_texturebits;			// number of desired texture bits
 extern cvar_t *r_ext_multisample;
+// HZM gl2 MSAA (plan P2a, ME-F15): -1 = the window uses r_ext_multisample (default, and always for gl1); >= 0 =
+// the gl2 renderer's new MSAA path overrides it (0: the scene is multisampled in textures, the window is not).
+extern int glimp_windowSamplesOverride;
 										// 0 = use framebuffer depth
 										// 16 = use 16-bit textures
 										// 32 = use 32-bit textures

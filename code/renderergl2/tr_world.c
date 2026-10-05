@@ -741,6 +741,29 @@ static void R_MarkLeaves (void) {
 	int		i;
 	int		cluster;
 
+	// HZM gl2 P3 (bug-3235): the W bake is the WHOLE static world, never the PVS of its own (arbitrary) centre and
+	// never this frame's areamask (door states) - either made W miss geometry and depend on game state (e2l2: the
+	// first bake after boot differed from every later one). Mark every leaf in a slot of its own; cluster -3 is never
+	// a real cluster, so no player view can reuse the slot and the next player view re-marks its own PVS.
+	if ( tr.viewParms.flags & VPF_SUNWORLD ) {
+		tr.visIndex = (tr.visIndex + 1) % MAX_VISCOUNTS;
+		tr.visCounts[tr.visIndex]++;
+		tr.visClusters[tr.visIndex] = -3;
+		for (i = 0, leaf = tr.world->nodes; i < tr.world->numnodes; i++, leaf++) {
+			if ( leaf->cluster < 0 || leaf->cluster >= tr.world->numClusters ) {
+				continue;
+			}
+			parent = leaf;
+			do {
+				if ( parent->visCounts[tr.visIndex] == tr.visCounts[tr.visIndex] )
+					break;
+				parent->visCounts[tr.visIndex] = tr.visCounts[tr.visIndex];
+				parent = parent->parent;
+			} while ( parent );
+		}
+		return;
+	}
+
 	// lockpvs lets designers walk around to determine the
 	// extent of the current pvs
 	if ( r_lockpvs->integer ) {
@@ -917,11 +940,23 @@ void R_AddWorldSurfaces (void) {
     // OPENMOHAA-specific stuff
     //=========================
 
+	if (tr.viewParms.flags & VPF_SUNWORLD) {
+		// HZM gl2 stable sun shadows (P3): the W bake takes the fixed-detail terrain proxy, never ROAM's
+		// view-dependent tessellation (the E1 empty far cascade), and not tr.refdef.render_terrain either (the
+		// previous frame's, at this point); static models only while B0-M says their shadow is baked.
+		if (r_drawterrain->integer) {
+			R_SunWorld_AddTerrainProxy();
+		}
+		if (r_drawstaticmodels->integer) {   // membership per model: R_SunWorld_StaticWanted
+			R_AddStaticModelSurfaces();
+		}
+	} else {
 	if (r_drawterrain->integer && tr.refdef.render_terrain && !tr.viewParms.isPortalSky) {
 		R_AddTerrainSurfaces();
 	}
 	if (r_drawstaticmodels->integer) {
 		R_AddStaticModelSurfaces();
+	}
 	}
 
 	if (g_bInfostaticmodels) {

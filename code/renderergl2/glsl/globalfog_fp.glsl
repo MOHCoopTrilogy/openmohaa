@@ -28,7 +28,14 @@ void main()
 {
 	vec4  scene = texture2D(u_TextureMap, var_TexCoords);
 
+#if defined(MSAA_DEPTH_MINMAX)
+	// HZM gl2 MSAA (plan P2b, ME-F11): the farthest surface of an edge pixel (g), so a silhouette against distant
+	// fog takes the fog of what is behind it; g is 0 on a single-sample depth (the HOME bypass): today's r.
+	vec2  zmm   = texture2D(u_LevelsMap, var_TexCoords).rg;
+	float zw    = (zmm.g > 0.0) ? zmm.g : zmm.r;
+#else
 	float zw    = texture2D(u_LevelsMap, var_TexCoords).r;
+#endif
 
 	// exact eye-space (planar) distance from the real projection matrix. clamp the
 	// denominator away from zero so a depth of exactly 1.0 cannot produce inf/NaN.
