@@ -525,6 +525,16 @@ Event EV_Sentient_CoopEjectMag
     "HZM coop - drop a spent magazine prop from this sentient's weapon",
     EV_NORMAL
 );
+// HZM coop [reload audit phase B] spent cases: revolver reload notetracks drop the FIRED cases (apply_ejectcases.py)
+Event EV_Sentient_CoopEjectCases
+(
+    "coop_ejectcases",
+    EV_DEFAULT,
+    "sSI",
+    "modelname [tagname] [max]",
+    "HZM coop - drop the mainhand weapon's spent cases (clip size minus rounds left, capped)",
+    EV_NORMAL
+);
 Event EV_Sentient_DropItems
 (
     "dropitems",
@@ -794,6 +804,7 @@ CLASS_DECLARATION(Animate, Sentient, NULL) {
     {&EV_Sentient_SetupHelmet,            &Sentient::EventSetupHelmet             },
     {&EV_Sentient_PopHelmet,              &Sentient::EventPopHelmet               },
     {&EV_Sentient_CoopEjectMag,           &Sentient::EventCoopEjectMag            },
+    {&EV_Sentient_CoopEjectCases,         &Sentient::EventCoopEjectCases          },
     {&EV_Sentient_GetThreatBias,          &Sentient::EventGetThreatBias           },
     {&EV_Sentient_SetThreatBias,          &Sentient::EventSetThreatBias           },
     {&EV_Sentient_SetThreatBias2,         &Sentient::EventSetThreatBias           },
@@ -5902,6 +5913,39 @@ void Sentient::EventCoopEjectMag(Event *ev)
     str tag = (ev->NumArgs() > 1) ? ev->GetString(2) : str("");
 
     CoopEjectMagazine(tik.c_str(), tag.length() ? tag.c_str() : NULL, 0);
+}
+
+// HZM coop [reload audit phase B] spent cases (apply_ejectcases.py) - see the event above.
+void Sentient::EventCoopEjectCases(Event *ev)
+{
+    static cvar_t *pCap = NULL;
+    str            tik  = ev->GetString(1);
+    str            tag  = (ev->NumArgs() > 1) ? ev->GetString(2) : str("");
+    int            iMax = (ev->NumArgs() > 2) ? ev->GetInteger(3) : 6;
+    Weapon        *weap = GetActiveWeapon(WEAPON_MAIN);
+    int            fired, i;
+
+    if (!pCap) {
+        pCap = gi.Cvar_Get("coop_caseEjectMax", "6", CVAR_ARCHIVE);
+    }
+    if (!weap) {
+        return;
+    }
+    fired = weap->GetClipSize(FIRE_PRIMARY) - weap->ClipAmmo(FIRE_PRIMARY);
+    if (fired > iMax) {
+        fired = iMax;
+    }
+    if (fired > pCap->integer) {
+        fired = pCap->integer;
+    }
+    for (i = 0; i < fired; i++) {
+        // one burst: lift the same-model debounce and the frame budget for these cases only
+        m_fCoopLastMagEject = 0;
+        if (s_coopMagThisFrame > 0) {
+            s_coopMagThisFrame = 0;
+        }
+        CoopEjectMagazine(tik.c_str(), tag.length() ? tag.c_str() : NULL, 0);
+    }
 }
 
 void Sentient::ReceivedItem(Item *item)

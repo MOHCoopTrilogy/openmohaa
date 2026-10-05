@@ -273,6 +273,7 @@ public:
     // animations carry no notetrack at all.
     void CoopEjectMagazine(const char *pszTik, const char *pszTag, int iSkinBits);
     void EventCoopEjectMag(Event *ev);
+    void EventCoopEjectCases(Event *ev); // HZM coop [reload audit phase B] spent cases
     void              CoopGoreHeal(float amount); // HZM coop - gore tier 1: healed -> reduce gore, retier
     Vector            m_vCoopPoolPos;          // HZM coop - gore tier 2: floor point of the growing corpse pool
     Vector            m_vCoopPoolNormal;       // HZM coop - gore tier 2: floor normal of the growing corpse pool
