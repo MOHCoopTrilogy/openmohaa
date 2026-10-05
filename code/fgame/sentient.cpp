@@ -5737,6 +5737,8 @@ static int CoopMagKey(const char *s)
     return h;
 }
 
+extern Event EV_EntitySVFlags; // entity.cpp - HZM coop [magown] used to un-hide the owner's ejected magazine
+
 void Sentient::CoopEjectMagazine(const char *pszTik, const char *pszTag, int iSkinBits)
 {
     static cvar_t *pOn = NULL, *pMax = NULL, *pBud = NULL, *pGap = NULL, *pDbg = NULL;
@@ -5836,6 +5838,23 @@ void Sentient::CoopEjectMagazine(const char *pszTik, const char *pszTag, int iSk
     mag->setSize(Vector(-1, -1, -1), Vector(1, 1, 1));
     mag->setOrigin(pos);
     mag->setAngles(angles);
+    // HZM coop [magown 2026-10-05] "the random clip that pops up near the gun for a frame or so": `pos` is the
+    // THIRD-PERSON tag, which for the owner in first person is not where the view model's hands are, so the
+    // magazine materialised beside the gun and fell out of the view in 4-6 frames (hip and ADS alike, every
+    // magazine gun). Not sent to its owner until it has fallen; everyone else sees it leave the hand as before.
+    if (IsSubclassOfPlayer()) {
+        static cvar_t *pOwnHide = NULL;
+        if (!pOwnHide) {
+            pOwnHide = gi.Cvar_Get("coop_magEjectOwnerHide", "0.5", 0);
+        }
+        if (pOwnHide->value > 0.0f) {
+            Event *show = new Event(EV_EntitySVFlags);
+            mag->edict->r.svFlags |= SVF_NOTSINGLECLIENT;
+            mag->edict->r.singleClient = entnum;
+            show->AddString("-notsingleclient");
+            mag->PostEvent(show, pOwnHide->value);
+        }
+    }
 
     AngleVectors(angles, fwd, right, up);
     // half the owner's velocity so a sprinting player's magazine lands behind him instead of

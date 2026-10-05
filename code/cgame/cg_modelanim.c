@@ -2990,6 +2990,9 @@ void CG_ModelAnim(centity_t *cent, qboolean bDoShaderTime)
                 CG_AttachEyeEntity(&model, parent, tiki, iTagNum & TAG_MASK, s1->attach_use_angles, s1->attach_offset);
             } else if (!Q_stricmp(szTagName, "tag_weapon_right") || !Q_stricmp(szTagName, "tag_weapon_left")) {
                 vec3_t vVmhAttAxis[3], vVmhAttOrg; // HZM coop [weaponview 2026-10-04] the gun as attached (probe)
+                if (CG_VMAmmoPropEarly(model.tiki)) {
+                    return; // HZM coop [adsprop 2026-10-05] not yet: the reload view clip has not taken over
+                }
                 refEntity_t mVmPre = model;        // HZM coop [weaponview] F5: the gun before any attach (hand-off fade)
                 // HZM coop [adsbolt] an aimed bolt clip keys BOTH weapon tags on the gun; following the server's
                 // attachtohand offhand would drag the gun through the left tag blended in from the aim pose.

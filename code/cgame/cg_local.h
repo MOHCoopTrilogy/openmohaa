@@ -685,6 +685,7 @@ const adsGunTune_t *CG_FindAdsTune(const char *wpn);
     float    CG_VMAimWeight(void); // HZM coop [weaponview 2026-10-04] displayed weight of aim-pose view clips (0..1)
     float    CG_VMCurWeight(void); // HZM coop [weaponview 2026-10-04] displayed weight of the newest view clip
     qboolean CG_VMAdsTagRight(void); // HZM coop [adsbolt] an _ads clip leads: keep the view weapon on tag_weapon_right
+    qboolean CG_VMAmmoPropEarly(dtiki_t *tiki); // HZM coop [adsprop] ammo prop attached before the reload clip leads
     extern int g_iCoopVmTagSnap;     // HZM coop [adsbolt] cg.time of an ADS-release swap to the hip clip
     qboolean CG_AdsSightSameMesh(const char *a, const char *b); // HZM coop [adsbolt] same iron-sight geometry
     void     CG_AdsRigAdvance(void);

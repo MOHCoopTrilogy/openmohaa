@@ -481,6 +481,7 @@ int CG_GetVMAnimPrefixIndex()
 
 static int s_iCoopPrevVMAnim = -1;
 static qboolean s_coopAdsClip = qfalse; // HZM coop [adsanim] the clip being started is a <gun>_<anim>_ads variant
+static qboolean s_coopAdsBolt = qfalse; // HZM coop [adsreload] ...and it is a bolt (rechamber) clip
 static int      s_coopAdsSlot = -1;     // HZM coop [adsbolt] slot playing an _ads clip (-1 = none)
 static int      s_coopSwapSlot = -1;    // HZM coop [adsbolt] slot of the hip clip swapped in on ADS release
 static char     s_szCoopHipAnim[MAX_QPATH]; // HZM coop [adsbolt] the hip clip the _ads clip stands in for
@@ -521,9 +522,29 @@ static qboolean CoopAdsClipFitsHeldGun(const char *prefix)
     return qtrue;
 }
 
+// HZM coop [adsprop 2026-10-05] a reload's ammo prop (models/ammo/*) attached by the server before the reload view
+// clip has taken over would hang on the aim/idle clip's weapon tag - a magazine standing beside the gun for a few
+// frames. Hidden until a reload-family clip is the newest clip and holds at least half of the crossblend.
+qboolean CG_VMAmmoPropEarly(dtiki_t *tiki)
+{
+    const char *name = tiki ? cgi.TIKI_Name(tiki) : NULL;
+    int         a;
+
+    if (!name || !strstr(name, "ammo/")) {
+        return qfalse;
+    }
+    a = cgi.anim->g_iLastVMAnim;
+    if ((a == VM_ANIM_RELOAD || a == VM_ANIM_RELOAD_SINGLE || a == VM_ANIM_RELOAD_END || a == VM_ANIM_RECHAMBER)
+        && CG_VMCurWeight() >= 0.5f) {
+        return qfalse;
+    }
+    return qtrue;
+}
+
 qboolean CG_VMAdsTagRight(void)
 {
-    return (s_coopAdsSlot >= 0 && s_coopAdsSlot == cgi.anim->g_iCurrentVMAnimSlot) ? qtrue : qfalse;
+    // HZM coop [adsreload] bolt clips only: a reload clip keeps the server's tag (its ammo prop rides the other hand)
+    return (s_coopAdsSlot >= 0 && s_coopAdsSlot == cgi.anim->g_iCurrentVMAnimSlot && s_coopAdsBolt) ? qtrue : qfalse;
 }
 
 float CG_VMAimWeight(void)
@@ -854,6 +875,7 @@ void CG_ViewModelAnimation(refEntity_t *pModel)
                     Q_strncpyz(s_szCoopHipAnim, szAnimName, sizeof(s_szCoopHipAnim));
                     Q_strncpyz(szAnimName, szAds, sizeof(szAnimName));
                     s_coopAdsClip = qtrue;
+                    s_coopAdsBolt = (a == VM_ANIM_RECHAMBER) ? qtrue : qfalse;
                 }
             }
         }
