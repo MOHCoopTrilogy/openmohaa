@@ -2591,23 +2591,12 @@ ScriptSimpleStrafingGunfire::ScriptSimpleStrafingGunfire()
     tracerCount     = 0;
     tracerFrequency = 0;
     projectileModel = "models/projectiles/stukaround.tik";
-    m_bHzmHasCarrier = false; // HZM coop [bug-3416]
 }
 
 // HZM coop [bug-3360]
 void ScriptSimpleStrafingGunfire::HzmSetCarrier(Event *ev)
 {
-    m_pHzmCarrier    = ev->GetEntity(1);
-    m_bHzmHasCarrier = (m_pHzmCarrier != NULL);
-}
-
-// HZM coop [bug-3416] a carried gun must never fire unowned: once its carrier is removed or dead it stops.
-bool ScriptSimpleStrafingGunfire::HzmCarrierGone()
-{
-    if (!m_bHzmHasCarrier) {
-        return false;
-    }
-    return !m_pHzmCarrier || m_pHzmCarrier->IsDead();
+    m_pHzmCarrier = ev->GetEntity(1);
 }
 
 // HZM coop [bug-3360] who fires: the carrier while he exists, else the gun itself (stock).
@@ -2639,11 +2628,6 @@ void ScriptSimpleStrafingGunfire::GunFire(Event *ev)
     Vector dir, right, up;
     Vector horzAngles;
 
-    if (HzmCarrierGone()) { // HZM coop [bug-3416]
-        isOn = false;
-        return;
-    }
-
     AngleVectors(angles, NULL, NULL, up);
     dir = -1 * up;
 
@@ -2654,10 +2638,7 @@ void ScriptSimpleStrafingGunfire::GunFire(Event *ev)
     dir += up * grandom() * spread.y;
     dir.normalize();
 
-    Projectile *hzmProj = ProjectileAttack(origin, dir, HzmShotOwner(), projectileModel, 1, 0, NULL); // HZM coop [bug-3360]
-    if (hzmProj && m_bHzmHasCarrier) {
-        hzmProj->m_bHzmSpareOwner = true; // HZM coop [bug-3416] its splash never hurts the carrier
-    }
+    ProjectileAttack(origin, dir, HzmShotOwner(), projectileModel, 1, 0, NULL); // HZM coop [bug-3360]
     // continue firing
     PostEvent(EV_ScriptSimpleStrafingGunfire_Fire, fireDelay);
 }
@@ -2703,11 +2684,6 @@ ScriptAimedStrafingGunfire::ScriptAimedStrafingGunfire()
 
 void ScriptAimedStrafingGunfire::GunFire(Event *ev)
 {
-    if (HzmCarrierGone()) { // HZM coop [bug-3416]
-        isOn = false;
-        return;
-    }
-
     if (!aimTarget) {
         ScriptSimpleStrafingGunfire::GunFire(ev);
         return;
@@ -2726,10 +2702,7 @@ void ScriptAimedStrafingGunfire::GunFire(Event *ev)
     dir += up * grandom() * spread.y;
     dir.normalize();
 
-    Projectile *hzmProj = ProjectileAttack(origin, dir, HzmShotOwner(), projectileModel, 1, 0, NULL); // HZM coop [bug-3360]
-    if (hzmProj && m_bHzmHasCarrier) {
-        hzmProj->m_bHzmSpareOwner = true; // HZM coop [bug-3416] its splash never hurts the carrier
-    }
+    ProjectileAttack(origin, dir, HzmShotOwner(), projectileModel, 1, 0, NULL); // HZM coop [bug-3360]
     // continue firing
     PostEvent(EV_ScriptSimpleStrafingGunfire_Fire, fireDelay);
 }
