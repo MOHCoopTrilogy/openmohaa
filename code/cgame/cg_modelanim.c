@@ -285,7 +285,7 @@ projection drifted off to the side and mis-scaled). bEnemy selects the swastika 
 ===============
 */
 /* iconType: 0 = allied star, 1 = axis swastika, 2 = officer eagle (Reichsadler),
- *           3 = surrendered German (star | eagle split diagonally) [user 2026-10-05] */
+ *           3 = surrendered German (star | Balkenkreuz badge, split diagonally) [user 2026-10-05] */
 static void CG_ActorOverheadIcon(refEntity_t *pModel, int iconType)
 {
     int         i, iTag;
@@ -3586,10 +3586,10 @@ void CG_ModelAnim(centity_t *cent, qboolean bDoShaderTime)
              * ever applied to map light entities otherwise - which can never carry
              * RF_COOP_BOSS, so this combination is unambiguous. Conversion removes the bit
              * and flips the team, after which the star draws through the normal path. */
-            /* [user 2026-10-05] now its OWN icon: the star and the German eagle split diagonally,
+            /* [user 2026-10-05] now its OWN icon: the star and a Balkenkreuz split diagonally,
              * "this one is surrendering" rather than "this one is ours" - he becomes ours when
              * recruited, which clears the bit and flips EF_AXIS, so the plain star takes over. */
-            iconType = 3; /* surrendered -> star|eagle split, despite EF_AXIS */
+            iconType = 3; /* surrendered -> star|cross badge, despite EF_AXIS */
         } else if (cent->currentState.eFlags & EF_AXIS) {
             iconType = 1; /* axis -> swastika */
         } else {

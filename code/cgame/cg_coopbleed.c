@@ -28,7 +28,8 @@ coop medkit HUD art (textures/hud/coop_medkit_icon.tga).
 
 qboolean CG_CoopAimPoint(float *pX, float *pY); // cg_drawtools.cpp - where the crosshair really is
 
-#define BLEED_FLARE_MS 520
+#define BLEED_FLARE_HOLD 300 // full-strength hold, then a quick fade - a 2-frame blink was missable
+#define BLEED_FLARE_MS 650
 
 typedef struct {
     int   num;
@@ -155,7 +156,7 @@ empty part opens at the top and sweeps clockwise.
 */
 static void CG_BleedRing(float cx, float cy, float r, float th, float rem, const vec4_t fill, float trackA)
 {
-    float step, a0, a, end;
+    float step, a0, a, end, ow;
     vec4_t col;
 
     if (r < 2.0f || th < 1.0f) {
@@ -164,6 +165,18 @@ static void CG_BleedRing(float cx, float cy, float r, float th, float rem, const
     step = (th * 0.55f) / r;
     if (step < 0.01f) {
         step = 0.01f;
+    }
+
+    // a 1 px dark outline under the whole ring: a thin white arc vanishes on snow without it
+    ow = th + 2.0f;
+    col[0] = col[1] = col[2] = 0.0f;
+    col[3] = (fill[3] > trackA ? fill[3] : trackA) * 0.55f;
+    if (col[3] > 0.003f) {
+        float so = (ow * 0.55f) / r;
+        cgi.R_SetColor(col);
+        for (a = 0.0f; a < 2.0f * (float)M_PI; a += so) {
+            cgi.R_DrawBox(cx + (float)sin(a) * r - ow * 0.5f, cy - (float)cos(a) * r - ow * 0.5f, ow, ow);
+        }
     }
 
     if (trackA > 0.003f) {
@@ -243,8 +256,14 @@ static void CG_BleedDrawSelf(float dt)
     pulse = 1.0f - depth * (0.5f + 0.5f * (float)sin(s_ringPhase));
 
     age = cg.time - s_selfFlareAt;
-    f   = (s_selfFlareAt && age >= 0 && age < BLEED_FLARE_MS) ? 1.0f - (float)age / (float)BLEED_FLARE_MS : 0.0f;
-    f   = f * f;
+    if (s_selfFlareAt && age >= 0 && age < BLEED_FLARE_HOLD) {
+        f = 1.0f;
+    } else if (s_selfFlareAt && age >= BLEED_FLARE_HOLD && age < BLEED_FLARE_MS) {
+        f = 1.0f - (float)(age - BLEED_FLARE_HOLD) / (float)(BLEED_FLARE_MS - BLEED_FLARE_HOLD);
+        f = f * f;
+    } else {
+        f = 0.0f;
+    }
 
     if (!CG_CoopAimPoint(&cx, &cy)) {
         cx = cgs.glconfig.vidWidth * 0.5f;
@@ -257,7 +276,7 @@ static void CG_BleedDrawSelf(float dt)
     }
     th  = (float)(int)(th + 0.5f);
     th2 = (int)(th + th * f + 0.5f);   // the flare thickens the stroke by whole pixels
-    r   = cgs.glconfig.vidHeight * 0.034f;
+    r   = cgs.glconfig.vidHeight * 0.040f;   // clear of the crosshair arms with a gap
     rr  = r * (1.0f + 0.16f * f);
 
     a = s_selfAppear * (pulse + (1.0f - pulse) * f);
