@@ -166,6 +166,27 @@ int CG_GetVMAnimPrefixIndex()
         szWeaponName = szSkinBase;
     }
 
+    // HZM coop [reload audit phase B] TEST-ONLY: coop_vmPrefixTest "<weapon name>=<prefix>" swaps one gun's
+    // whole first-person prefix for a slot-run comparison. Default empty = off.
+    {
+        static cvar_t *pPrefixTest = NULL;
+        const char    *eq;
+        int            k;
+
+        if (!pPrefixTest) {
+            pPrefixTest = cgi.Cvar_Get("coop_vmPrefixTest", "", 0);
+        }
+        eq = pPrefixTest->string[0] ? strchr(pPrefixTest->string, '=') : NULL;
+        if (eq && (int)(eq - pPrefixTest->string) == (int)strlen(szWeaponName)
+            && !Q_stricmpn(pPrefixTest->string, szWeaponName, (int)(eq - pPrefixTest->string))) {
+            for (k = 1; k < (int)(sizeof(AnimPrefixList) / sizeof(AnimPrefixList[0])); k++) {
+                if (AnimPrefixList[k] && !Q_stricmp(AnimPrefixList[k], eq + 1)) {
+                    return k;
+                }
+            }
+        }
+    }
+
     if (iWeaponClass & WEAPON_CLASS_ANY_ITEM) {
         if (!Q_stricmp(szWeaponName, "Papers")) {
             return WPREFIX_PAPERS;
@@ -211,6 +232,11 @@ int CG_GetVMAnimPrefixIndex()
         //
         if (!Q_stricmp(szWeaponName, "S&W M10 .38")) {
             return WPREFIX_M10;
+        }
+        // HZM coop [reload audit phase B] the renamed colt45_colt1911w.tik is a Webley break-top mesh (the pack
+        // ships webley_* world anims for it): it takes the Webley's hands, and its torso is RELOAD_WEBLEY.
+        if (!Q_stricmp(szWeaponName, "Webley Mk VI")) {
+            return WPREFIX_WEBLEY;
         }
 
         return WPREFIX_COLT45;
@@ -624,6 +650,60 @@ static float CoopVMCrossblend(dtiki_t *pTiki, int index)
     return authored;
 }
 
+// HZM coop [reload audit phase B] "Mosin-Nagant Sniper" -> "mosin_nagant_sniper"
+static void CoopWeaponKey(const char *name, char *out, int outSize)
+{
+    int n = 0, gap = 0;
+
+    for (; *name && n < outSize - 1; name++) {
+        char c = *name;
+        if (c >= 'A' && c <= 'Z') {
+            c = c - 'A' + 'a';
+        }
+        if ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')) {
+            if (gap && n > 0 && n < outSize - 2) {
+                out[n++] = '_';
+            }
+            out[n++] = c;
+            gap      = 0;
+        } else {
+            gap = 1;
+        }
+    }
+    out[n] = 0;
+}
+
+// HZM coop [reload audit phase B] exact weapon name first, then the "(Finish)"-stripped base
+static void CoopPerWeaponReloadAnim(dtiki_t *pTiki, const char *suffix, char *anim, int animSize)
+{
+    const char *wpn;
+    char        base[64], key[64], tryName[MAX_QPATH];
+    int         pass;
+
+    if (!pTiki || !cg.snap || cg.snap->ps.activeItems[1] < 0) {
+        return;
+    }
+    wpn = CG_ConfigString(CS_WEAPONS + cg.snap->ps.activeItems[1]);
+    if (!wpn || !*wpn) {
+        return;
+    }
+    for (pass = 0; pass < 2; pass++) {
+        if (pass == 0) {
+            CoopWeaponKey(wpn, key, sizeof(key));
+        } else {
+            if (!CoopStripSkinSuffix(wpn, base, sizeof(base))) {
+                return;
+            }
+            CoopWeaponKey(base, key, sizeof(key));
+        }
+        Com_sprintf(tryName, sizeof(tryName), "coopr_%s_%s", key, suffix);
+        if (cgi.Anim_NumForName(pTiki, tryName) != -1) {
+            Q_strncpyz(anim, tryName, animSize);
+            return;
+        }
+    }
+}
+
 void CG_ViewModelAnimation(refEntity_t *pModel)
 {
     int         i;
@@ -853,6 +933,12 @@ void CG_ViewModelAnimation(refEntity_t *pModel)
         }
 
         Com_sprintf(szAnimName, sizeof(szAnimName), "%s_%s", AnimPrefixList[iAnimPrefixIndex], pszAnimSuffix);
+        // HZM coop [reload audit phase B] per-weapon reload clip (apply_reloadclips.py): coopr_<weapon key>_<suffix>
+        // wins when the hands tiki has it - lets one gun of a shared prefix get the reload that fits ITS feed.
+        if (cgi.anim->g_iLastVMAnim == VM_ANIM_RELOAD || cgi.anim->g_iLastVMAnim == VM_ANIM_RELOAD_SINGLE
+            || cgi.anim->g_iLastVMAnim == VM_ANIM_RELOAD_END) {
+            CoopPerWeaponReloadAnim(pTiki, pszAnimSuffix, szAnimName, sizeof(szAnimName));
+        }
         // HZM coop [adsanim 2026-10-04 / adsbolt] AIMED BOLT: a reload or bolt that starts while aiming plays the
         // gun's dedicated `<prefix>_<suffix>_ads` clip when fps_anims defines one (hand-keyed to start and end in
         // the `charge` aim pose with the cheek near the stock), and the slot is flagged as an aim pose below so the
