@@ -715,10 +715,19 @@ static void CoopPropLandSound(Entity *self, const char *szFamily)
 void CoopMagObject::CoopMagStop(Event *ev)
 {
     static cvar_t *pSurf = NULL;
+    static cvar_t *pFlat = NULL;
 
     avelocity = vec_zero;
     angles.x  = 0;
     angles.z  = 0;
+    // HZM coop [reload audit phase B] magazine rest: pitch 0 / roll 0 is the in-the-well pose (long axis up), so the
+    // magazine stood on its end on the floor. Lie it on a random side; coop_magRestFlat 0 = the old upright rest.
+    if (!pFlat) {
+        pFlat = gi.Cvar_Get("coop_magRestFlat", "1", CVAR_ARCHIVE);
+    }
+    if (pFlat->integer) {
+        angles.z = (G_Random() < 0.5f) ? 90.0f : -90.0f;
+    }
     setAngles(angles);
     setMoveType(MOVETYPE_NONE);
 
