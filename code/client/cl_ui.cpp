@@ -5107,6 +5107,9 @@ centred and aspect-correct at 1024/1440 of the screen height (1:1 at 1440p), cla
 */
 static int s_memorialSkipAt; // cls.realtime from which a key/click may skip
 static int s_memorialT0;     // cls.realtime when it started (the ^~^~^ MEMORIAL at= offsets)
+// [user 2026-10-05] "can we use the same logo anim we have for loadscreen?" - the looping old<->new medal
+// (scripts/coop_loadmorph.shader hzmLoadMedalMorph) under the memorial art, fading with it. NULL = no art, no logo.
+static UIReggedMaterial *s_memorialLogo;
 
 static void UI_MemorialPhase(int stage, float alphaStart, float alphaEnd, int ms)
 {
@@ -5170,6 +5173,8 @@ static qboolean UI_MemorialStart(void)
         Com_Printf("^~^~^ MEMORIAL none (no hzmMemorial art in this install) - straight to the menu\n");
         return qfalse;
     }
+
+    s_memorialLogo = uWinMan.RegisterShader("hzmLoadMedalMorph");
 
     UI_MemorialTimes(&fin, &hold, &fout);
     IN_MouseOff(); // no GUI pointer on the black screen; clicks still arrive as keys (UI_StartStageKeyEvent)
@@ -5243,6 +5248,16 @@ static void UI_MemorialDraw(void)
         re.SetColor(color);
         re.DrawStretchPic((swidth - w) * 0.5f, (sheight - h) * 0.5f, w, h, 0.0, 0.0, 1.0, 1.0,
                           intro_stage.material->GetMaterial());
+
+        // the loading screen's medal, same size relative to the screen height (ui/loadingbar.txt: 53.43 of 480),
+        // centred in the black band under the art. Its stages carry their own alphaGen, so the fade rides on rgb
+        // (on black that reads exactly as the art's fade).
+        if (s_memorialLogo && s_memorialLogo->GetMaterial()) {
+            const float s    = sheight * (53.43f / 480.0f);
+            const float band = (sheight - h) * 0.5f;
+            const float y    = (sheight + h) * 0.5f + (band > s ? (band - s) * 0.5f : 0.0f);
+            re.DrawStretchPic((swidth - s) * 0.5f, y, s, s, 0.0, 0.0, 1.0, 1.0, s_memorialLogo->GetMaterial());
+        }
         re.SetColor(NULL);
     }
 
