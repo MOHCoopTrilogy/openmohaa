@@ -506,7 +506,8 @@ static int CoopVMAnimIsAim(int a)
 // on the gun it was authored on and its re-skins (same sight geometry = same mesh). Prefixes not listed: no guard.
 static qboolean CoopAdsClipFitsHeldGun(const char *prefix)
 {
-    static const char *kAuthored[][2] = {{"kar98", "Mauser KAR 98K"}};
+    static const char *kAuthored[][2] = {{"kar98", "Mauser KAR 98K"}, {"springfield", "Springfield M1903"},
+                                         {"mosin", "Mosin Nagant Rifle"}, {"enfield", "Lee-Enfield"}};
     int i;
 
     if (!cg.snap || cg.snap->ps.activeItems[1] < 0) {
