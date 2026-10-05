@@ -2532,7 +2532,23 @@ Event EV_ScriptSimpleStrafingGunfire_ProjectileModel
     EV_NORMAL
 );
 
+// HZM coop [bug-3360/bug-3416] a gun a script pins on an ACTOR (officer.scr prone shooter, anim/corner*.scr
+// corner grenade) owned its own shots: the gun is not a Sentient, so Sentient::ArmorDamage's same-team filter
+// never applied, and the projectile only skipped the gun, so rounds starting inside the carrier's box hit him
+// and his squad. coop_carrier hands ownership to the carrier: the projectile ignores him (ownerNum) and his
+// damage is attributed to him, so the normal team rules apply. Unset = stock behaviour (planes, map scripts, MP).
+Event EV_ScriptSimpleStrafingGunfire_HzmCarrier
+(
+    "coop_carrier",
+    EV_DEFAULT,
+    "e",
+    "carrier",
+    "HZM coop: fire this gun's projectiles as if the carrier entity fired them (owner/attacker = carrier).",
+    EV_NORMAL
+);
+
 CLASS_DECLARATION(ScriptSlave, ScriptSimpleStrafingGunfire, "script_simplestrafinggunfire") {
+    {&EV_ScriptSimpleStrafingGunfire_HzmCarrier,      &ScriptSimpleStrafingGunfire::HzmSetCarrier     },
     {&EV_ScriptSimpleStrafingGunfire_On,              &ScriptSimpleStrafingGunfire::GunOn             },
     {&EV_ScriptSimpleStrafingGunfire_Off,             &ScriptSimpleStrafingGunfire::GunOff            },
     {&EV_ScriptSimpleStrafingGunfire_Fire,            &ScriptSimpleStrafingGunfire::GunFire           },
@@ -2565,6 +2581,21 @@ ScriptSimpleStrafingGunfire::ScriptSimpleStrafingGunfire()
     projectileModel = "models/projectiles/stukaround.tik";
 }
 
+// HZM coop [bug-3360]
+void ScriptSimpleStrafingGunfire::HzmSetCarrier(Event *ev)
+{
+    m_pHzmCarrier = ev->GetEntity(1);
+}
+
+// HZM coop [bug-3360] who fires: the carrier while he exists, else the gun itself (stock).
+Entity *ScriptSimpleStrafingGunfire::HzmShotOwner()
+{
+    if (m_pHzmCarrier) {
+        return m_pHzmCarrier;
+    }
+    return this;
+}
+
 void ScriptSimpleStrafingGunfire::GunOn(Event *ev)
 {
     isOn = true;
@@ -2595,7 +2626,7 @@ void ScriptSimpleStrafingGunfire::GunFire(Event *ev)
     dir += up * grandom() * spread.y;
     dir.normalize();
 
-    ProjectileAttack(origin, dir, this, projectileModel, 1, 0, NULL);
+    ProjectileAttack(origin, dir, HzmShotOwner(), projectileModel, 1, 0, NULL); // HZM coop [bug-3360]
     // continue firing
     PostEvent(EV_ScriptSimpleStrafingGunfire_Fire, fireDelay);
 }
@@ -2659,7 +2690,7 @@ void ScriptAimedStrafingGunfire::GunFire(Event *ev)
     dir += up * grandom() * spread.y;
     dir.normalize();
 
-    ProjectileAttack(origin, dir, this, projectileModel, 1, 0, NULL);
+    ProjectileAttack(origin, dir, HzmShotOwner(), projectileModel, 1, 0, NULL); // HZM coop [bug-3360]
     // continue firing
     PostEvent(EV_ScriptSimpleStrafingGunfire_Fire, fireDelay);
 }
