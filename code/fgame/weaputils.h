@@ -294,6 +294,9 @@ void ExplosionAttack
 	bool			hurtOwnerOnly = false
 );
 
+// HZM coop [aircraft 2026-10-05] scriptslave.cpp
+void G_HZM_AircraftBulletHits(const Vector& start, const Vector& dir, float range, float damage, int count,
+                              int dflags, int meansofdeath, Entity *owner, Weapon *weap);
 float BulletAttack
 	(
 	Vector   start,

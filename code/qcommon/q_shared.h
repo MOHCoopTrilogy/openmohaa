@@ -2165,6 +2165,9 @@ typedef struct usercmd_s {
 #define RF_LIGHTSTYLE_DLIGHT	(1<<23)		// this entity has a dynamic light that uses a light style
 #define RF_SHADOW_PRECISE		(1<<24)		// this entity can have a precise shadow applied to it
 #define RF_INVISIBLE			(1<<25)		// This entity is invisible, and only negative lights will light it up
+// HZM coop [aircraft 2026-10-05] entityState.loopSoundFlags bit: this entity is a coop aircraft (cgame Doppler +
+// fog see-through). Never passed on to the sound system (cg_modelanim.c masks it).
+#define LOOPSOUND_FLAG_HZM_AIRCRAFT 2
 #define RF_ALWAYSDRAW			(1<<26)		// This entity is invisible, and only negative lights will light it up
 #define RF_COOP_BOSS			(1<<27)		// HZM coop: mark officer/bodyguard/wave actors for boss icon
 #define RF_PRECISESHADOW		(1<<28)		// This entity is invisible, and only negative lights will light it up
@@ -2291,7 +2294,7 @@ typedef struct entityState_s {
 	float	loopSoundMinDist;
 	float	loopSoundMaxDist;
 	float	loopSoundPitch;
-	int		loopSoundFlags;
+	int		loopSoundFlags;	// bit 1 = LOOPSOUND_FLAG_NO_PAN, bit 2 = LOOPSOUND_FLAG_HZM_AIRCRAFT
 
 	int		parent;
 	int		tag_num;

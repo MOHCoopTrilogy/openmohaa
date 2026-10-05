@@ -144,6 +144,12 @@ protected:
     void TriggerFunc(Event *ev);
     void UseFunc(Event *ev);
     void DamageFunc(Event *ev);
+    // HZM coop [aircraft 2026-10-05] coop call-in aircraft (coop_mod/aircraft.scr)
+    float m_fHzmAirRadius = 0;  // > 0: shootable, damage sphere radius
+    float m_fHzmAirHp     = 0;
+    void  EventHzmAircraft(Event *ev);
+    void  EventHzmAirThink(Event *ev);
+    void  HzmAircraftDamage(Event *ev);
     void SetDamage(Event *ev);
     void SetMeansOfDeath(Event *ev);
     void FollowPath(Event *ev);

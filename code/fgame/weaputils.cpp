@@ -2616,6 +2616,10 @@ float BulletAttack(
     lastSurfaceFlags = 0;
     iNumHit          = 0;
 
+    // HZM coop [aircraft 2026-10-05] shootable coop aircraft: a ray-vs-sphere test that does not stop at the sky
+    // brush and does not depend on the scaled-down model's tiny link box (scriptslave.cpp).
+    G_HZM_AircraftBulletHits(start, dir, range, damage, count, dflags, meansofdeath, owner, weap);
+
     // HZM coop [user 2026-08-25] PLAYER SUPPRESSION - the inverse of the block below. An ENEMY round
     // cracking past a player feeds that player's server-side stress, which now widens their weapon
     // spread (Player::TickCoopStress / coop_stressSpread). Until this, stress moved the view weapon and

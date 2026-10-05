@@ -2621,6 +2621,10 @@ static qboolean CoopFpBodyBuild(centity_t *cent, const refEntity_t *pModel, refE
     return qtrue;
 }
 
+// HZM coop [aircraft 2026-10-05] cg_hzm_aircraft.c
+float CG_HZM_AircraftPitch(const centity_t *cent, float fPitch);
+void  CG_HZM_AircraftView(const centity_t *cent, refEntity_t *model);
+
 void CG_ModelAnim(centity_t *cent, qboolean bDoShaderTime)
 {
     entityState_t *s1;
@@ -2746,8 +2750,8 @@ void CG_ModelAnim(centity_t *cent, qboolean bDoShaderTime)
             s1->loopSoundVolume,
             s1->loopSoundMinDist,
             s1->loopSoundMaxDist,
-            s1->loopSoundPitch,
-            s1->loopSoundFlags
+            CG_HZM_AircraftPitch(cent, s1->loopSoundPitch), // HZM coop [aircraft] Doppler
+            s1->loopSoundFlags & ~LOOPSOUND_FLAG_HZM_AIRCRAFT
         );
     }
 
@@ -4008,6 +4012,7 @@ void CG_ModelAnim(centity_t *cent, qboolean bDoShaderTime)
                 }
             }
         }
+        CG_HZM_AircraftView(cent, &model); // HZM coop [aircraft 2026-10-05] fog see-through, debug log
         cgi.R_AddRefEntityToScene(&model, s1->parent);
 
         // HZM coop [bug-2569] THE BODY COPIES GO IN AFTER THE RIG, AND ONLY WITH IT. RE_GetRenderEntity returns the FIRST

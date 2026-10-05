@@ -3345,7 +3345,9 @@ void Entity::LoopSound(str sound_name, float volume, float min_dist, float max_d
             edict->s.loopSoundPitch   = pitch < 0 ? (aliaspitch) : (aliaspitch * pitch);
 
             // Local sound will always be heard
-            edict->s.loopSoundFlags = aliaschannel == CHAN_LOCAL;
+            // HZM coop [aircraft 2026-10-05] keep LOOPSOUND_FLAG_HZM_AIRCRAFT; only bit 1 is the alias channel
+            edict->s.loopSoundFlags = (edict->s.loopSoundFlags & LOOPSOUND_FLAG_HZM_AIRCRAFT)
+                                    | ((aliaschannel == CHAN_LOCAL) ? 1 : 0);
         } else {
             gi.DPrintf(
                 "ERROR: Entity::LoopSound: %s needs an alias in ubersound.scr or uberdialog.scr - Please fix.\n",
