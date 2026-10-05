@@ -1533,6 +1533,16 @@ void CG_DrawCrosshair()
         return;
     }
 
+    // HZM coop [user 2026-10-05] "when gun is mounted crosshair needs to be turned off". Once the
+    // brace has engaged (envelope past half - the same point the gun visibly settles into the rest)
+    // the crosshair goes; the brace pip stays as the "you are braced" indicator.
+    {
+        extern float CG_CoopBrace(void);
+        if (CG_CoopBrace() > 0.5f) {
+            return;
+        }
+    }
+
     // HZM coop [237] - the free-cam capture-hide that lived here was REMOVED: the user wants the
     // crosshair IN free cam too. The 3P true-aim projection below draws it where the gun actually
     // points (not screen center), so it stays truthful while the camera orbits freely.
