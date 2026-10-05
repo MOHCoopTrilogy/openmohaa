@@ -1947,6 +1947,89 @@ static void UI_ApplyHudFadeAlpha(void)
     }
 }
 
+// HZM coop [srvperf 2026-10-04] "update available" line on the main menu.
+// updater.ps1 writes the newest release version it has SEEN (plain text, e.g. "1.10.13") to
+// <fs_homepath>/maintt/coop_latest_seen.txt - a LOCAL file: the game makes no network call for this. It is read once,
+// then compared against coop_modVersion (set by the mod's ui/coop_version.cfg via autoexec) whenever that cvar
+// changes; coop_updateNotice is the text ui/main.urc's updateNotice label shows ("" draws nothing). Comparing against
+// the RUNNING mod (not the updater's installed manifest) keeps a dev deploy newer than the release quiet. Each half is
+// inert alone: an older exe never opens the file, an older updater never writes it, an older mod has no label.
+static int UI_HzmVerCmp(const char *a, const char *b)
+{
+    for (int i = 0; i < 4; i++) {
+        int va = 0, vb = 0;
+
+        while (*a && (*a < '0' || *a > '9')) {
+            a++;
+        }
+        while (*b && (*b < '0' || *b > '9')) {
+            b++;
+        }
+        while (*a >= '0' && *a <= '9') {
+            va = va * 10 + (*a++ - '0');
+            if (va > 99999) {
+                va = 99999;
+            }
+        }
+        while (*b >= '0' && *b <= '9') {
+            vb = vb * 10 + (*b++ - '0');
+            if (vb > 99999) {
+                vb = 99999;
+            }
+        }
+        if (va != vb) {
+            return va > vb ? 1 : -1;
+        }
+    }
+    return 0;
+}
+
+static void UI_HzmUpdateNotice(void)
+{
+    static qboolean read    = qfalse;
+    static int      lastMod = -1;
+    static char     latest[16];
+    static cvar_t  *modVer;
+
+    if (!read) {
+        void *buf = NULL;
+        int   len;
+
+        read      = qtrue;
+        latest[0] = 0;
+        modVer    = Cvar_Get("coop_modVersion", "", 0);
+        Cvar_Get("coop_updateNotice", "", 0);
+        len = FS_ReadFileEx("coop_latest_seen.txt", &buf, qtrue);
+        if (len > 0 && buf) {
+            // digits and dots only, leading digit, at most 15 chars - anything else leaves the notice off
+            const char *s = (const char *)buf;
+            int         n = 0;
+
+            while (n < len && n < (int)sizeof(latest) - 1 && ((s[n] >= '0' && s[n] <= '9') || s[n] == '.')) {
+                latest[n] = s[n];
+                n++;
+            }
+            latest[n] = 0;
+            if (!(latest[0] >= '0' && latest[0] <= '9') || (n < len && s[n] != '\r' && s[n] != '\n' && s[n] != ' ')) {
+                latest[0] = 0;
+            }
+        }
+        if (buf) {
+            FS_FreeFile(buf);
+        }
+    }
+
+    if (!latest[0] || !modVer || modVer->modificationCount == lastMod) {
+        return;
+    }
+    lastMod = modVer->modificationCount;
+    if (modVer->string[0] && UI_HzmVerCmp(latest, modVer->string) > 0) {
+        Cvar_Set("coop_updateNotice", va("Update v%s available - restart via the MOH Coop Trilogy shortcut", latest));
+    } else {
+        Cvar_Set("coop_updateNotice", "");
+    }
+}
+
 void UI_Update(void)
 {
     Menu    *currentMenu;
@@ -1955,6 +2038,7 @@ void UI_Update(void)
     re.SetRenderTime(cls.realtime);
     CL_FillUIDef();
     uWinMan.ServiceEvents();
+    UI_HzmUpdateNotice(); // HZM coop - "update available" line (local file, see above)
 
     // HZM coop [user 2026-09-13] top compass bar: when cgame changes the band, re-apply the gmbox and DM box
     // frames the way UI_ResolutionChange does, so the bar toggles live without a vid_restart. Nothing runs
