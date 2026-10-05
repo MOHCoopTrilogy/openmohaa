@@ -85,6 +85,7 @@ hzmBindFragDataLocation_t           qglBindFragDataLocation;
 
 cvar_t *r_msaaOverride;
 cvar_t *r_msaaBypass;
+cvar_t *r_msaa;   // P6.1 flip: the player's setting (ARCHIVE, -1 Auto), owned by the Advanced Graphics row
 cvar_t *r_alphaToCoverage;
 cvar_t *r_msaaCentroid;
 cvar_t *r_msaaShadowMatch;
@@ -109,6 +110,7 @@ const char *const hzmMsaaInitReadCvars[] = {
 	"r_shadowFboDummy",   // P1b, read at FBO_Init
 	"r_shadowHarden",     // P1a, read at FBO_Init (the clears) as well as per frame
 	"r_msaaCentroid",     // P4b, a GLSL define
+	"r_msaa",             // P6.1 flip: the player's setting, read at R_Init
 	NULL
 };
 
@@ -119,10 +121,10 @@ static const struct {
 } s_msaaSwitches[] = {
 	{ "r_msaaOverride",    ""  },
 	{ "r_msaaBypass",      "0" },
-	{ "r_shadowStable",    "0" },
-	{ "r_shadowHarden",    "0" },
-	{ "r_shadowFboDummy",  "1" },
-	{ "r_alphaToCoverage", "1" },
+	{ "r_shadowStable",    "1" },   // P6.1 flip
+	{ "r_shadowHarden",    "1" },   // P6.1 flip
+	{ "r_shadowFboDummy",  "0" },   // P6.1 flip
+	{ "r_alphaToCoverage", "0" },   // flip 2026-10-04: OFF - A2C draws white foliage streaks at 8x (bug-3344)
 	{ "r_msaaCentroid",    "1" },
 	{ "r_msaaShadowMatch", "1" },
 	{ "r_hzmPshadowCharGate",  "-1" },   // P3 E1 (bug-3009)
@@ -151,6 +153,9 @@ void R_Msaa_Register(void)
 
 	r_msaaOverride            = ri.Cvar_Get("r_msaaOverride", "", 0);
 	r_msaaBypass              = ri.Cvar_Get("r_msaaBypass", "0", 0);
+	// P6.1 flip (MH-C1 / V3-C2): born here, ARCHIVE because a menu row owns it, decided at every R_Init and NEVER
+	// written back. r_msaaOverride "" now means this; "legacy" is the diagnostic path to today's pipeline.
+	r_msaa                    = ri.Cvar_Get("r_msaa", "-1", CVAR_ARCHIVE);
 	r_msaaAutoDebugVramMB     = ri.Cvar_Get("r_msaaAutoDebugVramMB", "0", 0);
 	r_msaaAutoDebugIntel      = ri.Cvar_Get("r_msaaAutoDebugIntel", "0", 0);
 	r_msaaAutoDebugMaxSamples = ri.Cvar_Get("r_msaaAutoDebugMaxSamples", "0", 0);
@@ -177,7 +182,7 @@ void R_Msaa_Register(void)
 	}
 
 	// P4 (registered with their defaults by the loop above)
-	r_alphaToCoverage = ri.Cvar_Get("r_alphaToCoverage", "1", 0);
+	r_alphaToCoverage = ri.Cvar_Get("r_alphaToCoverage", "0", 0);   // bug-3344
 	r_msaaCentroid    = ri.Cvar_Get("r_msaaCentroid", "1", 0);
 	r_msaaShadowMatch = ri.Cvar_Get("r_msaaShadowMatch", "1", 0);
 }
@@ -318,6 +323,18 @@ static qboolean R_MsaaParseSetting(const char *s, int *want, qboolean warn)
 	return qtrue;
 }
 
+// P6.1 flip: r_msaaOverride wins when set ("legacy" = today's pipeline, an integer = that setting); "" = r_msaa
+static const char *R_MsaaSettingString(void)
+{
+	const char *o = r_msaaOverride ? r_msaaOverride->string : "";
+
+	if (!o[0] && r_msaa)
+	{
+		return r_msaa->string[0] ? r_msaa->string : "-1";
+	}
+	return o;
+}
+
 /*
 =================
 R_MsaaNewPathRequested - from cvars only (InitOpenGL asks before the window, and so the context, exists)
@@ -327,7 +344,7 @@ qboolean R_MsaaNewPathRequested(void)
 {
 	int want;
 
-	return R_MsaaParseSetting(r_msaaOverride ? r_msaaOverride->string : "", &want, qfalse);
+	return R_MsaaParseSetting(R_MsaaSettingString(), &want, qfalse);
 }
 
 // the dedicated VRAM, cached in ROM r_gpuVramMB once per process (the cvar outlives the DLL). -1 = unknown.
@@ -407,12 +424,12 @@ void R_DecideMsaa(void)
 	tr.displaySplit     = qfalse;
 	tr.msaaBypassActive = qfalse;
 
-	Q_strncpyz(s_ms.setting, r_msaaOverride->string, sizeof(s_ms.setting));
+	Q_strncpyz(s_ms.setting, R_MsaaSettingString(), sizeof(s_ms.setting));
 	s_ms.vramMB = -1;
 
 	if (!R_MsaaParseSetting(s_ms.setting, &s_ms.want, qtrue))
 	{
-		R_MsaaReason(s_ms.setting[0] ? "override-legacy" : "pre-flip-default");
+		R_MsaaReason(s_ms.setting[0] ? "override-legacy" : "no-setting");
 		return;   // today's pipeline: FBO_Init's legacy branch decides everything, exactly as before
 	}
 	tr.msaaNewPath = qtrue;

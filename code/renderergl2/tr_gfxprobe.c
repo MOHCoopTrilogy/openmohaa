@@ -33,7 +33,7 @@ r_gfxLabel 1 draws the A/B label (AA / SHADOWS / fps vs the real cap) last in th
 #endif
 
 // Read by publish_release.ps1 / build.ps1 (plan section 3.5). It stays "legacy" until the flip commit.
-const char hzmGfxDefaultsMarker[] = "HZM_GFX_DEFAULTS=legacy";
+const char hzmGfxDefaultsMarker[] = "HZM_GFX_DEFAULTS=flip";   // P6.1 flip commit (publish guard + pairing check)
 
 extern int TIKI_Skel_Bones_Index;
 
@@ -513,8 +513,8 @@ void R_GfxProbe_Register(void)
 	r_shadowFitYaw    = ri.Cvar_Get("r_shadowFitYaw", "0", 0);
 	r_shadowFitOffset = ri.Cvar_Get("r_shadowFitOffset", "0", 0);
 	// plan P1a/P1b switches. flags 0 (never archived - T7), defaults = today's behaviour until the flip.
-	r_shadowHarden    = ri.Cvar_Get("r_shadowHarden", "0", 0);
-	r_shadowFboDummy  = ri.Cvar_Get("r_shadowFboDummy", "1", 0);
+	r_shadowHarden    = ri.Cvar_Get("r_shadowHarden", "1", 0);     // P6.1 flip (was 0)
+	r_shadowFboDummy  = ri.Cvar_Get("r_shadowFboDummy", "0", 0);   // P6.1 flip (was 1); Intel keeps them regardless
 	ri.Cvar_Get("r_displayHz", "0", CVAR_ROM);
 	ri.Cvar_Get("r_vsyncActive", "0", CVAR_ROM);
 

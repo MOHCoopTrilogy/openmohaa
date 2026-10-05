@@ -54,7 +54,7 @@ cvar_t *r_hzmPshadowCharGate;
 typedef struct {
 	int              serial;          // bumped by every world load
 	qboolean         haveWorld;       // R_SunStable_WorldLoaded ran for the current world
-	qboolean         protectedMap;    // Q5: Omaha stays exactly as today (m3l1a, m3l1b)
+	qboolean         protectedMap;    // Q5: Omaha stays exactly as today (m3l1a m3l1b e3l1 e3l2 obj_team3)
 	float            farplane;        // worldspawn farplane (0 = none), latched at load (SH#2)
 	float            fDist;           // f = min(r_shadowDistance, farplane > 0)
 	float            radius[3];
@@ -98,7 +98,7 @@ registration (every R_Init)
 void R_SunStable_Register(void)
 {
 	// the switch. flags 0 (never archived, T7). Its default flips only in the P6 flip commit.
-	r_shadowStable        = ri.Cvar_Get("r_shadowStable", "0", 0);
+	r_shadowStable        = ri.Cvar_Get("r_shadowStable", "1", 0);   // P6.1 flip (was 0); B0 is part of it (route 1)
 	// knobs (flags 0, plan P3)
 	r_shadowDistance      = ri.Cvar_Get("r_shadowDistance", "2048", 0);
 	r_shadowSplitLambda   = ri.Cvar_Get("r_shadowSplitLambda", "0.85", 0);
@@ -317,7 +317,21 @@ void R_SunStable_WorldLoaded(const char *name)
 	}
 
 	COM_StripExtension(COM_SkipPath((char *)name), base, sizeof(base));
-	ss.protectedMap = (qboolean)(!Q_stricmp(base, "m3l1a") || !Q_stricmp(base, "m3l1b"));
+	// Omaha = the same five maps ground variety excludes (tr_hzm_groundvar.c R_HZM_GroundVarOmahaMap), as the BSP base
+	// name or a suffixed copy (m3l1a_sml); 2026-10-04 was m3l1a/m3l1b only
+	{
+		static const char *const omaha[] = { "m3l1a", "m3l1b", "e3l1", "e3l2", "obj_team3" };
+		size_t len = strlen(base), n;
+		int    k;
+
+		ss.protectedMap = qfalse;
+		for (k = 0; k < (int)(sizeof(omaha) / sizeof(omaha[0])); k++) {
+			n = strlen(omaha[k]);
+			if (len >= n && !Q_stricmpn(base, omaha[k], (int)n) && (len == n || base[n] == '_' || base[n] == '.')) {
+				ss.protectedMap = qtrue;
+			}
+		}
+	}
 
 	R_SunStable_ParseFarplane();
 	R_SunStable_BuildTerrainProxy();
