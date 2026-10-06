@@ -633,6 +633,7 @@ Projectile::Projectile()
     remove_when_stopped  = false;
     m_bExplodeOnTouch    = false;
     m_bHurtOwnerOnly     = false;
+    m_bHzmSpareOwner     = false; // HZM coop [bug-3416]
     m_iSmashThroughGlass = 0;
     takedamage           = DAMAGE_NO;
     owner                = ENTITYNUM_NONE;
@@ -917,7 +918,10 @@ void Projectile::Explode(Event *ev)
         }
         v = origin;
 
+        // HZM coop [bug-3416] a carried script gun's round spares its carrier (ExplosionAttack -> RadiusDamage is synchronous)
+        g_pHzmSpareSplash = (m_bHzmSpareOwner && owner != world) ? owner : NULL;
         ExplosionAttack(v, owner, explosionmodel, dir, ignoreEnt, 1.0f, weap, m_bHurtOwnerOnly);
+        g_pHzmSpareSplash = NULL;
     }
     g_iBotNadeDetId = 0;
 
@@ -3710,6 +3714,8 @@ static int radiusdamage_compare(const void *elem1, const void *elem2)
     }
 }
 
+Entity *g_pHzmSpareSplash = NULL; // HZM coop [bug-3416] see weaputils.h
+
 void RadiusDamage(
     Vector   origin,
     Entity  *inflictor,
@@ -3829,6 +3835,9 @@ void RadiusDamage(
         ent = ents.ObjectAt(i);
 
         if (ent == ignore || !(ent->takedamage) || (hurtOwnerOnly && ent != attacker)) {
+            continue;
+        }
+        if (g_pHzmSpareSplash && ent == g_pHzmSpareSplash) { // HZM coop [bug-3416] carried gun: spare the carrier
             continue;
         }
 

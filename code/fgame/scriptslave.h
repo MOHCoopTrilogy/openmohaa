@@ -324,6 +324,7 @@ protected:
     // HZM coop [bug-3360] the actor that carries this gun (coop_carrier). NULL = the gun owns its shots (stock).
     // Not archived: after a load it is NULL and the gun falls back to stock ownership.
     SafePtr<Entity> m_pHzmCarrier;
+    bool            m_bHzmHasCarrier; // set once coop_carrier was given: a vanished/dead carrier then stops the gun
 
 public:
     CLASS_PROTOTYPE(ScriptSimpleStrafingGunfire);
@@ -335,6 +336,7 @@ public:
 protected:
     void    GunFire(Event *ev);
     Entity *HzmShotOwner(); // HZM coop [bug-3360] the carrier if one is set, else this gun
+    bool    HzmCarrierGone(); // HZM coop [bug-3416] carried gun whose carrier was removed or died
 
 private:
     void HzmSetCarrier(Event *ev); // HZM coop [bug-3360]

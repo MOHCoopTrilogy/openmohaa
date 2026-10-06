@@ -81,6 +81,7 @@ public:
 	bool remove_when_stopped;
 	bool m_bExplodeOnTouch;
 	bool m_bHurtOwnerOnly;
+	bool m_bHzmSpareOwner; // HZM coop [bug-3416] fired by a carried script gun: the splash never hurts the carrier
 	int m_iSmashThroughGlass;
 	// Added in 2.0
 	bool m_bArcToTarget;
@@ -384,3 +385,5 @@ void PlaceLandmine(const Vector& origin, Entity* owner, const str& model, Weapon
 void       BotNadeOnSpawn(Projectile *proj, Entity *owner, Weapon *weap, float fraction, float life, const char *how);
 void       BotNadeOnExplode(Projectile *proj);
 extern int g_iBotNadeDetId;
+// HZM coop [bug-3416] the owner a running ExplosionAttack must not damage (a carried script gun's carrier), else NULL
+extern Entity *g_pHzmSpareSplash;
