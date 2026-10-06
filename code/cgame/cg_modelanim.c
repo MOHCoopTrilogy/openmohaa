@@ -1390,6 +1390,8 @@ static const char *const s_adsDonor[][2] = {
     {"Gewehrgranate", "Mauser KAR 98K"  }, // kar98 body with a launcher cup
     {"Mauser C96",    "Luger P08"       }, // German pistol
     {"S&W M10 .38",   "Webley Revolver" }, // top-break-style revolver sight picture
+    {"Lewis Gun",     "BAR"             }, // renamed from "BAR (M1918 WWI)" (reload audit 2026-10-05) - keeps its tune
+    {"Webley Mk VI",  "Colt 45"         }, // renamed from "Colt 45 (M1911 WWI)" - keeps its tune
 };
 
 static float s_fAdsPose = 0.0f; // eased ADS pose factor (0 = hip, 1 = full sight alignment)
