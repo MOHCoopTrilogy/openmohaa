@@ -2607,6 +2607,7 @@ typedef struct {
 	shaderProgram_t lowHealthShader;    // HZM gl1-parity low-health desat + red vignette + heartbeat
 	shaderProgram_t suppressionShader;  // HZM gl1-parity suppression tunnel-vignette
 	shaderProgram_t hitBloodShader;     // HZM coop [user 08-02] on-hit blood splatter
+	shaderProgram_t hzmScopeShader;     // HZM coop [bug-3462] modern scope optics (TRY-built: 0 = pass off)
 	shaderProgram_t heatHazeShader;     // HZM gl1-parity heat haze + localized muzzle shimmer
 	shaderProgram_t dofShader;          // HZM gl1-parity depth of field (r_ppDoF)
 	shaderProgram_t underwaterShader;   // HZM NEW: underwater/slime/lava screen distortion (r_ppUnderwaterFx)

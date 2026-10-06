@@ -754,6 +754,11 @@ const adsGunTune_t *CG_FindAdsTune(const char *wpn);
         int    cls;        // HZM_FLARE_CLASS_HEADLIGHT / _SEARCHLIGHT
     } hzmFlareReq_t;
     qboolean CG_HZM_RendererIsGl2(void);    // cl_renderer names a gl2 build ("opengl2", "opengl2flip")
+    // HZM coop [bug-3462] modern scope view (cg_hzmscope.c)
+    int      CG_HzmScopeWeaponOptic(const char *wpn);
+    qboolean CG_HzmScopeWorldFov(float camFov, float *outFov);
+    qboolean CG_HzmScopeActive(void);
+    qboolean CG_HzmScopeDraw2D(void);
     // HZM coop [2026-09-27] realistic lightning (cg_hzmlightning.c)
     void CG_HzmLt_Init(void);
     void CG_HzmLt_ConfigString(const char *str);

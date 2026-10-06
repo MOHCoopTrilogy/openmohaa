@@ -5909,7 +5909,10 @@ static qboolean CG_ActiveWeaponHasScope(void)
     }
     return (!Q_stricmp(wpn, "KAR98 - Sniper") || !Q_stricmp(wpn, "Springfield '03 Sniper")
             || !Q_stricmp(wpn, "Enfield L42A1") || !Q_stricmp(wpn, "SVT 40") || !Q_stricmp(wpn, "G 43")
-            || !Q_stricmp(wpn, "FG 42") || !Q_stricmp(wpn, "Bombing Run") || strstr(wpn, "inocular") != NULL)
+            || !Q_stricmp(wpn, "FG 42") || !Q_stricmp(wpn, "Bombing Run") || strstr(wpn, "inocular") != NULL
+            // [bug-3462] every optic of the modern scope table, so the imported snipers (Mosin, Arisaka,
+            // Carcano, Lee-Enfield, G43 Sniper, StG44 Scoped, Garand) skip the shoulder stage too
+            || CG_HzmScopeWeaponOptic(wpn) >= 0)
                ? qtrue
                : qfalse;
 }
@@ -7525,6 +7528,20 @@ static int CG_CalcFov(void)
             fWeaponFov = fov_x + (fov_x * s_adsZoomCur - fov_x) * fGunZoom;
             // zoom the world by the eased factor
             fov_x *= s_adsZoomCur;
+        }
+
+        // HZM coop [bug-3462] modern scope view: the eased scope-in/out fov and the optic's true magnification
+        // (cg_hzmscope.c). WORLD fov only - fWeaponFov keeps the hip fov, so the gun does not balloon while the
+        // view eases back out; ahead of the discharge punch below, which still applies on top.
+        {
+            float fHzmScopeFov;
+            if (CG_HzmScopeWorldFov(cg.camera_fov, &fHzmScopeFov)) {
+                if (fov_ratio == 1) {
+                    fov_x = fHzmScopeFov;
+                } else {
+                    fov_x = RAD2DEG(atan(tan(DEG2RAD(fHzmScopeFov / 2.0)) * fov_ratio)) * 2.0;
+                }
+            }
         }
 
         // HZM coop [user 2026-08-21] fov snap on discharge, decayed here. Applied to the WORLD fov

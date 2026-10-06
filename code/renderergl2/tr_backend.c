@@ -2274,6 +2274,7 @@ const void *RB_PostProcess(const void *data)
 			else
 				FBO_FastBlit(rsSrc, NULL, tr.renderFbo, NULL, GL_COLOR_BUFFER_BIT, GL_NEAREST);
 		}
+		RB_HZMScopeLive(qfalse);   // HZM coop [bug-3462] no post chain: cgame draws the 2D scope masks
 		return (const void *)(cmd + 1);
 	}
 
@@ -2471,6 +2472,9 @@ const void *RB_PostProcess(const void *data)
 			// of everything, including the vignettes, matching how a real lens/sensor artifact or
 			// being submerged would sit over the whole image.
 			RB_HZMExtraFx(srcFbo, srcBox);
+			// HZM coop [bug-3462] modern scope optics: LAST, it IS the image through the glass (cgame draws the reticle)
+			RB_HZMScope(srcFbo, srcBox);
+			RB_HZMScopeLive(qtrue);
 		}
 	}
 

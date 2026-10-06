@@ -467,6 +467,10 @@ void CG_DrawOverlayMiddle(qhandle_t handle, float fAlpha)
     // that the scene is rendered ONCE, at the zoomed fov, so the periphery is magnified exactly as
     // much as the lens. Fixing that needs a second scene render at normal fov with the zoomed image
     // composited into a circular mask. Do that; do not touch these.
+    // [bug-3462] CORRECTION, measured: in this engine a 2D quad's vertex alpha is NOT the R_SetColor alpha
+    // (an explicit alphaGen vertex stage drew a reticle at 1 - fade), so oneMinusVertex here draws at fAlpha and
+    // these pillars ARE opaque black at full zoom (G:/mohaa-scopes run s2b). The modern scope view
+    // (cg_hzmscope.c) replaces this path for every rifle scope; binoculars still come through here.
     color[0] = 0.0;
     color[1] = 0.0;
     color[2] = 0.0;
@@ -566,6 +570,13 @@ void CG_DrawZoomOverlay()
         } else {
             bDrawOverlay = qfalse;
         }
+    }
+
+    // HZM coop [bug-3462] modern scope view: every rifle scope draws its own optic (cg_hzmscope.c); the retail
+    // overlay below stays for binoculars, the Spy Camera, the Bombing Run, and cg_hzmScope 0.
+    if (CG_HzmScopeDraw2D()) {
+        fAlpha = 0.0f;
+        return;
     }
 
     if (bDrawOverlay) {

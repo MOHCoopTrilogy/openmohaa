@@ -63,6 +63,7 @@ extern const char *fallbackShader_hzmwater_fp;
 extern const char *fallbackShader_lowhealth_fp;
 extern const char *fallbackShader_suppression_fp;
 extern const char *fallbackShader_hitblood_fp;
+extern const char *fallbackShader_hzmscope_fp;   // HZM coop [bug-3462]
 extern const char *fallbackShader_heathaze_fp;
 extern const char *fallbackShader_dof_fp;
 extern const char *fallbackShader_underwater_fp;
@@ -1935,6 +1936,19 @@ void GLSL_InitGPUShaders(void)
 	GLSL_SetUniformInt(&tr.hitBloodShader, UNIFORM_TEXTUREMAP, TB_COLORMAP);
 	GLSL_FinishGPUShader(&tr.hitBloodShader);
 
+	// HZM coop [bug-3462] modern scope optics. TRY-built: a driver that rejects it costs the scope pass (cgame then
+	// draws its 2D aperture and shadow masks, r_ppScopeLive 0), never the session.
+	if (GLSL_TryInitGPUShader(&tr.hzmScopeShader, "hzmscope", attribs, qtrue, extradefines, qtrue, fallbackShader_tonemap_vp, fallbackShader_hzmscope_fp))
+	{
+		GLSL_InitUniforms(&tr.hzmScopeShader);
+		GLSL_SetUniformInt(&tr.hzmScopeShader, UNIFORM_TEXTUREMAP, TB_COLORMAP);
+		GLSL_FinishGPUShader(&tr.hzmScopeShader);
+	}
+	else
+	{
+		ri.Printf(PRINT_WARNING, "hzmscope shader failed to build - scope optics pass disabled\n");
+	}
+
 	numEtcShaders++;
 
 	// HZM gl2 POST-FX PORT (bug-1157): depth of field. Two samplers - the blurred colour on
@@ -2363,6 +2377,7 @@ void GLSL_ShutdownGPUShaders(void)
 	GLSL_DeleteGPUShader(&tr.lowHealthShader);
 	GLSL_DeleteGPUShader(&tr.suppressionShader);
 	GLSL_DeleteGPUShader(&tr.hitBloodShader);   // HZM coop [user 08-02]
+	GLSL_DeleteGPUShader(&tr.hzmScopeShader);   // HZM coop [bug-3462] (zeroed struct when it never built: no-op)
 	GLSL_DeleteGPUShader(&tr.dofShader);
 	GLSL_DeleteGPUShader(&tr.underwaterShader);
 	if (tr.hzmLtSkyShaderOk) {

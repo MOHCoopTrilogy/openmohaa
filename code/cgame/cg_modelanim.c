@@ -3478,7 +3478,8 @@ void CG_ModelAnim(centity_t *cent, qboolean bDoShaderTime)
     // viewmodel/zoom behaviour this block exists for is unchanged; it simply stops firing in 3P,
     // where there is no viewmodel to hide.
     if (!(s1->renderfx & RF_ALWAYSDRAW) && s1->parent != ENTITYNUM_NONE && s1->parent == cg.snap->ps.clientNum
-        && !bThirdPerson && (!cg_drawviewmodel->integer || cg.snap->ps.stats[STAT_INZOOM])) {
+        && !bThirdPerson && (!cg_drawviewmodel->integer || cg.snap->ps.stats[STAT_INZOOM]
+                             || CG_HzmScopeActive())) { // [bug-3462] and through the scope-out ease
         // hide all surfaces while zooming or if the viewmodel shouldn't be shown
         for (i = 0; i < MAX_MODEL_SURFACES; i++) {
             model.surfaces[i] |= MDL_SURFACE_NODRAW;
@@ -3759,7 +3760,8 @@ void CG_ModelAnim(centity_t *cent, qboolean bDoShaderTime)
             cgi.ForceUpdatePose(&model);
 
             if ((cent->currentState.eFlags & EF_UNARMED) || cg_drawviewmodel->integer <= 1
-                || cg.snap->ps.stats[STAT_INZOOM] || cg.snap->ps.stats[STAT_HEALTH] <= 0) {
+                || cg.snap->ps.stats[STAT_INZOOM] || cg.snap->ps.stats[STAT_HEALTH] <= 0
+                || CG_HzmScopeActive()) { // [bug-3462] the gun stays down while the scope view eases out
                 // unarmed or zooming, hide the arms
                 CoopGunVisNote(&s_coopArmsVis, 1, "HIDE-ARMS", (cent->currentState.eFlags & EF_UNARMED) ? 1 : 0);
                 for (i = 0; i < MAX_MODEL_SURFACES; i++) {
