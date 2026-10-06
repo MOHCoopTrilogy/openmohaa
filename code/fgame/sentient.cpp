@@ -5874,6 +5874,16 @@ void Sentient::CoopEjectMagazine(const char *pszTik, const char *pszTag, int iSk
     mag->velocity = velocity * 0.5f + fwd * (6.0f + G_Random(10.0f)) + right * G_CRandom(8.0f)
                   + Vector(0.0f, 0.0f, -10.0f);
     mag->avelocity = Vector(G_CRandom(360.0f), G_CRandom(360.0f), G_CRandom(360.0f));
+    // HZM coop [magbrace 2026-10-05] bug-3450: braced over a wall or sill the third-person hand is above the brace
+    // surface, so the magazine landed on the ledge right under the muzzle and tumbled there in full view of the
+    // sights (ab41 MP40 braced reload). A braced owner drops it on his own side: at the hips, back and down.
+    if (IsSubclassOfPlayer() && static_cast<Player *>(this)->m_bCoopBraceMounted) {
+        Vector flat(fwd[0], fwd[1], 0.0f);
+        flat.normalize();
+        pos = origin + Vector(0.0f, 0.0f, 24.0f);
+        mag->setOrigin(pos);
+        mag->velocity = flat * -(12.0f + G_Random(8.0f)) + right * G_CRandom(6.0f) + Vector(0.0f, 0.0f, -20.0f);
+    }
 
     // carry the gun's finish across the bug-2241 3-bit surface bus. On the animation path these
     // bits come straight off the in-hand magazine, so an ejected mag can never disagree with the
