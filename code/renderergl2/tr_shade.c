@@ -1470,11 +1470,79 @@ GLS_MULTITEXTURE_ENV stages; gl2 defines the bit but never sets it - multitextur
 bundle[1]/UNIFORM_TEXTURE1ENV instead - so the test below is defensive only.)
 =================
 */
+/*
+=================
+HZM coop [2026-10-05] SKY FOG MODEL (docs/proposals/volumetric_clouds_2026-09-26/v11.md, part C).
+
+The sky shell is drawn at depth range (1,1), so the forward fog scored it at zFar - and zFar is R_SetFarClip's
+farthest VISIBLE world corner, not the fog's end. On a fogged map it shrinks whenever the view is enclosed (a street,
+a room, a trench), the sky's fog fraction drops with it, and a clear painted sky shows through every gap above a
+solid fog wall; it also changed as the camera turned. A portal-sky view (a 3D skybox) was never fogged at all.
+
+The model: a sky draw takes the path through a fog LAYER of height H (r_hzmSkyFogHeight) toward its own elevation,
+  dist = H / sin(elevation)   (below the horizon: fully fogged)
+so the zenith is fogged as geometry at H, the horizon fully (seamless with the fogged terrain under it), and nothing
+depends on where the camera stands. A thickly fogged map (fog end <= H) hides its sky completely; a light haze keeps
+a clear zenith. The same fraction drives the volumetric clouds' composites and gate (RB_HZM_SkyFogAt), the wet film's
+and the water's sky reflection.
+Off - the legacy zFar behaviour, exactly - on Omaha / dday2 / m3l2 / m3l3 (R_HZM_SkyFogMapLoaded), r_hzmSkyFog 0,
+r_globalFogSky 0. A portal-sky view is fogged only with r_hzmSkyFogPortal 1 (a 3D skybox is authored scenery: t1l1).
+=================
+*/
+qboolean R_HZM_SkyFogModelOn( void )
+{
+	int v;
+
+	if ( tr.hzmSkyFogDeny ) {
+		return qfalse;
+	}
+	if ( !r_hzmSkyFog || !r_hzmSkyFog->string[0] || r_hzmSkyFog->integer == -1 ) {
+		v = HZM_SKYFOG_AUTO;
+	} else {
+		v = r_hzmSkyFog->integer;
+	}
+	if ( !v || !r_hzmSkyFogHeight || r_hzmSkyFogHeight->value <= 0.0f ) {
+		return qfalse;
+	}
+	return qtrue;
+}
+
+// u_HzmSkyFog (world up in eye space, H) on every fogged draw while the model is on (the wet film and the water read
+// H for their sky reflection); u_HzmSkyVp / u_HzmSkyTan only on a sky draw, whose z flag switches ApplyGlobalFog over
+void RB_HZM_SkyFogUniforms( shaderProgram_t *sp, qboolean isSky )
+{
+	vec4_t v;
+	const float *m = backEnd.viewParms.world.modelMatrix;
+	const float *p = backEnd.viewParms.projectionMatrix;
+
+	if ( !R_HZM_SkyFogModelOn() || p[0] == 0.0f || p[5] == 0.0f ) {
+		VectorSet4( v, 0.0f, 0.0f, 0.0f, 0.0f );
+		GLSL_SetUniformVec4( sp, UNIFORM_HZMSKYFOG, v );
+		GLSL_SetUniformVec4( sp, UNIFORM_HZMSKYTAN, v );
+		return;
+	}
+	VectorSet4( v, m[8], m[9], m[10], r_hzmSkyFogHeight->value );
+	GLSL_SetUniformVec4( sp, UNIFORM_HZMSKYFOG, v );
+	if ( !isSky ) {
+		VectorSet4( v, 0.0f, 0.0f, 0.0f, 0.0f );
+		GLSL_SetUniformVec4( sp, UNIFORM_HZMSKYTAN, v );
+		return;
+	}
+	VectorSet4( v, (float)backEnd.viewParms.viewportX, (float)backEnd.viewParms.viewportY,
+		1.0f / (float)backEnd.viewParms.viewportWidth, 1.0f / (float)backEnd.viewParms.viewportHeight );
+	GLSL_SetUniformVec4( sp, UNIFORM_HZMSKYVP, v );
+	VectorSet4( v, 1.0f / p[0], 1.0f / p[5], 1.0f, 0.0f );
+	GLSL_SetUniformVec4( sp, UNIFORM_HZMSKYTAN, v );
+}
+
 void RB_SetGlobalFogUniforms( shaderProgram_t *sp, int stateBits, qboolean fogAsSky )
 {
 	vec4_t	fogColor;
 	vec4_t	fogParams;
 	int		blendSrcBits, blendDstBits;
+	const float	*fogRgb;
+	float	fogStart, fogEnd;
+	qboolean	portalSky = qfalse;
 
 	VectorSet4( fogColor,  0.0f, 0.0f, 0.0f, 0.0f );	// alpha 0 = fog off for this draw
 	VectorSet4( fogParams, 0.0f, 0.0f, 0.0f, 0.0f );
@@ -1482,7 +1550,17 @@ void RB_SetGlobalFogUniforms( shaderProgram_t *sp, int stateBits, qboolean fogAs
 	if ( !R_UseForwardGlobalFog() ) {
 		goto upload;
 	}
-	if ( !rb_globalFog.active ) {
+	// HZM sky fog model: a PORTAL-SKY view is sky as a whole - its 3D skybox takes the main view's fog (latched last
+	// frame; the portal view renders first) as a sky draw. Without the model it stays unfogged, as it always was.
+	// [2026-10-05, in engine] OFF by default (r_hzmSkyFogPortal 0): a 3D skybox is authored content - t1l1's C-47 door
+	// shows its night sky and flak through it, and the main view's ground fog blacked it out
+	if ( backEnd.viewParms.isPortalSky && !backEnd.viewParms.isPortal && r_hzmSkyFogPortal && r_hzmSkyFogPortal->integer
+		&& !( backEnd.viewParms.flags & (VPF_SHADOWMAP | VPF_DEPTHSHADOW) ) && R_HZM_SkyFogModelOn()
+		&& rb_hzmSkyFogLatch.active && tr.frameCount - rb_hzmSkyFogLatch.frame <= 1
+		&& rb_hzmSkyFogLatch.end > rb_hzmSkyFogLatch.start ) {
+		portalSky = qtrue;
+		fogAsSky  = qtrue;
+	} else if ( !rb_globalFog.active ) {
 		goto upload;
 	}
 	// 2D, depth-fill, cubemap capture and the god-ray occlusion mask are never fogged
@@ -1503,9 +1581,9 @@ void RB_SetGlobalFogUniforms( shaderProgram_t *sp, int stateBits, qboolean fogAs
 	if ( tr.renderCubeFbo && glState.currentFBO == tr.renderCubeFbo ) {
 		goto upload;
 	}
-	// same view policy as the latch in RB_SetupGlobalFog
-	if ( backEnd.viewParms.isPortal || backEnd.viewParms.isPortalSky
-		|| ( backEnd.viewParms.flags & (VPF_SHADOWMAP | VPF_DEPTHSHADOW) ) ) {
+	// same view policy as the latch in RB_SetupGlobalFog (a portal-sky view only through the sky fog model above)
+	if ( !portalSky && ( backEnd.viewParms.isPortal || backEnd.viewParms.isPortalSky
+		|| ( backEnd.viewParms.flags & (VPF_SHADOWMAP | VPF_DEPTHSHADOW) ) ) ) {
 		goto upload;
 	}
 	// r_globalFogSky 0 leaves the sky shell (and the sun that sits on it) alone
@@ -1517,7 +1595,10 @@ void RB_SetGlobalFogUniforms( shaderProgram_t *sp, int stateBits, qboolean fogAs
 		goto upload;
 	}
 
-	VectorCopy( rb_globalFog.color, fogColor );
+	fogRgb   = portalSky ? rb_hzmSkyFogLatch.color : rb_globalFog.color;
+	fogStart = portalSky ? rb_hzmSkyFogLatch.start : rb_globalFog.start;
+	fogEnd   = portalSky ? rb_hzmSkyFogLatch.end   : rb_globalFog.end;
+	VectorCopy( fogRgb, fogColor );
 	fogColor[3] = r_globalFogScale ? r_globalFogScale->value : 1.0f;
 
 	blendSrcBits = stateBits & GLS_SRCBLEND_BITS;
@@ -1544,12 +1625,46 @@ void RB_SetGlobalFogUniforms( shaderProgram_t *sp, int stateBits, qboolean fogAs
 
 	fogParams[0] = rb_globalFog.projMat10;
 	fogParams[1] = rb_globalFog.projMat14;
-	fogParams[2] = rb_globalFog.start;
-	fogParams[3] = 1.0f / ( rb_globalFog.end - rb_globalFog.start );
+	fogParams[2] = fogStart;
+	fogParams[3] = 1.0f / ( fogEnd - fogStart );
 
 upload:
 	GLSL_SetUniformVec4( sp, UNIFORM_GLOBALFOGCOLOR,  fogColor );
 	GLSL_SetUniformVec4( sp, UNIFORM_GLOBALFOGPARAMS, fogParams );
+	// HZM sky fog model: the sky flag only where this draw is fogged as sky (fogColor.a > 0)
+	RB_HZM_SkyFogUniforms( sp, (qboolean)( fogAsSky && fogColor[3] > 0.0f ) );
+}
+
+// HZM sky fog model: the worlds that keep the legacy sky fog - the Omaha set (never touched: hzm_waterwet.h's list, the
+// same tr.hzmOmahaWorld the water / wet passes refuse), the user's m3l2 / m3l3, and any sky naming an Omaha box
+void R_HZM_SkyFogMapLoaded( void )
+{
+	static const char *const names[] = { "dday2", "e3l1sky", "e3l2sky", "omaha", "inteldim", 0 };
+	int i, k;
+
+	tr.hzmSkyFogDeny = qfalse;
+	if ( !tr.world ) {
+		return;
+	}
+	if ( tr.hzmOmahaWorld || !Q_stricmp( tr.world->baseName, "m3l2" ) || !Q_stricmp( tr.world->baseName, "m3l3" )
+		|| !Q_stricmpn( tr.world->baseName, "m3l1", 4 ) || !Q_stricmpn( tr.world->baseName, "e3l1", 4 )
+		|| !Q_stricmpn( tr.world->baseName, "e3l2", 4 ) ) {
+		tr.hzmSkyFogDeny = qtrue;
+		return;
+	}
+	for ( i = 0; i < tr.world->numsurfaces; i++ ) {
+		const shader_t *sh = tr.world->surfaces[i].shader;
+		if ( !sh || !sh->isSky ) {
+			continue;
+		}
+		for ( k = 0; names[k]; k++ ) {
+			if ( Q_stristr( sh->name, names[k] )
+				|| ( sh->sky.outerbox[0] && Q_stristr( sh->sky.outerbox[0]->imgName, names[k] ) ) ) {
+				tr.hzmSkyFogDeny = qtrue;
+				return;
+			}
+		}
+	}
 }
 
 /*

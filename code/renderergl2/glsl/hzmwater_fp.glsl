@@ -11,6 +11,7 @@ uniform vec4      u_HzmWetSun;      // toward-sun xyz, sun present
 uniform vec4      u_HzmWetSunCol;   // sun rgb
 uniform vec4      u_GlobalFogColor;
 uniform vec4      u_GlobalFogParams;
+uniform vec4      u_HzmSkyFog;      // [2026-10-05] sky fog model: w = fog-layer height H (0 = off), see generic_fp HzmFogDist
 uniform sampler2D u_HzmOccMap;      // the rain-occlusion map (8 u top-down max height: r sharp, g blurred; tr_hzm_wet.c)
 uniform sampler2D u_HzmRippleMap;   // 256^2 tileable ripple normals, RGBA8 UNCOMPRESSED with mips (Toksvig reads |n|)
 uniform sampler2D u_LightMap;       // the water shader's own lightmap, when it has one
@@ -94,7 +95,10 @@ void main()
 	float f    = 0.0;
 	if (u_GlobalFogColor.a > 0.0)
 	{
-		float zf = u_GlobalFogParams.y / min(u_GlobalFogParams.x + 1.0, -0.000001);
+		// [2026-10-05] the sky fog model (u_HzmSkyFog.w = H > 0): the reflected sky is fogged as the visible sky now is,
+		// by the reflected ray's elevation - no longer at zFar (tr_shade.c RB_HZM_SkyFogUniforms)
+		float zf = (u_HzmSkyFog.w > 0.0) ? u_HzmSkyFog.w / max(R.z, 0.03)
+		                                 : u_GlobalFogParams.y / min(u_GlobalFogParams.x + 1.0, -0.000001);
 		haze = clamp(clamp((zf - u_GlobalFogParams.z) * u_GlobalFogParams.w, 0.0, 1.0) * u_GlobalFogColor.a, 0.0, 1.0);
 		// generic_fp ApplyGlobalFog's fraction, term for term
 		float dp = u_GlobalFogParams.y / min(u_GlobalFogParams.x + (2.0 * gl_FragCoord.z - 1.0), -0.000001);

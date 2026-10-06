@@ -258,6 +258,10 @@ static uniformInfo_t uniformsInfo[] =
 	{ "u_HzmShadowKernel", GLSL_VEC4 },
 	{ "u_HzmShadowBias",   GLSL_VEC4 },
 	{ "u_HzmShadowMatch",  GLSL_VEC4 },   // HZM gl2 MSAA P4c
+	// HZM coop [2026-10-05] sky fog model - UNIFORM_HZMSKYFOG..UNIFORM_HZMSKYTAN, same order
+	{ "u_HzmSkyFog",       GLSL_VEC4 },
+	{ "u_HzmSkyVp",        GLSL_VEC4 },
+	{ "u_HzmSkyTan",       GLSL_VEC4 },
 };
 
 // HZM gl2 [2026-09-26] vet_phaseS F10: this table is indexed by uniform_t and GLSL_InitUniforms walks it to

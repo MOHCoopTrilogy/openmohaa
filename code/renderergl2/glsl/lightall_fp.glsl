@@ -136,6 +136,28 @@ vec3 HzmLtFogColor()
 	return fogCol;
 }
 
+// HZM coop [2026-10-05] SKY FOG MODEL (tr_shade.c RB_HZM_SkyFogUniforms, docs/proposals/volumetric_clouds_2026-09-26/v11.md).
+// The sky is drawn at depth 1, so the depth fraction fogged it as if it hung at zFar - the farthest VISIBLE corner of
+// the world, which shrinks in a street or a room: a thickly fogged map then showed a clear sky through every gap
+// above the fog wall. A sky draw (u_HzmSkyTan.z 1: the box, its cloud stages, the sun, a portal-sky view) instead
+// takes the path through a fog LAYER of height H toward its own elevation: the zenith is fogged as at H, the
+// horizon fully - camera position no longer matters. Every other draw keeps its depth (the z 0 default).
+uniform vec4      u_HzmSkyFog;
+uniform vec4      u_HzmSkyVp;
+uniform vec4      u_HzmSkyTan;
+
+float HzmFogDist()
+{
+	if (u_HzmSkyTan.z > 0.5)
+	{
+		vec2 ndc = (gl_FragCoord.xy - u_HzmSkyVp.xy) * u_HzmSkyVp.zw * 2.0 - 1.0;
+		vec3 ray = normalize(vec3(ndc.x * u_HzmSkyTan.x, ndc.y * u_HzmSkyTan.y, -1.0));
+		return u_HzmSkyFog.w / max(dot(ray, u_HzmSkyFog.xyz), 0.0001);
+	}
+	float denom = u_GlobalFogParams.x + (2.0 * gl_FragCoord.z - 1.0);
+	return u_GlobalFogParams.y / min(denom, -1e-6);
+}
+
 vec3 ApplyGlobalFog(vec3 color)
 {
 	if (u_GlobalFogColor.a <= 0.0)
@@ -143,8 +165,7 @@ vec3 ApplyGlobalFog(vec3 color)
 		return color;
 	}
 
-	float denom = u_GlobalFogParams.x + (2.0 * gl_FragCoord.z - 1.0);
-	float dist  = u_GlobalFogParams.y / min(denom, -1e-6);
+	float dist  = HzmFogDist();
 	float frac  = clamp((dist - u_GlobalFogParams.z) * u_GlobalFogParams.w, 0.0, 1.0);
 
 	frac = clamp(frac * u_GlobalFogColor.a, 0.0, 1.0);
@@ -600,7 +621,10 @@ void HzmWet(vec3 viewDir, vec3 E, vec3 n, vec3 lm, inout vec3 albedo, inout vec3
 	float haze = 0.0;
 	if (u_GlobalFogColor.a > 0.0)
 	{
-		float zf = u_GlobalFogParams.y / min(u_GlobalFogParams.x + 1.0, -0.000001);
+		// [2026-10-05] the sky fog model (u_HzmSkyFog.w = H > 0): the reflected sky is fogged as the visible sky now is,
+		// by the reflected ray's elevation - no longer at zFar (tr_shade.c RB_HZM_SkyFogUniforms)
+		float zf = (u_HzmSkyFog.w > 0.0) ? u_HzmSkyFog.w / max(R.z, 0.03)
+		                                 : u_GlobalFogParams.y / min(u_GlobalFogParams.x + 1.0, -0.000001);
 		haze = clamp((zf - u_GlobalFogParams.z) * u_GlobalFogParams.w, 0.0, 1.0) * u_GlobalFogColor.a;
 	}
 	env = mix(env, u_GlobalFogColor.rgb, haze);

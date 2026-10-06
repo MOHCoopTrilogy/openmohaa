@@ -1465,6 +1465,7 @@ the world was drawn. Latching here removes that entire class of divergence.
 */
 globalFogState_t rb_globalFog;
 viewProjLatch_t  rb_viewProj;
+hzmSkyFogLatch_t rb_hzmSkyFogLatch;	// HZM sky fog model: the main view's fog, for the portal-sky view of the next frame
 
 void RB_SetupGlobalFog( void ) {
 	const float	*m;
@@ -1511,6 +1512,9 @@ void RB_SetupGlobalFog( void ) {
 	}
 
 	rb_globalFog.active = qfalse;
+	// HZM sky fog model (2026-10-05): the latch follows the main view only - fog off here, until set below
+	rb_hzmSkyFogLatch.active = qfalse;
+	rb_hzmSkyFogLatch.frame  = tr.frameCount;
 
 	// gl1 RB_SetupFog: no farplane -> no fog; r_farplane_nofog -> no fog
 	if ( backEnd.viewParms.farplane_distance <= 0.0f ) {
@@ -1575,6 +1579,13 @@ void RB_SetupGlobalFog( void ) {
 	rb_globalFog.color[2] = backEnd.viewParms.farplane_color[2] * identityLight;
 
 	rb_globalFog.active = qtrue;
+
+	// HZM sky fog model (2026-10-05): what a portal-sky view (rendered BEFORE this view, every frame) fogs its 3D skybox with
+	rb_hzmSkyFogLatch.active = qtrue;
+	rb_hzmSkyFogLatch.frame  = tr.frameCount;
+	rb_hzmSkyFogLatch.start  = rb_globalFog.start;
+	rb_hzmSkyFogLatch.end    = rb_globalFog.end;
+	VectorCopy( rb_globalFog.color, rb_hzmSkyFogLatch.color );
 }
 
 /*

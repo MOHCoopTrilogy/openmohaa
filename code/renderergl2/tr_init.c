@@ -369,6 +369,9 @@ cvar_t* r_globalFogScale;
 cvar_t* r_globalFogStartScale;
 cvar_t* r_globalFogEndScale;
 cvar_t* r_globalFogSky;
+cvar_t* r_hzmSkyFog;
+cvar_t* r_hzmSkyFogHeight;
+cvar_t* r_hzmSkyFogPortal;
 cvar_t* r_skyHD;
 cvar_t* r_skyHDCompare;
 cvar_t* r_globalFogRadial;
@@ -2211,6 +2214,10 @@ void R_Register( void )
 	r_globalFogStartScale    = ri.Cvar_Get("r_globalFogStartScale",    "1", CVAR_ARCHIVE);
 	r_globalFogEndScale      = ri.Cvar_Get("r_globalFogEndScale",      "1", CVAR_ARCHIVE);
 	r_globalFogSky           = ri.Cvar_Get("r_globalFogSky",           "1", CVAR_ARCHIVE);
+	// HZM coop [2026-10-05] the sky fog model (tr_shade.c): flags 0, never archived (TRAPS T7)
+	r_hzmSkyFog              = ri.Cvar_Get("r_hzmSkyFog",              "-1", 0);
+	r_hzmSkyFogHeight        = ri.Cvar_Get("r_hzmSkyFogHeight",        "3000", 0);
+	r_hzmSkyFogPortal        = ri.Cvar_Get("r_hzmSkyFogPortal",        "0", 0);
 	// HZM gl2 [2026-09-25] HD SKY BOXES + SKY LAYERS (the moving cloud dome's stage images, env/hzmhd/clouds/).
 	// Read by ParseSkyParms / R_HZM_SkyHDLayers when the map's shaders are parsed, so a change
 	// takes effect on the NEXT map - RE_BeginRegistration rebuilds every shader per map, no vid_restart. Not

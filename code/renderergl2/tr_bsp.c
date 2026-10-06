@@ -4089,6 +4089,8 @@ void RE_LoadWorldMap( const char *name ) {
     // HZM gl2 stable sun shadows (P3): latch f (SHADOWFIT), build the terrain proxy and W's own arrays
     R_SunStable_WorldLoaded(name);
     R_GfxProbe_WorldLoaded(name);
+    // HZM coop [2026-10-05] sky fog model: which worlds keep the legacy sky fog (Omaha / dday2 / m3l2 / m3l3)
+    R_HZM_SkyFogMapLoaded();
     //=========================
 }
 

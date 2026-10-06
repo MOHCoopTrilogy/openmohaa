@@ -1127,6 +1127,11 @@ typedef enum
 	UNIFORM_HZMSHADOWBIAS,    // (bias c0, c1, c2, W bias) in depth units (stable mask)
 	// HZM gl2 MSAA P4c (r_msaaShadowMatch): (on, depth-slope factor, 0, 0) - lightall, zero-neutral
 	UNIFORM_HZMSHADOWMATCH,
+	// HZM coop [2026-10-05] SKY FOG MODEL (tr_shade.c RB_HZM_SkyFogUniforms): u_HzmSkyFog = (world up in EYE space, fog-layer
+	// height H; w 0 = off), u_HzmSkyVp = (viewport x, y, 1/w, 1/h), u_HzmSkyTan = (tan(fovX/2), tan(fovY/2), 1 = sky draw, 0)
+	UNIFORM_HZMSKYFOG,
+	UNIFORM_HZMSKYVP,
+	UNIFORM_HZMSKYTAN,
 
 	UNIFORM_COUNT
 } uniform_t;
@@ -2745,6 +2750,7 @@ typedef struct {
     // HZM rain wetness (tr_hzm_wet.c, water_wetness_2026-09-27). In tr ON PURPOSE: R_Init's memset clears it with
     // the images it points at; R_HZMWetBuild rebuilds it on every world load.
     qboolean hzmWetReady;
+    qboolean hzmSkyFogDeny;				// HZM sky fog model: Omaha / dday2 / m3l2 / m3l3 world - the legacy sky fog (R_HZM_SkyFogMapLoaded)
     qboolean hzmOmahaWorld;				// the loaded BSP is on hzm_waterwet.h's Omaha list: every water/wet path off
     image_t *hzmRainOccImage;
     image_t *hzmWetNoiseImage;
@@ -3236,7 +3242,21 @@ extern cvar_t* r_globalFog;				// 0 = off entirely (A/B kill switch)
 extern cvar_t* r_globalFogScale;		// multiplies the computed fog fraction
 extern cvar_t* r_globalFogStartScale;	// multiplies farplane_bias  (fog START)
 extern cvar_t* r_globalFogEndScale;		// multiplies farplane_distance (fog END)
-extern cvar_t* r_globalFogSky;			// 1 = fog sky pixels too (gl1 "nofog" sky = 0)
+extern cvar_t* r_globalFogSky;
+extern cvar_t* r_hzmSkyFog;			// sky fog model: -1/"" = HZM_SKYFOG_AUTO, 0 = legacy (sky fogged at zFar), 1 = model
+extern cvar_t* r_hzmSkyFogHeight;		// the fog-layer height H (world units): the zenith is fogged as geometry at H
+extern cvar_t* r_hzmSkyFogPortal;		// 1 = a portal-sky view (3D skybox) is fogged as sky too; 0 (default) = never, as before
+#define HZM_SKYFOG_AUTO 1
+qboolean R_HZM_SkyFogModelOn( void );
+void     RB_HZM_SkyFogUniforms( shaderProgram_t *sp, qboolean isSky );
+void     R_HZM_SkyFogMapLoaded( void );
+typedef struct {
+	qboolean	active;
+	int			frame;
+	float		start, end;
+	vec3_t		color;
+} hzmSkyFogLatch_t;
+extern hzmSkyFogLatch_t rb_hzmSkyFogLatch;	// the main view's fog, for a portal-sky view of the next frame			// 1 = fog sky pixels too (gl1 "nofog" sky = 0)
 // HZM gl2 [2026-09-25] HD sky boxes (docs/tools/gen_sky_hd.py -> zzzzzzzzzz_coop_hd_skies.pk3, env/hzmhd/).
 extern cvar_t* r_skyHD;				// -1 auto (boxes HZM_SKYHD_AUTO, layers HZM_SKYHD_LAYERS_AUTO), 0 original, 1 HD - both. Next map.
 extern cvar_t* r_skyHDCompare;		// TEST ONLY, CVAR_TEMP: 0 normal, 1 show HD, 2 show original (live A/B, boxes + layers)
