@@ -7,7 +7,7 @@
 //   pupil    - the exit pupil: a second, softer circle offset by where the eye sits behind the eyepiece. Where the
 //              two do not overlap you see the scope shadow - the crescent that swings in as you sway or move
 //   inside   - a touch of radial chromatic fringe and barrel toward the rim, a faint glass tint, a rim vignette
-//   outside  - the scene blurred, desaturated and darkened (the eyepiece housing), never a flat black
+//   outside  - the eyepiece housing: black; optionally a faint blurred, desaturated share of the frame (r_ppScopeOuter < 1)
 //
 // NOTE: no double quotes anywhere in this file - stringify emits it as a C string literal.
 
@@ -47,31 +47,37 @@ void main()
 	inside  *= vec3(1.0 + 0.25 * w, 1.0 + 0.05 * w, 1.0 - w);   // uncoated glass: a faint warm or cool cast
 	inside  *= 1.0 - 0.18 * pow(smoothstep(0.55, 1.0, r), 1.5); // tube vignette toward the rim
 
-	// ---- outside: the housing - a wide blur of the scene, desaturated, nearly dark
-	// two rings of 8 taps (1.2% and 2.6% of screen height) - one ring left visible ghost copies of bright edges
-	vec2  o1  = vec2(0.012 / aspect, 0.012);
-	vec2  o2  = vec2(0.026 / aspect, 0.026);
-	vec3  b   = scene * 0.12;
-	b += texture2D(u_TextureMap, var_TexCoords + o1 * vec2( 1.0,  0.0)).rgb * 0.055;
-	b += texture2D(u_TextureMap, var_TexCoords + o1 * vec2(-1.0,  0.0)).rgb * 0.055;
-	b += texture2D(u_TextureMap, var_TexCoords + o1 * vec2( 0.0,  1.0)).rgb * 0.055;
-	b += texture2D(u_TextureMap, var_TexCoords + o1 * vec2( 0.0, -1.0)).rgb * 0.055;
-	b += texture2D(u_TextureMap, var_TexCoords + o1 * vec2( 0.7,  0.7)).rgb * 0.055;
-	b += texture2D(u_TextureMap, var_TexCoords + o1 * vec2(-0.7,  0.7)).rgb * 0.055;
-	b += texture2D(u_TextureMap, var_TexCoords + o1 * vec2( 0.7, -0.7)).rgb * 0.055;
-	b += texture2D(u_TextureMap, var_TexCoords + o1 * vec2(-0.7, -0.7)).rgb * 0.055;
-	b += texture2D(u_TextureMap, var_TexCoords + o2 * vec2( 0.92,  0.38)).rgb * 0.055;
-	b += texture2D(u_TextureMap, var_TexCoords + o2 * vec2(-0.92,  0.38)).rgb * 0.055;
-	b += texture2D(u_TextureMap, var_TexCoords + o2 * vec2( 0.92, -0.38)).rgb * 0.055;
-	b += texture2D(u_TextureMap, var_TexCoords + o2 * vec2(-0.92, -0.38)).rgb * 0.055;
-	b += texture2D(u_TextureMap, var_TexCoords + o2 * vec2( 0.38,  0.92)).rgb * 0.055;
-	b += texture2D(u_TextureMap, var_TexCoords + o2 * vec2(-0.38,  0.92)).rgb * 0.055;
-	b += texture2D(u_TextureMap, var_TexCoords + o2 * vec2( 0.38, -0.92)).rgb * 0.055;
-	b += texture2D(u_TextureMap, var_TexCoords + o2 * vec2(-0.38, -0.92)).rgb * 0.055;
-	float l   = dot(b, vec3(0.299, 0.587, 0.114));
-	b         = mix(b, vec3(l), 0.55);
-	float dark = clamp(u_HzmParams.w, 0.0, 1.0);
-	vec3  outside = b * (1.0 - dark) * (1.0 - 0.7 * smoothstep(1.0, 2.0, r));
+	// ---- outside: the housing. Flat black by default (r_ppScopeOuter 1). Below 1 it keeps that share of a wide blur
+	// of the frame, desaturated - at 0.97 this read as a grey smudge on bright maps, so it is opt-in now, and the
+	// 17 taps are only paid for when it is asked for.
+	float dark    = clamp(u_HzmParams.w, 0.0, 1.0);
+	vec3  outside = vec3(0.0);
+	if (dark < 0.999)
+	{
+		// two rings of 8 taps (1.2% and 2.6% of screen height) - one ring left visible ghost copies of bright edges
+		vec2  o1  = vec2(0.012 / aspect, 0.012);
+		vec2  o2  = vec2(0.026 / aspect, 0.026);
+		vec3  b   = scene * 0.12;
+		b += texture2D(u_TextureMap, var_TexCoords + o1 * vec2( 1.0,  0.0)).rgb * 0.055;
+		b += texture2D(u_TextureMap, var_TexCoords + o1 * vec2(-1.0,  0.0)).rgb * 0.055;
+		b += texture2D(u_TextureMap, var_TexCoords + o1 * vec2( 0.0,  1.0)).rgb * 0.055;
+		b += texture2D(u_TextureMap, var_TexCoords + o1 * vec2( 0.0, -1.0)).rgb * 0.055;
+		b += texture2D(u_TextureMap, var_TexCoords + o1 * vec2( 0.7,  0.7)).rgb * 0.055;
+		b += texture2D(u_TextureMap, var_TexCoords + o1 * vec2(-0.7,  0.7)).rgb * 0.055;
+		b += texture2D(u_TextureMap, var_TexCoords + o1 * vec2( 0.7, -0.7)).rgb * 0.055;
+		b += texture2D(u_TextureMap, var_TexCoords + o1 * vec2(-0.7, -0.7)).rgb * 0.055;
+		b += texture2D(u_TextureMap, var_TexCoords + o2 * vec2( 0.92,  0.38)).rgb * 0.055;
+		b += texture2D(u_TextureMap, var_TexCoords + o2 * vec2(-0.92,  0.38)).rgb * 0.055;
+		b += texture2D(u_TextureMap, var_TexCoords + o2 * vec2( 0.92, -0.38)).rgb * 0.055;
+		b += texture2D(u_TextureMap, var_TexCoords + o2 * vec2(-0.92, -0.38)).rgb * 0.055;
+		b += texture2D(u_TextureMap, var_TexCoords + o2 * vec2( 0.38,  0.92)).rgb * 0.055;
+		b += texture2D(u_TextureMap, var_TexCoords + o2 * vec2(-0.38,  0.92)).rgb * 0.055;
+		b += texture2D(u_TextureMap, var_TexCoords + o2 * vec2( 0.38, -0.92)).rgb * 0.055;
+		b += texture2D(u_TextureMap, var_TexCoords + o2 * vec2(-0.38, -0.92)).rgb * 0.055;
+		float l   = dot(b, vec3(0.299, 0.587, 0.114));
+		b         = mix(b, vec3(l), 0.55);
+		outside = b * (1.0 - dark) * (1.0 - 0.7 * smoothstep(1.0, 2.0, r));
+	}
 
 	vec3 col = mix(outside, inside, vis);
 	gl_FragColor = vec4(mix(scene, col, amt), 1.0);
