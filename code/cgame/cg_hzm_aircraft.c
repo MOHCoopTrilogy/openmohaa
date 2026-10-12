@@ -15,6 +15,15 @@ For those entities only:
     fades late instead of vanishing (the user asked for "a little" see-through on the foggiest maps). Nothing else in
     the scene, and no fog setting, changes. Off with cg_hzmAcFog 0.
 
+ 2b. FADE AT THE TRACK ENDS (2026-10-12, cg_hzmAcFogFade, default 1). The see-through keeps a plane at least 8 % visible
+    however far it is, so the places the script spawns and removes it - "at the fog edge or the world edge, never in
+    plain view" - are in plain view after all: a C-47 flight spawned 1.24 fog distances out on m4l1 (its track clipped
+    by the +-7900 world box) stood in the sky at a third of full contrast from one frame to the next, against the now
+    fog-coloured sky. The drawn depth is therefore pushed on to the fog's end (0.998 F = invisible) over the last
+    cg_hzmAcFogEdge units before the world box, and between cg_hzmAcFogFar0 and cg_hzmAcFogFar1 fog distances from the
+    viewer: the plane fades in and out of the fog instead of appearing in it. Inside those limits nothing changes.
+    Never on the five Omaha maps (HZM_WaterWetOmahaMap): there the planes draw exactly as shipped.
+
  3. cg_hzmAcDebug 1 prints the drawn pose of every aircraft every frame (^~^~^ ACLERP) for the smoothness gate.
     Without the flag (a live, unpatched server) it matches the plane models by name, so a before/after run can be
     measured with the same client.
@@ -23,6 +32,9 @@ For those entities only:
 
 #include "cg_local.h"
 #include "tiki.h"
+#include "../renderercommon/hzm_waterwet.h" // HZM_WaterWetOmahaMap: the five-map Omaha list (the fade is refused there)
+
+#define HZM_AC_WORLD_BOX 7900.0f // coop_mod/aircraft.scr level.ac_box: every track is clipped to +-this
 
 static cvar_t *s_acDoppler;
 static cvar_t *s_acSound;
@@ -31,6 +43,10 @@ static cvar_t *s_acFogStart;
 static cvar_t *s_acFogSlope;
 static cvar_t *s_acFogMax;
 static cvar_t *s_acDebug;
+static cvar_t *s_acFogFade;
+static cvar_t *s_acFogEdge;
+static cvar_t *s_acFogFar0;
+static cvar_t *s_acFogFar1;
 
 static void CG_HZM_AircraftCvars(void)
 {
@@ -44,6 +60,10 @@ static void CG_HZM_AircraftCvars(void)
     s_acFogSlope = cgi.Cvar_Get("cg_hzmAcFogSlope", "0.3", 0);   // compression beyond it
     s_acFogMax   = cgi.Cvar_Get("cg_hzmAcFogMax", "0.92", 0);    // never drawn deeper than this
     s_acDebug    = cgi.Cvar_Get("cg_hzmAcDebug", "0", 0);
+    s_acFogFade  = cgi.Cvar_Get("cg_hzmAcFogFade", "1", CVAR_ARCHIVE); // 0 = the v1.10.21 behaviour
+    s_acFogEdge  = cgi.Cvar_Get("cg_hzmAcFogEdge", "1500", 0);         // units before the world box the fade takes
+    s_acFogFar0  = cgi.Cvar_Get("cg_hzmAcFogFar0", "2.0", 0);          // fog distances from the viewer: fade starts
+    s_acFogFar1  = cgi.Cvar_Get("cg_hzmAcFogFar1", "2.8", 0);          // ... and is complete
 }
 
 static qboolean CG_HZM_IsAircraft(const centity_t *cent)
@@ -132,6 +152,26 @@ void CG_HZM_AircraftView(const centity_t *cent, refEntity_t *model)
             d2 = d0 + (d - d0) * s_acFogSlope->value;
             if (d2 > dmax) {
                 d2 = dmax;
+            }
+            // [2026-10-12] fade at the track ends - see 2b in the header. model->origin is still the TRUE position here.
+            if (s_acFogFade->integer && !HZM_WaterWetOmahaMap(cgs.mapname)) {
+                float ax    = (float)fabs(model->origin[0]);
+                float ay    = (float)fabs(model->origin[1]);
+                float edge  = HZM_AC_WORLD_BOX - (ax > ay ? ax : ay);
+                float span  = s_acFogEdge->value > 1.0f ? s_acFogEdge->value : 1.0f;
+                float kEdge = 1.0f - edge / span;
+                float f0    = s_acFogFar0->value * F;
+                float f1    = s_acFogFar1->value * F;
+                float kFar  = (f1 > f0) ? (d - f0) / (f1 - f0) : 0.0f;
+                float k     = kEdge > kFar ? kEdge : kFar;
+
+                if (k > 0.0f) {
+                    if (k > 1.0f) {
+                        k = 1.0f;
+                    }
+                    k  = k * k * (3.0f - 2.0f * k); // no kink where the fade starts or ends
+                    d2 = d2 + (0.998f * F - d2) * k;
+                }
             }
             ratio = d2 / d;
             VectorMA(cg.refdef.vieworg, ratio, delta, model->origin);
