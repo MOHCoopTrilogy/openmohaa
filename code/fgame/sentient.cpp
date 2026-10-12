@@ -4610,6 +4610,10 @@ void Sentient::CoopArteryEnterStage(int stage)
         return;
 
     case COOP_ART_BLEEDOUT:
+        if (!IsDead() && health > 0 && ((edict->s.renderfx & RF_COOP_BOSS) || m_Team != TEAM_GERMAN)) {
+            CoopArteryStop(); // surrendered / recruited between the last beat and now (see CoopArteryPulse)
+            return;
+        }
         if (!IsDead() && health > 0) {
             Entity *atk = m_pCoopArteryAttacker;
             if (!atk) {
@@ -4684,6 +4688,19 @@ void Sentient::CoopArteryPulse(void)
     Event             *ev;
 
     if (!m_pCoopArtery || m_iCoopArteryStage < COOP_ART_STRONG || m_iCoopArteryStage > COOP_ART_WEAK) {
+        return;
+    }
+    // [2026-10-12] A soldier who SURRENDERS or is RECRUITED after the hit is no longer a target: the artery closes
+    // and he does not bleed out. Without this the 150000 bleed-out hit killed a prisoner - or an ally, a recruited
+    // man is on the allied team - and credited the kill to the player. Surrender sets +coopboss on him (officer.scr,
+    // the overhead star) and it stays through conversion (surrender.scr), which then also changes his team.
+    if (!IsDead() && health > 0 && ((edict->s.renderfx & RF_COOP_BOSS) || m_Team != TEAM_GERMAN)) {
+        cvar_t *pDbg = gi.Cvar_Get("coop_goreDebug", "0", 0);
+        if (pDbg->integer) {
+            gi.Printf("^~^~^ ARTERY closed ent=%d reason=%s t=%.2f\n", entnum,
+                      (m_Team != TEAM_GERMAN) ? "recruited" : "surrendered", level.time);
+        }
+        CoopArteryStop();
         return;
     }
     m_iCoopArteryFlip ^= 1;
