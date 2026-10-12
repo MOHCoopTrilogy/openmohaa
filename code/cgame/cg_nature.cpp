@@ -318,6 +318,7 @@ void CG_RainGlobal(void)
     vec3_t         vOmins, vOmaxs, vOe, vStart, vEnd, vLength;
     vec3_t         vZero = {0.0f, 0.0f, 0.0f};
     const char    *shadername;
+    qboolean       bEntRoof = qfalse; // the player stands under a vehicle / model roof (see the roof test below)
 
     if (!pGlobal) {
         pGlobal = cgi.Cvar_Get("coop_dynRainGlobal", "1", CVAR_ARCHIVE); // master toggle (off if it misbehaves)
@@ -361,13 +362,28 @@ void CG_RainGlobal(void)
         CG_Trace(&roofTr, vpStart, vZero, vZero, vpEnd, cg.snap->ps.clientNum, MASK_SOLID, qfalse, qtrue, "CG_RainRoof");
         {
             static cvar_t *pStrict = NULL;
+            static cvar_t *pSeeOut = NULL;
+            qboolean       bDry;
+
             if (!pStrict) { pStrict = cgi.Cvar_Get("coop_rainSkyStrict", "1", CVAR_ARCHIVE); }
+            if (!pSeeOut) { pSeeOut = cgi.Cvar_Get("coop_rainSeeOut", "1", CVAR_ARCHIVE); }
             if (pStrict->integer) {
-                if (!(roofTr.surfaceFlags & SURF_SKY)) {
-                    return; // no sky overhead -> dry, INCLUDING "hit nothing at all"
+                bDry = !(roofTr.surfaceFlags & SURF_SKY); // no sky overhead, INCLUDING "hit nothing at all"
+            } else {
+                bDry = roofTr.fraction < 0.999f && !(roofTr.surfaceFlags & SURF_SKY);
+            }
+            if (bDry) {
+                // HZM coop [user 2026-10-12] "when it rains outside and you are standing indoors, you don't actually
+                // see the rain outside until you actually go outside". This used to return here: a roof over the
+                // PLAYER switched off every drop, the ones falling in the street beyond the window included. Under a
+                // world roof that was never needed - the per-drop sky gate below keeps each drop out of every world
+                // interior by itself. What the cull was added for is a roof the per-drop trace cannot see (a
+                // vehicle or model roof is an entity, the per-drop trace is world-only): there the player now
+                // stands in a dry circle and the rain goes on around it. coop_rainSeeOut 0 = the old cull.
+                if (!pSeeOut->integer) {
+                    return;
                 }
-            } else if (roofTr.fraction < 0.999f && !(roofTr.surfaceFlags & SURF_SKY)) {
-                return;
+                bEntRoof = roofTr.fraction < 0.999f && roofTr.entityNum != ENTITYNUM_WORLD;
             }
         }
     }
@@ -413,6 +429,15 @@ void CG_RainGlobal(void)
         vLength[2] = 0;
         if (VectorLengthSquared(vLength) > Square(cg.rain.min_dist)) {
             continue;
+        }
+        if (bEntRoof) {
+            // under a vehicle / model roof: nothing within 256 units of the player (a truck bed, a covered boat)
+            float dx = vStart[0] - cg.predicted_player_state.origin[0];
+            float dy = vStart[1] - cg.predicted_player_state.origin[1];
+
+            if (dx * dx + dy * dy < 256.0f * 256.0f) {
+                continue;
+            }
         }
 
         // SKY GATE: trace straight up this column from the DROP's own height; only rain where the sky is
