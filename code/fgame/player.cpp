@@ -2375,6 +2375,15 @@ Player::Player()
     m_bCoopProneKeyBlock = false;
     m_fCoopCrouchUp   = 0;
     m_fCoopProneEnter = 0;
+    m_fCoopProneAskT      = 0; // [bug-3560] player memory is not zeroed - seed every one
+    m_fCoopProneReqT      = 0;
+    m_iCoopProneWhySaid   = 0;
+    m_bCoopProneCueSaid   = false;
+    m_fCoopProneUnconfT   = 0;
+    m_bCoopCrouchRawPrev  = false;
+    m_bCoopCrouchDefer    = false;
+    m_bCoopCrouchEat      = false;
+    m_fCoopCrouchPulseEnd = 0;
     m_fCoopReadyUpAt      = 0.0f;
     m_iCoopGunHeftSent    = -1;
     m_fCoopRecoilLast     = 0.0f;
@@ -2484,6 +2493,7 @@ Player::Player()
     m_bCoopBleedBcast     = false;
     m_iCoopBleedFlare     = 0;
     m_fCoopCoverAutoDwell = 0.0f; // HZM coop [user 2026-08-09] auto-cover dwell/backoff
+    m_fCoopCoverAutoLast  = 0.0f; // [bug-3560]
     m_vCoopRecoilOwed     = Vector(0, 0, 0);
     m_iCoopSpeedBase      = 0;   // [vet] was never assigned anywhere - the SPEEDPROBE read it raw
     if (LoadingSavegame) {
@@ -6187,6 +6197,13 @@ void Player::ClientThink(void)
     }
 
     last_ucmd = *current_ucmd;
+
+    // HZM coop [bug-3560] HERE, on the line after the latch, and nowhere earlier. The Tick* calls above
+    // run BEFORE it and so read the PREVIOUS command, while EvaluateState below reads this one: called
+    // from TickCoopProne, the signal learned of a press one think after the statemap had already taken
+    // it - measured, 3 holds in 12 made from a crouch were 'shown' and stood the player up first.
+    // Unconditional: the statemap reads the result on every think, whatever state the player is in.
+    CoopCrouchSignal();
 
     new_buttons = current_ucmd->buttons & ~buttons;
     if (new_buttons & G_GetWeaponCommandMask()) {
@@ -14588,6 +14605,178 @@ bool Player::CoopMpRealismOff(int iBit)
     return true;
 }
 
+// HZM coop [bug-3560, user 2026-10-12] A PRONE REQUEST IS NEVER REFUSED SILENTLY.
+//
+// "sometimes proning just doesnt work. I hold down control and nothing." His session log said
+// nothing about it either, because every refusal in TickCoopProne was a bare return. A request is
+// the crouch key held for coop_proneHold; from that moment it is GRANTED, or it WAITS / is REFUSED
+// with one of the reasons below, printed once per press under coop_proneWhy 1 (off by default, and
+// quiet enough to leave on for a whole test session - one line per request, nothing periodic):
+//
+//   ^~^~^ PRONEWHY ent=0 OK waited=0.00 legs=CROUCH_IDLE org=.. t=..
+//   ^~^~^ PRONEWHY ent=0 WAIT why=no-ground legs=FALL hull=94 ground=0 water=0 org=.. t=..
+//   ^~^~^ PRONEWHY ent=0 REFUSED why=water legs=STAND hull=94 ground=1 water=2 org=.. t=..
+//
+// The CUE is the retail one: the statemap's own CROUCH_DENIED state tells the player
+// `iprint "Can't duck under water"`, so a prone request that cannot be honoured says so the same
+// way, once per press. No cue where the key plainly means something else (a vehicle seat ducks on
+// it, a turret, a downed or frozen player) or where the wait is over before it could be read.
+enum {
+    PRONEWHY_NONE = 0,
+    PRONEWHY_OFF,      // coop_prone 0
+    PRONEWHY_MPOFF,    // MP host realism toggle
+    PRONEWHY_DOWNED,
+    PRONEWHY_VEHICLE,
+    PRONEWHY_TURRET,
+    PRONEWHY_LADDER,
+    PRONEWHY_WATER,
+    PRONEWHY_FROZEN,   // frozen, immobile, spectating, intermission
+    PRONEWHY_NOGROUND, // waits: airborne, or footing too steep to stand on
+    PRONEWHY_SLIDE,    // waits: TickSlide hands over to prone when the slide runs out
+    PRONEWHY_LEGS,     // waits: the legs statemap is in a state with no row to prone (landing, an emote)
+    PRONEWHY_STATEMAP, // the flag was raised and the body never followed - dropped by the watchdog
+    PRONEWHY_NOROOM,   // getting UP: no headroom here and none within a shuffle
+    PRONEWHY_MAX
+};
+
+static const char *const s_coopProneWhyName[PRONEWHY_MAX] = {
+    "none",      "prone-off", "mp-prone-off", "downed",    "vehicle",                 "turret",          "ladder",
+    "water",     "frozen",    "no-ground",    "sliding",   "legs-busy",               "body-never-followed",
+    "no-room-to-get-up"
+};
+
+static const char *const s_coopProneWhyCue[PRONEWHY_MAX] = {
+    NULL,                       NULL,                       "Prone is off on this server", NULL,
+    NULL,                       NULL,                       "Can't go prone on a ladder",  "Can't go prone in water",
+    NULL,                       "Can't go prone here",      NULL,                          "Can't go prone right now",
+    "Can't go prone right now", "No room to get up here"
+};
+
+// The legs states that carry a `PRONE_IDLE : COOP_PRONE` row (coop_mod/player_legs.st), plus the
+// cover states - TickCoopCover hard-cancels on m_bCoopProne later in the same think and they fall
+// to CROUCH_IDLE / STAND. Anything else (FALL*, LAND*, JUMP*, SPRINT_FORWARD, the emotes) is a
+// state the request WAITS out.
+static qboolean CoopProneLegsReady(State *pLegs)
+{
+    const char *n;
+
+    if (!pLegs) {
+        return qfalse;
+    }
+    n = pLegs->getName();
+    if (!n) {
+        return qfalse;
+    }
+    return (qboolean)(!Q_stricmp(n, "STAND") || !Q_stricmpn(n, "RUN_", 4) || !Q_stricmpn(n, "WALK_", 5)
+                      || (!Q_stricmpn(n, "CROUCH_", 7) && Q_stricmp(n, "CROUCH_DENIED"))
+                      || !Q_stricmpn(n, "LIMP_", 5) || !Q_stricmpn(n, "COVER_", 6));
+}
+
+void Player::CoopProneSay(int iWhy, qboolean bCue, qboolean bWaiting)
+{
+    static cvar_t *pWhy = NULL;
+
+    if (iWhy <= PRONEWHY_NONE || iWhy >= PRONEWHY_MAX) {
+        return;
+    }
+    if (!pWhy) { pWhy = gi.Cvar_Get("coop_proneWhy", "0", 0); }
+
+    if (m_iCoopProneWhySaid != iWhy) {
+        m_iCoopProneWhySaid = iWhy;
+        if (pWhy->integer) {
+            gi.Printf("^~^~^ PRONEWHY ent=%d %s why=%s legs=%s hull=%.0f ground=%d water=%d org=%.0f/%.0f/%.0f t=%.2f\n",
+                      entnum, bWaiting ? "WAIT" : "REFUSED", s_coopProneWhyName[iWhy],
+                      currentState_Legs ? currentState_Legs->getName() : "?", maxs.z,
+                      groundentity ? 1 : 0, (int)waterlevel, origin[0], origin[1], origin[2], level.time);
+        }
+    }
+    if (bCue && !m_bCoopProneCueSaid && s_coopProneWhyCue[iWhy] && !G_IsBot(edict)) {
+        m_bCoopProneCueSaid = true;
+        gi.SendServerCommand(
+            edict - g_entities, "print \"" HUD_MESSAGE_YELLOW "%s\n\"", gi.LV_ConvertString(s_coopProneWhyCue[iWhy])
+        );
+    }
+}
+
+// HZM coop [bug-3560] WHAT THE STATEMAP IS SHOWN OF THE CROUCH KEY.
+//
+// Crouch is a TOGGLE in the legs statemap, keyed on the rising edge of the press: STAND ->
+// CROUCH_IDLE on `+CROUCH`, and every CROUCH_* state back to STAND on `+CROUCH` (bug-2918 met the
+// same fact from the bot side). Prone is that same key HELD. From standing the two agree - the press
+// crouches, the hold lies down. From a CROUCH they collide: the press stands the player up, and
+// 0.5 s later the hold raises the prone flag on a man who is now standing, in a state with no row
+// to prone. He sees himself stand up and nothing else; the flag stays up, he walks at crawl speed,
+// and his next press is spent 'getting up'. Measured on m4l1: tap, then hold -> never prone.
+//
+// So a press that BEGINS while crouched is withheld from the statemap until it is known what it is:
+//   - held for coop_proneHold  -> prone, from the crouch, without standing first
+//   - released before that     -> it was the toggle: shown to the statemap now (a short pulse the
+//                                 `+CROUCH` edge takes exactly like a key press) and the player stands
+// The only cost is that standing up from a crouch happens on the key's release instead of its
+// press, i.e. later by the length of a tap. coop_proneFromCrouch 0 restores stand-on-press (a hold
+// from the crouch then stands up first and lies down from standing, via the STAND row).
+// A press made standing is untouched, as is everything while prone is unavailable.
+// Bots are untouched too: they crouch with one-frame taps and are tuned on that timing (bug-2918).
+void Player::CoopCrouchSignal()
+{
+    static cvar_t *pOn = NULL, *pDefer = NULL;
+    bool           bRaw = (last_ucmd.upmove < 0);
+    bool           bCrouched = (!m_bCoopProne && (maxs.z == 54.0f || maxs.z == 60.0f) && groundentity);
+
+    if (!pOn)    { pOn    = gi.Cvar_Get("coop_prone", "1", CVAR_ARCHIVE); }
+    if (!pDefer) { pDefer = gi.Cvar_Get("coop_proneFromCrouch", "1", 0); }
+
+    if (bRaw && !m_bCoopCrouchRawPrev) {
+        m_fCoopCrouchPulseEnd = 0;
+        m_bCoopCrouchDefer    = (pOn->integer && pDefer->integer && !CoopMpRealismOff(MPREALISM_NOPRONE)
+                                 && bCrouched && !deadflag && !m_bCoopDbno && !m_pVehicle && !m_pTurret
+                                 && !m_pLadder && !m_pGlueMaster && waterlevel <= 1 && !m_bCoopProneKeyBlock
+                                 && !G_IsBot(edict));
+        {
+            static cvar_t *pWhy2 = NULL;
+            if (!pWhy2) { pWhy2 = gi.Cvar_Get("coop_proneWhy", "0", 0); }
+            if (pWhy2->integer >= 2) {
+                gi.Printf("^~^~^ PRONEKEY ent=%d press %s legs=%s hull=%.0f ground=%d prone=%d block=%d t=%.2f\n",
+                          entnum, m_bCoopCrouchDefer ? "WITHHELD(crouched)" : "shown",
+                          currentState_Legs ? currentState_Legs->getName() : "?", maxs.z, groundentity ? 1 : 0,
+                          (int)m_bCoopProne, (int)m_bCoopProneKeyBlock, level.time);
+            }
+        }
+    } else if (!bRaw && m_bCoopCrouchRawPrev) {
+        // released. A withheld press that did not become prone was the toggle - deliver it, but only
+        // to a body that is still crouched (a jump in between has already stood him up, and the same
+        // pulse read in STAND would crouch him again).
+        if (m_bCoopCrouchDefer && !m_bCoopProne && bCrouched) {
+            trace_t tr;
+            Vector  vUpMaxs = maxs;
+
+            m_fCoopCrouchPulseEnd = level.time + 0.08f;
+            {
+                static cvar_t *pWhy3 = NULL;
+                if (!pWhy3) { pWhy3 = gi.Cvar_Get("coop_proneWhy", "0", 0); }
+                if (pWhy3->integer >= 2) {
+                    gi.Printf("^~^~^ PRONEKEY ent=%d release: a tap - shown to the statemap now t=%.2f\n", entnum, level.time);
+                }
+            }
+            // the statemap's own CHECK_HEIGHT "stand" will refuse this under a low ceiling, in
+            // silence (retail). Same trace, and the player is told.
+            vUpMaxs[2] = 94.0f;
+            tr = G_Trace(origin, mins, vUpMaxs, origin, edict, MASK_PLAYERSOLID, true,
+                         "Player::CoopCrouchSignal standroom");
+            if (tr.startsolid) {
+                m_iCoopProneWhySaid = 0;
+                m_bCoopProneCueSaid = false;
+                CoopProneSay(PRONEWHY_NOROOM, qtrue, qfalse);
+            }
+        }
+    }
+    if (!bRaw) {
+        m_bCoopCrouchDefer = false;
+        m_bCoopCrouchEat   = false;
+    }
+    m_bCoopCrouchRawPrev = bRaw;
+}
+
 // HZM coop [user 2026-08-24] PRONE - hold the crouch key.
 //
 // DIVISION OF LABOUR, and it is not arbitrary. In MOHAA the STATEMAP owns stance: `height prone`
@@ -14635,8 +14824,24 @@ void Player::TickCoopProne()
     // on an upright body. Cover can no longer engage while prone either (TickCoopCover),
     // so these terms are the belt-and-braces direction. Ladder and swim close the spec's
     // two known bMustLeave gaps while we are here.
+    // [bug-3560, user 2026-10-12: "sometimes proning just doesnt work. I hold down control and nothing"]
+    // THE THREE COVER TERMS ARE GONE FROM THIS LIST, and they were the reported defect. Auto-cover
+    // (TickCoopCover) sets m_bCoopCoverRequested SPECULATIVELY for any player who is crouched and
+    // still - no wall needed, the validation that follows is the judge - and holds it through a 0.5 s
+    // geometry grace before dropping it, then asks again. Each such tick landed in the branch below,
+    // which zeroes the hold: measured on m4l1 on open ground, a 2.5 s hold never became prone
+    // (held 115.18 -> 0 -> 115.93 -> 0 -> 116.88), while the same hold made WALKING worked every time
+    // (a move input cancels the request) - hence "sometimes". The dwell also integrated
+    // level.frametime per usercmd, so above ~72 fps the request beat the 0.5 s prone hold even from
+    // standing (60 fps: prone, 200 fps: never), which is why no 60 fps harness run ever saw it; the
+    // weapon-view harness masks it altogether with coop_coverAuto 0.
+    // They were belt-and-braces for bug-2127 (a prone flag latched on a body in a cover legs state,
+    // which has no COOP_PRONE row). That is now closed where it belongs: TickCoopCover already
+    // hard-cancels on m_bCoopProne and runs later in this same think, the cover legs states then fall
+    // to CROUCH_IDLE / STAND, which both route to PRONE_IDLE, and the watchdog below drops a flag the
+    // body never follows. So a prone hold made in cover now LEAVES cover and lies down - the player's
+    // explicit input wins over the automatic one.
     bMustLeave = (qboolean)(deadflag || m_bCoopDbno || m_pVehicle || m_pTurret
-                            || m_bCoopCoverRequested || m_bCoopCoverWall || m_bCoopCoverLow
                             || m_pLadder || waterlevel > 1
                             || (client->ps.pm_flags & (PMF_SPECTATING | PMF_INTERMISSION
                                                        | PMF_FROZEN | PMF_NO_MOVE)));
@@ -14666,8 +14871,39 @@ void Player::TickCoopProne()
         m_bCoopProneWant  = false;
         m_fCoopCrouchHeld = 0;
         m_fCoopCrouchUp   = 0; // never let the arming latch survive a death or a vehicle
+        m_fCoopProneUnconfT = 0;
+        m_fCoopProneReqT    = 0;
+        // [bug-3560] the hold is still TIMED here, only so that a refusal can be reported: the key
+        // held for coop_proneHold in a state that cannot go prone is a request, and it gets a reason
+        // (coop_proneWhy) and, where the player could not have known, one cue. Nothing in this block
+        // can enter prone; when the blocking state ends the normal hold starts from zero.
+        if (last_ucmd.upmove < 0 && !deadflag && !IsSpectator() && !m_bCoopProneKeyBlock) {
+            if (m_fCoopProneAskT == 0.0f) {
+                m_fCoopProneAskT = level.time;
+            } else if (level.time - m_fCoopProneAskT >= pHold->value) {
+                int iWhy = PRONEWHY_FROZEN;
+
+                if (!pOn->integer)                               { iWhy = PRONEWHY_OFF; }
+                else if (CoopMpRealismOff(MPREALISM_NOPRONE))    { iWhy = PRONEWHY_MPOFF; }
+                else if (m_bCoopDbno)                            { iWhy = PRONEWHY_DOWNED; }
+                else if (m_pVehicle)                             { iWhy = PRONEWHY_VEHICLE; }
+                else if (m_pTurret)                              { iWhy = PRONEWHY_TURRET; }
+                else if (m_pLadder)                              { iWhy = PRONEWHY_LADDER; }
+                else if (waterlevel > 1)                         { iWhy = PRONEWHY_WATER; }
+                CoopProneSay(iWhy, qtrue, qfalse);
+            }
+        } else if (last_ucmd.upmove >= 0) {
+            m_fCoopProneAskT    = 0;
+            m_iCoopProneWhySaid = 0;
+            m_bCoopProneCueSaid = false;
+            // a block left by a prone exit must not outlive the key that set it just because the
+            // release happened in here (dead, in water, on a ladder): the NEXT press would have
+            // been ignored without a word
+            m_bCoopProneKeyBlock = false;
+        }
         return;
     }
+    m_fCoopProneAskT = 0;
 
     bCrouchKey = (last_ucmd.upmove < 0) ? qtrue : qfalse;
 
@@ -14758,10 +14994,41 @@ void Player::TickCoopProne()
         qboolean bJump   = (last_ucmd.upmove > 0) ? qtrue : qfalse;
         qboolean bWantUp;
 
+        // [bug-3560] WATCHDOG: the flag without the body. The statemap owns the pose (see the header),
+        // so m_bCoopProne is only a request until `modheight "prone"` has run - and a request the legs
+        // statemap never honours left a STANDING player flagged prone: crawl speed, no sprint, no
+        // slide, no cover, nothing on screen to say why, and his next crouch press silently spent on
+        // 'getting up'. Reached by holding crouch while already crouched (the press stands him up -
+        // crouch is a toggle - and STAND had no COOP_PRONE row), and by a press whose edge the
+        // statemap never took (off the ground for a frame on rough terrain, landing). Both entries are
+        // closed at the source (CoopCrouchSignal, the legs gate below, the new statemap rows); this is
+        // the guarantee that the state can never again outlive 0.75 s unseen.
+        if (maxs.z == 20.0f) {
+            m_fCoopProneUnconfT = 0;
+        } else if (m_fCoopProneUnconfT == 0.0f) {
+            m_fCoopProneUnconfT = level.time;
+        } else if (level.time - m_fCoopProneUnconfT > 0.75f) {
+            m_iCoopProneWhySaid = 0; // always report this one
+            CoopProneSay(PRONEWHY_STATEMAP, qtrue, qfalse);
+            m_bCoopSupine        = false;
+            m_fCoopSupineFlip    = 0;
+            m_fCoopProneExitAt   = 0;
+            m_bCoopProne         = false;
+            m_bCoopProneWant     = false;
+            m_fCoopCrouchUp      = 0;
+            m_fCoopCrouchHeld    = 0;
+            m_fCoopProneUnconfT  = 0;
+            m_fCoopProneReqT     = 0;
+            m_bCoopProneKeyBlock = bCrouchKey ? true : false; // a key still down must come up first
+            return;
+        }
+
         if (!bCrouchKey) {
             if (!m_fCoopCrouchUp) {
                 m_fCoopCrouchUp = level.time; // released - a later press now means 'get up'
             }
+            m_iCoopProneWhySaid = 0; // [bug-3560] the next press may be told 'no room' again
+            m_bCoopProneCueSaid = false;
         }
         bWantUp = (qboolean)((m_fCoopCrouchUp && bCrouchKey) || bJump);
 
@@ -14807,7 +15074,18 @@ void Player::TickCoopProne()
             Vector  vUpMaxs = maxs;
 
             vUpMaxs[2] = 60.0f; // crouch height - the cheapest stance that is not prone
-            tr = G_Trace(origin, mins, vUpMaxs, origin, this, MASK_PLAYERSOLID, false,
+            // [bug-3560] CYLINDER, like every trace pmove moves a player with (bg_pmove.cpp, the
+            // `qtrue` in each pm->trace) and like the statemap's own CHECK_HEIGHT. All five traces of
+            // this get-up path were BOX traces. A player rests on the ground on his cylinder, so on
+            // anything but dead-level ground the box's corners - 21 u out against the cylinder's 15 -
+            // sit inside the terrain: the box test said 'solid' on EVERY get-up (measured on m4l1,
+            // 27 of 27, level road included), every one was declared 'embedded', and the escape below
+            // hopped the player 9-18 u into the air to stand him. Worse, 'embedded' is the licence
+            // for the last resort that skips the reachability test: under a real low ceiling (a slab
+            // 30 u over a prone man on that road) it stood him up INSIDE the slab. With the shape
+            // pmove uses, level and sloped ground pass in place, and a low ceiling is the honest
+            // refusal bug-2247 meant it to be.
+            tr = G_Trace(origin, mins, vUpMaxs, origin, this, MASK_PLAYERSOLID, true,
                          "Player::TickCoopProne standup");
             {
                 static cvar_t *pSDbg = NULL;
@@ -14872,7 +15150,7 @@ void Player::TickCoopProne()
                 // say and is skipped. What still holds the line is the DESTINATION test: the crouch
                 // box at the candidate must be genuinely clear, and the candidate is still capped at
                 // 40 units out and 18 up - a shove and a step, not a teleport.
-                trace_t trHere = G_Trace(origin, mins, maxs, origin, this, MASK_PLAYERSOLID, false,
+                trace_t trHere = G_Trace(origin, mins, maxs, origin, this, MASK_PLAYERSOLID, true,
                                          "Player::TickCoopProne embedded");
                 qboolean bEmbedded = (qboolean)(trHere.startsolid || trHere.allsolid);
 
@@ -14897,7 +15175,7 @@ void Player::TickCoopProne()
                             // question when we are not already inside something.
                             if (!bEmbedded) {
                                 trMove = G_Trace(origin, mins, maxs, vTry, this, MASK_PLAYERSOLID,
-                                                 false, "Player::TickCoopProne shuffle");
+                                                 true, "Player::TickCoopProne shuffle");
                                 if (trMove.startsolid || trMove.allsolid || trMove.fraction < 0.99f) {
                                     continue;
                                 }
@@ -14906,7 +15184,7 @@ void Player::TickCoopProne()
                             // and is there room to come up to crouch once it is there?
                             vFitMaxs[2] = 60.0f;
                             trFit = G_Trace(vTry, mins, vFitMaxs, vTry, this, MASK_PLAYERSOLID,
-                                            false, "Player::TickCoopProne shuffle fit");
+                                            true, "Player::TickCoopProne shuffle fit");
                             if (trFit.startsolid || trFit.allsolid) {
                                 continue;
                             }
@@ -14930,8 +15208,19 @@ void Player::TickCoopProne()
                     vTop[2] += 18.0f;
                     vBot[2] -= 64.0f;
                     vFitMaxs[2] = 60.0f;
-                    trFloor = G_Trace(vTop, mins, vFitMaxs, vBot, this, MASK_PLAYERSOLID, false,
+                    trFloor = G_Trace(vTop, mins, vFitMaxs, vBot, this, MASK_PLAYERSOLID, true,
                                       "Player::TickCoopProne unbury");
+                    // [bug-3560] ...and never INTO something. A sweep that starts inside a low
+                    // ceiling is not 'allsolid' (its END point, 64 u down, is clear of the ceiling), so
+                    // fraction alone passed and the crouch hull was put inside the thing overhead.
+                    // The place it stops is tested like every other candidate: the hull must fit THERE.
+                    if (!trFloor.allsolid && trFloor.fraction > 0.0f) {
+                        trace_t trDest = G_Trace(Vector(trFloor.endpos), mins, vFitMaxs, Vector(trFloor.endpos),
+                                                 this, MASK_PLAYERSOLID, true, "Player::TickCoopProne unbury fit");
+                        if (trDest.startsolid || trDest.allsolid) {
+                            trFloor.allsolid = qtrue;
+                        }
+                    }
                     if (!trFloor.allsolid && trFloor.fraction > 0.0f) {
                         gi.Printf(
                             "^~^~^ PRONEUNBURY %d %.0f/%.0f/%.0f -> %.0f/%.0f/%.0f t=%.1f\n",
@@ -14945,6 +15234,9 @@ void Player::TickCoopProne()
                 }
 
                 if (!bMoved) {
+                    // [bug-3560] the one refusal that stands - under something, nowhere to shuffle to
+                    // - is no longer silent either. Once per press (reset when the key comes up).
+                    CoopProneSay(PRONEWHY_NOROOM, qtrue, qfalse);
                     return;
                 }
 
@@ -14970,6 +15262,14 @@ void Player::TickCoopProne()
         m_fCoopCrouchUp   = 0;
         m_fCoopCrouchHeld = 0; // do not let the entry accumulator re-trigger prone on this same press
         m_bCoopProneKeyBlock = true; // and not on this held key either
+        // [bug-3560] ...and the statemap must not read this press as the crouch TOGGLE: the CROUCH
+        // conditional was last evaluated before the prone states (which never test it), so a key down
+        // now can look like a fresh edge and stand the player the instant he reaches CROUCH_IDLE.
+        m_bCoopCrouchEat    = bCrouchKey ? true : false;
+        m_fCoopProneUnconfT = 0;
+        m_fCoopProneReqT    = 0;
+        m_iCoopProneWhySaid = 0;
+        m_bCoopProneCueSaid = false;
         return;
     }
 
@@ -14998,12 +15298,43 @@ void Player::TickCoopProne()
         m_fCoopCrouchHeld    = 0.0f;
         m_bCoopProneWant     = false;
         m_bCoopProneKeyBlock = false; // key is up: prone may arm again
+        m_fCoopProneReqT     = 0;     // [bug-3560] one report and one cue per press
+        m_iCoopProneWhySaid  = 0;
+        m_bCoopProneCueSaid  = false;
         return;
     }
     // [spec A9] a leftover from the first elapsed-time design assigned level.time into what is
     // now a SECONDS accumulator - on a zero-length frame that poisoned the hold with a huge
     // timestamp and entered prone instantly. The accumulator needs no seeding; deleted.
-    if (bCanEnter && m_fCoopCrouchHeld != 0.0f && (level.time - m_fCoopCrouchHeld) >= pHold->value) {
+    if (m_fCoopCrouchHeld != 0.0f && (level.time - m_fCoopCrouchHeld) >= pHold->value) {
+        // [bug-3560] THE HOLD HAS MATURED: this is a prone REQUEST, and from here it is either
+        // granted, or it WAITS with a named reason. A waiting request stays armed while the key is
+        // down and is granted the moment its reason clears (airborne -> landed, the slide ran out,
+        // the landing animation finished) - the old code simply did nothing, every think, in silence.
+        // The legs gate is new: prone is entered by a statemap row, so the flag is only raised when
+        // the legs are in a state that HAS that row (or a cover state, which TickCoopCover drops this
+        // same think). Raised anywhere else it was a flag on a body that never moved.
+        static cvar_t *pWhy = NULL;
+        int            iWhy = PRONEWHY_NONE;
+
+        if (!pWhy) { pWhy = gi.Cvar_Get("coop_proneWhy", "0", 0); }
+        if (m_fCoopProneReqT == 0.0f) {
+            m_fCoopProneReqT = level.time;
+        }
+        if (!groundentity) {
+            iWhy = PRONEWHY_NOGROUND;
+        } else if (m_bCoopSliding) {
+            iWhy = PRONEWHY_SLIDE;
+        } else if (!CoopProneLegsReady(movecontrol == MOVECONTROL_LEGS ? currentState_Legs : NULL)) {
+            iWhy = PRONEWHY_LEGS;
+        }
+        if (iWhy != PRONEWHY_NONE) {
+            // told on screen only once it has plainly not happened - a jump or a landing clears in
+            // well under this, and a cue for every one of those would be noise
+            CoopProneSay(iWhy, (qboolean)(level.time - m_fCoopProneReqT > 0.75f), qtrue);
+            return;
+        }
+
         // MUST clear the arming latch. Entry happens with crouch still DOWN, so a latch left set by a
         // previous prone session would satisfy (m_fCoopCrouchUp && bCrouchKey) on the very next frame
         // and stand the player straight back up - the same symptom that brought this rewrite about.
@@ -15012,6 +15343,14 @@ void Player::TickCoopProne()
         m_bCoopProne      = true;
         m_bCoopProneWant  = true;
         m_fCoopProneEnter = level.time;
+        m_fCoopProneUnconfT = level.time; // the watchdog's clock starts now: the hull is not prone yet
+        if (pWhy->integer) {
+            gi.Printf("^~^~^ PRONEWHY ent=%d OK waited=%.2f legs=%s org=%.0f/%.0f/%.0f t=%.2f\n",
+                      entnum, level.time - m_fCoopProneReqT,
+                      currentState_Legs ? currentState_Legs->getName() : "?",
+                      origin[0], origin[1], origin[2], level.time);
+        }
+        m_iCoopProneWhySaid = 0;
     }
 }
 
@@ -18825,13 +19164,23 @@ void Player::TickCoopCover()
             && !m_pLadder && !level.playerfrozen && !m_bFrozen && !(flags & FL_IMMOBILE)
             && (client->ps.pm_flags & PMF_DUCKED) && !last_ucmd.forwardmove && !last_ucmd.rightmove
             && last_ucmd.upmove <= 0) {
-            m_fCoopCoverAutoDwell += level.frametime;
+            // [bug-3560] ELAPSED time, not level.frametime: this runs once per USERCMD (TRAPS), so at
+            // com_maxfps 200 against sv_fps 40 the advertised 0.9 s dwell matured in 0.18 s - ahead of
+            // the 0.5 s prone hold, and five times faster for one player than for another on the same
+            // server. Clamped so a hitch cannot mature it in one step.
+            float fCovDt = level.time - m_fCoopCoverAutoLast;
+
+            if (fCovDt < 0.0f) { fCovDt = 0.0f; }
+            if (fCovDt > 0.1f) { fCovDt = 0.1f; }
+            m_fCoopCoverAutoLast   = level.time;
+            m_fCoopCoverAutoDwell += fCovDt;
             if (m_fCoopCoverAutoDwell >= s_coopCoverAutoDelay->value && level.time >= m_fCoopCoverAutoRetry) {
                 m_bCoopCoverRequested = true; // speculative - validation below is the judge
                 m_fCoopCoverAutoRetry = level.time + 0.4f;
             }
         } else {
             m_fCoopCoverAutoDwell = 0.0f;
+            m_fCoopCoverAutoLast  = level.time; // [bug-3560] the first dwell step measures from here
         }
         if (!m_bCoopCoverRequested) {
             m_bCoopCoverWall    = false;
