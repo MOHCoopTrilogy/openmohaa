@@ -5174,7 +5174,9 @@ static qboolean UI_MemorialStart(void)
         return qfalse;
     }
 
-    s_memorialLogo = uWinMan.RegisterShader("hzmLoadMedalMorph");
+    // [user 2026-10-12] the card's own 512 px copy of the animated medal (docs/tools/gen_memorial_medal.py). An older
+    // pak does not have it: its card still carries the baked badge, so no medal is drawn and it stays one badge.
+    s_memorialLogo = uWinMan.RegisterShader("hzmMemorialMedalMorph");
 
     UI_MemorialTimes(&fin, &hold, &fout);
     IN_MouseOff(); // no GUI pointer on the black screen; clicks still arrive as keys (UI_StartStageKeyEvent)
@@ -5249,14 +5251,15 @@ static void UI_MemorialDraw(void)
         re.DrawStretchPic((swidth - w) * 0.5f, (sheight - h) * 0.5f, w, h, 0.0, 0.0, 1.0, 1.0,
                           intro_stage.material->GetMaterial());
 
-        // the loading screen's medal, same size relative to the screen height (ui/loadingbar.txt: 53.43 of 480),
-        // centred in the black band under the art. Its stages carry their own alphaGen, so the fade rides on rgb
-        // (on black that reads exactly as the art's fade).
+        // [user 2026-10-12] "There should only be one badge, at the top, and it should be the animated one." The card
+        // art keeps an empty 352 px slot at its top (44 px down, of the 1024 px card - gen_memorial.py) and the
+        // looping old <-> new medal is drawn in it; the medal fills 460 / 512 of its own quad. Its stages carry their
+        // own alphaGen, so the fade rides on rgb (on black that reads exactly as the art's fade).
         if (s_memorialLogo && s_memorialLogo->GetMaterial()) {
-            const float s    = sheight * (53.43f / 480.0f);
-            const float band = (sheight - h) * 0.5f;
-            const float y    = (sheight + h) * 0.5f + (band > s ? (band - s) * 0.5f : 0.0f);
-            re.DrawStretchPic((swidth - s) * 0.5f, y, s, s, 0.0, 0.0, 1.0, 1.0, s_memorialLogo->GetMaterial());
+            const float s  = h * (352.0f / 1024.0f) * (512.0f / 460.0f);
+            const float cy = (sheight - h) * 0.5f + h * ((44.0f + 176.0f) / 1024.0f);
+            re.DrawStretchPic((swidth - s) * 0.5f, cy - s * 0.5f, s, s, 0.0, 0.0, 1.0, 1.0,
+                              s_memorialLogo->GetMaterial());
         }
         re.SetColor(NULL);
     }
