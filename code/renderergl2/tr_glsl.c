@@ -1030,6 +1030,7 @@ void GLSL_SetUniformInt(shaderProgram_t *program, int uniformNum, GLint value)
 
 	*compare = value;
 
+	hzmPerf.glUniforms++;	// HZM gl2 [render-perf 0] r_hzmPerfStats
 	qglProgramUniform1iEXT(program->program, uniforms[uniformNum], value);
 }
 
@@ -1085,6 +1086,7 @@ void GLSL_SetUniformFloat(shaderProgram_t *program, int uniformNum, GLfloat valu
 
 	*compare = value;
 	
+	hzmPerf.glUniforms++;	// HZM gl2 [render-perf 0] r_hzmPerfStats
 	qglProgramUniform1fEXT(program->program, uniforms[uniformNum], value);
 }
 
@@ -1110,6 +1112,7 @@ void GLSL_SetUniformVec2(shaderProgram_t *program, int uniformNum, const vec2_t 
 	compare[0] = v[0];
 	compare[1] = v[1];
 
+	hzmPerf.glUniforms++;	// HZM gl2 [render-perf 0] r_hzmPerfStats
 	qglProgramUniform2fEXT(program->program, uniforms[uniformNum], v[0], v[1]);
 }
 
@@ -1134,6 +1137,7 @@ void GLSL_SetUniformVec3(shaderProgram_t *program, int uniformNum, const vec3_t 
 
 	VectorCopy(v, compare);
 
+	hzmPerf.glUniforms++;	// HZM gl2 [render-perf 0] r_hzmPerfStats
 	qglProgramUniform3fEXT(program->program, uniforms[uniformNum], v[0], v[1], v[2]);
 }
 
@@ -1158,6 +1162,7 @@ void GLSL_SetUniformVec4(shaderProgram_t *program, int uniformNum, const vec4_t 
 
 	VectorCopy4(v, compare);
 
+	hzmPerf.glUniforms++;	// HZM gl2 [render-perf 0] r_hzmPerfStats
 	qglProgramUniform4fEXT(program->program, uniforms[uniformNum], v[0], v[1], v[2], v[3]);
 }
 
@@ -1182,6 +1187,7 @@ void GLSL_SetUniformFloat5(shaderProgram_t *program, int uniformNum, const vec5_
 
 	VectorCopy5(v, compare);
 
+	hzmPerf.glUniforms++;	// HZM gl2 [render-perf 0] r_hzmPerfStats
 	qglProgramUniform1fvEXT(program->program, uniforms[uniformNum], 5, v);
 }
 
@@ -1206,6 +1212,7 @@ void GLSL_SetUniformMat4(shaderProgram_t *program, int uniformNum, const mat4_t 
 
 	Mat4Copy(matrix, compare);
 
+	hzmPerf.glUniformMats++;	// HZM gl2 [render-perf 0] r_hzmPerfStats
 	qglProgramUniformMatrix4fvEXT(program->program, uniforms[uniformNum], 1, GL_FALSE, matrix);
 }
 
@@ -1238,6 +1245,7 @@ void GLSL_SetUniformMat4BoneMatrix(shaderProgram_t *program, int uniformNum, /*c
 
 	Com_Memcpy(compare, matrix, numMatricies * sizeof(mat4_t));
 
+	hzmPerf.glUniformMats++;	// HZM gl2 [render-perf 0] r_hzmPerfStats
 	qglProgramUniformMatrix4fvEXT(program->program, uniforms[uniformNum], numMatricies, GL_FALSE, &matrix[0][0]);
 }
 
