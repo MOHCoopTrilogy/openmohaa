@@ -39,6 +39,7 @@ static void GfxInfo_f( void );
 static void GfxMemInfo_f( void );
 void R_HzmVramAcct_f( void );   // tr_hzm_vram.c
 void R_HzmVramRegister( void );
+void R_HzmVramSrc_f( void );
 void R_HzmVramInit( void );
 void R_HzmVramShutdown( void );
 
@@ -2139,6 +2140,7 @@ void R_Register( void )
 	ri.Cmd_AddCommand( "gfxinfo", GfxInfo_f );
 	ri.Cmd_AddCommand( "minimize", GLimp_Minimize );
 	ri.Cmd_AddCommand( "gfxmeminfo", GfxMemInfo_f );
+	ri.Cmd_AddCommand( "vramsrc", R_HzmVramSrc_f );     // HZM gl2: the video-memory source chain (tr_hzm_vram.c)
 	ri.Cmd_AddCommand( "vramacct", R_HzmVramAcct_f );   // HZM gl2: video-memory accounting line (tr_hzm_vram.c)
 	ri.Cmd_AddCommand( "exportCubemaps", R_ExportCubemaps_f );
 	// HZM gl2 graphics probes (tr_gfxprobe.c, MSAA/shadow plan P0): r_gfxProbe, r_glDebug, r_gfxLabel,
@@ -2538,6 +2540,7 @@ void RE_Shutdown( qboolean destroyWindow ) {
 	ri.Cmd_RemoveCommand( "minimize" );
 	ri.Cmd_RemoveCommand( "gfxmeminfo" );
 	ri.Cmd_RemoveCommand( "vramacct" );
+	ri.Cmd_RemoveCommand( "vramsrc" );
 	ri.Cmd_RemoveCommand( "exportCubemaps" );
 	R_GfxProbe_Shutdown();
 	ri.Cmd_RemoveCommand( "hzmtlprobe" );
