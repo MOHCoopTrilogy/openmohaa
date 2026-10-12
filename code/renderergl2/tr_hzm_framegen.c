@@ -137,7 +137,12 @@ typedef struct {
 	// ---- main thread, motion vectors (the renderer's own context)
 	qboolean		vecOK;			// its programs and textures exist
 	GLuint			velProg;
-	GLint			uVelMidVP, uVelCurVP, uVelSize, uVelPass;
+	GLint			uVelMidVP, uVelCurVP, uVelSize, uVelPass, uVelSunVP;
+	GLint			uWideShadow, uWideInvVP, uWideSunVP, uWideSunDir, uWideL;
+	qboolean		velShadow;		// this frame: movers are also drawn as the sun sees them
+	float			sunVP[16], invCurVP[16], sunDir[3];
+	qboolean		vecTried;
+	qboolean		lastBypass;		// the last frame handed over had an overlay up
 	image_t			*MC0;			// scratch, twice the scene's width: M as rasterised | C, with a depth buffer for C
 	FBO_t			*fboMC0;
 	float			midVP[16], curVP[16];
@@ -157,7 +162,7 @@ typedef struct {
 	qboolean		ctxInit;
 	GLuint			prog, vao;
 	GLint			uMode, uTint, uRes, uGun, uCurFromOut, uOutFromCur, uPrvFromOut, uOutFromPrv, uFadeK, uFadeB, uHudThr;
-	GLint			uOutVP, uCurInvW, uPrvInvW, uCurK, uPrvK, uUseC;
+	GLint			uOutVP, uCurInvW, uPrvInvW, uCurK, uPrvK, uUseC, uEdge;
 
 	// ---- shared, under mx
 	SDL_Thread		*thread;
@@ -182,7 +187,7 @@ static struct {
 	volatile int	nSyncWait, nGenTimed, nFade;
 	volatile double	genDelayMs, realDelayMs;	// from the main thread handing a frame over to its pictures being shown
 	volatile int	nGenDelay, nRealDelay;
-	volatile int	nVec, nVelPass, velDraws, velSkipped;	// main thread: frames with vectors, passes run, batches drawn / left out
+	volatile int	nVec, nVelPass, velDraws, velSkipped, velBrush;	// main thread: frames with vectors, passes run, batches drawn / left out
 	char			lastOverlay[96];
 } fgs;
 
@@ -190,6 +195,8 @@ cvar_t *r_hzmFrameGen;
 cvar_t *r_hzmFrameGenDebug;
 cvar_t *r_hzmFrameGenStats;
 cvar_t *r_hzmFrameGenVectors;
+cvar_t *r_hzmFrameGenShadows;
+cvar_t *r_hzmFrameGenEdge;
 int r_fgVelPass;		// the motion-vector pass is collecting surfaces: RB_EndSurface hands them to R_FG_VelocityDraw
 
 static const char *fg_vs =
@@ -203,6 +210,7 @@ static const char *fg_vs =
 static const char *fg_fs =
 	"uniform sampler2D uCurS, uCurD, uPrvS, uPrvD, uHudF, uHudS, uHudD, uCurM, uPrvM, uCurC;\n"
 	"uniform float uUseC;\n"
+	"uniform float uEdge;\n"
 	"uniform mat4 uCurFromOut, uOutFromCur, uPrvFromOut, uOutFromPrv, uOutVP;\n"
 	"uniform vec4 uCurInvW, uPrvInvW;\n"		// the row of ( view-projection )^-1 that gives a source pixel's world w
 	"uniform float uCurK, uPrvK;\n"			// the share of a frame's own displacement to take back (0 = no vectors)
@@ -310,7 +318,19 @@ static const char *fg_fs =
 	"				vec2 q = vUV + cm.rg;\n"
 	"				bool in01 = all( greaterThanEqual( q, vec2( 0.0 ) ) ) && all( lessThanEqual( q, vec2( 1.0 ) ) );\n"
 	"				float nd = in01 ? 1.0 - depthAt( uCurD, q ) : -1.0;\n"
-	"				if ( in01 && abs( nd - cm.b ) <= 0.012 * cm.b + 0.000002 ) {\n"
+	"				bool vis = in01 && abs( nd - cm.b ) <= 0.012 * cm.b + 0.000002;\n"
+	"				if ( in01 && !vis && uEdge != 0.0 ) {\n"
+	// the mover's outline: the point lies within a pixel of its edge in the newer frame, and the depth texel
+	// under it is the background's. One of the four texels around it is the mover's: it is there, take it
+	// (the colour fetch blends the edge as the real frames do). Without this every generated picture lost a
+	// one-pixel ring off each mover.
+	"					vec2 px = 1.0 / vec2( textureSize( uCurD, 0 ) );\n"
+	"					for ( int i = 0; i < 4 && !vis; i++ ) {\n"
+	"						vec2 o = ( i < 2 ? vec2( float( i * 2 - 1 ), 0.0 ) : vec2( 0.0, float( i * 2 - 5 ) ) ) * px;\n"
+	"						vis = abs( 1.0 - depthAt( uCurD, q + o ) - cm.b ) <= 0.012 * cm.b + 0.000002;\n"
+	"					}\n"
+	"				}\n"
+	"				if ( vis ) {\n"
 	"					a = vec4( q, 0.0, cm.a );\n"
 	"					dyn = true;\n"
 	"				} else {\n"
@@ -381,9 +401,9 @@ static const char *fg_vel_vs =
 	"in vec3 attr_Position;\n"
 	"in vec2 attr_TexCoord0;\n"		// model-space displacement of the vertex since the frame before: xy ...
 	"in vec2 attr_TexCoord1;\n"		// ... and z (skinned models; zero for rigid ones)
-	"uniform mat4 uMVP, uModel, uPrevModel, uMidVP, uCurVP;\n"
+	"uniform mat4 uMVP, uModel, uPrevModel, uMidVP, uCurVP, uSunVP;\n"
 	"uniform float uSkinned;\n"		// 0 = the two attributes above are not displacements (a rigid brush model)
-	"uniform int uPass;\n"			// 0 = M: where it is in the frame, 1 = C: where it is halfway
+	"uniform int uPass;\n"			// 0 = M: where it is in the frame, 1 = C: where it is halfway, 2 = L: seen from the sun
 	"out vec3 vDelta;\n"
 	"out vec4 vCur;\n"
 	"void main() {\n"
@@ -393,7 +413,8 @@ static const char *fg_vel_vs =
 	"	vDelta = now - was;\n"
 	"	vCur = uCurVP * vec4( now, 1.0 );\n"
 	"	if ( uPass == 0 ) gl_Position = uMVP * vec4( attr_Position, 1.0 );\n"
-	"	else gl_Position = uMidVP * vec4( ( now + was ) * 0.5, 1.0 );\n"
+	"	else if ( uPass == 1 ) gl_Position = uMidVP * vec4( ( now + was ) * 0.5, 1.0 );\n"
+	"	else gl_Position = uSunVP * vec4( now, 1.0 );\n"
 	"}\n";
 
 // Both passes go into one scratch target twice the width (M left, C right): switching framebuffers per batch cost
@@ -413,6 +434,10 @@ static const char *fg_vel_fs =
 	"		float z = gl_FragCoord.z;\n"
 	"		if ( abs( z - sd ) > fwidth( z ) + 0.002 * ( 1.0 - z ) + 0.0000005 ) discard;\n"
 	"		oColor = vec4( vDelta, 1.0 );\n"
+	"	} else if ( uPass == 2 ) {\n"
+	// L: the movers as the sun sees them (nearest to the sun on top): the displacement, and a = 2 - depth towards
+	// the ground. What lies behind one of them along the sun's rays is in its shadow.
+	"		oColor = vec4( vDelta, 2.0 - gl_FragCoord.z );\n"
 	"	} else {\n"
 	// rg = how far from here the same point of the surface is in the newer frame (screen 0..1), b = 1 - its depth
 	// there, a = how far away it is here
@@ -433,6 +458,10 @@ static const char *fg_quad_vs =
 // the newer frame's place. It takes the vector of a neighbour that is a mover at the same depth.
 static const char *fg_wide_fs =
 	"uniform sampler2D uM, uD;\n"
+	"uniform float uShadow;\n"
+	"uniform mat4 uInvVP, uSunVP;\n"
+	"uniform vec3 uSunDir;\n"
+	"uniform vec3 uL;\n"			// L's place in the scratch target: x, y, size
 	"out vec4 oColor;\n"
 	"void main() {\n"
 	"	ivec2 c = ivec2( gl_FragCoord.xy );\n"
@@ -449,6 +478,23 @@ static const char *fg_wide_fs =
 	"		if ( n.a > 0.5 ) {\n"
 	"			float dd = abs( texelFetch( uD, q, 0 ).r - d );\n"
 	"			if ( dd < bd ) { bd = dd; best = n; }\n"
+	"		}\n"
+	"	}\n"
+	// A mover's shadow is part of the ground's colour, and the ground stands still: in the generated pictures the
+	// shadow stayed at the newer frame's place while its owner was put halfway - it led him by half a real frame.
+	// A pixel that has a mover between it and the sun is in that mover's shadow: it gets the mover's displacement
+	// (slid along the sun's ray back onto level ground), so the generator moves the shadowed patch with him.
+	"	if ( best.a < 0.5 && uShadow != 0.0 && d < 1.0 ) {\n"
+	"		vec2 uv = ( vec2( c ) + 0.5 ) / vec2( sz + ivec2( 1 ) );\n"
+	"		vec4 wp = uInvVP * vec4( uv * 2.0 - 1.0, d * 2.0 - 1.0, 1.0 );\n"
+	"		vec3 l = ( uSunVP * vec4( wp.xyz / wp.w, 1.0 ) ).xyz * 0.5 + 0.5;\n"
+	"		if ( all( greaterThan( l.xy, vec2( 0.0 ) ) ) && all( lessThan( l.xy, vec2( 1.0 ) ) ) ) {\n"
+	"			vec4 sm = texelFetch( uM, ivec2( uL.xy + l.xy * uL.z ), 0 );\n"
+	"			if ( sm.a > 0.5 && 2.0 - sm.a < l.z - 0.003 ) {\n"
+	"				vec3 dv = sm.rgb;\n"
+	"				if ( abs( uSunDir.z ) > 0.1 ) dv -= uSunDir * ( dv.z / uSunDir.z );\n"
+	"				best = vec4( dv, 1.0 );\n"
+	"			}\n"
 	"		}\n"
 	"	}\n"
 	"	oColor = best;\n"
@@ -671,6 +717,7 @@ static qboolean FG_CtxInit( void )
 	fg.uCurK = qglGetUniformLocation( fg.prog, "uCurK" );
 	fg.uPrvK = qglGetUniformLocation( fg.prog, "uPrvK" );
 	fg.uUseC = qglGetUniformLocation( fg.prog, "uUseC" );
+	fg.uEdge = qglGetUniformLocation( fg.prog, "uEdge" );
 	qglDisable( GL_DEPTH_TEST );
 	qglDisable( GL_BLEND );
 	qglDisable( GL_CULL_FACE );
@@ -753,6 +800,7 @@ static qboolean FG_DrawGenerated( const fgFrame_t *prv, const fgFrame_t *cur, co
 		FG_BindTex( 9, fg.sets[cur->set].C );
 	}
 	qglUniform1f( fg.uUseC, useC );
+	qglUniform1f( fg.uEdge, r_hzmFrameGenEdge->integer ? 1.0f : 0.0f );
 	if ( prvK != 0.0f ) {
 		FG_BindTex( 8, fg.sets[prv->set].M );
 	}
@@ -1264,8 +1312,8 @@ void R_FG_VelocityDraw( void )
 	}
 	if ( !fg.velBound ) {
 		FBO_Bind( fg.fboMC0 );
-		qglViewport( 0, 0, w * 2, h );
-		qglScissor( 0, 0, w * 2, h );
+		qglViewport( 0, 0, w * 2 + h, h );
+		qglScissor( 0, 0, w * 2 + h, h );
 		GL_State( GLS_DEPTHMASK_TRUE );
 		qglClearColor( 0.0f, 0.0f, 0.0f, 0.0f );
 		qglClearDepth( 1.0 );
@@ -1275,6 +1323,9 @@ void R_FG_VelocityDraw( void )
 		qglUniformMatrix4fv( fg.uVelMidVP, 1, GL_FALSE, fg.midVP );
 		qglUniformMatrix4fv( fg.uVelCurVP, 1, GL_FALSE, fg.curVP );
 		qglUniform2f( fg.uVelSize, (float)w, (float)h );
+		if ( fg.velShadow ) {
+			qglUniformMatrix4fv( fg.uVelSunVP, 1, GL_FALSE, fg.sunVP );
+		}
 		fg.velBound = qtrue;
 	}
 	if ( tess.useCacheVao ) {
@@ -1282,6 +1333,7 @@ void R_FG_VelocityDraw( void )
 		// coordinates - the shader must not read those as a displacement
 		VaoCache_Commit();
 		qglUniform1f( fg.uVelRigid, 0.0f );
+		fgs.velBrush++;
 	} else {
 		RB_UpdateTessVao( ATTR_POSITION | ATTR_TEXCOORD | ATTR_LIGHTCOORD );
 		qglUniform1f( fg.uVelRigid, 1.0f );
@@ -1305,6 +1357,14 @@ void R_FG_VelocityDraw( void )
 	GL_State( GLS_DEPTHMASK_TRUE );
 	qglUniform1i( fg.uVelPass, 1 );
 	R_DrawElements( tess.numIndexes, tess.firstIndex );
+	if ( fg.velShadow ) {
+		// L: as the sun sees it (both faces: the nearest surface to the sun is what matters)
+		qglViewport( w * 2, 0, h, h );
+		qglScissor( w * 2, 0, h, h );
+		GL_Cull( CT_TWO_SIDED );
+		qglUniform1i( fg.uVelPass, 2 );
+		R_DrawElements( tess.numIndexes, tess.firstIndex );
+	}
 	fg.velDraws++;
 }
 
@@ -1349,8 +1409,10 @@ void R_FG_VelocityPass( void *drawSurfsV, int numDrawSurfs )
 	if ( tess.numIndexes ) {
 		RB_EndSurface();
 	}
-	if ( fg.lastSeq != frame - 1 ) {
-		return;		// no frame straight before this one: nothing to be halfway to
+	if ( fg.lastSeq != frame - 1 || fg.lastBypass ) {
+		// no frame straight before this one: nothing to be halfway to. Or an overlay is up (scope, menu, the
+		// aiming vignette): nothing is being generated, so nothing needs vectors.
+		return;
 	}
 	{
 		double Vm[16], Pm[16], t[16];
@@ -1366,6 +1428,38 @@ void R_FG_VelocityPass( void *drawSurfsV, int numDrawSurfs )
 		FG_M4Mul( fg.latP, fg.latV, t );
 		for ( i = 0; i < 16; i++ ) {
 			fg.curVP[i] = (float)t[i];
+		}
+		fg.velShadow = qfalse;
+		if ( r_hzmFrameGenShadows->integer && R_CharShadowsActive() && FG_M4Inv( t, Vm ) ) {
+			// an orthographic box around the camera, looking down the sun's rays: 1024 units to each side
+			vec3_t d, u, v, up = { 0.0f, 0.0f, 1.0f };
+			const float *cam = backEnd.viewParms.or.origin;
+			const float R = 1024.0f;
+
+			VectorCopy( backEnd.refdef.sunDir, d );
+			if ( VectorNormalize( d ) > 0.5f ) {
+				if ( fabs( d[2] ) > 0.99f ) {
+					VectorSet( up, 1.0f, 0.0f, 0.0f );
+				}
+				CrossProduct( up, d, u );
+				VectorNormalize( u );
+				CrossProduct( d, u, v );
+				memset( fg.sunVP, 0, sizeof( fg.sunVP ) );
+				for ( i = 0; i < 3; i++ ) {
+					fg.sunVP[i * 4 + 0] = u[i] / R;
+					fg.sunVP[i * 4 + 1] = v[i] / R;
+					fg.sunVP[i * 4 + 2] = -d[i] / R;
+				}
+				fg.sunVP[12] = -DotProduct( u, cam ) / R;
+				fg.sunVP[13] = -DotProduct( v, cam ) / R;
+				fg.sunVP[14] = DotProduct( d, cam ) / R;
+				fg.sunVP[15] = 1.0f;
+				for ( i = 0; i < 16; i++ ) {
+					fg.invCurVP[i] = (float)Vm[i];
+				}
+				VectorCopy( d, fg.sunDir );
+				fg.velShadow = qtrue;
+			}
 		}
 	}
 	fg.velOldFbo = glState.currentFBO;
@@ -1509,6 +1603,13 @@ void R_FG_VelocityPass( void *drawSurfsV, int numDrawSurfs )
 		GL_UseProgram( fg.wideProg );
 		GL_BindToTMU( fg.MC0, 0 );
 		GL_BindToTMU( tr.renderDepthImage, 1 );
+		qglUniform1f( fg.uWideShadow, fg.velShadow ? 1.0f : 0.0f );
+		if ( fg.velShadow ) {
+			qglUniformMatrix4fv( fg.uWideInvVP, 1, GL_FALSE, fg.invCurVP );
+			qglUniformMatrix4fv( fg.uWideSunVP, 1, GL_FALSE, fg.sunVP );
+			qglUniform3f( fg.uWideSunDir, fg.sunDir[0], fg.sunDir[1], fg.sunDir[2] );
+			qglUniform3f( fg.uWideL, (float)( s->M->width * 2 ), 0.0f, (float)s->M->height );
+		}
 		FG_FullQuad();
 		// C: as it is
 		VectorSet4( right, s->M->width, 0, s->M->width, s->M->height );
@@ -1581,11 +1682,11 @@ static qboolean FG_CreateVectorResources( void )
 			return qfalse;
 		}
 	}
-	if ( mw * 2 > glConfig.maxTextureSize ) {
+	if ( mw * 2 + mh > glConfig.maxTextureSize ) {
 		return qfalse;
 	}
-	fg.MC0 = R_CreateImage( "_hzmfgMC0", NULL, mw * 2, mh, IMGTYPE_COLORALPHA, IMGFLAG_NO_COMPRESSION | IMGFLAG_CLAMPTOEDGE, GL_RGBA16F_ARB );
-	fg.fboMC0 = fg.MC0 ? FBO_Create( "_hzmfgMC0", mw * 2, mh ) : NULL;
+	fg.MC0 = R_CreateImage( "_hzmfgMC0", NULL, mw * 2 + mh, mh, IMGTYPE_COLORALPHA, IMGFLAG_NO_COMPRESSION | IMGFLAG_CLAMPTOEDGE, GL_RGBA16F_ARB );
+	fg.fboMC0 = fg.MC0 ? FBO_Create( "_hzmfgMC0", mw * 2 + mh, mh ) : NULL;
 	if ( !fg.fboMC0 ) {
 		return qfalse;
 	}
@@ -1601,6 +1702,11 @@ static qboolean FG_CreateVectorResources( void )
 	GL_UseProgram( fg.wideProg );
 	qglUniform1i( qglGetUniformLocation( fg.wideProg, "uM" ), 0 );
 	qglUniform1i( qglGetUniformLocation( fg.wideProg, "uD" ), 1 );
+	fg.uWideShadow = qglGetUniformLocation( fg.wideProg, "uShadow" );
+	fg.uWideInvVP = qglGetUniformLocation( fg.wideProg, "uInvVP" );
+	fg.uWideSunVP = qglGetUniformLocation( fg.wideProg, "uSunVP" );
+	fg.uWideSunDir = qglGetUniformLocation( fg.wideProg, "uSunDir" );
+	fg.uWideL = qglGetUniformLocation( fg.wideProg, "uL" );
 	fg.velProg = FG_MainProgram( fg_vel_vs, fg_vel_fs, qtrue );
 	if ( !fg.velProg ) {
 		return qfalse;
@@ -1615,6 +1721,7 @@ static qboolean FG_CreateVectorResources( void )
 	fg.uVelCurVP = qglGetUniformLocation( fg.velProg, "uCurVP" );
 	fg.uVelSize = qglGetUniformLocation( fg.velProg, "uSize" );
 	fg.uVelPass = qglGetUniformLocation( fg.velProg, "uPass" );
+	fg.uVelSunVP = qglGetUniformLocation( fg.velProg, "uSunVP" );
 	GL_UseProgram( 0 );
 	return qtrue;
 }
@@ -1678,10 +1785,6 @@ static qboolean FG_CreateResources( void )
 			return qfalse;
 		}
 	}
-	fg.vecOK = FG_CreateVectorResources();
-	if ( !fg.vecOK ) {
-		ri.Printf( PRINT_ALL, "r_hzmFrameGen: no motion vectors on this system - things that move keep the newer frame's place\n" );
-	}
 	GL_BindFramebuffer( GL_FRAMEBUFFER, 0 );
 	glState.currentFBO = NULL;
 
@@ -1697,9 +1800,8 @@ static qboolean FG_CreateResources( void )
 	if ( !fg.FenceSync || !fg.ClientWaitSync || !fg.DeleteSync ) {
 		fg.FenceSync = NULL;	// the main thread then finishes each frame before publishing it
 	}
-	ri.Printf( PRINT_ALL, "r_hzmFrameGen: ready (%dx%d, depth %dx%d, %s, motion vectors %s)\n", fg.width, fg.height,
-		tr.renderDepthImage->width, tr.renderDepthImage->height, fg.FenceSync ? "fence sync" : "glFinish",
-		fg.vecOK ? "yes" : "no" );
+	ri.Printf( PRINT_ALL, "r_hzmFrameGen: ready (%dx%d, depth %dx%d, %s)\n", fg.width, fg.height,
+		tr.renderDepthImage->width, tr.renderDepthImage->height, fg.FenceSync ? "fence sync" : "glFinish" );
 	return qtrue;
 }
 
@@ -1912,6 +2014,16 @@ int R_FG_Present( void )
 	if ( !fg.mode ) {
 		return 0;
 	}
+	if ( fg.mode == 1 && !fg.vecTried && r_hzmFrameGenVectors->integer ) {
+		// the vector textures exist only once the vectors are wanted (about 0.17 GB at 1920x1080)
+		fg.vecTried = qtrue;
+		fg.vecOK = FG_CreateVectorResources();
+		GL_BindFramebuffer( GL_FRAMEBUFFER, 0 );
+		glState.currentFBO = NULL;
+		GL_UseProgram( 0 );
+		ri.Printf( PRINT_ALL, fg.vecOK ? "r_hzmFrameGen: motion vectors ready\n"
+			: "r_hzmFrameGen: no motion vectors on this system - things that move keep the newer frame's place\n" );
+	}
 	s = &fg.sets[fg.w];
 	FBO_FastBlit( tr.renderFbo, NULL, s->fboF, NULL, GL_COLOR_BUFFER_BIT, GL_NEAREST );
 	fg.build.set = fg.w;
@@ -1922,6 +2034,7 @@ int R_FG_Present( void )
 		fg.lastSeq = fg.build.seq;
 	}
 	fg.build.bypass = ( fg.max2D >= FG_BIG2D ) ? qtrue : qfalse;
+	fg.lastBypass = fg.build.bypass;
 	if ( fg.build.fadeK != 1.0f || fg.build.fadeB[0] + fg.build.fadeB[1] + fg.build.fadeB[2] != 0.0f ) {
 		fgs.nFade++;
 	}
@@ -2048,8 +2161,8 @@ static void FG_Stats_f( void )
 	ri.Printf( PRINT_ALL, "FGSTAT2 noscene=%d overlay=%d fade=%d camjump=%d dropped=%d earlyskip=%d glerr=%d synctimeout=%d syncwait_ms=%.3f gen_ms=%.3f lastoverlay=[%s]\n",
 		fgs.nNoScene, fgs.nBypass, fgs.nFade, fgs.nJump, fgs.nDropped, fgs.nEarlySkip, fgs.nGLErr, fgs.nSyncTimeout,
 		fgs.nSyncWait ? fgs.syncWaitMs / fgs.nSyncWait : 0.0, fgs.nGenTimed ? fgs.genMs / fgs.nGenTimed : 0.0, fgs.lastOverlay );
-	ri.Printf( PRINT_ALL, "FGSTAT3 vectors=%d vecframes=%d velpasses=%d veldraws=%d velskipped=%d prevskin_kb=%d gen_delay_ms=%.2f real_delay_ms=%.2f\n",
-		( fg.vecOK && r_hzmFrameGenVectors->integer ) ? 1 : 0, fgs.nVec, fgs.nVelPass, fgs.velDraws, fgs.velSkipped, fgSkinBytes / 1024,
+	ri.Printf( PRINT_ALL, "FGSTAT3 vectors=%d vecframes=%d velpasses=%d veldraws=%d velbrush=%d velskipped=%d prevskin_kb=%d gen_delay_ms=%.2f real_delay_ms=%.2f\n",
+		( fg.vecOK && r_hzmFrameGenVectors->integer ) ? 1 : 0, fgs.nVec, fgs.nVelPass, fgs.velDraws, fgs.velBrush, fgs.velSkipped, fgSkinBytes / 1024,
 		fgs.nGenDelay ? fgs.genDelayMs / fgs.nGenDelay : 0.0, fgs.nRealDelay ? fgs.realDelayMs / fgs.nRealDelay : 0.0 );
 	line[0] = 0;
 	for ( j = 0; j < 13; j++ ) {
@@ -2143,6 +2256,17 @@ void R_FG_Init( void )
 	// 1 = what moves by itself (soldiers, vehicles, doors) is placed halfway too, from per-pixel motion vectors;
 	// 0 = the camera-only picture of the first version (they keep the newer frame's place)
 	r_hzmFrameGenVectors = ri.Cvar_Get( "r_hzmFrameGenVectors", "1", 0 );
+	// with the vectors: 1 = the ground a mover's sun shadow falls on moves with him (0 = the shadow keeps the newer
+	// frame's place and leads its owner by half a real frame). Only while the sun casts character shadows.
+	// Measured 2026-10-12: the lead goes from 4.6-5.1 px to 3.2 px, not to nothing - the strip the shadow has to
+	// cover behind itself is not filled (that needs the movers drawn from the sun at their HALFWAY pose and the
+	// generator asking that map; see docs/proposals/framegen_2026-10-11/2026-10-12_motion_vectors).
+	r_hzmFrameGenShadows = ri.Cvar_Get( "r_hzmFrameGenShadows", "1", 0 );
+	// with the vectors: 1 = a mover's outline point is also accepted when one of the four depth texels around it in
+	// the newer frame is the mover's. Measured 2026-10-12: no difference to a soldier's silhouette area (0.86-0.92
+	// of the real one either way - mostly the softer edge of a resampled picture), but thin carried things (a
+	// rifle held overhead) are cut off less often with it. 0 = without.
+	r_hzmFrameGenEdge = ri.Cvar_Get( "r_hzmFrameGenEdge", "1", 0 );
 	fg.mx = SDL_CreateMutex();
 	fg.cv = SDL_CreateCond();
 	ri.Cmd_AddCommand( "fg_stats", FG_Stats_f );
