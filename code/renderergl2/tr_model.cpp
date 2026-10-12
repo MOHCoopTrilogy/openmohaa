@@ -354,6 +354,10 @@ dtiki_t *R_Model_GetHandle(qhandle_t handle)
 /*
 ** R_FreeModel
 */
+extern "C" {
+extern int r_fgVelPass;        // tr_hzm_framegen.c
+void R_FG_FlushPrev(void);
+}
 extern "C" void R_SkelCacheFlush(void);
 extern "C" void R_SkelPoseMemoFlush(void);
 
@@ -2084,6 +2088,7 @@ extern "C" void R_SkelCacheFlush(void)
     }
     memset(s_skc, 0, sizeof(s_skc));
     s_skcBytes = 0;
+    R_FG_FlushPrev();   // HZM frame generation: last frame's skinned vertices are keyed by surface pointers too
     SMC_Flush();    // [render-perf 6] the packed static-model streams are keyed by surface pointers too
 }
 
@@ -3279,6 +3284,11 @@ skc_skinned:
         s_skcStatFrame = tr.frameCount;
     }
 
+    // HZM frame generation: the motion-vector pass draws this surface a second time for its vertices only
+    if (r_fgVelPass) {
+        return;
+    }
+
 #if 0
 	if( backEnd.currentEntity->e.staticModelIndex ) {
 		mstaticModel_t *sm;
@@ -3397,6 +3407,21 @@ skc_skinned:
     if (tiki && tiki->a && tiki->a->bIsCharacter) {
         R_GoreSkelSurfaceCheck((int)baseVertex, (int)baseIndex);
     }
+}
+
+// HZM frame generation: has this entity's skeleton (or face) changed since the last frame? The skin cache's own hash,
+// worked out once per entity and view.
+extern "C" unsigned int R_FG_PoseHash(trRefEntity_t *ent)
+{
+    dtiki_t *tiki = ent->e.tiki;
+    uint64_t h;
+
+    if (!tiki) {
+        return 0;
+    }
+    h = SKC_EntHash(ent, &TIKI_Skel_Bones[ent->e.bonestart], ri.TIKI_GetNumChannels(tiki),
+                    &skeletorMorphCache[ent->e.morphstart]);
+    return (unsigned int)(h ^ (h >> 32)) | 1u;
 }
 
 /*

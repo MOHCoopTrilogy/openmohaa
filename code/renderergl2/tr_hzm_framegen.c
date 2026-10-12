@@ -14,12 +14,24 @@ frames than the main thread makes:
                     1 = show the frame generated from them for the CURRENT camera, 2 = for the camera halfway between
                     them, 3 / 4 = the same with every pixel tinted by where it came from
 
-How a picture is generated. There are no per-pixel motion vectors, so only the CAMERA is reprojected: every output
-pixel searches the source frame's depth buffer for the surface that lands on it (a few fixed-point steps), in the newer
-frame first and in the older one where that fails (screen edge, something uncovered). Things that move by themselves
-keep the newer frame's position, so they still update at the real rate. Two kinds of pixel are never warped and are
-taken from the newer real frame as they are: the first-person weapon (drawn with glDepthRange 0..0.3, so its depth
-gives it away) and everything 2D (any pixel the HUD pass changed after the 3D picture was complete).
+How a picture is generated. The CAMERA is reprojected for everything that stands still: every output pixel searches
+the source frame's depth buffer for the surface that lands on it (a few fixed-point steps), in the newer frame first
+and in the older one where that fails (screen edge, something uncovered). Two kinds of pixel are never warped and
+are taken from the newer real frame as they are: the first-person weapon (drawn with glDepthRange 0..0.3, so its
+depth gives it away) and everything 2D (any pixel the HUD pass changed after the 3D picture was complete).
+
+What moves by itself (r_hzmFrameGenVectors 1, the default; 0 = the first version, where it kept the newer frame's
+place and so stood half a real frame ahead of the world in every generated picture - "characters vibrate"): the
+main thread draws every numbered entity's opaque surfaces twice more per frame, see "motion vectors" below -
+  M  where it is in the frame, with how far each point moved in the world since the frame before (the entity's
+     placement then and now, and for a skinned model each vertex then and now), so the search above knows such a
+     pixel is not where it will be in the generated picture;
+  C  where it is HALFWAY, seen from the halfway camera - the generated picture's own view of it, thin parts
+     included - with where each of those pixels is in the newer frame. The generator takes them from there (or, if
+     the newer frame hides that point, from as far the other way in the older frame), unless something that stands
+     still is nearer. What a mover uncovers comes from the other frame, or from the background beside it.
+Not moved (they keep the newer frame's place): blended surfaces and sprites - smoke, fire, rain and snow, beams,
+muzzle flashes, decals, shadows on the ground - and entities without a number (client-side effect models).
 
 A translucent box over the whole picture (damage flash, fade, tint) is a uniform change, final = scene * K + B; the
 generated picture gets the same K and B.
@@ -32,11 +44,13 @@ are handled: the scene depth is then smaller than the display, and is sampled by
 
 Measured (2026-10-11, one PC only: NVIDIA 16 GB, windowed 1280x720, MSAA 8x, vsync off): Omaha 44-47 real frames a second
 are shown as 87, intervals 11.5 ms +- 0.9; the main thread's frame time does not change by more than the map's own
-drift (the swap was 0.3 ms of it here). Costs: four extra sets of display-sized textures, three copies per real
-frame, and half a real frame of delay on what is shown.
+drift (the swap was 0.3 ms of it here). Costs: four extra sets of display-sized textures (with vectors two more
+half-float ones per set), three copies per real frame, and half a real frame of delay on what is shown.
 
 Commands: fg_stats [reset] (present-time record), fg_capture 0|1 (mode 3), fg_record <n> (the next n pictures as the
-present thread shows them -> screenshots/fgrec_*.tga).
+present thread shows them -> screenshots/fgrec_*.tga). r_hzmFrameGenDebug 3 = every generated pixel tinted by where
+it came from (none = newer frame, cyan = a mover, green = older frame, light blue = a mover from the older frame,
+orange = background beside a mover, red / yellow = nothing fitted), 5 = the newer frame's vectors.
 
 Threading. The present thread owns a second GL context that shares textures with the main one, and is the only
 thread that touches the window's back buffer and swaps. The main thread copies each finished frame into one of four
@@ -57,6 +71,7 @@ The renderer DLL is unloaded on every vid_restart: R_FG_Shutdown joins the threa
 
 // tr_fbo.c (not in tr_fbo.h)
 FBO_t   *FBO_Create( const char *name, int width, int height );
+void     FBO_CreateBuffer( FBO_t *fbo, int format, int index, int multisample );
 qboolean R_CheckFBO( const FBO_t *fbo );
 
 #define FG_SETS			4		// held by the present thread: 2, waiting for it: 1, being written: 1
@@ -80,13 +95,17 @@ typedef void ( APIENTRY *fgDeleteSync_t )( void *sync );
 
 typedef struct {
 	image_t		*S, *F, *D;			// scene before the HUD, final picture, scene depth
-	FBO_t		*fboS, *fboF;
+	image_t		*M;					// motion: world displacement since the frame before, a = a surface that moves by itself
+	image_t		*C;					// the movers drawn where they are HALFWAY to this frame: where each pixel of them is in this frame
+	FBO_t		*fboS, *fboF, *fboM, *fboC;
 } fgSet_t;
 
 typedef struct {
 	int			set;
 	int			seq;
 	qboolean	scene;				// S, D and the matrices are valid
+	qboolean	vec;				// M and C are valid: something moved by itself in this frame
+	int			midPrev;			// C was drawn for the camera halfway between the frame with this number and this one
 	qboolean	bypass;				// a big 2D overlay was drawn over the scene
 	double		V[16], P[16];		// world -> eye, eye -> clip (column-major)
 	float		fadeK, fadeB[3];	// full-screen translucent boxes drawn over the scene: final = scene * K + B
@@ -115,11 +134,30 @@ typedef struct {
 	int				swapInterval;
 	int				width, height;
 
+	// ---- main thread, motion vectors (the renderer's own context)
+	qboolean		vecOK;			// its programs and textures exist
+	GLuint			velProg;
+	GLint			uVelMidVP, uVelCurVP, uVelSize, uVelPass;
+	image_t			*MC0;			// scratch, twice the scene's width: M as rasterised | C, with a depth buffer for C
+	FBO_t			*fboMC0;
+	float			midVP[16], curVP[16];
+	double			lastV[16], lastP[16];	// the last frame handed over with a scene
+	int				lastSeq;
+	GLint			uVelMVP, uVelModel, uVelPrevModel, uVelRigid;
+	GLuint			wideProg;
+	FBO_t			*velOldFbo;
+	qboolean		velBound;		// the scratch target is bound and cleared
+	qboolean		velBatchMoves;	// something in the batch being collected moved
+	int				velDraws, velSkipped, velSurfs;
+	float			velModel[16], velPrevModel[16];
+	qboolean		velNewEntity;	// the two matrices above are not in the program yet
+
 	// ---- the frame-gen context (whoever has it current)
 	void			*ctx;
 	qboolean		ctxInit;
 	GLuint			prog, vao;
 	GLint			uMode, uTint, uRes, uGun, uCurFromOut, uOutFromCur, uPrvFromOut, uOutFromPrv, uFadeK, uFadeB, uHudThr;
+	GLint			uOutVP, uCurInvW, uPrvInvW, uCurK, uPrvK, uUseC;
 
 	// ---- shared, under mx
 	SDL_Thread		*thread;
@@ -142,12 +180,17 @@ static struct {
 	volatile int	nReal, nGen, nNoScene, nBypass, nJump, nDropped, nEarlySkip, nGLErr, nSyncTimeout;
 	volatile double	syncWaitMs, genMs;
 	volatile int	nSyncWait, nGenTimed, nFade;
+	volatile double	genDelayMs, realDelayMs;	// from the main thread handing a frame over to its pictures being shown
+	volatile int	nGenDelay, nRealDelay;
+	volatile int	nVec, nVelPass, velDraws, velSkipped;	// main thread: frames with vectors, passes run, batches drawn / left out
 	char			lastOverlay[96];
 } fgs;
 
 cvar_t *r_hzmFrameGen;
 cvar_t *r_hzmFrameGenDebug;
 cvar_t *r_hzmFrameGenStats;
+cvar_t *r_hzmFrameGenVectors;
+int r_fgVelPass;		// the motion-vector pass is collecting surfaces: RB_EndSurface hands them to R_FG_VelocityDraw
 
 static const char *fg_vs =
 	"out vec2 vUV;\n"
@@ -158,8 +201,11 @@ static const char *fg_vs =
 	"}\n";
 
 static const char *fg_fs =
-	"uniform sampler2D uCurS, uCurD, uPrvS, uPrvD, uHudF, uHudS, uHudD;\n"
-	"uniform mat4 uCurFromOut, uOutFromCur, uPrvFromOut, uOutFromPrv;\n"
+	"uniform sampler2D uCurS, uCurD, uPrvS, uPrvD, uHudF, uHudS, uHudD, uCurM, uPrvM, uCurC;\n"
+	"uniform float uUseC;\n"
+	"uniform mat4 uCurFromOut, uOutFromCur, uPrvFromOut, uOutFromPrv, uOutVP;\n"
+	"uniform vec4 uCurInvW, uPrvInvW;\n"		// the row of ( view-projection )^-1 that gives a source pixel's world w
+	"uniform float uCurK, uPrvK;\n"			// the share of a frame's own displacement to take back (0 = no vectors)
 	"uniform vec2 uRes;\n"
 	"uniform int uMode;\n"		// 0 = copy the final picture, 1 = generate
 	"uniform int uTint;\n"
@@ -169,9 +215,12 @@ static const char *fg_fs =
 	"uniform float uHudThr;\n"
 	"in vec2 vUV;\n"
 	"out vec4 oColor;\n"
-	"float depthAt( sampler2D t, vec2 uv ) {\n"
+	"ivec2 texel( sampler2D t, vec2 uv ) {\n"
 	"	ivec2 sz = textureSize( t, 0 );\n"
-	"	return texelFetch( t, clamp( ivec2( uv * vec2( sz ) ), ivec2( 0 ), sz - ivec2( 1 ) ), 0 ).r;\n"
+	"	return clamp( ivec2( uv * vec2( sz ) ), ivec2( 0 ), sz - ivec2( 1 ) );\n"
+	"}\n"
+	"float depthAt( sampler2D t, vec2 uv ) {\n"
+	"	return texelFetch( t, texel( t, uv ), 0 ).r;\n"
 	"}\n"
 	// Catmull-Rom through 9 bilinear fetches: a warped pixel almost never lands on a texel centre
 	"vec3 sharp( sampler2D t, vec2 uv ) {\n"
@@ -203,21 +252,33 @@ static const char *fg_fs =
 	"	if ( c.w < 0.00001 ) return vec2( -10.0 );\n"
 	"	return c.xy / c.w * 0.5 + 0.5;\n"
 	"}\n"
-	// xy = where in the source picture the surface seen at output pixel p is, z = how far off that answer is (pixels)
-	"vec3 find( sampler2D dep, mat4 srcFromOut, mat4 outFromSrc, vec2 p ) {\n"
-	"	float d = depthAt( dep, p );\n"
-	"	if ( d < uGun ) d = 1.0;\n"
-	"	vec2 q = proj( srcFromOut, p, d );\n"
-	"	for ( int i = 0; i < 4; i++ ) {\n"
-	"		if ( any( lessThan( q, vec2( 0.0 ) ) ) || any( greaterThan( q, vec2( 1.0 ) ) ) ) return vec3( q, 10000.0 );\n"
-	"		d = depthAt( dep, q );\n"
-	"		if ( d < uGun ) return vec3( q, 10000.0 );\n"
-	"		q += p - proj( outFromSrc, q, d );\n"
+	// where the surface at source position q (depth d) is in the OUTPUT picture: xy, and z = how far away it is there.
+	// A surface that moves by itself is first taken k of its own displacement back (k < 0: forward).
+	"vec3 land( sampler2D mot, mat4 outFromSrc, vec4 invW, float k, vec2 q, float d ) {\n"
+	"	vec4 c = vec4( q * 2.0 - 1.0, d * 2.0 - 1.0, 1.0 );\n"
+	"	vec4 o = outFromSrc * c;\n"
+	"	if ( k != 0.0 ) {\n"
+	"		vec4 m = texelFetch( mot, texel( mot, q ), 0 );\n"
+	"		if ( m.a > 0.5 ) o -= ( k * dot( invW, c ) ) * ( uOutVP * vec4( m.rgb, 0.0 ) );\n"
 	"	}\n"
-	"	if ( any( lessThan( q, vec2( 0.0 ) ) ) || any( greaterThan( q, vec2( 1.0 ) ) ) ) return vec3( q, 10000.0 );\n"
-	"	d = depthAt( dep, q );\n"
-	"	if ( d < uGun ) return vec3( q, 10000.0 );\n"
-	"	return vec3( q, length( ( proj( outFromSrc, q, d ) - p ) * uRes ) );\n"
+	"	if ( o.w < 0.00001 ) return vec3( -10.0, -10.0, 0.0 );\n"
+	"	return vec3( o.xy / o.w * 0.5 + 0.5, o.w );\n"
+	"}\n"
+	// xy = where in the source picture the surface seen at output pixel p is (searched from q), z = how far off that
+	// answer is (pixels), w = how far away the surface is in the output picture
+	"vec4 find( sampler2D dep, sampler2D mot, mat4 outFromSrc, vec4 invW, float k, vec2 p, vec2 q ) {\n"
+	"	vec3 l = vec3( 0.0 );\n"
+	"	for ( int i = 0; i < 5; i++ ) {\n"
+	"		if ( any( lessThan( q, vec2( 0.0 ) ) ) || any( greaterThan( q, vec2( 1.0 ) ) ) ) return vec4( q, 10000.0, 0.0 );\n"
+	"		float d = depthAt( dep, q );\n"
+	"		if ( d < uGun ) return vec4( q, 10000.0, 0.0 );\n"
+	"		l = land( mot, outFromSrc, invW, k, q, d );\n"
+	"		if ( i < 4 ) q += p - l.xy;\n"
+	"	}\n"
+	"	return vec4( q, length( ( l.xy - p ) * uRes ), l.z );\n"
+	"}\n"
+	"bool moving( sampler2D mot, vec2 q ) {\n"
+	"	return texelFetch( mot, texel( mot, q ), 0 ).a > 0.5;\n"
 	"}\n"
 	"void main() {\n"
 	"	ivec2 ip = ivec2( gl_FragCoord.xy );\n"
@@ -233,25 +294,164 @@ static const char *fg_fs =
 	"		c = f;\n"
 	"		tint = hud ? vec3( 1.0, 0.45, 1.0 ) : vec3( 0.45, 0.45, 1.0 );\n"
 	"	} else {\n"
-	"		vec3 a = find( uCurD, uCurFromOut, uOutFromCur, vUV );\n"
+	"		float d0 = depthAt( uCurD, vUV );\n"
+	"		if ( d0 < uGun ) d0 = 1.0;\n"
+	"		vec2 q0 = proj( uCurFromOut, vUV, d0 );\n"
+	"		vec4 a = find( uCurD, uCurM, uOutFromCur, uCurInvW, uCurK, vUV, q0 );\n"
+	"		bool dyn = false;\n"
+	"		bool lost = false;\n"
+	"		if ( uCurK != 0.0 && a.z <= 1.0 ) dyn = moving( uCurM, a.xy );\n"
+	"		if ( uUseC != 0.0 ) {\n"
+	// a mover covers this pixel at this moment (it was drawn halfway between its two poses): C says where that
+	// point of it is in the newer frame. Take it from there if the newer frame shows it there (same distance) and
+	// nothing that stands still is in front of it at this moment.
+	"			vec4 cm = texelFetch( uCurC, texel( uCurC, vUV ), 0 );\n"
+	"			if ( cm.a > 0.0 && !( a.z <= 1.0 && !dyn && a.w < cm.a * 0.998 ) ) {\n"
+	"				vec2 q = vUV + cm.rg;\n"
+	"				bool in01 = all( greaterThanEqual( q, vec2( 0.0 ) ) ) && all( lessThanEqual( q, vec2( 1.0 ) ) );\n"
+	"				float nd = in01 ? 1.0 - depthAt( uCurD, q ) : -1.0;\n"
+	"				if ( in01 && abs( nd - cm.b ) <= 0.012 * cm.b + 0.000002 ) {\n"
+	"					a = vec4( q, 0.0, cm.a );\n"
+	"					dyn = true;\n"
+	"				} else {\n"
+	// hidden or off screen in the newer frame: the older one has it as far the other way
+	"					vec2 qp = vUV - cm.rg;\n"
+	"					if ( uPrvK != 0.0 && all( greaterThanEqual( qp, vec2( 0.0 ) ) ) && all( lessThanEqual( qp, vec2( 1.0 ) ) ) && moving( uPrvM, qp ) ) {\n"
+	"						a = vec4( qp, 0.0, cm.a );\n"
+	"						lost = true;\n"
+	"					}\n"
+	"				}\n"
+	"			}\n"
+	"		}\n"
+	"		if ( lost ) {\n"
+	"			c = sharp( uPrvS, a.xy );\n"
+	"			tint = vec3( 0.4, 0.7, 1.0 );\n"
+	"		} else\n"
 	"		if ( a.z <= 1.0 ) {\n"
 	"			c = sharp( uCurS, a.xy );\n"
+	"			if ( dyn ) tint = vec3( 0.4, 1.0, 1.0 );\n"
 	"		} else {\n"
-	"			vec3 b = find( uPrvD, uPrvFromOut, uOutFromPrv, vUV );\n"
+	"			float d1 = depthAt( uPrvD, vUV );\n"
+	"			if ( d1 < uGun ) d1 = 1.0;\n"
+	"			vec4 b = find( uPrvD, uPrvM, uOutFromPrv, uPrvInvW, uPrvK, vUV, proj( uPrvFromOut, vUV, d1 ) );\n"
+	"			bool done = false;\n"
 	"			if ( b.z <= 1.0 ) {\n"
 	"				c = sharp( uPrvS, b.xy );\n"
 	"				tint = vec3( 0.45, 1.0, 0.45 );\n"
-	"			} else if ( min( a.z, b.z ) < 64.0 ) {\n"
-	"				c = a.z <= b.z ? texture( uCurS, a.xy ).rgb : texture( uPrvS, b.xy ).rgb;\n"
-	"				tint = vec3( 1.0, 0.3, 0.3 );\n"
-	"			} else {\n"
-	"				c = s;\n"
-	"				tint = vec3( 1.0, 1.0, 0.3 );\n"
+	"				done = true;\n"
+	"			} else if ( uCurK != 0.0 && all( greaterThanEqual( q0, vec2( 0.0 ) ) ) && all( lessThanEqual( q0, vec2( 1.0 ) ) ) && moving( uCurM, q0 ) ) {\n"
+	// uncovered by something that moved on, and hidden in the older frame as well: the background beside the mover
+	// in the newer frame, stepping out of it along its own motion (ahead first, then behind)
+	"				vec3 l0 = land( uCurM, uOutFromCur, uCurInvW, uCurK, q0, depthAt( uCurD, q0 ) );\n"
+	"				vec2 st = vUV - l0.xy;\n"
+	"				for ( int n = 0; n < 6 && !done; n++ ) {\n"
+	"					float fn = float( n / 2 + 1 ) * ( ( n & 1 ) == 0 ? 1.25 : -1.25 );\n"
+	"					vec2 qq = q0 + st * fn;\n"
+	"					if ( all( greaterThanEqual( qq, vec2( 0.0 ) ) ) && all( lessThanEqual( qq, vec2( 1.0 ) ) )\n"
+	"						&& !moving( uCurM, qq ) && depthAt( uCurD, qq ) >= uGun ) {\n"
+	"						c = texture( uCurS, qq ).rgb;\n"
+	"						tint = vec3( 1.0, 0.6, 0.2 );\n"
+	"						done = true;\n"
+	"					}\n"
+	"				}\n"
+	"			}\n"
+	"			if ( !done ) {\n"
+	"				if ( min( a.z, b.z ) < 64.0 ) {\n"
+	"					c = a.z <= b.z ? texture( uCurS, a.xy ).rgb : texture( uPrvS, b.xy ).rgb;\n"
+	"					tint = vec3( 1.0, 0.3, 0.3 );\n"
+	"				} else {\n"
+	"					c = s;\n"
+	"					tint = vec3( 1.0, 1.0, 0.3 );\n"
+	"				}\n"
 	"			}\n"
 	"		}\n"
 	"	}\n"
 	"	if ( !( hud || gun ) ) c = clamp( c * uFadeK + uFadeB.rgb, 0.0, 1.0 );\n"
-	"	oColor = vec4( uTint != 0 ? c * tint : c, 1.0 );\n"
+	"	if ( uTint == 2 ) {\n"
+	// r_hzmFrameGenDebug 5: the newer frame's motion vectors (displacement in world units, grey = none, dark = not a mover)
+	"		vec4 m = texelFetch( uCurM, texel( uCurM, vUV ), 0 );\n"
+	"		c = m.a > 0.5 ? clamp( vec3( 0.5 ) + m.rgb * 0.1, 0.0, 1.0 ) : c * 0.25;\n"
+	"	}\n"
+	"	oColor = vec4( uTint == 1 ? c * tint : c, 1.0 );\n"
+	"}\n";
+
+// ---- the motion-vector pass (main context). Every surface of an entity that has a number is drawn once more, with
+// where each vertex was a frame ago: the world-space displacement goes into M wherever the surface is the visible one.
+static const char *fg_vel_vs =
+	"in vec3 attr_Position;\n"
+	"in vec2 attr_TexCoord0;\n"		// model-space displacement of the vertex since the frame before: xy ...
+	"in vec2 attr_TexCoord1;\n"		// ... and z (skinned models; zero for rigid ones)
+	"uniform mat4 uMVP, uModel, uPrevModel, uMidVP, uCurVP;\n"
+	"uniform float uSkinned;\n"		// 0 = the two attributes above are not displacements (a rigid brush model)
+	"uniform int uPass;\n"			// 0 = M: where it is in the frame, 1 = C: where it is halfway
+	"out vec3 vDelta;\n"
+	"out vec4 vCur;\n"
+	"void main() {\n"
+	"	vec3 dl = vec3( attr_TexCoord0, attr_TexCoord1.x ) * uSkinned;\n"
+	"	vec3 now = ( uModel * vec4( attr_Position, 1.0 ) ).xyz;\n"
+	"	vec3 was = ( uPrevModel * vec4( attr_Position - dl, 1.0 ) ).xyz;\n"
+	"	vDelta = now - was;\n"
+	"	vCur = uCurVP * vec4( now, 1.0 );\n"
+	"	if ( uPass == 0 ) gl_Position = uMVP * vec4( attr_Position, 1.0 );\n"
+	"	else gl_Position = uMidVP * vec4( ( now + was ) * 0.5, 1.0 );\n"
+	"}\n";
+
+// Both passes go into one scratch target twice the width (M left, C right): switching framebuffers per batch cost
+// more than everything else in the pass on a crowded map.
+static const char *fg_vel_fs =
+	"uniform sampler2D uDepth;\n"
+	"uniform vec2 uSize;\n"
+	"uniform int uPass;\n"
+	"in vec3 vDelta;\n"
+	"in vec4 vCur;\n"
+	"out vec4 oColor;\n"
+	"void main() {\n"
+	"	if ( uPass == 0 ) {\n"
+	// only where this surface is what the scene shows: its depth is the scene's (with multisampling the scene depth
+	// is the nearest sample of the pixel, so allow the slope of the surface across a pixel and a little distance)
+	"		float sd = texelFetch( uDepth, ivec2( gl_FragCoord.xy ), 0 ).r;\n"
+	"		float z = gl_FragCoord.z;\n"
+	"		if ( abs( z - sd ) > fwidth( z ) + 0.002 * ( 1.0 - z ) + 0.0000005 ) discard;\n"
+	"		oColor = vec4( vDelta, 1.0 );\n"
+	"	} else {\n"
+	// rg = how far from here the same point of the surface is in the newer frame (screen 0..1), b = 1 - its depth
+	// there, a = how far away it is here
+	"		if ( vCur.w < 0.00001 ) discard;\n"
+	"		vec3 n = vCur.xyz / vCur.w * 0.5 + 0.5;\n"
+	"		oColor = vec4( n.xy - ( gl_FragCoord.xy - vec2( uSize.x, 0.0 ) ) / uSize, 1.0 - n.z, 1.0 / gl_FragCoord.w );\n"
+	"	}\n"
+	"}\n";
+
+static const char *fg_quad_vs =
+	"in vec3 attr_Position;\n"
+	"void main() {\n"
+	"	gl_Position = vec4( attr_Position.xy, 0.0, 1.0 );\n"
+	"}\n";
+
+// A pixel on a mover's outline is partly its colour, and with multisampling carries its depth (the nearest sample),
+// but the vector pass - one sample, the pixel centre - missed it: left alone it stays behind as a dotted outline at
+// the newer frame's place. It takes the vector of a neighbour that is a mover at the same depth.
+static const char *fg_wide_fs =
+	"uniform sampler2D uM, uD;\n"
+	"out vec4 oColor;\n"
+	"void main() {\n"
+	"	ivec2 c = ivec2( gl_FragCoord.xy );\n"
+	"	vec4 m = texelFetch( uM, c, 0 );\n"
+	"	if ( m.a > 0.5 ) { oColor = m; return; }\n"
+	"	ivec2 sz = textureSize( uD, 0 ) - ivec2( 1 );\n"		// uM is the scratch target, twice as wide
+	"	float d = texelFetch( uD, c, 0 ).r;\n"
+	"	float bd = 0.004 * ( 1.0 - d ) + 0.000001;\n"
+	"	vec4 best = vec4( 0.0 );\n"
+	"	for ( int i = 0; i < 9; i++ ) {\n"
+	"		if ( i == 4 ) continue;\n"
+	"		ivec2 q = clamp( c + ivec2( i % 3 - 1, i / 3 - 1 ), ivec2( 0 ), sz );\n"
+	"		vec4 n = texelFetch( uM, q, 0 );\n"
+	"		if ( n.a > 0.5 ) {\n"
+	"			float dd = abs( texelFetch( uD, q, 0 ).r - d );\n"
+	"			if ( dd < bd ) { bd = dd; best = n; }\n"
+	"		}\n"
+	"	}\n"
+	"	oColor = best;\n"
 	"}\n";
 
 /*
@@ -426,7 +626,7 @@ static qboolean FG_CtxInit( void )
 	const char *header;
 	GLuint vs, fs;
 	GLint ok = 0;
-	static const char *samplers[7] = { "uCurS", "uCurD", "uPrvS", "uPrvD", "uHudF", "uHudS", "uHudD" };
+	static const char *samplers[10] = { "uCurS", "uCurD", "uPrvS", "uPrvD", "uHudF", "uHudS", "uHudD", "uCurM", "uPrvM", "uCurC" };
 	int i;
 
 	if ( fg.ctxInit ) {
@@ -451,7 +651,7 @@ static qboolean FG_CtxInit( void )
 	qglGenVertexArrays( 1, &fg.vao );
 	qglBindVertexArray( fg.vao );
 	qglUseProgram( fg.prog );
-	for ( i = 0; i < 7; i++ ) {
+	for ( i = 0; i < 10; i++ ) {
 		qglUniform1i( qglGetUniformLocation( fg.prog, samplers[i] ), i );
 	}
 	fg.uMode = qglGetUniformLocation( fg.prog, "uMode" );
@@ -465,6 +665,12 @@ static qboolean FG_CtxInit( void )
 	fg.uOutFromCur = qglGetUniformLocation( fg.prog, "uOutFromCur" );
 	fg.uPrvFromOut = qglGetUniformLocation( fg.prog, "uPrvFromOut" );
 	fg.uOutFromPrv = qglGetUniformLocation( fg.prog, "uOutFromPrv" );
+	fg.uOutVP = qglGetUniformLocation( fg.prog, "uOutVP" );
+	fg.uCurInvW = qglGetUniformLocation( fg.prog, "uCurInvW" );
+	fg.uPrvInvW = qglGetUniformLocation( fg.prog, "uPrvInvW" );
+	fg.uCurK = qglGetUniformLocation( fg.prog, "uCurK" );
+	fg.uPrvK = qglGetUniformLocation( fg.prog, "uPrvK" );
+	fg.uUseC = qglGetUniformLocation( fg.prog, "uUseC" );
 	qglDisable( GL_DEPTH_TEST );
 	qglDisable( GL_BLEND );
 	qglDisable( GL_CULL_FACE );
@@ -505,11 +711,26 @@ static void FG_DrawCopy( const fgFrame_t *fr )
 	qglDrawArrays( GL_TRIANGLES, 0, 3 );
 }
 
-// a picture for the camera ( outV, outP ), made from two real frames; HUD and weapon come from `hud' unwarped
+// a picture for the camera ( outV, outP ), made from two real frames; HUD and weapon come from `hud' unwarped.
+// vectors: the output is the moment halfway between prv and cur, so what moves by itself is taken half its own way
+// back from cur (and half its last displacement forward from prv, where cur does not show the pixel).
 static qboolean FG_DrawGenerated( const fgFrame_t *prv, const fgFrame_t *cur, const fgFrame_t *hud,
-	const double *outV, const double *outP, int tint )
+	const double *outV, const double *outP, int tint, qboolean vectors )
 {
 	double vpO[16], vpC[16], vpP[16], iO[16], iC[16], iP[16], m[16];
+	float curK = 0.0f, prvK = 0.0f, useC = 0.0f;
+
+	if ( vectors && r_hzmFrameGenVectors->integer ) {
+		// a dropped frame in between: cur's displacement is one frame's, the gap is n frames
+		int n = cur->seq - prv->seq;
+		if ( n >= 1 && n <= 3 ) {
+			if ( cur->vec ) curK = 0.5f * n;
+			if ( prv->vec ) prvK = -0.5f * n;
+			// the movers were drawn for the camera halfway between cur and the frame before it: that is this
+			// picture's camera unless a frame was dropped in between
+			if ( cur->vec && cur->midPrev == prv->seq ) useC = 1.0f;
+		}
+	}
 
 	FG_M4Mul( outP, outV, vpO );
 	FG_M4Mul( cur->P, cur->V, vpC );
@@ -525,6 +746,21 @@ static qboolean FG_DrawGenerated( const fgFrame_t *prv, const fgFrame_t *cur, co
 	FG_BindTex( 4, fg.sets[hud->set].F );
 	FG_BindTex( 5, fg.sets[hud->set].S );
 	FG_BindTex( 6, fg.sets[hud->set].D );
+	if ( curK != 0.0f ) {
+		FG_BindTex( 7, fg.sets[cur->set].M );
+	}
+	if ( useC != 0.0f ) {
+		FG_BindTex( 9, fg.sets[cur->set].C );
+	}
+	qglUniform1f( fg.uUseC, useC );
+	if ( prvK != 0.0f ) {
+		FG_BindTex( 8, fg.sets[prv->set].M );
+	}
+	qglUniform1f( fg.uCurK, curK );
+	qglUniform1f( fg.uPrvK, prvK );
+	qglUniform4f( fg.uCurInvW, (float)iC[3], (float)iC[7], (float)iC[11], (float)iC[15] );
+	qglUniform4f( fg.uPrvInvW, (float)iP[3], (float)iP[7], (float)iP[11], (float)iP[15] );
+	FG_SetMat( fg.uOutVP, vpO );
 	qglUniform1i( fg.uMode, 1 );
 	qglUniform1i( fg.uTint, tint );
 	qglUniform2f( fg.uRes, (float)fg.width, (float)fg.height );
@@ -606,6 +842,20 @@ the present thread
 static double FG_Ms( Uint64 a, Uint64 b )
 {
 	return (double)( b - a ) * 1000.0 / (double)SDL_GetPerformanceFrequency();
+}
+
+// how long after the main thread handed the frame over was this picture of it shown (the delay the feature adds)
+static void FG_NoteDelay( const fgFrame_t *fr, int kind )
+{
+	double d = FG_Ms( fr->tPub, SDL_GetPerformanceCounter() );
+
+	if ( kind == FGK_GEN ) {
+		fgs.genDelayMs += d;
+		fgs.nGenDelay++;
+	} else {
+		fgs.realDelayMs += d;
+		fgs.nRealDelay++;
+	}
 }
 
 // sleep until `target'. Returns qfalse if a newer frame was published first (and early is set).
@@ -725,11 +975,13 @@ static int FG_ThreadMain( void *unused )
 
 			t0 = SDL_GetPerformanceCounter();
 			FG_MidCamera( &cur, &next, V, P );
-			if ( FG_DrawGenerated( &cur, &next, &next, V, P, r_hzmFrameGenDebug->integer >= 3 ) ) {
+			if ( FG_DrawGenerated( &cur, &next, &next, V, P,
+			r_hzmFrameGenDebug->integer >= 5 ? 2 : ( r_hzmFrameGenDebug->integer >= 3 ? 1 : 0 ), qtrue ) ) {
 				FG_RecGrab( FGK_GEN );
 				GLimp_FG_Swap();
 				tGen = SDL_GetPerformanceCounter();
 				FG_Record( FGK_GEN );
+				FG_NoteDelay( &next, FGK_GEN );
 				fgs.genMs += FG_Ms( t0, tGen );
 				fgs.nGenTimed++;
 				// the real picture half a real frame after the generated one
@@ -747,12 +999,14 @@ static int FG_ThreadMain( void *unused )
 				FG_RecGrab( FGK_REAL );
 				GLimp_FG_Swap();
 				FG_Record( FGK_REAL );
+				FG_NoteDelay( &next, FGK_REAL );
 			}
 		} else {
 			FG_DrawCopy( &next );
 			FG_RecGrab( FGK_REAL );
 			GLimp_FG_Swap();
 			FG_Record( FGK_REAL );
+			FG_NoteDelay( &next, FGK_REAL );
 		}
 
 		if ( ( ++errTick & 63 ) == 0 ) {
@@ -816,6 +1070,557 @@ static qboolean FG_StartThread( void )
 
 /*
 =====================================================================================================================
+motion vectors (main thread, the renderer's own context)
+
+The camera-only picture leaves everything that moves by itself where the NEWER frame has it: for half of the pictures
+shown a running soldier, a truck, a squad mate walking beside the player is half a real frame ahead of the world
+around it, and it reads as shaking (user, 2026-10-12: "when characters vibrate it looks super buggy").
+
+So each frame also gets M: for every pixel that shows a surface of a numbered entity, how far that point of the
+surface moved in the WORLD since the frame before (its entity's placement then and now, and for a skinned model each
+vertex's own position then and now - the skinned vertices of the last frame are kept here, per entity and surface).
+World units, not screen units: the generator then places the point with the same camera as everything else.
+And C: the same surfaces drawn where they are halfway (each vertex halfway between then and now, the camera halfway
+between the two frames - the same one the present thread works out), each pixel carrying where it is in this frame.
+An earlier attempt found the movers from M alone, by searching from a per-tile "fastest mover" guess: a rifle slung
+on a running soldier's back and his trailing boot have their own speed, the guess missed them and they vanished
+from the generated pictures. Drawing them where they will be cannot miss.
+
+Not in M or C (they keep the newer frame's place, as before): the first-person weapon and the HUD (never warped at all),
+blended surfaces and sprites (smoke, fire, rain, beams, muzzle flashes, decals - they have no depth of their own and
+ride with whatever is behind them), entities without a number (client-side effect models), the map itself.
+=====================================================================================================================
+*/
+#define FG_TELEPORT		96.0f		// an entity that moved further than this in one frame was placed, it did not travel
+#define FG_PSK_SLOTS	8192
+#define FG_PSK_PROBES	8
+#define FG_PSK_MAX		( 64 * 1024 * 1024 )
+
+typedef struct {
+	int			seq;				// the frame cur is from
+	int			num, hModel;
+	unsigned int	pose;			// its bones (and morphs) in that frame
+	qboolean	use;
+	qboolean	havePrev;
+	float		cur[16], prev[16];	// model -> world
+} fgEnt_t;
+
+typedef struct {
+	const void	*sf;
+	int			ent;
+	int			seq;
+	int			n, cap;
+	float		*xyz;				// the surface's skinned vertices in that frame, model space
+} fgSkin_t;
+
+// One entity number can be drawn as several models in a frame (a soldier, and client-side models hung on him under
+// his number): the record is per ( number, model ). Two of the same model under one number cannot be told apart -
+// the second one seen in a frame gets no vectors and keeps the newer frame's place.
+#define FG_ENT_SLOTS	4096
+#define FG_ENT_PROBES	8
+static fgEnt_t	fgEnts[FG_ENT_SLOTS];
+
+static fgEnt_t *FG_EntSlot( int num, int hModel, int frame )
+{
+	unsigned int h = (unsigned int)num * 2654435761u + (unsigned int)hModel * 40503u;
+	fgEnt_t *old = NULL;
+	int i;
+
+	for ( i = 0; i < FG_ENT_PROBES; i++ ) {
+		fgEnt_t *e = &fgEnts[( ( h >> 8 ) + i ) & ( FG_ENT_SLOTS - 1 )];
+		if ( e->seq && e->num == num && e->hModel == hModel ) {
+			return e;
+		}
+		if ( !old || e->seq < old->seq ) {
+			old = e;
+		}
+	}
+	if ( old->seq >= frame - 1 && old->seq ) {
+		return NULL;
+	}
+	memset( old, 0, sizeof( *old ) );
+	old->num = num;
+	old->hModel = hModel;
+	return old;
+}
+static fgSkin_t	fgSkins[FG_PSK_SLOTS];
+static int		fgSkinBytes;
+
+unsigned int R_FG_PoseHash( trRefEntity_t *ent );		// tr_model.cpp
+
+// model data is being freed (surface pointers die), or the feature shuts down
+void R_FG_FlushPrev( void )
+{
+	int i;
+
+	for ( i = 0; i < FG_PSK_SLOTS; i++ ) {
+		free( fgSkins[i].xyz );
+	}
+	memset( fgSkins, 0, sizeof( fgSkins ) );
+	memset( fgEnts, 0, sizeof( fgEnts ) );
+	fgSkinBytes = 0;
+}
+
+static fgSkin_t *FG_SkinSlot( int ent, const void *sf, int frame )
+{
+	unsigned int h = (unsigned int)( ( (size_t)sf >> 4 ) * 2654435761u ) ^ ( (unsigned int)ent * 40503u );
+	fgSkin_t *old = NULL;
+	int i;
+
+	for ( i = 0; i < FG_PSK_PROBES; i++ ) {
+		fgSkin_t *e = &fgSkins[( h + i ) & ( FG_PSK_SLOTS - 1 )];
+		if ( e->sf == sf && e->ent == ent ) {
+			return e;
+		}
+		if ( !old || e->seq < old->seq ) {
+			old = e;
+		}
+	}
+	// not there: the least recently used of the probed slots, unless it was used this frame or the last
+	if ( old->sf && old->seq >= frame - 1 ) {
+		return NULL;
+	}
+	old->sf = sf;
+	old->ent = ent;
+	old->seq = 0;
+	old->n = 0;
+	return old;
+}
+
+// the surface function has just put n vertices at tess.xyz[base]: write each one's displacement since the last frame
+// where the vertex shader reads it (texCoords = x y, lightCoords = z), and keep the positions for the next frame
+static void FG_FillPrev( const trRefEntity_t *ent, const surfaceType_t *surface, int base, int n, int frame )
+{
+	fgSkin_t *e;
+	int i, m = 0;
+
+	if ( n <= 0 ) {
+		return;
+	}
+	if ( *surface == SF_TIKI_SKEL && ( e = FG_SkinSlot( ent->e.entityNumber, surface, frame ) ) != NULL ) {
+		if ( e->seq == frame - 1 && e->xyz ) {
+			qboolean moved = qfalse;
+
+			m = n < e->n ? n : e->n;
+			for ( i = 0; i < m; i++ ) {
+				const float *c = tess.xyz[base + i];
+				const float *o = &e->xyz[i * 3];
+				float dx = c[0] - o[0], dy = c[1] - o[1], dz = c[2] - o[2];
+
+				tess.texCoords[base + i][0] = dx;
+				tess.texCoords[base + i][1] = dy;
+				tess.lightCoords[base + i][0] = dz;
+				tess.lightCoords[base + i][1] = 0.0f;
+				if ( dx != 0.0f || dy != 0.0f || dz != 0.0f ) {
+					moved = qtrue;
+				}
+			}
+			if ( moved ) {
+				fg.velBatchMoves = qtrue;
+			}
+		}
+		if ( e->seq != frame ) {
+			if ( e->cap < n ) {
+				if ( fgSkinBytes > FG_PSK_MAX ) {
+					R_FG_FlushPrev();
+					e = FG_SkinSlot( ent->e.entityNumber, surface, frame );
+				}
+				if ( e ) {
+					free( e->xyz );
+					e->cap = n + 16;
+					e->xyz = (float *)malloc( (size_t)e->cap * 3 * sizeof( float ) );
+					fgSkinBytes += e->cap * 3 * (int)sizeof( float );
+				}
+			}
+			if ( e && e->xyz ) {
+				for ( i = 0; i < n; i++ ) {
+					VectorCopy( tess.xyz[base + i], &e->xyz[i * 3] );
+				}
+				e->n = n;
+				e->seq = frame;
+			}
+		}
+	}
+	for ( i = m; i < n; i++ ) {
+		tess.texCoords[base + i][0] = tess.texCoords[base + i][1] = 0.0f;
+		tess.lightCoords[base + i][0] = tess.lightCoords[base + i][1] = 0.0f;
+	}
+}
+
+// RB_EndSurface while r_fgVelPass is set: what the surface functions collected goes into M and C
+void R_FG_VelocityDraw( void )
+{
+	fgSet_t *s = &fg.sets[fg.w];
+	int w = s->M->width, h = s->M->height;
+
+	if ( !tess.numIndexes || !tess.numVertexes ) {
+		return;
+	}
+	if ( ( !tess.useInternalVao && !tess.useCacheVao ) || !fg.velBatchMoves ) {
+		// a surface drawn from buffers of its own is not handled; a batch in which nothing moved is the same as
+		// not being in M at all
+		fg.velSkipped++;
+		return;
+	}
+	if ( !fg.velBound ) {
+		FBO_Bind( fg.fboMC0 );
+		qglViewport( 0, 0, w * 2, h );
+		qglScissor( 0, 0, w * 2, h );
+		GL_State( GLS_DEPTHMASK_TRUE );
+		qglClearColor( 0.0f, 0.0f, 0.0f, 0.0f );
+		qglClearDepth( 1.0 );
+		qglClear( GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT );
+		GL_BindToTMU( tr.renderDepthImage, 0 );
+		GL_UseProgram( fg.velProg );
+		qglUniformMatrix4fv( fg.uVelMidVP, 1, GL_FALSE, fg.midVP );
+		qglUniformMatrix4fv( fg.uVelCurVP, 1, GL_FALSE, fg.curVP );
+		qglUniform2f( fg.uVelSize, (float)w, (float)h );
+		fg.velBound = qtrue;
+	}
+	if ( tess.useCacheVao ) {
+		// brush models (doors, lifts): rigid, their vertices sit in the surface cache with their real texture
+		// coordinates - the shader must not read those as a displacement
+		VaoCache_Commit();
+		qglUniform1f( fg.uVelRigid, 0.0f );
+	} else {
+		RB_UpdateTessVao( ATTR_POSITION | ATTR_TEXCOORD | ATTR_LIGHTCOORD );
+		qglUniform1f( fg.uVelRigid, 1.0f );
+	}
+	GL_Cull( tess.shader->cullType );
+	qglUniformMatrix4fv( fg.uVelMVP, 1, GL_FALSE, glState.modelviewProjection );
+	if ( fg.velNewEntity ) {
+		qglUniformMatrix4fv( fg.uVelModel, 1, GL_FALSE, fg.velModel );
+		qglUniformMatrix4fv( fg.uVelPrevModel, 1, GL_FALSE, fg.velPrevModel );
+		fg.velNewEntity = qfalse;
+	}
+	// M: where it is in the frame, wherever it is what the scene shows there
+	qglViewport( 0, 0, w, h );
+	qglScissor( 0, 0, w, h );
+	GL_State( GLS_DEPTHTEST_DISABLE );
+	qglUniform1i( fg.uVelPass, 0 );
+	R_DrawElements( tess.numIndexes, tess.firstIndex );
+	// C: where it is halfway, nearest surface on top
+	qglViewport( w, 0, w, h );
+	qglScissor( w, 0, w, h );
+	GL_State( GLS_DEPTHMASK_TRUE );
+	qglUniform1i( fg.uVelPass, 1 );
+	R_DrawElements( tess.numIndexes, tess.firstIndex );
+	fg.velDraws++;
+}
+
+static void FG_FullQuad( void )
+{
+	vec4_t quad[4];
+	vec2_t tc[4];
+
+	VectorSet4( quad[0], -1.0f, -1.0f, 0.0f, 1.0f );
+	VectorSet4( quad[1], 1.0f, -1.0f, 0.0f, 1.0f );
+	VectorSet4( quad[2], 1.0f, 1.0f, 0.0f, 1.0f );
+	VectorSet4( quad[3], -1.0f, 1.0f, 0.0f, 1.0f );
+	VectorSet2( tc[0], 0.0f, 0.0f );
+	VectorSet2( tc[1], 1.0f, 0.0f );
+	VectorSet2( tc[2], 1.0f, 1.0f );
+	VectorSet2( tc[3], 0.0f, 1.0f );
+	RB_InstantQuad2( quad, tc );
+}
+
+/*
+RB_DrawSurfs, the main world view, after its colour pass (and the multisample depth resolve): tr.renderDepthImage
+is the finished opaque scene. Everything it needs from the back end is still set up for this view.
+*/
+void R_FG_VelocityPass( void *drawSurfsV, int numDrawSurfs )
+{
+	drawSurf_t		*drawSurfs = (drawSurf_t *)drawSurfsV, *drawSurf;
+	shader_t		*shader = NULL, *oldShader = NULL;
+	int				entityNum, oldEntityNum = -1;
+	int				fogNum, dlighted, pshadowed, i;
+	int				frame = fg.seq + 1;		// the frame being built (R_FG_Present numbers it)
+	qboolean		bStaticModel, use = qfalse;
+	trRefEntity_t	*ent = NULL;
+	double			originalTime = backEnd.refdef.floatTime;
+	fgSet_t			*s = &fg.sets[fg.w];
+
+	if ( fg.mode != 1 || !fg.vecOK || !fg.latched || fg.build.scene || fg.build.vec || !r_hzmFrameGenVectors->integer ) {
+		return;
+	}
+	if ( !tr.renderDepthImage || tr.renderDepthImage->width != s->M->width || tr.renderDepthImage->height != s->M->height ) {
+		return;
+	}
+	if ( tess.numIndexes ) {
+		RB_EndSurface();
+	}
+	if ( fg.lastSeq != frame - 1 ) {
+		return;		// no frame straight before this one: nothing to be halfway to
+	}
+	{
+		double Vm[16], Pm[16], t[16];
+
+		FG_MidView( fg.lastV, fg.latV, 0.5, Vm );
+		for ( i = 0; i < 16; i++ ) {
+			Pm[i] = ( fg.lastP[i] + fg.latP[i] ) * 0.5;
+		}
+		FG_M4Mul( Pm, Vm, t );
+		for ( i = 0; i < 16; i++ ) {
+			fg.midVP[i] = (float)t[i];
+		}
+		FG_M4Mul( fg.latP, fg.latV, t );
+		for ( i = 0; i < 16; i++ ) {
+			fg.curVP[i] = (float)t[i];
+		}
+	}
+	fg.velOldFbo = glState.currentFBO;
+	fg.velBound = qfalse;
+	fg.velDraws = fg.velSkipped = fg.velSurfs = 0;
+	GL_SetProjectionMatrix( backEnd.viewParms.projectionMatrix );
+	r_fgVelPass = 1;
+
+	for ( i = 0, drawSurf = drawSurfs; i < numDrawSurfs; i++, drawSurf++ ) {
+		int base;
+
+		if ( *drawSurf->surface == SF_SPRITE || *drawSurf->surface == SF_ENTITY || *drawSurf->surface == SF_FLARE
+			|| *drawSurf->surface == SF_MARK_FRAG || *drawSurf->surface == SF_POLY || *drawSurf->surface == SF_SWIPE
+			|| *drawSurf->surface == SF_BAD || *drawSurf->surface == SF_SKIP ) {
+			continue;
+		}
+		R_DecomposeSort( drawSurf->sort, &entityNum, &shader, &fogNum, &dlighted, &pshadowed, &bStaticModel );
+		if ( bStaticModel || entityNum == REFENTITYNUM_WORLD || !shader ) {
+			continue;
+		}
+		if ( entityNum != oldEntityNum || shader != oldShader ) {
+			RB_EndSurface();
+			tess.numIndexes = tess.numVertexes = 0;
+			oldShader = shader;
+			if ( entityNum != oldEntityNum ) {
+				fgEnt_t *rec;
+				int num;
+
+				oldEntityNum = entityNum;
+				ent = &backEnd.refdef.entities[entityNum];
+				num = ent->e.entityNumber;
+				use = qfalse;
+				if ( num < 0 || num >= MAX_GENTITIES || num == ENTITYNUM_NONE
+					|| ( ent->e.renderfx & ( RF_DEPTHHACK | RF_FIRST_PERSON ) ) ) {
+					continue;
+				}
+				backEnd.currentEntity = ent;
+				backEnd.currentStaticModel = NULL;
+				backEnd.refdef.floatTime = originalTime - (double)ent->e.shaderTime;
+				R_RotateForEntity( ent, &backEnd.viewParms, &backEnd.or );
+				GL_SetModelviewMatrix( backEnd.or.modelMatrix );
+				rec = FG_EntSlot( num, ent->e.hModel, frame );
+				if ( !rec ) {
+					continue;
+				}
+				if ( rec->seq == frame && memcmp( rec->cur, backEnd.or.transformMatrix, sizeof( rec->cur ) ) ) {
+					continue;		// a second one of the same model under this number, somewhere else
+				}
+				if ( rec->seq != frame ) {
+					// first sight of it this frame: last frame's placement becomes "before"
+					float dx = backEnd.or.transformMatrix[12] - rec->cur[12];
+					float dy = backEnd.or.transformMatrix[13] - rec->cur[13];
+					float dz = backEnd.or.transformMatrix[14] - rec->cur[14];
+
+					// turned by more than ~25 degrees in one frame (the model's x and z axes): placed, not turned
+					const float *nm = backEnd.or.transformMatrix, *om = rec->cur;
+					float xx = nm[0] * om[0] + nm[1] * om[1] + nm[2] * om[2];
+					float zz = nm[8] * om[8] + nm[9] * om[9] + nm[10] * om[10];
+					float lx = ( nm[0] * nm[0] + nm[1] * nm[1] + nm[2] * nm[2] ) * ( om[0] * om[0] + om[1] * om[1] + om[2] * om[2] );
+					float lz = ( nm[8] * nm[8] + nm[9] * nm[9] + nm[10] * nm[10] ) * ( om[8] * om[8] + om[9] * om[9] + om[10] * om[10] );
+
+					rec->havePrev = ( rec->seq == frame - 1
+						&& dx * dx + dy * dy + dz * dz < FG_TELEPORT * FG_TELEPORT
+						&& xx > 0.0f && zz > 0.0f && xx * xx > 0.81f * lx && zz * zz > 0.81f * lz ) ? qtrue : qfalse;
+					if ( rec->havePrev ) {
+						memcpy( rec->prev, rec->cur, sizeof( rec->prev ) );
+					}
+					memcpy( rec->cur, backEnd.or.transformMatrix, sizeof( rec->cur ) );
+					if ( !rec->havePrev ) {
+						memcpy( rec->prev, rec->cur, sizeof( rec->prev ) );
+					}
+					rec->seq = frame;
+					rec->use = rec->havePrev;
+					if ( rec->use ) {
+						// nothing about it changed (a dead soldier, a parked truck, a weapon lying there): not a
+						// mover this frame. Small on screen and hardly moving: under a pixel either way.
+						unsigned int pose = ent->e.tiki ? R_FG_PoseHash( ent ) : 0;
+						float ox = nm[12] - backEnd.viewParms.or.origin[0];
+						float oy = nm[13] - backEnd.viewParms.or.origin[1];
+						float oz = nm[14] - backEnd.viewParms.or.origin[2];
+						float px = fabs( backEnd.viewParms.projectionMatrix[5] ) * 0.5f * (float)backEnd.viewParms.viewportHeight
+							/ ( sqrt( ox * ox + oy * oy + oz * oz ) + 1.0f );
+
+						if ( pose == rec->pose && !memcmp( rec->cur, rec->prev, sizeof( rec->cur ) ) ) {
+							rec->use = qfalse;
+						} else if ( ent->e.radius > 0.0f && ent->e.radius * px < 12.0f
+							&& sqrt( dx * dx + dy * dy + dz * dz ) * px < 0.6f ) {
+							rec->use = qfalse;
+						}
+						rec->pose = pose;
+					} else {
+						rec->pose = ent->e.tiki ? R_FG_PoseHash( ent ) : 0;
+					}
+				}
+				use = rec->use;
+				memcpy( fg.velModel, rec->cur, sizeof( fg.velModel ) );
+				memcpy( fg.velPrevModel, rec->prev, sizeof( fg.velPrevModel ) );
+				fg.velNewEntity = qtrue;
+			}
+			if ( use ) {
+				// opaque and alpha-tested surfaces only: a blended one has no depth of its own in the scene
+				if ( shader->sort < SS_OPAQUE || shader->sort > SS_SEE_THROUGH ) {
+					oldShader = NULL;
+					continue;
+				}
+				RB_BeginSurface( shader, 0, 0 );
+				fg.velBatchMoves = memcmp( fg.velModel, fg.velPrevModel, sizeof( fg.velModel ) ) ? qtrue : qfalse;
+			}
+		}
+		if ( !use || oldShader == NULL ) {
+			continue;
+		}
+		base = tess.numVertexes;
+		rb_surfaceTable[*drawSurf->surface]( drawSurf->surface );
+		if ( tess.numVertexes < base ) {
+			base = 0;		// the surface function had to flush first
+		}
+		if ( tess.useInternalVao && !tess.useCacheVao ) {
+			FG_FillPrev( ent, drawSurf->surface, base, tess.numVertexes - base, frame );
+		}
+		fg.velSurfs++;
+	}
+	RB_EndSurface();
+	tess.numIndexes = tess.numVertexes = 0;
+	r_fgVelPass = 0;
+
+	backEnd.refdef.floatTime = originalTime;
+	backEnd.currentEntity = &tr.worldEntity;
+	backEnd.or = backEnd.viewParms.world;
+	GL_SetModelviewMatrix( backEnd.or.modelMatrix );
+
+	if ( fg.velBound ) {
+		ivec4_t right;
+
+		GL_State( GLS_DEPTHTEST_DISABLE );
+		GL_Cull( CT_TWO_SIDED );
+		// M: outline pixels take their mover's vector
+		FBO_Bind( s->fboM );
+		qglViewport( 0, 0, s->M->width, s->M->height );
+		qglScissor( 0, 0, s->M->width, s->M->height );
+		GL_UseProgram( fg.wideProg );
+		GL_BindToTMU( fg.MC0, 0 );
+		GL_BindToTMU( tr.renderDepthImage, 1 );
+		FG_FullQuad();
+		// C: as it is
+		VectorSet4( right, s->M->width, 0, s->M->width, s->M->height );
+		FBO_FastBlit( fg.fboMC0, right, s->fboC, NULL, GL_COLOR_BUFFER_BIT, GL_NEAREST );
+		fg.build.midPrev = frame - 1;
+		fg.build.vec = qtrue;
+		fgs.nVec++;
+	}
+	fgs.velDraws += fg.velDraws;
+	fgs.velSkipped += fg.velSkipped;
+	fgs.nVelPass++;
+	FBO_Bind( fg.velOldFbo );
+	GL_UseProgram( 0 );
+}
+
+static GLuint FG_MainProgram( const char *vsSrc, const char *fsSrc, qboolean attribs )
+{
+	const char *header = ( glRefConfig.glslMajorVersion > 1 || glRefConfig.glslMinorVersion >= 50 ) ? "#version 150\n" : "#version 130\n";
+	GLuint vs, fs, prog;
+	GLint ok = 0;
+
+	vs = FG_Compile( GL_VERTEX_SHADER, header, vsSrc );
+	fs = FG_Compile( GL_FRAGMENT_SHADER, header, fsSrc );
+	if ( !vs || !fs ) {
+		return 0;
+	}
+	prog = qglCreateProgram();
+	qglAttachShader( prog, vs );
+	qglAttachShader( prog, fs );
+	qglBindAttribLocation( prog, ATTR_INDEX_POSITION, "attr_Position" );
+	if ( attribs ) {
+		qglBindAttribLocation( prog, ATTR_INDEX_TEXCOORD, "attr_TexCoord0" );
+		qglBindAttribLocation( prog, ATTR_INDEX_LIGHTCOORD, "attr_TexCoord1" );
+	}
+	qglLinkProgram( prog );
+	qglGetProgramiv( prog, GL_LINK_STATUS, &ok );
+	qglDeleteShader( vs );
+	qglDeleteShader( fs );
+	if ( !ok ) {
+		qglDeleteProgram( prog );
+		return 0;
+	}
+	return prog;
+}
+
+// the motion-vector textures and programs. Failing here only costs the vectors: the camera-only picture still works.
+static qboolean FG_CreateVectorResources( void )
+{
+	int mw = tr.renderDepthImage->width, mh = tr.renderDepthImage->height;
+	int i;
+
+	if ( !glRefConfig.textureFloat ) {
+		return qfalse;
+	}
+	for ( i = 0; i < FG_SETS; i++ ) {
+		fgSet_t *s = &fg.sets[i];
+		s->M = R_CreateImage( va( "_hzmfgM%d", i ), NULL, mw, mh, IMGTYPE_COLORALPHA, IMGFLAG_NO_COMPRESSION | IMGFLAG_CLAMPTOEDGE, GL_RGBA16F_ARB );
+		s->C = R_CreateImage( va( "_hzmfgC%d", i ), NULL, mw, mh, IMGTYPE_COLORALPHA, IMGFLAG_NO_COMPRESSION | IMGFLAG_CLAMPTOEDGE, GL_RGBA16F_ARB );
+		if ( !s->M || !s->C ) {
+			return qfalse;
+		}
+		s->fboM = FBO_Create( va( "_hzmfgM%d", i ), mw, mh );
+		s->fboC = FBO_Create( va( "_hzmfgC%d", i ), mw, mh );
+		if ( !s->fboM || !s->fboC ) {
+			return qfalse;
+		}
+		FBO_AttachImage( s->fboM, s->M, GL_COLOR_ATTACHMENT0, 0 );
+		FBO_AttachImage( s->fboC, s->C, GL_COLOR_ATTACHMENT0, 0 );
+		if ( !R_CheckFBO( s->fboM ) || !R_CheckFBO( s->fboC ) ) {
+			return qfalse;
+		}
+	}
+	if ( mw * 2 > glConfig.maxTextureSize ) {
+		return qfalse;
+	}
+	fg.MC0 = R_CreateImage( "_hzmfgMC0", NULL, mw * 2, mh, IMGTYPE_COLORALPHA, IMGFLAG_NO_COMPRESSION | IMGFLAG_CLAMPTOEDGE, GL_RGBA16F_ARB );
+	fg.fboMC0 = fg.MC0 ? FBO_Create( "_hzmfgMC0", mw * 2, mh ) : NULL;
+	if ( !fg.fboMC0 ) {
+		return qfalse;
+	}
+	FBO_CreateBuffer( fg.fboMC0, GL_DEPTH_COMPONENT24, 0, 0 );
+	FBO_AttachImage( fg.fboMC0, fg.MC0, GL_COLOR_ATTACHMENT0, 0 );
+	if ( !R_CheckFBO( fg.fboMC0 ) ) {
+		return qfalse;
+	}
+	fg.wideProg = FG_MainProgram( fg_quad_vs, fg_wide_fs, qfalse );
+	if ( !fg.wideProg ) {
+		return qfalse;
+	}
+	GL_UseProgram( fg.wideProg );
+	qglUniform1i( qglGetUniformLocation( fg.wideProg, "uM" ), 0 );
+	qglUniform1i( qglGetUniformLocation( fg.wideProg, "uD" ), 1 );
+	fg.velProg = FG_MainProgram( fg_vel_vs, fg_vel_fs, qtrue );
+	if ( !fg.velProg ) {
+		return qfalse;
+	}
+	GL_UseProgram( fg.velProg );
+	qglUniform1i( qglGetUniformLocation( fg.velProg, "uDepth" ), 0 );
+	fg.uVelMVP = qglGetUniformLocation( fg.velProg, "uMVP" );
+	fg.uVelModel = qglGetUniformLocation( fg.velProg, "uModel" );
+	fg.uVelPrevModel = qglGetUniformLocation( fg.velProg, "uPrevModel" );
+	fg.uVelRigid = qglGetUniformLocation( fg.velProg, "uSkinned" );
+	fg.uVelMidVP = qglGetUniformLocation( fg.velProg, "uMidVP" );
+	fg.uVelCurVP = qglGetUniformLocation( fg.velProg, "uCurVP" );
+	fg.uVelSize = qglGetUniformLocation( fg.velProg, "uSize" );
+	fg.uVelPass = qglGetUniformLocation( fg.velProg, "uPass" );
+	GL_UseProgram( 0 );
+	return qtrue;
+}
+
+/*
+=====================================================================================================================
 main thread
 =====================================================================================================================
 */
@@ -873,6 +1678,10 @@ static qboolean FG_CreateResources( void )
 			return qfalse;
 		}
 	}
+	fg.vecOK = FG_CreateVectorResources();
+	if ( !fg.vecOK ) {
+		ri.Printf( PRINT_ALL, "r_hzmFrameGen: no motion vectors on this system - things that move keep the newer frame's place\n" );
+	}
 	GL_BindFramebuffer( GL_FRAMEBUFFER, 0 );
 	glState.currentFBO = NULL;
 
@@ -888,8 +1697,9 @@ static qboolean FG_CreateResources( void )
 	if ( !fg.FenceSync || !fg.ClientWaitSync || !fg.DeleteSync ) {
 		fg.FenceSync = NULL;	// the main thread then finishes each frame before publishing it
 	}
-	ri.Printf( PRINT_ALL, "r_hzmFrameGen: ready (%dx%d, depth %dx%d, %s)\n", fg.width, fg.height,
-		tr.renderDepthImage->width, tr.renderDepthImage->height, fg.FenceSync ? "fence sync" : "glFinish" );
+	ri.Printf( PRINT_ALL, "r_hzmFrameGen: ready (%dx%d, depth %dx%d, %s, motion vectors %s)\n", fg.width, fg.height,
+		tr.renderDepthImage->width, tr.renderDepthImage->height, fg.FenceSync ? "fence sync" : "glFinish",
+		fg.vecOK ? "yes" : "no" );
 	return qtrue;
 }
 
@@ -1085,7 +1895,7 @@ static int FG_DebugPresent( void )
 		GLimp_FG_MakeCurrent( NULL );
 		return 0;
 	}
-	ok = FG_CtxInit() && FG_DrawGenerated( &fg.slot[0], &fg.slot[1], &cur, V, P, dbg >= 3 );
+	ok = FG_CtxInit() && FG_DrawGenerated( &fg.slot[0], &fg.slot[1], &cur, V, P, dbg >= 3, qfalse );
 	qglFinish();
 	GLimp_FG_MakeCurrent( NULL );
 	return ok ? 2 : 0;
@@ -1106,6 +1916,11 @@ int R_FG_Present( void )
 	FBO_FastBlit( tr.renderFbo, NULL, s->fboF, NULL, GL_COLOR_BUFFER_BIT, GL_NEAREST );
 	fg.build.set = fg.w;
 	fg.build.seq = ++fg.seq;
+	if ( fg.build.scene ) {
+		memcpy( fg.lastV, fg.build.V, sizeof( fg.lastV ) );
+		memcpy( fg.lastP, fg.build.P, sizeof( fg.lastP ) );
+		fg.lastSeq = fg.build.seq;
+	}
 	fg.build.bypass = ( fg.max2D >= FG_BIG2D ) ? qtrue : qfalse;
 	if ( fg.build.fadeK != 1.0f || fg.build.fadeB[0] + fg.build.fadeB[1] + fg.build.fadeB[2] != 0.0f ) {
 		fgs.nFade++;
@@ -1233,6 +2048,9 @@ static void FG_Stats_f( void )
 	ri.Printf( PRINT_ALL, "FGSTAT2 noscene=%d overlay=%d fade=%d camjump=%d dropped=%d earlyskip=%d glerr=%d synctimeout=%d syncwait_ms=%.3f gen_ms=%.3f lastoverlay=[%s]\n",
 		fgs.nNoScene, fgs.nBypass, fgs.nFade, fgs.nJump, fgs.nDropped, fgs.nEarlySkip, fgs.nGLErr, fgs.nSyncTimeout,
 		fgs.nSyncWait ? fgs.syncWaitMs / fgs.nSyncWait : 0.0, fgs.nGenTimed ? fgs.genMs / fgs.nGenTimed : 0.0, fgs.lastOverlay );
+	ri.Printf( PRINT_ALL, "FGSTAT3 vectors=%d vecframes=%d velpasses=%d veldraws=%d velskipped=%d prevskin_kb=%d gen_delay_ms=%.2f real_delay_ms=%.2f\n",
+		( fg.vecOK && r_hzmFrameGenVectors->integer ) ? 1 : 0, fgs.nVec, fgs.nVelPass, fgs.velDraws, fgs.velSkipped, fgSkinBytes / 1024,
+		fgs.nGenDelay ? fgs.genDelayMs / fgs.nGenDelay : 0.0, fgs.nRealDelay ? fgs.realDelayMs / fgs.nRealDelay : 0.0 );
 	line[0] = 0;
 	for ( j = 0; j < 13; j++ ) {
 		if ( j < 12 ) {
@@ -1322,6 +2140,9 @@ void R_FG_Init( void )
 	r_hzmFrameGen = ri.Cvar_Get( "r_hzmFrameGen", "0", 0 );
 	r_hzmFrameGenDebug = ri.Cvar_Get( "r_hzmFrameGenDebug", "0", 0 );
 	r_hzmFrameGenStats = ri.Cvar_Get( "r_hzmFrameGenStats", "0", 0 );
+	// 1 = what moves by itself (soldiers, vehicles, doors) is placed halfway too, from per-pixel motion vectors;
+	// 0 = the camera-only picture of the first version (they keep the newer frame's place)
+	r_hzmFrameGenVectors = ri.Cvar_Get( "r_hzmFrameGenVectors", "1", 0 );
 	fg.mx = SDL_CreateMutex();
 	fg.cv = SDL_CreateCond();
 	ri.Cmd_AddCommand( "fg_stats", FG_Stats_f );
@@ -1335,6 +2156,10 @@ void R_FG_Shutdown( void )
 		return;		// never initialised
 	}
 	FG_StopThread();
+	R_FG_FlushPrev();
+	if ( fg.velProg ) qglDeleteProgram( fg.velProg );
+
+	if ( fg.wideProg ) qglDeleteProgram( fg.wideProg );
 	if ( fg.ctx ) {
 		// its program and vertex array die with it; the textures and framebuffers are the renderer's own
 		GLimp_FG_DeleteContext( fg.ctx );

@@ -13,6 +13,10 @@ void     R_FG_Shutdown( void );             // RE_Shutdown: joins the present th
 qboolean R_FG_Wanted( void );               // cheap: is the cvar set, or is the feature still running
 void     R_FG_LatchView( const void *viewParms );   // RB_SetupGlobalFog: the main world view's matrices
 void     R_FG_SceneDone( qboolean depthValid );     // RB_PostProcess: the 3D picture is complete, the HUD is not yet drawn
+void     R_FG_VelocityPass( void *drawSurfs, int numDrawSurfs );   // RB_DrawSurfs, main world view, after the colour pass: motion vectors of what moves by itself
+void     R_FG_VelocityDraw( void );         // RB_EndSurface while r_fgVelPass is set
+void     R_FG_FlushPrev( void );            // model data freed: forget last frame's skinned vertices
+extern int r_fgVelPass;
 void     R_FG_Set2DWindow( float w, float h, int vpW, int vpH );   // Set2DWindow: extents of the 2D coordinate system and its viewport
 void     R_FG_Note2D( float w, float h, const char *what );          // every 2D quad: a big one after the scene = menu / console / overlay
 int      R_FG_Present( void );              // RB_SwapBuffers: 0 = not handled, 1 = handed to the present thread, 2 = back buffer filled, swap it
