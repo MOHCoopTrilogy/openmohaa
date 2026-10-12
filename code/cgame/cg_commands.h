@@ -252,6 +252,10 @@ public:
     qboolean      addedOnce;
     qboolean      lastEntValid;
     spawnthing_t *m_spawnthing;
+    // HZM coop [perf1 A1] cg_hzmTempLeaf: the map leaf this temp model was last found in, when and where
+    int    hzmLeaf;
+    int    hzmLeafTime;
+    vec3_t hzmLeafOrg;
 
     void (*touchfcn)(ctempmodel_t *ct, trace_t *trace);
 
@@ -271,6 +275,9 @@ inline ctempmodel_t::ctempmodel_t()
     aliveTime             = 0;
     addedOnce             = qfalse;
     lastEntValid          = qfalse;
+    hzmLeaf               = -1;
+    hzmLeafTime           = 0;
+    VectorClear(hzmLeafOrg);
 }
 
 enum class vsstypes_t : unsigned char {
@@ -557,6 +564,8 @@ inline emittertime_t *emitterthing_t::GetEmitTime(int entnum)
     return et;
 }
 
+void CG_HzmEmitLeakSign(spawnthing_t *sp); // [perf1 A1] cg_hzmEmitLeakFix 2 (cg_commands.cpp)
+
 class commandtime_t : public Class
 {
 public:
@@ -632,6 +641,9 @@ public:
 
     cg_common_data cgd;
     int            entnum;
+    // HZM coop [perf1 A1] cg_hzmEmitLeakFix (cg_commands.cpp EndTagSpawn): 1 = made by 'tagspawnlinked',
+    // 2 = the verify mode has marked it as one the fix would have deleted
+    int hzmLinkedSpawn = 0;
 
     Vector   origin_offset_base;
     Vector   origin_offset_amplitude;
@@ -967,6 +979,7 @@ public:
     void RemoveClientEntity(int number, dtiki_t *tiki, centity_t *cent, ctempmodel_t *p = NULL);
     void ClearSwipes(void);
     void FreeSpawnthing(spawnthing_t *sp);
+    void HzmFreeEmptyLinkedEmitters(spawnthing_t *justSpawned); // [perf1 A1]
     void ResetTempModels(void);
     void SpawnTempModel(int count, spawnthing_t *sp);
 

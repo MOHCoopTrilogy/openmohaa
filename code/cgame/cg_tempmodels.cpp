@@ -46,6 +46,79 @@ extern Event EV_Client_SwipeOn;
 extern Event EV_Client_SwipeOff;
 
 //=============
+// HZM coop [perf1 A1] cg_hzmTempLeaf - "is this temp model in a part of the map the camera can see?" without a
+// map-tree walk per particle per frame (4.9 % of a quiet Omaha frame). The leaf is kept with the particle and
+// looked up again when it is cg_hzmTempLeafMs old or the particle is cg_hzmTempLeafDist units from where it was
+// looked up. The view leaf is fresh every frame; only the particle's own leaf is remembered.
+// It can only err one way: a remembered leaf that says HIDDEN is never trusted - the particle is looked up again
+// at once - so nothing is ever hidden that the old code would draw. What can happen is a particle that has just
+// crossed into a hidden leaf being drawn for a few more frames (as retail always drew it).
+// 0 = a lookup every frame (the old code), 1 = remembered, 2 = both, differences counted (^~^~^ TEMPLEAF).
+//=============
+static cvar_t *cg_hzmTempLeaf;
+static cvar_t *cg_hzmTempLeafMs;
+static cvar_t *cg_hzmTempLeafDist;
+static struct {
+    int checked, hiddenWrongly, drawnLonger;
+    int asked, lookups;
+    int lastPrint;
+} s_tempLeafStat;
+
+static qboolean CG_HzmTempModelInView(ctempmodel_t *p, int viewLeafNum, const vec3_t org)
+{
+    int      mode = cg_hzmTempLeaf->integer;
+    qboolean fresh, vis;
+    vec3_t   d;
+
+    if (!mode) {
+        return cgi.CM_LeafInPVS(viewLeafNum, cgi.CM_PointLeafnum(org));
+    }
+
+    s_tempLeafStat.asked++;
+    fresh = qfalse;
+    VectorSubtract(org, p->hzmLeafOrg, d);
+    if (p->hzmLeaf < 0
+        || (unsigned int)(cg.time - p->hzmLeafTime) >= (unsigned int)cg_hzmTempLeafMs->integer
+        || DotProduct(d, d) > cg_hzmTempLeafDist->value * cg_hzmTempLeafDist->value) {
+        fresh = qtrue;
+    } else if (!cgi.CM_LeafInPVS(viewLeafNum, p->hzmLeaf)) {
+        fresh = qtrue;    // never hide on a remembered leaf
+    }
+    if (fresh) {
+        p->hzmLeaf     = cgi.CM_PointLeafnum(org);
+        p->hzmLeafTime = cg.time;
+        VectorCopy(org, p->hzmLeafOrg);
+        s_tempLeafStat.lookups++;
+    }
+    vis = cgi.CM_LeafInPVS(viewLeafNum, p->hzmLeaf);
+
+    if (mode >= 2) {
+        qboolean old = cgi.CM_LeafInPVS(viewLeafNum, cgi.CM_PointLeafnum(org));
+
+        s_tempLeafStat.checked++;
+        if (old && !vis) {
+            s_tempLeafStat.hiddenWrongly++;
+        } else if (!old && vis) {
+            s_tempLeafStat.drawnLonger++;
+        }
+        if (cg.time - s_tempLeafStat.lastPrint >= 2000 || cg.time < s_tempLeafStat.lastPrint) {
+            cgi.Printf(
+                "^~^~^ TEMPLEAF verify (checked/DIFFERENT) %d/%d = hidden wrongly | drawn a moment longer %d | map "
+                "lookups %d of %d\n",
+                s_tempLeafStat.checked,
+                s_tempLeafStat.hiddenWrongly,
+                s_tempLeafStat.drawnLonger,
+                s_tempLeafStat.lookups,
+                s_tempLeafStat.asked
+            );
+            s_tempLeafStat.lastPrint = cg.time;
+        }
+        vis = old;    // the verify mode always acts on the old answer
+    }
+    return vis;
+}
+
+//=============
 // AllocateTempModel
 //=============
 ctempmodel_t *ClientGameCommandManager::AllocateTempModel(void)
@@ -65,6 +138,8 @@ ctempmodel_t *ClientGameCommandManager::AllocateTempModel(void)
     p->prev                        = &m_active_tempmodels;
     m_active_tempmodels.next->prev = p;
     m_active_tempmodels.next       = p;
+
+    p->hzmLeaf = -1;    // HZM coop [perf1 A1] a reused temp model starts with no remembered leaf
 
     return p;
 }
@@ -244,6 +319,10 @@ void ClientGameCommandManager::InitializeTempModelCvars(void)
     // HZM coop - 1 = skip drawing tempmodels (brass casings, debris, blood, smoke) whose leaf is not in
     // the view PVS, so they no longer show through walls. Marks/decals already do this; tempmodels did not.
     cg_cullTempModels = cgi.Cvar_Get("cg_cullTempModels", "1", CVAR_ARCHIVE);
+    // HZM coop [perf1 A1] see CG_HzmTempModelInView. Tuning switches, not archived.
+    cg_hzmTempLeaf     = cgi.Cvar_Get("cg_hzmTempLeaf", "1", 0);
+    cg_hzmTempLeafMs   = cgi.Cvar_Get("cg_hzmTempLeafMs", "100", 0);
+    cg_hzmTempLeafDist = cgi.Cvar_Get("cg_hzmTempLeafDist", "24", 0);
 
     if (cg_max_tempmodels->integer > MAX_TEMPMODELS) {
         // 2.40 sets the integer value directly rather than calling Cvar_Set()
@@ -1088,8 +1167,7 @@ void ClientGameCommandManager::AddTempModels(void)
                 p->cgd.color[2],
                 p->cgd.lightType
             );
-        } else if (!cg_cullTempModels->integer
-                   || cgi.CM_LeafInPVS(viewLeafNum, cgi.CM_PointLeafnum(newEnt.origin))) {
+        } else if (!cg_cullTempModels->integer || CG_HzmTempModelInView(p, viewLeafNum, newEnt.origin)) {
             // HZM coop - only draw when the tempmodel's leaf is in the view PVS (no through-wall casings)
             if (p->ent.reType == RT_SPRITE) {
                 vec3_t vTestAngles;
@@ -1203,6 +1281,7 @@ void ClientGameCommandManager::SpawnTempModel(int mcount)
         memset(&p->lastEnt, 0, sizeof(refEntity_t));
 
         if (m_spawnthing->cgd.flags & T_WAVE) {
+            CG_HzmEmitLeakSign(m_spawnthing); // [perf1 A1] verify: ... and never spawns again
             p->m_spawnthing = m_spawnthing;
             m_spawnthing->numtempmodels++;
             start = Vector(0, 0, 0);

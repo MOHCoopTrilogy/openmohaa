@@ -3073,6 +3073,7 @@ spawnthing_t *ClientGameCommandManager::InitializeSpawnthing(spawnthing_t *sp)
     sp->tagnum                  = -1;
     sp->numtempmodels           = 0;
     sp->entnum                  = ENTITYNUM_NONE;
+    sp->hzmLinkedSpawn          = 0;
 
     sp->cgd.scale              = 1.0f;
     sp->cgd.createTime         = cg.time;
@@ -3163,6 +3164,7 @@ spawnthing_t *ClientGameCommandManager::GetEmitterByName(str name)
     for (i = 1; i <= m_emitters.NumObjects(); i++) {
         spawnthing_t *st = m_emitters.ObjectAt(i);
         if (st->emittername == name) {
+            CG_HzmEmitLeakSign(st); // [perf1 A1] verify
             return st;
         }
     }
@@ -3515,6 +3517,7 @@ void ClientGameCommandManager::BeginTagSpawnLinked(Event *ev)
     m_spawnthing->entnum   = current_entity->entityNumber;
     m_spawnthing->cgd.tiki = current_tiki;
     m_spawnthing->cgd.flags |= T_WAVE;
+    m_spawnthing->hzmLinkedSpawn = 1; // [perf1 A1] see EndTagSpawn
     m_spawnthing->cgd.origin = current_entity->origin;
 
     ori = cgi.TIKI_Orientation(current_entity, tagnum);
@@ -3566,6 +3569,96 @@ void ClientGameCommandManager::EndTagSpawn(void)
 
     // Okay we should have a valid spawnthing, let's create a render entity
     SpawnEffect(m_spawnthing->count, 0);
+
+    HzmFreeEmptyLinkedEmitters(m_spawnthing);
+}
+
+//===============
+// HZM coop [perf1 A1] cg_hzmEmitLeakFix - THE LINKED-SPAWN EMITTER LEAK.
+//
+// 'tagspawnlinked' (BeginTagSpawnLinked) makes a NEW emitter every time it runs, puts it on the global emitter
+// list, and leaves its deletion to the temp models it spawns: the last one to die deletes it (FreeTempModel).
+// When the spawn makes no temp model at all - the effect is out of its spawnrange, there is no free temp model,
+// it is volumetric smoke - nothing ever deletes it. The fake MG42s of Omaha (mg42_gun_fake.tik: 'tagspawnlinked
+// tag_barrel ( spawnrange 4096 ... )' in the fire animation) run it for every shot, most of them out of range:
+// measured on m3l1a, 25 emitters leaked a second, 2,300 after five minutes. UpdateEmitter then walks all of them
+// for each of the ten guns in view, every frame - 22,000 GetEmitTime calls a frame, which is the "emitter
+// bookkeeping, 12.7 % of a quiet Omaha frame" of the 2026-10-12 study, and it grows for as long as the map runs.
+//
+// An emitter of this kind that owns no temp model is referenced by nothing: temp models are the only things that
+// keep a pointer to it, UpdateEmitter does nothing with it but refresh its position (T_WAVE), and it has no name
+// to be found by. So it is deleted where it was made, the moment its one spawn turns out empty.
+// 0 = leak (the old code), 1 = fixed, 2 = verify: nothing is deleted; each emitter the fix would have deleted is
+// marked, and any later sign of life from a marked one is counted (^~^~^ EMITLEAK, must stay 0).
+// Going from 0 to 1 also deletes what has leaked so far.
+//===============
+static cvar_t *cg_hzmEmitLeakFix;
+static struct {
+    int checked, different;
+    int freed;
+    int lastPrint;
+    int lastMode;
+} s_emitLeak;
+
+void CG_HzmEmitLeakSign(spawnthing_t *sp)
+{
+    if (sp && sp->hzmLinkedSpawn == 2) {
+        s_emitLeak.different++;
+    }
+}
+
+void ClientGameCommandManager::HzmFreeEmptyLinkedEmitters(spawnthing_t *justSpawned)
+{
+    int mode, i, marked;
+
+    if (!cg_hzmEmitLeakFix) {
+        cg_hzmEmitLeakFix = cgi.Cvar_Get("cg_hzmEmitLeakFix", "1", 0);
+    }
+    mode = cg_hzmEmitLeakFix->integer;
+
+    if (mode == 1 && s_emitLeak.lastMode != 1) {
+        // switched on mid-level: delete what the old code has leaked so far (everything but the one in hand)
+        for (i = m_emitters.NumObjects(); i > 0; i--) {
+            spawnthing_t *sp = m_emitters.ObjectAt(i);
+
+            if (sp != justSpawned && sp->hzmLinkedSpawn && !sp->numtempmodels) {
+                FreeSpawnthing(sp);
+                s_emitLeak.freed++;
+            }
+        }
+    }
+    s_emitLeak.lastMode = mode;
+
+    if (!mode || !justSpawned || !justSpawned->hzmLinkedSpawn || justSpawned->numtempmodels) {
+        return;
+    }
+    if (!m_emitters.ObjectInList(justSpawned)) {
+        return; // only the list's own emitters are ever marked; never delete anything else
+    }
+    if (mode == 1) {
+        FreeSpawnthing(justSpawned); // off the list, deleted; clears m_spawnthing when it is this one
+        s_emitLeak.freed++;
+        return;
+    }
+
+    justSpawned->hzmLinkedSpawn = 2;
+    s_emitLeak.checked++;
+    if (cg.time - s_emitLeak.lastPrint >= 2000 || cg.time < s_emitLeak.lastPrint) {
+        marked = 0;
+        for (i = 1; i <= m_emitters.NumObjects(); i++) {
+            if (m_emitters.ObjectAt(i)->hzmLinkedSpawn == 2) {
+                marked++;
+            }
+        }
+        cgi.Printf(
+            "^~^~^ EMITLEAK verify (checked/DIFFERENT) %d/%d | emitters on the list %d, of them leaked %d\n",
+            s_emitLeak.checked,
+            s_emitLeak.different,
+            m_emitters.NumObjects(),
+            marked
+        );
+        s_emitLeak.lastPrint = cg.time;
+    }
 }
 
 //===============
@@ -4956,6 +5049,8 @@ void ClientGameCommandManager::UpdateEmitter(
 
             continue;
         }
+
+        CG_HzmEmitLeakSign(m_spawnthing); // [perf1 A1] verify: a leaked emitter never gets here
 
         // Set the default origin (spawn from the parent's origin)
         VectorCopy(entity_origin, m_spawnthing->cgd.origin);
