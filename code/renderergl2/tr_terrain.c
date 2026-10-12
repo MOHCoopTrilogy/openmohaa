@@ -52,6 +52,17 @@ static size_t g_nTris;
 static size_t g_nVerts;
 static int    g_nMerge;
 static int    g_nSplit;
+
+// HZM gl2 [perf1 A2] THE TERRAIN CHANGE COUNTER.
+// The terrain patch memo (tr_surface.c, bug-3497) hashed every vertex and triangle of every patch three or more
+// times a frame to learn that nothing had changed (4.7 % of the Bunker frame). The tessellator knows when it
+// changes something, so it says so: every function below that adds, removes or reorders a patch's vertices or
+// triangles, or moves a vertex, stamps the patch with the next value of one global counter. The value never
+// repeats (64 bits, never reset - not by ter_restart, not by a map change), so "same stamp" means "same lists".
+// What is stamped is exactly what TM_Key reads from the lists: vertex order, xyz, both texture coordinate sets,
+// fHzmMorph, hzmLPar; triangle order, iPt and the drawable bit. r_hzmTerrainMemoKey 2 checks it against the hash.
+uint64_t g_terChangeSeq = 1;
+#define TER_CHANGED(patch) ((patch)->drawinfo.hzmChange = ++g_terChangeSeq)
 unsigned int  g_uiTerDist;
 vec2_t        g_vTerOrg;
 vec3_t        g_vTerFwd;
@@ -106,6 +117,7 @@ static terraInt R_AllocateVert(cTerraPatchUnpacked_t *patch)
 
     patch->drawinfo.iVertHead = iVert;
     patch->drawinfo.nVerts++;
+    TER_CHANGED(patch);
 
     assert(g_vert.nFree > 0);
     g_vert.nFree--;
@@ -185,6 +197,7 @@ static void R_ReleaseVert(cTerraPatchUnpacked_t *patch, int iVert)
 
     assert(patch->drawinfo.nVerts > 0);
     patch->drawinfo.nVerts--;
+    TER_CHANGED(patch);
 
     if (patch->drawinfo.iVertHead == iVert) {
         patch->drawinfo.iVertHead = iNext;
@@ -219,6 +232,7 @@ terraInt R_AllocateTri(cTerraPatchUnpacked_t *patch, qboolean check)
     }
 
     patch->drawinfo.nTris++;
+    TER_CHANGED(patch);
     assert(g_tri.nFree > 0);
     g_tri.nFree--;
 
@@ -251,6 +265,7 @@ static void R_ReleaseTri(cTerraPatchUnpacked_t *patch, terraInt iTri)
 
     assert(patch->drawinfo.nTris > 0);
     patch->drawinfo.nTris--;
+    TER_CHANGED(patch);
 
     if (patch->drawinfo.iTriHead == iTri) {
         patch->drawinfo.iTriHead = iNext;
@@ -323,6 +338,7 @@ static void R_DemoteInAncestry(cTerraPatchUnpacked_t *patch, terraInt iTri)
 
     assert(patch->drawinfo.nTris > 0);
     patch->drawinfo.nTris--;
+    TER_CHANGED(patch);
 
     if (patch->drawinfo.iTriHead == iTri) {
         patch->drawinfo.iTriHead = iNext;
@@ -384,6 +400,7 @@ static void R_TerrainPatchesInit()
         patch->drawinfo.iVertHead    = 0;
         patch->drawinfo.nTris        = 0;
         patch->drawinfo.nVerts       = 0;
+        TER_CHANGED(patch); // [perf1 A2]
     }
 }
 
@@ -544,6 +561,7 @@ static void R_ForceSplit(terraInt iTri)
                 pVert->fVariance = 0.0;
                 pVert->hzmLPar[0] = pVert->hzmLPar[1] = 0xFF; // [bug-3007] height snaps here, so does L
                 pVert->xyz[2]    = pVert->fHgtAvg;
+                TER_CHANGED(pBase->patch);
             }
         }
 
@@ -563,6 +581,7 @@ static void R_ForceSplit(terraInt iTri)
         pVert->fVariance = 0.0;
         pVert->hzmLPar[0] = pVert->hzmLPar[1] = 0xFF; // [bug-3007] height snaps here, so does L
         pVert->xyz[2]    = pVert->fHgtAvg;
+        TER_CHANGED(pTri->patch);
     }
 
     R_SplitTri(iTri, iNewPt, iTriLeft, iTriRight, iBaseRight, iBaseLeft);
@@ -632,6 +651,7 @@ static void R_ForceMerge(terraInt iTri)
     }
 
     patch->drawinfo.nTris++;
+    TER_CHANGED(patch);
     if (patch->drawinfo.iMergeHead == iTri) {
         patch->drawinfo.iMergeHead = iNext;
     }
@@ -727,6 +747,7 @@ static void R_PreTessellateTerrain()
         patch->drawinfo.iTriHead    = 0;
         patch->drawinfo.iTriTail    = 0;
         patch->drawinfo.iVertHead   = 0;
+        TER_CHANGED(patch); // [perf1 A2]
 
         float sMin, tMin;
 
@@ -958,9 +979,13 @@ static qboolean R_NeedSplitTri(terraTri_t *pTri)
 R_CalcVertMorphHeight
 ================
 */
-static void R_CalcVertMorphHeight(terrainVert_t *pVert)
+static qboolean R_CalcVertMorphHeight(terrainVert_t *pVert)
 {
     float dot;
+    float was[2]; // [perf1 A2] height and morph before, to tell the caller whether this vertex changed
+
+    was[0] = pVert->xyz[2];
+    was[1] = pVert->fHzmMorph;
 
     pVert->xyz[2]       = pVert->fHgtAvg;
     pVert->fHzmMorph    = 0.0f; // [bug-3007] mirrors the height geomorph factor below
@@ -981,6 +1006,8 @@ static void R_CalcVertMorphHeight(terrainVert_t *pVert)
     } else {
         pVert->uiDistRecalc = g_uiTerDist - (int)ceil(dot);
     }
+
+    return (qboolean)(memcmp(&was[0], &pVert->xyz[2], sizeof(float)) || memcmp(&was[1], &pVert->fHzmMorph, sizeof(float)));
 }
 
 /*
@@ -988,11 +1015,12 @@ static void R_CalcVertMorphHeight(terrainVert_t *pVert)
 R_UpdateVertMorphHeight
 ================
 */
-static void R_UpdateVertMorphHeight(terrainVert_t *pVert)
+static qboolean R_UpdateVertMorphHeight(terrainVert_t *pVert)
 {
     if (pVert->uiDistRecalc <= g_uiTerDist) {
-        R_CalcVertMorphHeight(pVert);
+        return R_CalcVertMorphHeight(pVert);
     }
+    return qfalse;
 }
 
 /*
@@ -1055,10 +1083,12 @@ static void R_DoGeomorphs()
         g_vert.iCur = patch->drawinfo.iVertHead;
 
         if (patch->visCountDraw == g_terVisCount) {
+            qboolean moved = qfalse; // [perf1 A2]
+
             if (patch->byDirty) {
                 while (g_vert.iCur) {
                     terrainVert_t *pVert = &g_pVert[g_vert.iCur];
-                    R_CalcVertMorphHeight(pVert);
+                    moved |= R_CalcVertMorphHeight(pVert);
                     g_vert.iCur = pVert->iNext;
                 }
 
@@ -1066,13 +1096,17 @@ static void R_DoGeomorphs()
             } else {
                 while (g_vert.iCur) {
                     terrainVert_t *pVert = &g_pVert[g_vert.iCur];
-                    R_UpdateVertMorphHeight(pVert);
+                    moved |= R_UpdateVertMorphHeight(pVert);
                     g_vert.iCur = pVert->iNext;
                 }
+            }
+            if (moved) {
+                TER_CHANGED(patch);
             }
         } else {
             if (!patch->byDirty) {
                 patch->byDirty = qtrue;
+                TER_CHANGED(patch);
                 while (g_vert.iCur) {
                     terrainVert_t *pVert = &g_pVert[g_vert.iCur];
                     pVert->xyz[2]        = pVert->fHgtAvg;
@@ -1193,13 +1227,69 @@ static void R_DoTriMerging()
 R_TessellateTerrain
 ================
 */
+// HZM gl2 [perf1 A2] did the last pass leave the detail where it found it? (triangles and vertices in use before
+// and after: the churn at the edge of a detail level - split, merge straight back - nets to nothing)
+static qboolean s_terSettled = qfalse;
+// ... and has a patch become active since then? (R_MarkTerrainPatch: a shadow view walks map nodes the camera
+// view culled, and can add patches of its own to the active list - the pass has work to do on those)
+static qboolean s_terNewActive = qtrue;
+
 void R_TessellateTerrain()
 {
+    size_t trisFree = g_tri.nFree, vertsFree = g_vert.nFree;
+
     R_DoTriSplitting();
     // Morph geometry according to the view
     R_DoGeomorphs();
     // Merge vertices
     R_DoTriMerging();
+
+    s_terSettled   = (qboolean)(g_tri.nFree == trisFree && g_vert.nFree == vertsFree);
+    s_terNewActive = qfalse;
+}
+
+/*
+================
+R_TerGeomSig - HZM gl2 [perf1 A2] r_hzmTerTessOnce 2
+
+What the visible patches would draw, as one number: every drawable triangle's three corner positions, mixed and
+summed (so the order of a list does not matter - the tessellator re-queues triangles it splits and merges back
+without changing a single one).
+================
+*/
+static uint64_t R_TerGeomSig(int *numTris)
+{
+    cTerraPatchUnpacked_t *patch;
+    uint64_t               sum = 0;
+
+    *numTris = 0;
+
+    for (patch = tr.world->activeTerraPatches; patch; patch = patch->pNextActive) {
+        terraInt i;
+
+        for (i = patch->drawinfo.iTriHead; i; i = g_pTris[i].iNext) {
+            uint64_t h = 0x9E3779B97F4A7C15ULL, w;
+            int      k;
+
+            if (!(g_pTris[i].byConstChecks & 4)) {
+                continue;
+            }
+            for (k = 0; k < 3; k++) {
+                const terrainVert_t *v = &g_pVert[g_pTris[i].iPt[k]];
+
+                memcpy(&w, &v->xyz[0], 8);
+                h = (h ^ w) * 0x100000001B3ULL;
+                h ^= h >> 29;
+                w = 0;
+                memcpy(&w, &v->xyz[2], 4);
+                h = (h ^ w) * 0x100000001B3ULL;
+                h ^= h >> 29;
+            }
+            sum += h;
+            (*numTris)++;
+        }
+    }
+    return sum;
 }
 
 /*
@@ -1330,6 +1420,7 @@ void R_MarkTerrainPatch(cTerraPatchUnpacked_t *pPatch)
     pPatch->visCountDraw         = g_terVisCount;
     pPatch->pNextActive          = tr.world->activeTerraPatches;
     tr.world->activeTerraPatches = pPatch;
+    s_terNewActive               = qtrue; // [perf1 A2]
 }
 
 /*
@@ -1348,7 +1439,58 @@ void R_AddTerrainSurfaces()
     }
 
     if (!ter_lock->integer) {
-        R_TessellateTerrain();
+        // HZM gl2 [perf1 A2] NO TESSELLATION PASS IN A SHADOW VIEW ONCE THE DETAIL HAS SETTLED.
+        // The level-of-detail pass is driven by what R_TerrainPrepareFrame worked out for the camera, and that
+        // step is skipped for depth-shadow views (tr_world.c, bug-1156): in a shadow view the pass ran again for
+        // the camera of the last camera view - three more times a frame with sun shadows, ~6 % of the Bunker frame.
+        // Those extra passes are not always idle: after a camera jump the first pass can leave splits and merges
+        // unfinished, and the old code got up to four steps a frame towards the new detail (measured: 85 of 11,163
+        // shadow-view passes on Omaha finished one). So a shadow view runs the pass exactly while there is
+        // something left: when the LAST pass (the camera's, or an earlier shadow view's) left the number of
+        // triangles and vertices in use unchanged, AND no patch has become active since (a shadow view can add
+        // patches the camera view culled), the detail has settled for that camera and the pass is skipped.
+        // (A settled pass is still not a no-op for the lists: at the edge of a detail level it splits a triangle,
+        // finds the new vertex not yet morphed and merges it straight back, every time it runs. The lists are
+        // re-queued; what they draw does not change.)
+        // r_hzmTerTessOnce 0 = every view (the old code), 1 = as above, 2 = verify: every pass runs as before, and
+        // for each one that 1 would have skipped, what the visible patches draw is compared before and after
+        // (RPSTAT5 "terrain tessellation in shadow views", must stay 0).
+        static cvar_t *r_hzmTerTessOnce = NULL;
+
+        if (!r_hzmTerTessOnce) {
+            r_hzmTerTessOnce = ri.Cvar_Get("r_hzmTerTessOnce", "1", 0);
+        }
+        if (!(tr.viewParms.flags & VPF_DEPTHSHADOW) || !r_hzmTerTessOnce->integer) {
+            R_TessellateTerrain();
+        } else if (r_hzmTerTessOnce->integer >= 2) {
+            qboolean wouldSkip = (qboolean)(s_terSettled && !s_terNewActive);
+            int      trisBefore, trisAfter;
+            uint64_t before = R_TerGeomSig(&trisBefore);
+            uint64_t stamp  = g_terChangeSeq;
+
+            R_TessellateTerrain();
+            if (!wouldSkip) {
+                hzmPerf.verifyTerTessRun++;             // still catching up: 1 runs this pass too
+            } else {
+                hzmPerf.verifyTerTess++;
+                if (R_TerGeomSig(&trisAfter) != before) {
+                    hzmPerf.verifyTerTessBad++;
+                    if (trisAfter < trisBefore) {
+                        hzmPerf.verifyTerTessMerged++;  // the skipped pass would have finished a merge
+                    } else if (trisAfter > trisBefore) {
+                        hzmPerf.verifyTerTessSplit++;   // ... or a split
+                    }
+                }
+                if (g_terChangeSeq != stamp) {
+                    hzmPerf.verifyTerTessChurn++;
+                }
+            }
+        } else if (!s_terSettled || s_terNewActive) {
+            R_TessellateTerrain();
+            hzmPerf.terTessRun++;
+        } else {
+            hzmPerf.terTessSkipped++;
+        }
     }
 
     if (ter_count->integer || ter_lock->integer == 2) {

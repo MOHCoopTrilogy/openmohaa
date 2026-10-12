@@ -1785,6 +1785,9 @@ typedef struct srfTerrain_s {
     byte* lmData;
     float lmapX;
     float lmapY;
+    // HZM gl2 [perf1 A2] stamped from g_terChangeSeq by the tessellator whenever this patch's vertex or triangle
+    // list changes in a way RB_DrawTerrainTris can see (tr_terrain.c TER_CHANGED). Never repeats, never reset.
+    uint64_t hzmChange;
 } srfTerrain_t;
 
 typedef struct cTerraPatchUnpacked_s {
@@ -4804,7 +4807,16 @@ typedef struct {
 	int glErrors, glLastError;	// polled once a frame while r_hzmPerfStats is on (the engine itself only looks when it creates something)
 	// the memos' verify modes: answers checked against the real work / answers that differed (must stay 0)
 	int verifyPose, verifyPoseBad, verifyLightDir, verifyLightDirBad, verifyTerrain, verifyTerrainBad, verifyPack, verifyPackBad;
+	// [perf1 A2] r_hzmTerrainMemoKey 2 / r_hzmTerTessOnce 2 / r_hzmShadowCharReject 2 (RPSTAT5)
+	int verifyTerKey, verifyTerKeyBad, verifyTerKeyLost, verifyTerTess, verifyTerTessBad, verifyShadowChar, verifyShadowCharBad;
+	int terTessSkipped, shadowCharRejected, verifyTerTessChurn, verifyTerTessMerged, verifyTerTessSplit;
+	int terTessRun, verifyTerTessRun;
 } hzmPerf_t;
+// [perf1 A2] the terrain change counter (tr_terrain.c)
+extern uint64_t g_terChangeSeq;
+// [perf1 A2] r_hzmShadowCharReject 2: set by R_AddSkelSurfaces when it WOULD have rejected the entity, read back by
+// R_AddEntitySurface, which then checks that the entity added no draw surface (tr_main.c)
+extern int r_hzmShadowCharWould;
 extern hzmPerf_t hzmPerf;
 void R_HzmPerfFrame(void);
 // [render-perf 0] the renderer's own main-thread time, for r_hzmAB: microseconds since some fixed point, and the

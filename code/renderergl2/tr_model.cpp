@@ -1085,6 +1085,21 @@ extern "C" void R_HzmPerfFrame(void)
             hzmPerf.tessStalls,
             hzmPerf.sprites * f, hzmPerf.spriteBatches * f, hzmPerf.lightFills * f,
             hzmPerf.staticSurfs * f, hzmPerf.terrainPatches * f, hzmPerf.terrainMemo * f);
+        if (hzmPerf.verifyTerKey || hzmPerf.verifyTerTess || hzmPerf.verifyTerTessRun || hzmPerf.verifyShadowChar) {
+            // [perf1 A2] one line for the three A2 verify modes
+            ri.Printf(PRINT_ALL, "^~^~^ RPSTAT5 verify (checked/DIFFERENT) terrain key %d/%d (stamp changed, lists the same %d) | "
+                                 "terrain tessellation in shadow views %d/%d (lists re-queued %d) | shadow-view characters %d/%d "
+                                 "| of the different passes: merged %d split %d | passes still catching up (run either way) %d\n",
+                      hzmPerf.verifyTerKey, hzmPerf.verifyTerKeyBad, hzmPerf.verifyTerKeyLost,
+                      hzmPerf.verifyTerTess, hzmPerf.verifyTerTessBad, hzmPerf.verifyTerTessChurn,
+                      hzmPerf.verifyShadowChar, hzmPerf.verifyShadowCharBad,
+                      hzmPerf.verifyTerTessMerged, hzmPerf.verifyTerTessSplit, hzmPerf.verifyTerTessRun);
+        }
+        if (hzmPerf.terTessSkipped || hzmPerf.terTessRun || hzmPerf.shadowCharRejected) {
+            ri.Printf(PRINT_ALL, "^~^~^ RPSTAT6 per frame: terrain tessellations in shadow views skipped %.2f, run %.2f | "
+                                 "characters kept out of shadow views %.1f\n",
+                      hzmPerf.terTessSkipped * f, hzmPerf.terTessRun * f, hzmPerf.shadowCharRejected * f);
+        }
         if (hzmPerf.verifyPose || hzmPerf.verifyLightDir || hzmPerf.verifyTerrain || hzmPerf.verifyPack) {
             ri.Printf(PRINT_ALL, "^~^~^ RPSTAT4 verify (checked/DIFFERENT) pose %d/%d lightdir %d/%d terrain %d/%d pack %d/%d\n",
                       hzmPerf.verifyPose, hzmPerf.verifyPoseBad, hzmPerf.verifyLightDir, hzmPerf.verifyLightDirBad,
@@ -1434,6 +1449,38 @@ void R_AddSkelSurfaces(trRefEntity_t *ent)
         if (isChar && r_test_noprepass && r_test_noprepass->integer
             && (tr.viewParms.flags & (VPF_DEPTHSHADOW | VPF_SHADOWMAP))) {
             return;
+        }
+
+        // HZM gl2 [perf1 A2] A CHARACTER THE SHADOW VIEW WILL NOT DRAW IS NOT ADDED TO IT.
+        // A depth-shadow view draws characters only when R_DepthViewAllows says so (r_charShadows on a sun
+        // cascade, the dlight-shadow and pshadow gates). When it says no, every surface of a character is thrown
+        // away - by R_AddDrawSurf since the shadow hardening (R_DepthViewSkipsFrontend), by the back end before
+        // that - but only AFTER this function had decided the pose, culled, walked the meshes and offered each
+        // surface: 4-5 % of the Omaha frame, three cascades a frame, for nothing on screen.
+        // The test is the back end's own (same function, same flags, same bIsCharacter), asked once per entity
+        // instead of once per surface. The pose is untouched by this: the camera view that follows decides and
+        // poses exactly as it does in a frame that has no shadow views at all (r_sunShadows 0), and the pose memo
+        // is keyed by the frame, not by which view asked first.
+        // r_hzmShadowCharReject 0 = add and drop (the old code), 1 = reject here, 2 = verify: carry on as before
+        // and count the entities that then DID add a surface (RPSTAT5, must stay 0).
+        if (isChar && (tr.viewParms.flags & VPF_DEPTHSHADOW) && r_drawSurfNoWrap) {
+            static cvar_t *r_hzmShadowCharReject = NULL;
+
+            if (!r_hzmShadowCharReject) {
+                r_hzmShadowCharReject = ri.Cvar_Get("r_hzmShadowCharReject", "1", 0);
+            }
+            if (r_hzmShadowCharReject->integer) {
+                qboolean allowChars, allowCutout;
+
+                R_DepthViewAllows(tr.viewParms.flags, tr.viewParms.shadowCascade, &allowChars, &allowCutout);
+                if (!allowChars) {
+                    if (r_hzmShadowCharReject->integer == 1) {
+                        hzmPerf.shadowCharRejected++;
+                        return;
+                    }
+                    r_hzmShadowCharWould = 1;
+                }
+            }
         }
 
         // ------------------------------------------------------------------------------

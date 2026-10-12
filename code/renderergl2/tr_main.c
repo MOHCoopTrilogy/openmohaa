@@ -1582,6 +1582,7 @@ static void R_RadixSort( drawSurf_t *source, int size )
 
 // HZM gl2 shadow hardening (r_shadowHarden, plan P1a). See tr_local.h.
 qboolean r_drawSurfNoWrap = qfalse;
+int      r_hzmShadowCharWould = 0;   // [perf1 A2] see tr_local.h
 int      r_drawSurfCap = MAX_DRAWSURFS;
 int      r_drawSurfDrops = 0;
 
@@ -1963,7 +1964,21 @@ static void R_AddEntitySurface (int entityNum)
 				ri.Printf(PRINT_ALL, "sprite model '%s' being added to renderer!\n", tr.currentModel->name);
                 break;
             case MOD_TIKI:
-                R_AddSkelSurfaces(ent);
+                {
+                    // HZM gl2 [perf1 A2] r_hzmShadowCharReject 2: an entity the reject would have dropped must not
+                    // have added a draw surface (see R_AddSkelSurfaces)
+                    int hzmSurfsBefore = tr.refdef.numDrawSurfs;
+
+                    r_hzmShadowCharWould = 0;
+                    R_AddSkelSurfaces(ent);
+                    if (r_hzmShadowCharWould) {
+                        hzmPerf.verifyShadowChar++;
+                        if (tr.refdef.numDrawSurfs != hzmSurfsBefore) {
+                            hzmPerf.verifyShadowCharBad++;
+                        }
+                        r_hzmShadowCharWould = 0;
+                    }
+                }
                 break;
 			//=========================
 			case MOD_BAD:		// null model axis

@@ -1780,6 +1780,7 @@ int g_terrainMemoGen = 1;
 
 typedef struct {
 	uint64_t	key;
+	uint64_t	keyFast;	// [perf1 A2] the same question answered from the patch's change stamp (TM_KeyFast)
 	int			nVerts, nIndexes;
 	int			cap;
 	byte		*data;		// xyz[nVerts] (3 floats) | texCoords | lightCoords | normal | tangent | lightdir | indexes (patch-relative)
@@ -1880,6 +1881,35 @@ static uint64_t TM_Key(const srfTerrain_t *p, qboolean bLightGrid, int hmNormals
 	return h;
 }
 
+/*
+TM_KeyFast - HZM gl2 [perf1 A2] r_hzmTerrainMemoKey. TM_Key with the two list walks replaced by the stamp the
+tessellator puts on a patch whenever it changes those lists (tr_terrain.c TER_CHANGED). The header words are the
+same ones TM_Key starts with. 0 = the hash (the old code), 1 = the stamp, 2 = verify: both, and a patch the stamp
+calls unchanged while the hash says it changed is counted (RPSTAT5 "terrain key", must stay 0).
+*/
+static uint64_t TM_KeyFast(const srfTerrain_t *p, qboolean bLightGrid, int hmNormals, const int16_t *iLightDir)
+{
+	uint64_t	h = 0x9E3779B97F4A7C15ULL, w;
+	float		f[2];
+
+	w = (uint64_t)(unsigned int)g_terrainMemoGen | ((uint64_t)(bLightGrid ? 1 : 0) << 32) | ((uint64_t)(hmNormals ? 1 : 0) << 33)
+		| ((uint64_t)(p->dlightMap[0] ? 1 : 0) << 34);
+	h = TM_Mix(h, w);
+	memcpy(&w, iLightDir, 8);
+	h = TM_Mix(h, w);
+	if (p->dlightMap[0]) {
+		f[0] = p->lmapStep;
+		f[1] = p->lmapX;
+		memcpy(&w, f, 8);
+		h = TM_Mix(h, w);
+		f[0] = p->lmapY;
+		f[1] = 0.0f;
+		memcpy(&w, f, 8);
+		h = TM_Mix(h, w);
+	}
+	return TM_Mix(h, p->hzmChange);
+}
+
 static tmEntry_t *TM_Entry(const srfTerrain_t *p)
 {
 	int idx;
@@ -1912,9 +1942,10 @@ void RB_DrawTerrainTris(srfTerrain_t* p) {
 	int dlightBits;
 	// HZM gl2 [render-perf 5] the terrain patch memo
 	tmEntry_t	*tm = NULL;
-	uint64_t	tmKey = 0;
+	uint64_t	tmKey = 0, tmKeyFast = 0;
 	int			tmVerts = 0, tmIndexes = 0, firstIndex;
-	qboolean	tmVerify = qfalse;
+	qboolean	tmVerify = qfalse, tmFastHit = qfalse, tmHit = qfalse;
+	static cvar_t *s_tmKeyMode = NULL;	// [perf1 A2] r_hzmTerrainMemoKey
 	int16_t iNormal[4];
 	int16_t iTangent[4];
 	vec3_t  vUp;
@@ -2011,12 +2042,40 @@ void RB_DrawTerrainTris(srfTerrain_t* p) {
 		if (!s_tmHmNormals) {
 			s_tmHmNormals = ri.Cvar_Get("r_hzmTerrainHeightNormals", "1", CVAR_ARCHIVE);
 		}
-		tmKey = TM_Key(p, bLightGrid, s_tmHmNormals->integer, iLightDir, &tmVerts, &tmIndexes);
-		if (tm->data && tm->key == tmKey && tm->nVerts == tmVerts && tm->nIndexes == tmIndexes
+		// [perf1 A2] the stamp first; the hash only when the stamp is not the stored one (the patch changed, and is
+		// about to be rebuilt anyway) - so both keys of an entry are always the keys of its data
+		tmKeyFast = TM_KeyFast(p, bLightGrid, s_tmHmNormals->integer, iLightDir);
+		tmFastHit = (qboolean)(tm->data && tm->nVerts >= 0 && tm->keyFast == tmKeyFast);
+		if (!s_tmKeyMode) {
+			s_tmKeyMode = ri.Cvar_Get("r_hzmTerrainMemoKey", "1", 0);
+		}
+		if (s_tmKeyMode->integer == 1 && tmFastHit) {
+			tmKey = tm->key;
+			tmVerts = tm->nVerts;
+			tmIndexes = tm->nIndexes;
+			tmHit = qtrue;
+		} else {
+			tmKey = TM_Key(p, bLightGrid, s_tmHmNormals->integer, iLightDir, &tmVerts, &tmIndexes);
+			tmHit = (qboolean)(tm->data && tm->key == tmKey && tm->nVerts == tmVerts && tm->nIndexes == tmIndexes);
+			if (s_tmKeyMode->integer >= 2) {
+				hzmPerf.verifyTerKey++;
+				if (tmFastHit && !tmHit) {
+					hzmPerf.verifyTerKeyBad++;	// the stamp would have copied streams the hash says are stale
+				} else if (!tmFastHit && tmHit) {
+					hzmPerf.verifyTerKeyLost++;	// stamped, yet the lists hash the same (the tessellator's churn)
+				}
+			}
+			if (tmHit) {
+				// the stored streams are the streams of these lists: they are the streams of this stamp too. A patch
+				// the tessellator only re-queued costs one hash, once, instead of one per draw.
+				tm->keyFast = tmKeyFast;
+			}
+		}
+		if (tmHit
 			&& firstVert + tmVerts <= SHADER_MAX_VERTEXES && firstIndex + tmIndexes <= SHADER_MAX_INDEXES
 			&& r_hzmTerrainMemo->integer == 2) {
 			tmVerify = qtrue;	// build it for real below and compare with what is stored
-		} else if (tm->data && tm->key == tmKey && tm->nVerts == tmVerts && tm->nIndexes == tmIndexes
+		} else if (tmHit
 			&& firstVert + tmVerts <= SHADER_MAX_VERTEXES && firstIndex + tmIndexes <= SHADER_MAX_INDEXES) {
 			const byte *src = tm->data;
 			const glIndex_t *idx;
@@ -2287,6 +2346,7 @@ void RB_DrawTerrainTris(srfTerrain_t* p) {
 				idx[i] = (glIndex_t)(tess.indexes[firstIndex + i] - firstVert);
 			}
 			tm->key = tmKey;
+			tm->keyFast = tmKeyFast;
 			tm->nVerts = tmVerts;
 			tm->nIndexes = tmIndexes;
 		}
