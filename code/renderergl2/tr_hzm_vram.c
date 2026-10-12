@@ -440,7 +440,7 @@ integrated-chip path; r_vramDebugCardMB, pretend the scale and the limit are thi
 */
 #include "tr_hzm_vram_pick.h"
 
-#define HZM_VRAMBAR_AUTO 0
+#define HZM_VRAMBAR_AUTO 1 // [user 2026-10-12] "I like A": the look is chosen (the lamp gauge), so automatic = ON
 #define VRAM_MARK_IMAGE  "textures/hud/vram/mark" // as the UI names it: no extension (docs/tools/gen_vram_panel.py)
 #define VRAM_POLL_MS     500
 #define VRAM_UMA_MB      512 // less dedicated memory than this = an integrated chip drawing from system RAM
