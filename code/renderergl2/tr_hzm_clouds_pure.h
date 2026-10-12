@@ -340,22 +340,38 @@ typedef struct hzmCloudFamily_s {
 	float		ramp, nfreq;	// coverage ramp width above the threshold; erosion-noise repeats per coverage tile
 	float		detail, dfreq;	// v2: outline billows (coverage lowered by up to `detail` by a field `dfreq` per tile)
 	float		basesharp, base1, topk;	// v2: base crispness 0..1, the thin-cloud base height, the tower height
+	// v4 light (2026-10-12; tr_hzm_clouds.c hzmVclLook_t has the meaning of each): the v3 picture is
+	// 0, 0, 0.1, 0, 0, 0.8, 0, 0.02
+	float		deep, silver, shrink, powder, white, ambBot, sunWhite, lumFloor;
+	// THE ALLOW LIST (user, 2026-10-12: "only for skies where they look good"). 1 = this sky gets clouds by default.
+	// 0 = reviewed and REFUSED: the family is kept for look-dev only (r_hzmCloudsAll 1) and the sky draws exactly as
+	// it does without this feature.
+	int			allow;
 } hzmCloudFamily_t;
 
 static const hzmCloudFamily_t hzmCloudFamilies[] = {
-	// cumulus fields (twin v7: billowy outline, flat crisp base, sun-lit) - and one stratus deck (twin v9, m5l2's rain)
-	//  box                     label       cover  sigma  sun   amb    tile     wdeg  wspd  eros   lmax  ramp   nfreq det   dfreq bsharp base1  topk
-	{ "env/mohday1",       "cumulus",  0.45f, 0.070f, 2.5f, 0.75f, 2400.0f,  60.0f, 3.0f, 0.85f, 1.6f, 0.30f, 12.0f, 0.30f, 20.0f, 0.8f, 0.08f, 0.70f },
-	{ "env/mohday2",       "cumulus",  0.45f, 0.070f, 2.5f, 0.75f, 2400.0f,  60.0f, 3.0f, 0.85f, 1.6f, 0.30f, 12.0f, 0.30f, 20.0f, 0.8f, 0.08f, 0.70f },
-	{ "env/nordawn",       "cumulus",  0.45f, 0.070f, 2.5f, 0.75f, 2400.0f,  30.0f, 2.5f, 0.85f, 1.6f, 0.30f, 12.0f, 0.30f, 20.0f, 0.8f, 0.08f, 0.70f },
-	{ "env/m5l2",          "stratus",  0.72f, 0.050f, 1.6f, 0.80f, 1600.0f,  80.0f, 6.0f, 0.85f, 1.1f, 0.30f, 12.0f, 0.15f, 16.0f, 0.8f, 0.08f, 0.35f },
-	{ "env/lighthousesky", "cumulus",  0.40f, 0.070f, 3.0f, 0.75f, 2048.0f,  45.0f, 2.0f, 0.85f, 3.0f, 0.30f, 12.0f, 0.30f, 20.0f, 0.8f, 0.08f, 0.70f },
-	{ "env/mohnightfog",   "cumulus",  0.40f, 0.070f, 3.0f, 0.75f, 2048.0f,  45.0f, 2.0f, 0.85f, 3.0f, 0.30f, 12.0f, 0.30f, 20.0f, 0.8f, 0.08f, 0.70f },
-	{ "env/t1l3",          "cumulus",  0.55f, 0.070f, 2.0f, 0.80f, 2048.0f, 100.0f, 3.0f, 0.85f, 2.0f, 0.30f, 12.0f, 0.30f, 20.0f, 0.8f, 0.08f, 0.70f },
-	{ 0, 0, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f }
+	// ALLOWED (judged in engine 2026-10-12, v11.md): the two dim blue skies, with the "lift" light (T1: amb 1.0, deep
+	// 0.35, silver 0.4, powder 0.25, white 0.6, ambbot 1.0) as their rest state. The africanight sky is the third
+	// allowed sky; it is the texture profile (VCL_PROFILE_SKY), not a row here.
+	//  box                     label       cover  sigma  sun   amb    tile     wdeg  wspd  eros   lmax  ramp   nfreq det   dfreq bsharp base1  topk   deep silver shrink powder white ambbot sunw lumfloor  allow
+	{ "env/nordawn",       "cumulus",  0.45f, 0.070f, 2.5f, 1.00f, 2400.0f,  30.0f, 2.5f, 0.85f, 1.6f, 0.30f, 12.0f, 0.30f, 20.0f, 0.8f, 0.08f, 0.70f, 0.35f, 0.4f, 0.10f, 0.25f, 0.6f, 1.0f, 0.0f, 0.02f, 1 },
+	{ "env/t1l3",          "cumulus",  0.55f, 0.070f, 2.0f, 1.00f, 2048.0f, 100.0f, 3.0f, 0.85f, 2.0f, 0.30f, 12.0f, 0.30f, 20.0f, 0.8f, 0.08f, 0.70f, 0.35f, 0.4f, 0.10f, 0.25f, 0.6f, 1.0f, 0.0f, 0.02f, 1 },
+	// REFUSED (same review): dirty beige smudges on the white haze (mohday1), nothing visible (mohday2), vein-like
+	// outlines (m5l2 overcast), barely visible (the lighthouse / night-fog boxes). Kept at their v3 values for look-dev.
+	{ "env/mohday1",       "cumulus",  0.45f, 0.070f, 2.5f, 0.75f, 2400.0f,  60.0f, 3.0f, 0.85f, 1.6f, 0.30f, 12.0f, 0.30f, 20.0f, 0.8f, 0.08f, 0.70f, 0.0f, 0.0f, 0.10f, 0.0f, 0.0f, 0.8f, 0.0f, 0.02f, 0 },
+	{ "env/mohday2",       "cumulus",  0.45f, 0.070f, 2.5f, 0.75f, 2400.0f,  60.0f, 3.0f, 0.85f, 1.6f, 0.30f, 12.0f, 0.30f, 20.0f, 0.8f, 0.08f, 0.70f, 0.0f, 0.0f, 0.10f, 0.0f, 0.0f, 0.8f, 0.0f, 0.02f, 0 },
+	{ "env/m5l2",          "stratus",  0.72f, 0.050f, 1.6f, 0.80f, 1600.0f,  80.0f, 6.0f, 0.85f, 1.1f, 0.30f, 12.0f, 0.15f, 16.0f, 0.8f, 0.08f, 0.35f, 0.0f, 0.0f, 0.10f, 0.0f, 0.0f, 0.8f, 0.0f, 0.02f, 0 },
+	{ "env/lighthousesky", "cumulus",  0.40f, 0.070f, 3.0f, 0.75f, 2048.0f,  45.0f, 2.0f, 0.85f, 3.0f, 0.30f, 12.0f, 0.30f, 20.0f, 0.8f, 0.08f, 0.70f, 0.0f, 0.0f, 0.10f, 0.0f, 0.0f, 0.8f, 0.0f, 0.02f, 0 },
+	{ "env/mohnightfog",   "cumulus",  0.40f, 0.070f, 3.0f, 0.75f, 2048.0f,  45.0f, 2.0f, 0.85f, 3.0f, 0.30f, 12.0f, 0.30f, 20.0f, 0.8f, 0.08f, 0.70f, 0.0f, 0.0f, 0.10f, 0.0f, 0.0f, 0.8f, 0.0f, 0.02f, 0 },
+	{ 0, 0, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0 }
 };
 
-static const hzmCloudFamily_t *R_HZM_VclFamily( const char *box ) {
+// The third allowed sky is the africanight shader (the texture profile, VCL_PROFILE_SKY in tr_hzm_clouds.c). 0 here
+// takes it off the allow list like any refused family (look-dev: r_hzmCloudsAll 1).
+#define HZM_VCL_ALLOW_AFRICANIGHT 1
+
+// the family of a sky box. all = 0: only a sky on the ALLOW list (what the game uses); all = 1: any reviewed family
+static const hzmCloudFamily_t *R_HZM_VclFamily( const char *box, int all ) {
 	int i;
 
 	if ( !box || !box[0] ) {
@@ -363,7 +379,7 @@ static const hzmCloudFamily_t *R_HZM_VclFamily( const char *box ) {
 	}
 	for ( i = 0; hzmCloudFamilies[i].box; i++ ) {
 		if ( R_HZM_VclStrIEq( box, hzmCloudFamilies[i].box ) ) {
-			return &hzmCloudFamilies[i];
+			return ( all || hzmCloudFamilies[i].allow ) ? &hzmCloudFamilies[i] : 0;
 		}
 	}
 	return 0;
@@ -387,6 +403,12 @@ static const char *R_HZM_VclDeny( const char *mapName, const char *skyShader, co
 	}
 	if ( R_HZM_VclStrIEq( mapName, "m3l3" ) ) {
 		return "deny:user-m3l3";
+	}
+	// maps taken off after the per-map review of the allowed skies (2026-10-12): the sky is allowed, this map is not.
+	// mp_unterseite_dm (norway_dawn): its fog hides the whole sky but a patch at the zenith, where the clouds are
+	// pale smudges on beige haze - the mohday1 failure.
+	if ( R_HZM_VclStrIEq( mapName, "mp_unterseite_dm" ) ) {
+		return "deny:map-review";
 	}
 	for ( i = 0; omahaNames[i]; i++ ) {
 		if ( ( skyShader && R_HZM_VclStrIHas( skyShader, omahaNames[i] ) )

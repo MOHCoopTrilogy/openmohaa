@@ -2487,7 +2487,8 @@ typedef struct {
 ** ONE struct inside tr, so R_Init's memset zeroes it (the keep-port contract: no function statics, permanent GPU
 ** objects created only in the R_Init path, per-map pointers cleared at every world load).
 */
-#define HZM_CLOUDS_AUTO 0		// r_hzmClouds -1 = this. 0 until the user's test passes (plan 2.2, T7)
+#define HZM_CLOUDS_AUTO 1		// r_hzmClouds -1 = this. ON since 2026-10-12 (user), on the ALLOW list of skies only
+								// (tr_hzm_clouds_pure.h hzmCloudFamilies .allow + the africanight sky); r_hzmClouds 0 = off
 
 typedef struct {
 	qboolean		supported;			// resources + programs ready this R_Init

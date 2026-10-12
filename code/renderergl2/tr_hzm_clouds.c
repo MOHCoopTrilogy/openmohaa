@@ -69,6 +69,7 @@ qboolean R_CheckFBO( const FBO_t *fbo );
 void     R_LoadImage( const char *name, byte **pic, int *width, int *height, GLenum *picFormat, int *numMips );
 
 cvar_t *r_hzmClouds;
+cvar_t *r_hzmCloudsAll;		// look-dev only: 1 = also the reviewed-and-refused sky families (read when a map loads)
 cvar_t *r_hzmCloudsDebug;
 cvar_t *r_hzmCloudsDither;
 cvar_t *r_hzmCloudsProbe;
@@ -122,6 +123,7 @@ switches (plan 2.2: flags 0, never archived)
 */
 void R_HZM_Clouds_Register( void ) {
 	r_hzmClouds          = ri.Cvar_Get( "r_hzmClouds",          "-1",  0 );
+	r_hzmCloudsAll       = ri.Cvar_Get( "r_hzmCloudsAll",       "0",   0 );
 	r_hzmCloudsDebug     = ri.Cvar_Get( "r_hzmCloudsDebug",     "0",   0 );
 	r_hzmCloudsDither    = ri.Cvar_Get( "r_hzmCloudsDither",    "0.5", 0 );
 	r_hzmCloudsProbe     = ri.Cvar_Get( "r_hzmCloudsProbe",     "0",   0 );
@@ -626,9 +628,10 @@ static void R_HZM_VclLogState( void ) {
 
 void R_HZM_Clouds_MapLoaded( const char *baseName ) {
 	hzmClouds_t *c = &tr.hzmClouds;
-	shader_t *sky = NULL, *any = NULL, *proc = NULL;
+	shader_t *sky = NULL, *any = NULL, *proc = NULL, *refused = NULL;
 	const char *deny;
 	int i;
+	int all = ( r_hzmCloudsAll && r_hzmCloudsAll->integer ) ? 1 : 0;
 
 	Q_strncpyz( c->mapName, baseName ? baseName : "", sizeof( c->mapName ) );
 	c->profileShader = NULL;
@@ -652,8 +655,10 @@ void R_HZM_Clouds_MapLoaded( const char *baseName ) {
 	if ( !sky && tr.world ) {
 		for ( i = 0; i < tr.world->numsurfaces && !proc; i++ ) {
 			shader_t *s = tr.world->surfaces[i].shader;
-			if ( s && s->isSky && R_HZM_VclFamily( s->sky.hzmBoxName ) ) {
+			if ( s && s->isSky && R_HZM_VclFamily( s->sky.hzmBoxName, all ) ) {
 				proc = s;
+			} else if ( s && s->isSky && !refused && R_HZM_VclFamily( s->sky.hzmBoxName, 1 ) ) {
+				refused = s;	// a reviewed sky that is NOT on the allow list: named in the CLOUDS line
 			}
 		}
 		if ( proc && !deny ) {
@@ -673,6 +678,8 @@ void R_HZM_Clouds_MapLoaded( const char *baseName ) {
 		c->mapReason = "sky-compare";
 	} else if ( r_fastsky && r_fastsky->integer ) {
 		c->mapReason = "r_fastsky";
+	} else if ( sky && !HZM_VCL_ALLOW_AFRICANIGHT && !all ) {
+		c->mapReason = "sky-not-allowed:africanight";
 	} else if ( sky ) {
 		if ( sky->hzmVclFp != 1 ) {
 			Com_sprintf( c->mapReasonBuf, sizeof( c->mapReasonBuf ), "fingerprint:%s",
@@ -691,9 +698,12 @@ void R_HZM_Clouds_MapLoaded( const char *baseName ) {
 		} else {
 			c->mapReason = NULL;
 			c->profileShader = proc;
-			c->family = R_HZM_VclFamily( proc->sky.hzmBoxName );
+			c->family = R_HZM_VclFamily( proc->sky.hzmBoxName, all );
 			c->kind = 2;
 		}
+	} else if ( refused ) {
+		Com_sprintf( c->mapReasonBuf, sizeof( c->mapReasonBuf ), "sky-not-allowed:%s", refused->sky.hzmBoxName );
+		c->mapReason = c->mapReasonBuf;
 	} else {
 		c->mapReason = "no-profile-sky";
 	}
@@ -821,7 +831,8 @@ map by tr_hzm_wet.c), the sun / moon direction and hue from the world's sun (tr.
 brightness from the box (so a night box lights its clouds by moonlight and a day box by day).
 ==================
 */
-// look-dev v4 (2026-10-12): what the v3 light model could not reach from r_hzmCloudsTune. The defaults ARE v3.
+// look-dev v4 (2026-10-12): what the v3 light model could not reach from r_hzmCloudsTune. Each sky family carries its
+// own rest values (tr_hzm_clouds_pure.h); r_hzmCloudsTune overrides them per frame. The v3 values are in brackets.
 //   deep      weight of the third multiple-scatter octave (0 = v3: a thick base keeps ~4 % of its top)
 //   silver    forward-scatter rim on thin cloud toward the sun (0 = v3)
 //   shrink    how much the outline narrows from base to top (v3: 0.1)
@@ -834,13 +845,19 @@ typedef struct {
 	float deep, silver, shrink, powder, white, ambBot, sunWhite, lumFloor;
 } hzmVclLook_t;
 #define HZM_VCL_LOOK_V3 { 0.0f, 0.0f, 0.1f, 0.0f, 0.0f, 0.8f, 0.0f, 0.02f }
-static const hzmVclLook_t hzmVclLookV3 = HZM_VCL_LOOK_V3;
 static hzmVclLook_t hzmVclLook = HZM_VCL_LOOK_V3;
 
 static void RB_HZM_VclTune( hzmCloudFamily_t *f ) {
 	char buf[256], *p, *eq;
 
-	hzmVclLook = hzmVclLookV3;
+	hzmVclLook.deep = f->deep;
+	hzmVclLook.silver = f->silver;
+	hzmVclLook.shrink = f->shrink;
+	hzmVclLook.powder = f->powder;
+	hzmVclLook.white = f->white;
+	hzmVclLook.ambBot = f->ambBot;
+	hzmVclLook.sunWhite = f->sunWhite;
+	hzmVclLook.lumFloor = f->lumFloor;
 	if ( !r_hzmCloudsTune || !r_hzmCloudsTune->string[0] ) {
 		return;
 	}
