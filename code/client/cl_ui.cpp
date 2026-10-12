@@ -5264,6 +5264,31 @@ static void UI_MemorialDraw(void)
         re.SetColor(NULL);
     }
 
+    // TEST HOOK (docs: launch memorial). Console commands do not run while the memorial is up, so a harness cannot
+    // photograph it: cl_memorialShot "<ms> <ms> ..." takes an engine screenshot at each offset from the start
+    // (memorial_shot_0.tga, _1, ...). Empty (the default) = nothing; never archived.
+    {
+        static cvar_t *shot = NULL;
+        static int     nDone = 0;
+
+        if (!shot) {
+            shot = Cvar_Get("cl_memorialShot", "", 0);
+        }
+        if (shot->string[0]) {
+            const char *sp = shot->string;
+            int         k;
+
+            for (k = 0; k < nDone && sp; k++) {
+                sp = strchr(sp, ' ');
+                sp = sp ? sp + 1 : NULL;
+            }
+            if (sp && sp[0] && cls.realtime - s_memorialT0 >= atoi(sp)) {
+                Cbuf_ExecuteText(EXEC_NOW, va("screenshot memorial_shot_%d\n", nDone));
+                nDone++;
+            }
+        }
+    }
+
     if (cls.realtime >= intro_stage.endtime) {
         CL_FinishedStartStage();
     }
