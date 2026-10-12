@@ -179,7 +179,7 @@ typedef struct {
 	qboolean		ctxInit;
 	GLuint			prog, vao;
 	GLint			uMode, uTint, uRes, uGun, uCurFromOut, uOutFromCur, uPrvFromOut, uOutFromPrv, uFadeK, uFadeB, uHudThr;
-	GLint			uOutVP, uCurInvW, uPrvInvW, uCurK, uPrvK, uUseC, uEdge, uLayer, uLayerCol, uLayerST, uGunVec, uGunFlash;
+	GLint			uOutVP, uCurInvW, uPrvInvW, uCurK, uPrvK, uUseC, uEdge, uLayer, uLayerCol, uLayerST, uGunVec, uGunFlash, uOccl, uFill;
 
 	// ---- shared, under mx
 	SDL_Thread		*thread;
@@ -218,6 +218,8 @@ cvar_t *r_hzmFrameGenShadows;
 cvar_t *r_hzmFrameGenEdge;
 cvar_t *r_hzmFrameGenLayers;
 cvar_t *r_hzmFrameGenGun;
+cvar_t *r_hzmFrameGenOccl;
+cvar_t *r_hzmFrameGenFill;
 cvar_t *r_hzmFrameGenGunMax;
 cvar_t *r_hzmFrameGenFovStep;
 int r_fgVelPass;		// the motion-vector pass is collecting surfaces: RB_EndSurface hands them to R_FG_VelocityDraw
@@ -235,6 +237,8 @@ static const char *fg_fs =
 	"uniform float uUseC;\n"
 	"uniform float uEdge;\n"
 	"uniform float uGunVec;\n"		// the newer frame's C also holds the first-person weapon where it is halfway (a < 0)
+	"uniform float uOccl;\n"
+	"uniform float uFill;\n"
 	"uniform float uGunFlash;\n"		// a muzzle flash is in one of the two frames
 	"uniform sampler2D uLayerT;\n"
 	"uniform float uLayer;\n"
@@ -298,7 +302,12 @@ static const char *fg_fs =
 	"		if ( m.a > 0.5 ) o -= ( k * dot( invW, c ) ) * ( uOutVP * vec4( m.rgb, 0.0 ) );\n"
 	"	}\n"
 	"	if ( o.w < 0.00001 ) return vec3( -10.0, -10.0, 0.0 );\n"
-	"	return vec3( o.xy / o.w * 0.5 + 0.5, o.w );\n"
+	// o is the output clip position of the WORLD point over its homogeneous w (= 1 / the source frame's clip w), so
+	// o.w alone is the ratio of the two frames' distances - about 1 everywhere. The distance in the output picture
+	// is o.w over that w. (Until 2026-10-12 the ratio itself was returned and compared with a mover's distance in
+	// game units: every mover pixel over a still background counted as hidden behind it - thin, fast things, a
+	// rifle held up, a trailing boot, were cut out of the generated pictures, and every mover lost its edges.)
+	"	return vec3( o.xy / o.w * 0.5 + 0.5, uOccl != 0.0 ? o.w / max( abs( dot( invW, c ) ), 1e-20 ) : o.w );\n"
 	"}\n"
 	// xy = where in the source picture the surface seen at output pixel p is (searched from q), z = how far off that
 	// answer is (pixels), w = how far away the surface is in the output picture
@@ -501,6 +510,24 @@ static const char *fg_fs =
 	"			} else if ( uCurK != 0.0 && all( greaterThanEqual( q0, vec2( 0.0 ) ) ) && all( lessThanEqual( q0, vec2( 1.0 ) ) ) && moving( uCurM, q0 ) ) {\n"
 	// uncovered by something that moved on, and hidden in the older frame as well: the background beside the mover
 	// in the newer frame, stepping out of it along its own motion (ahead first, then behind)
+	// First the nearest pixel around that is not a mover's body (ground in a mover's shadow carries a vector too, with
+	// a = 0.75: it is still ground). Stepping along the motion alone went 30 pixels through a leg and came out in
+	// the sun: light patches in the shadow under a trailing boot.
+	"				if ( uFill != 0.0 ) {\n"
+	"					vec2 px = 1.0 / uRes;\n"
+	"					for ( int r = 1; r <= 12 && !done; r++ ) {\n"
+	"						for ( int k = 0; k < 8 && !done; k++ ) {\n"
+	"							float an = float( k ) * 0.7853982;\n"
+	"							vec2 qq = q0 + vec2( cos( an ), sin( an ) ) * ( float( r ) * 3.0 ) * px;\n"
+	"							if ( all( greaterThanEqual( qq, vec2( 0.0 ) ) ) && all( lessThanEqual( qq, vec2( 1.0 ) ) )\n"
+	"								&& texelFetch( uCurM, texel( uCurM, qq ), 0 ).a < 0.9 && depthAt( uCurD, qq ) >= uGun ) {\n"
+	"								c = texture( uCurS, qq ).rgb;\n"
+	"								tint = vec3( 1.0, 0.6, 0.2 );\n"
+	"								done = true;\n"
+	"							}\n"
+	"						}\n"
+	"					}\n"
+	"				}\n"
 	"				vec3 l0 = land( uCurM, uOutFromCur, uCurInvW, uCurK, q0, depthAt( uCurD, q0 ) );\n"
 	"				vec2 st = vUV - l0.xy;\n"
 	"				for ( int n = 0; n < 6 && !done; n++ ) {\n"
@@ -526,6 +553,19 @@ static const char *fg_fs =
 	"		}\n"
 	"	}\n"
 	"	if ( !( hud || gun ) ) c = clamp( c * uFadeK + uFadeB.rgb, 0.0, 1.0 ) * ( 1.0 - lay.a ) + lay.rgb;\n"
+	"	if ( uTint == 3 || uTint == 4 ) {\n"
+	// r_hzmFrameGenDebug 6: C - the movers where they are halfway (red / green = how far to their place in the newer
+	// frame, blue = a world mover, no blue = the first-person weapon). 7: the same, but only the pixels of C whose
+	// place in the newer frame does not show that mover (white = the depth there is nearer, black = further)
+	"		vec4 m = texelFetch( uCurC, texel( uCurC, vUV ), 0 );\n"
+	"		if ( m.a == 0.0 ) c = uTint == 3 ? c * 0.25 : c;\n"
+	"		else if ( uTint == 3 ) c = clamp( vec3( 0.5 + m.r * uRes.x * 0.03, 0.5 + m.g * uRes.y * 0.03, m.a > 0.0 ? 1.0 : 0.0 ), 0.0, 1.0 );\n"
+	"		else if ( m.a > 0.0 ) {\n"
+	"			float nd = 1.0 - depthAt( uCurD, vUV + m.rg );\n"
+	"			c = abs( nd - m.b ) <= 0.012 * m.b + 0.000002 ? c : ( nd > m.b ? vec3( 1.0 ) : vec3( 0.0, 0.0, 0.0 ) );\n"
+	"			if ( abs( nd - m.b ) > 0.012 * m.b + 0.000002 ) c = mix( c, vec3( 1.0, 0.0, 0.0 ), 0.5 );\n"
+	"		}\n"
+	"	}\n"
 	"	if ( uTint == 2 ) {\n"
 	// r_hzmFrameGenDebug 5: the newer frame's motion vectors (displacement in world units, grey = none, dark = not a mover)
 	"		vec4 m = texelFetch( uCurM, texel( uCurM, vUV ), 0 );\n"
@@ -635,7 +675,7 @@ static const char *fg_wide_fs =
 	"			if ( sm.a > 0.5 && 2.0 - sm.a < l.z - 0.003 ) {\n"
 	"				vec3 dv = sm.rgb;\n"
 	"				if ( abs( uSunDir.z ) > 0.1 ) dv -= uSunDir * ( dv.z / uSunDir.z );\n"
-	"				best = vec4( dv, 1.0 );\n"
+	"				best = vec4( dv, 0.75 );\n"		// a = 0.75: ground in a mover's shadow, not a mover's body
 	"			}\n"
 	"		}\n"
 	"	}\n"
@@ -874,6 +914,8 @@ static qboolean FG_CtxInit( void )
 	fg.uLayerST = qglGetUniformLocation( fg.prog, "uLayerST" );
 	fg.uGunVec = qglGetUniformLocation( fg.prog, "uGunVec" );
 	fg.uGunFlash = qglGetUniformLocation( fg.prog, "uGunFlash" );
+	fg.uOccl = qglGetUniformLocation( fg.prog, "uOccl" );
+	fg.uFill = qglGetUniformLocation( fg.prog, "uFill" );
 	qglDisable( GL_DEPTH_TEST );
 	qglDisable( GL_BLEND );
 	qglDisable( GL_CULL_FACE );
@@ -958,6 +1000,8 @@ static qboolean FG_DrawGenerated( const fgFrame_t *prv, const fgFrame_t *cur, co
 	}
 	qglUniform1f( fg.uUseC, useC );
 	qglUniform1f( fg.uGunVec, gunVec );
+	qglUniform1f( fg.uOccl, r_hzmFrameGenOccl->integer ? 1.0f : 0.0f );
+	qglUniform1f( fg.uFill, r_hzmFrameGenFill->integer ? 1.0f : 0.0f );
 	qglUniform1f( fg.uGunFlash, ( cur->flash || prv->flash ) ? 1.0f : 0.0f );
 	qglUniform1f( fg.uEdge, r_hzmFrameGenEdge->integer ? 1.0f : 0.0f );
 	if ( prvK != 0.0f ) {
@@ -1192,7 +1236,7 @@ static int FG_ThreadMain( void *unused )
 			t0 = SDL_GetPerformanceCounter();
 			FG_MidCamera( &cur, &next, V, P );
 			if ( FG_DrawGenerated( &cur, &next, &next, V, P,
-			r_hzmFrameGenDebug->integer >= 5 ? 2 : ( r_hzmFrameGenDebug->integer >= 3 ? 1 : 0 ), qtrue ) ) {
+			r_hzmFrameGenDebug->integer >= 7 ? 4 : ( r_hzmFrameGenDebug->integer == 6 ? 3 : ( r_hzmFrameGenDebug->integer >= 5 ? 2 : ( r_hzmFrameGenDebug->integer >= 3 ? 1 : 0 ) ) ), qtrue ) ) {
 				FG_RecGrab( FGK_GEN );
 				GLimp_FG_Swap();
 				tGen = SDL_GetPerformanceCounter();
@@ -1413,6 +1457,12 @@ static void FG_FillPrev( int key, const surfaceType_t *surface, int base, int n,
 	if ( n <= 0 ) {
 		return;
 	}
+	if ( fg.gunDump > 0 ) {
+		fgSkin_t *d = ( *surface == SF_TIKI_SKEL ) ? FG_SkinSlot( key, surface, frame ) : NULL;
+		ri.Printf( PRINT_ALL, "FGSKIN frame %d key %d surface type %d %p base %d verts %d: %s, kept verts %d from frame %d\n", frame, key, (int)*surface, (void *)surface, base, n,
+			*surface != SF_TIKI_SKEL ? "not a skinned surface" : ( !d ? "NO SLOT" : ( d->seq == frame - 1 ? "has last frame" : ( d->seq == frame ? "SEEN TWICE this frame" : "no last frame" ) ) ),
+			d ? d->n : 0, d ? d->seq : 0 );
+	}
 	if ( *surface == SF_TIKI_SKEL && ( e = FG_SkinSlot( key, surface, frame ) ) != NULL ) {
 		if ( e->seq == frame - 1 && e->xyz ) {
 			qboolean moved = qfalse;
@@ -1571,6 +1621,27 @@ void R_FG_VelocityDraw( void )
 		qglUniform1f( fg.uVelGunF, 0.0f );
 		fg.gunDraws++;
 		return;
+	}
+	if ( fg.gunDump > 0 && !tess.useCacheVao ) {
+		const float *mc = fg.velModel, *mp = fg.velPrevModel;
+		float lo = 1e9f, hi = 0.0f, skin = 0.0f;
+		int i;
+
+		for ( i = 0; i < tess.numVertexes; i++ ) {
+			const float *v = tess.xyz[i];
+			float sx = tess.texCoords[i][0], sy = tess.texCoords[i][1], sz = tess.lightCoords[i][0];
+			float px = v[0] - sx, py = v[1] - sy, pz = v[2] - sz;
+			float dx = ( mc[0] * v[0] + mc[4] * v[1] + mc[8] * v[2] + mc[12] ) - ( mp[0] * px + mp[4] * py + mp[8] * pz + mp[12] );
+			float dy = ( mc[1] * v[0] + mc[5] * v[1] + mc[9] * v[2] + mc[13] ) - ( mp[1] * px + mp[5] * py + mp[9] * pz + mp[13] );
+			float dz = ( mc[2] * v[0] + mc[6] * v[1] + mc[10] * v[2] + mc[14] ) - ( mp[2] * px + mp[6] * py + mp[10] * pz + mp[14] );
+			float d = sqrt( dx * dx + dy * dy + dz * dz ), s = sqrt( sx * sx + sy * sy + sz * sz );
+
+			if ( d < lo ) lo = d;
+			if ( d > hi ) hi = d;
+			if ( s > skin ) skin = s;
+		}
+		ri.Printf( PRINT_ALL, "FGBATCH shader %s cull %d sort %.0f verts %d indexes %d: vertices moved %.2f .. %.2f units in the world, skinned part up to %.2f\n",
+			tess.shader->name, (int)tess.shader->cullType, tess.shader->sort, tess.numVertexes, tess.numIndexes, lo, hi, skin );
 	}
 	// M: where it is in the frame, wherever it is what the scene shows there
 	qglViewport( 0, 0, w, h );
@@ -1820,9 +1891,16 @@ void R_FG_VelocityPass( void *drawSurfsV, int numDrawSurfs )
 				GL_SetModelviewMatrix( backEnd.or.modelMatrix );
 				rec = FG_EntSlot( num, ent->e.hModel, frame );
 				if ( !rec ) {
+					if ( fg.gunDump > 0 ) {
+						ri.Printf( PRINT_ALL, "FGVEL frame %d ent %d: no record slot free\n", frame, num );
+					}
 					continue;
 				}
 				if ( rec->seq == frame && memcmp( rec->cur, backEnd.or.transformMatrix, sizeof( rec->cur ) ) ) {
+					if ( fg.gunDump > 0 ) {
+						model_t *mod = R_GetModelByHandle( ent->e.hModel );
+						ri.Printf( PRINT_ALL, "FGVEL frame %d ent %d model %s: a second copy under this number - no vectors\n", frame, num, mod ? mod->name : "?" );
+					}
 					continue;		// a second one of the same model under this number, somewhere else
 				}
 				if ( rec->seq != frame ) {
@@ -1837,6 +1915,8 @@ void R_FG_VelocityPass( void *drawSurfsV, int numDrawSurfs )
 					float zz = nm[8] * om[8] + nm[9] * om[9] + nm[10] * om[10];
 					float lx = ( nm[0] * nm[0] + nm[1] * nm[1] + nm[2] * nm[2] ) * ( om[0] * om[0] + om[1] * om[1] + om[2] * om[2] );
 					float lz = ( nm[8] * nm[8] + nm[9] * nm[9] + nm[10] * nm[10] ) * ( om[8] * om[8] + om[9] * om[9] + om[10] * om[10] );
+
+					int fg_dbgSeen = ( rec->seq == frame - 1 );
 
 					rec->havePrev = ( rec->seq == frame - 1
 						&& dx * dx + dy * dy + dz * dz < FG_TELEPORT * FG_TELEPORT
@@ -1869,6 +1949,12 @@ void R_FG_VelocityPass( void *drawSurfsV, int numDrawSurfs )
 						rec->pose = pose;
 					} else {
 						rec->pose = ent->e.tiki ? R_FG_PoseHash( ent ) : 0;
+					}
+					if ( fg.gunDump > 0 ) {
+						model_t *mod = R_GetModelByHandle( ent->e.hModel );
+						ri.Printf( PRINT_ALL, "FGVEL frame %d ent %d model %s fx 0x%x use %d prev %d (seen last frame %d) moved %.2f turned cos %.3f %.3f radius %.1f\n",
+							frame, num, mod ? mod->name : "?", ent->e.renderfx, rec->use, rec->havePrev, fg_dbgSeen,
+							sqrt( dx * dx + dy * dy + dz * dz ), lx > 0.0f ? xx / sqrt( lx ) : 0.0f, lz > 0.0f ? zz / sqrt( lz ) : 0.0f, ent->e.radius );
 					}
 				}
 				use = rec->use;
@@ -2690,6 +2776,13 @@ void R_FG_Init( void )
 	// reload, bob - is shown at the generated rate); 0 = they are taken unwarped from the newer real frame, as in
 	// every build before (their animation plays at the real frame rate).
 	r_hzmFrameGenGun = ri.Cvar_Get( "r_hzmFrameGenGun", "1", 0 );
+	// with the vectors: 1 = a mover is hidden by something that stands still only when that is really nearer (the
+	// distances are compared); 0 = the comparison as it was until 2026-10-12, which took every still background
+	// for nearer (kept for comparison: movers lose thin, fast parts and their edges)
+	r_hzmFrameGenOccl = ri.Cvar_Get( "r_hzmFrameGenOccl", "1", 0 );
+	// with the vectors: what a mover uncovers and neither frame shows is filled from 1 = the nearest background
+	// around it (shadowed ground included), 0 = the background along its motion only, as before
+	r_hzmFrameGenFill = ri.Cvar_Get( "r_hzmFrameGenFill", "1", 0 );
 	// a part of the weapon (one batch: the gun, its magazine, a hand) with a vertex that moves further than this in
 	// one frame, in view space (game units), keeps the newer frame's place
 	r_hzmFrameGenGunMax = ri.Cvar_Get( "r_hzmFrameGenGunMax", "2.5", 0 );
