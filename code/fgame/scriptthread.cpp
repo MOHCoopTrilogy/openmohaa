@@ -4915,7 +4915,13 @@ int ScriptThread::GetThreadState(void)
 
 void ScriptThread::ServerStufftext(Event *ev)
 {
-    gi.SendConsoleCommand(ev->GetString(1));
+    // HZM coop [bug-3523] `stuffsrv` put its text into the command buffer WITHOUT a line end (retail did too), so
+    // the line stayed open and merged with whatever entered the buffer next in the same frame - on a listen
+    // server that is the host client's next stufftext. `stuffsrv "sets coop_briefvideo <film>,<map>,<ms>"`
+    // became `...,<ms>set cg_huddraw_force 1`, an invalid key, and the briefing film overlay never started for
+    // anyone (and the map-start `sets coop_briefvideo off` swallowed mapgrade.scr's `exec`). A stuffsrv text is
+    // one complete line; a second newline after a text that already ends in one is harmless.
+    gi.SendConsoleCommand(va("%s\n", ev->GetString(1).c_str()));
 }
 
 void ScriptThread::RemoveArchivedClass(Event *ev)
