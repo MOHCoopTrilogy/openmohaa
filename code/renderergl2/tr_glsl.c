@@ -82,6 +82,11 @@ extern const char *fallbackShader_fsr_rcas_fp;      // HZM render scale: AMD FSR
 extern const char *fallbackShader_fsr_downscale_fp; // HZM render scale: SSAA tent downsample
 extern const char *fallbackShader_msaa_depthresolve_fp; // HZM MSAA P2a: min/max depth resolve (P2b draws it)
 extern const char *fallbackShader_msaa_colorresolve_fp; // HZM MSAA P2b: tone-exact MRT colour resolve
+extern const char *fallbackShader_vclouds_trace_fp;      // HZM volumetric clouds (tr_hzm_clouds.c)
+extern const char *fallbackShader_vclouds_tent_fp;
+extern const char *fallbackShader_vclouds_composite_vp;
+extern const char *fallbackShader_vclouds_composite_fp;
+extern const char *fallbackShader_vclouds_skycomp_fp;   // v1.1 procedural composite (full-screen, sky pixels only)
 
 typedef struct uniformInfo_s
 {
@@ -226,6 +231,7 @@ static uniformInfo_t uniformsInfo[] =
 
 	// HZM gl2 [2026-09-26] S4 spot shadows - see UNIFORM_HZMPSHADOWSPOT. Kept LAST, in enum order.
 	{ "u_HzmPshadowSpot",  GLSL_VEC4 },
+
 	// HZM rain wetness - see UNIFORM_HZMWET. Kept LAST, in enum order.
 	{ "u_HzmWet",          GLSL_VEC4 },
 	{ "u_HzmWetMat",       GLSL_VEC4 },
@@ -263,6 +269,30 @@ static uniformInfo_t uniformsInfo[] =
 	{ "u_HzmSkyFog",       GLSL_VEC4 },
 	{ "u_HzmSkyVp",        GLSL_VEC4 },
 	{ "u_HzmSkyTan",       GLSL_VEC4 },
+
+	// HZM gl2 volumetric clouds - see UNIFORM_VCLCOV. Kept LAST, in enum order.
+	{ "u_VclCov",          GLSL_INT },
+	{ "u_VclCovMax",       GLSL_INT },
+	{ "u_VclNoise",        GLSL_INT },
+	{ "u_VclVerts",        GLSL_INT },
+	{ "u_VclCloud",        GLSL_INT },
+	{ "u_VclRight",        GLSL_VEC4 },
+	{ "u_VclUp",           GLSL_VEC4 },
+	{ "u_VclFwd",          GLSL_VEC4 },
+	{ "u_VclScroll",       GLSL_VEC4 },
+	{ "u_VclView",         GLSL_VEC4 },
+	{ "u_VclVp",           GLSL_VEC4 },
+	{ "u_VclMisc",         GLSL_VEC4 },
+	{ "u_VclDither",       GLSL_VEC4 },
+	// v1.1: the procedural profile (UNIFORM_VCLPROCA..UNIFORM_VCLPROCC, same order)
+	{ "u_VclProcA",        GLSL_VEC4 },
+	{ "u_VclProcB",        GLSL_VEC4 },
+	{ "u_VclLdir",         GLSL_VEC4 },
+	{ "u_VclLcol",         GLSL_VEC4 },
+	{ "u_VclAmbTop",       GLSL_VEC4 },
+	{ "u_VclAmbBot",       GLSL_VEC4 },
+	{ "u_VclFog",          GLSL_VEC4 },
+	{ "u_VclProcC",        GLSL_VEC4 },
 };
 
 // HZM gl2 [2026-09-26] vet_phaseS F10: this table is indexed by uniform_t and GLSL_InitUniforms walks it to
@@ -1717,6 +1747,9 @@ void GLSL_InitGPUShaders(void)
 
 	GLSL_SetUniformInt(&tr.tonemapShader, UNIFORM_TEXTUREMAP, TB_COLORMAP);
 	GLSL_SetUniformInt(&tr.tonemapShader, UNIFORM_LEVELSMAP,  TB_LEVELSMAP);
+	// HZM volumetric clouds: the tone-pass dither's cloud (tent) and depth inputs (tr_hzm_clouds.c RB_HZM_CloudsToneDither)
+	GLSL_SetUniformInt(&tr.tonemapShader, UNIFORM_VCLCLOUD, TB_NORMALMAP);
+	GLSL_SetUniformInt(&tr.tonemapShader, UNIFORM_SCREENDEPTHMAP, TB_SCREENDEPTH);
 
 	GLSL_FinishGPUShader(&tr.tonemapShader);
 
@@ -1736,6 +1769,8 @@ void GLSL_InitGPUShaders(void)
 
 	GLSL_InitUniforms(&tr.tonemapHzmShader);
 	GLSL_SetUniformInt(&tr.tonemapHzmShader, UNIFORM_TEXTUREMAP, TB_COLORMAP);
+	GLSL_SetUniformInt(&tr.tonemapHzmShader, UNIFORM_VCLCLOUD, TB_NORMALMAP);        // HZM volumetric clouds dither
+	GLSL_SetUniformInt(&tr.tonemapHzmShader, UNIFORM_SCREENDEPTHMAP, TB_SCREENDEPTH);
 	GLSL_FinishGPUShader(&tr.tonemapHzmShader);
 
 	numEtcShaders++;
@@ -2539,4 +2574,106 @@ shaderProgram_t *GLSL_GetGenericShaderProgram(int stage)
 	}
 
 	return &tr.genericShader[shaderAttribs];
+}
+
+/*
+==================
+HZM gl2 volumetric clouds (tr_hzm_clouds.c; plan 2.4 / 2.7): the three programs, TRY-built (a failure returns 0 and the
+feature is off for the session - never ri.Error). GLSL >= 1.30 only; the caller checks that first. The trace and the
+tent reuse the tonemap vertex shader (a full-screen quad); the composite has its own vertex shader, a verbatim copy of
+generic_vp's ModTexCoords, so the gauze texel is exactly today's.
+==================
+*/
+int GLSL_HZM_BuildClouds( shaderProgram_t *trace, shaderProgram_t *tent, shaderProgram_t *comp,
+	const char *traceDefines, qboolean forceFail )
+{
+	char defs[4096];
+	const int attribs = ATTR_POSITION | ATTR_TEXCOORD;
+
+	Q_strncpyz( defs, traceDefines, sizeof( defs ) );
+	if ( forceFail ) {
+		// r_hzmCloudsForceFail 1 (dev): prove the try-compile path (plan 2.7 item 5)
+		Q_strcat( defs, sizeof( defs ), "#error r_hzmCloudsForceFail\n" );
+	}
+	if ( !GLSL_TryInitGPUShader( trace, "vclouds_trace", attribs, qtrue, defs, qtrue,
+	                             fallbackShader_tonemap_vp, fallbackShader_vclouds_trace_fp ) ) {
+		ri.Printf( PRINT_WARNING, "^~^~^ VCL shader vclouds_trace failed to build\n" );
+		return 0;
+	}
+	GLSL_InitUniforms( trace );
+	GLSL_SetUniformInt( trace, UNIFORM_VCLCOV,    1 );
+	GLSL_SetUniformInt( trace, UNIFORM_VCLCOVMAX, 2 );
+	GLSL_SetUniformInt( trace, UNIFORM_VCLNOISE,  3 );
+	GLSL_SetUniformInt( trace, UNIFORM_VCLVERTS,  4 );
+	GLSL_FinishGPUShader( trace );
+
+	if ( !GLSL_TryInitGPUShader( tent, "vclouds_tent", attribs, qtrue, "", qtrue,
+	                             fallbackShader_tonemap_vp, fallbackShader_vclouds_tent_fp ) ) {
+		ri.Printf( PRINT_WARNING, "^~^~^ VCL shader vclouds_tent failed to build\n" );
+		GLSL_DeleteGPUShader( trace );
+		return 0;
+	}
+	GLSL_InitUniforms( tent );
+	GLSL_SetUniformInt( tent, UNIFORM_VCLCLOUD, TB_COLORMAP );
+	GLSL_FinishGPUShader( tent );
+
+	if ( !GLSL_TryInitGPUShader( comp, "vclouds_composite", attribs, qtrue, "", qtrue,
+	                             fallbackShader_vclouds_composite_vp, fallbackShader_vclouds_composite_fp ) ) {
+		ri.Printf( PRINT_WARNING, "^~^~^ VCL shader vclouds_composite failed to build\n" );
+		GLSL_DeleteGPUShader( trace );
+		GLSL_DeleteGPUShader( tent );
+		return 0;
+	}
+	GLSL_InitUniforms( comp );
+	GLSL_SetUniformInt( comp, UNIFORM_DIFFUSEMAP, TB_DIFFUSEMAP );
+	GLSL_SetUniformInt( comp, UNIFORM_VCLCLOUD,   TB_LIGHTMAP );
+	GLSL_FinishGPUShader( comp );
+	return 1;
+}
+
+/*
+==================
+v1.1 (2026-10-05): the PROCEDURAL profile's two programs - the same trace source with VCL_PROC (constants become
+uniforms, coverage is the generated tileable map with a planar wind mapping) and the full-screen sky composite. TRY-built
+like the three above; a failure turns only the procedural profile off.
+==================
+*/
+int GLSL_HZM_BuildCloudsProc( shaderProgram_t *trace, shaderProgram_t *comp, const char *traceDefines, qboolean forceFail )
+{
+	char defs[4096];
+	const int attribs = ATTR_POSITION | ATTR_TEXCOORD;
+
+	Q_strncpyz( defs, traceDefines, sizeof( defs ) );
+	if ( forceFail ) {
+		Q_strcat( defs, sizeof( defs ), "#error r_hzmCloudsForceFail\n" );
+	}
+	if ( !GLSL_TryInitGPUShader( trace, "vclouds_trace_proc", attribs, qtrue, defs, qtrue,
+	                             fallbackShader_tonemap_vp, fallbackShader_vclouds_trace_fp ) ) {
+		ri.Printf( PRINT_WARNING, "^~^~^ VCL shader vclouds_trace_proc failed to build\n" );
+		return 0;
+	}
+	GLSL_InitUniforms( trace );
+	GLSL_SetUniformInt( trace, UNIFORM_VCLCOV,    1 );
+	GLSL_SetUniformInt( trace, UNIFORM_VCLCOVMAX, 2 );
+	GLSL_SetUniformInt( trace, UNIFORM_VCLNOISE,  3 );
+	GLSL_SetUniformInt( trace, UNIFORM_VCLVERTS,  4 );
+	GLSL_FinishGPUShader( trace );
+
+	if ( !GLSL_TryInitGPUShader( comp, "vclouds_skycomp", attribs, qtrue, "", qtrue,
+	                             fallbackShader_tonemap_vp, fallbackShader_vclouds_skycomp_fp ) ) {
+		ri.Printf( PRINT_WARNING, "^~^~^ VCL shader vclouds_skycomp failed to build\n" );
+		GLSL_DeleteGPUShader( trace );
+		return 0;
+	}
+	GLSL_InitUniforms( comp );
+	GLSL_SetUniformInt( comp, UNIFORM_VCLCLOUD, TB_LIGHTMAP );
+	GLSL_FinishGPUShader( comp );
+	return 1;
+}
+
+void GLSL_HZM_DeleteClouds( shaderProgram_t *trace, shaderProgram_t *tent, shaderProgram_t *comp )
+{
+	GLSL_DeleteGPUShader( trace );
+	GLSL_DeleteGPUShader( tent );
+	GLSL_DeleteGPUShader( comp );
 }

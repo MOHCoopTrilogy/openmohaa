@@ -1770,6 +1770,90 @@ upload:
 	GLSL_SetUniformVec4( sp, UNIFORM_SOFTPARTICLE, sp4 );
 }
 
+/*
+=================
+HZM gl2 volumetric clouds (tr_hzm_clouds.c; plan 2.4 step 3): the composite REPLACES the profile sky's talonclouds
+stage draw. Same tess vertices, same s_cloudTexCoords, same ComputeTexMods matrices and stage colour as the generic
+path, so the gauze texel is exactly today's; blend ONE, SRC_ALPHA with alpha write-masked (vet E5, the prepass
+precedent), fog uniforms of the OPAQUE class on the sky shell (the colour the box is fogged toward).
+=================
+*/
+static void RB_HZM_CloudsCompositeStage( shaderCommands_t *input, shaderStage_t *pStage )
+{
+	shaderProgram_t *sp = &tr.hzmClouds.compositeShader;
+	vec4_t texMatrix[8];
+	vec4_t baseColor, vertColor;
+
+	GLSL_BindProgram(sp);
+	GLSL_SetUniformMat4(sp, UNIFORM_MODELVIEWPROJECTIONMATRIX, glState.modelviewProjection);
+	GLSL_SetUniformVec3(sp, UNIFORM_VIEWORIGIN, backEnd.viewParms.or.origin);
+
+	ComputeTexMods(pStage, TB_DIFFUSEMAP, texMatrix);
+	GLSL_SetUniformVec4(sp, UNIFORM_DIFFUSETEXMATRIX0, texMatrix[0]);
+	GLSL_SetUniformVec4(sp, UNIFORM_DIFFUSETEXMATRIX1, texMatrix[1]);
+	GLSL_SetUniformVec4(sp, UNIFORM_DIFFUSETEXMATRIX2, texMatrix[2]);
+	GLSL_SetUniformVec4(sp, UNIFORM_DIFFUSETEXMATRIX3, texMatrix[3]);
+	GLSL_SetUniformVec4(sp, UNIFORM_DIFFUSETEXMATRIX4, texMatrix[4]);
+	GLSL_SetUniformVec4(sp, UNIFORM_DIFFUSETEXMATRIX5, texMatrix[5]);
+	GLSL_SetUniformVec4(sp, UNIFORM_DIFFUSETEXMATRIX6, texMatrix[6]);
+	GLSL_SetUniformVec4(sp, UNIFORM_DIFFUSETEXMATRIX7, texMatrix[7]);
+
+	ComputeShaderColors(pStage, baseColor, vertColor, pStage->stateBits);
+	GLSL_SetUniformVec4(sp, UNIFORM_BASECOLOR, baseColor);
+
+	RB_SetGlobalFogUniforms(sp, 0, qtrue);
+	RB_HZM_CloudsCompositeUniforms(sp);
+	R_BindAnimatedImageToTMU(&pStage->bundle[TB_DIFFUSEMAP], TB_DIFFUSEMAP);
+
+	GL_State((pStage->stateBits & ~(GLS_SRCBLEND_BITS | GLS_DSTBLEND_BITS)) | GLS_SRCBLEND_ONE | GLS_DSTBLEND_SRC_ALPHA);
+	qglColorMask(!backEnd.colorMask[0], !backEnd.colorMask[1], !backEnd.colorMask[2], GL_FALSE);
+	R_DrawElements(input->numIndexes, input->firstIndex);
+	qglColorMask(!backEnd.colorMask[0], !backEnd.colorMask[1], !backEnd.colorMask[2], !backEnd.colorMask[3]);
+
+	RB_HZM_CloudsCompositeDone();
+}
+
+/*
+=================
+RB_HZM_SkyFogFraction - the composite's fog fraction f on the sky shell (gl_FragCoord.z = 1 at depth range 1,1),
+through the same early-outs RB_SetGlobalFogUniforms(sp, 0, qtrue) takes. Drives the trace's fog gate and the dither mask.
+=================
+*/
+float RB_HZM_SkyFogFraction( void )
+{
+	float denom, dist, f, scale;
+	const shader_t *prof = tr.hzmClouds.profileShader;
+
+	if ( !R_UseForwardGlobalFog() || !rb_globalFog.active ) {
+		return 0.0f;
+	}
+	if ( r_globalFogSky && !r_globalFogSky->integer ) {
+		return 0.0f;
+	}
+	if ( prof && prof->noGlobalFog ) {
+		return 0.0f;
+	}
+	if ( backEnd.viewParms.isPortal || backEnd.viewParms.isPortalSky
+		|| ( backEnd.viewParms.flags & (VPF_SHADOWMAP | VPF_DEPTHSHADOW) ) ) {
+		return 0.0f;
+	}
+	scale = r_globalFogScale ? r_globalFogScale->value : 1.0f;
+	if ( scale <= 0.0f || rb_globalFog.end <= rb_globalFog.start ) {
+		return 0.0f;
+	}
+	if ( R_HZM_SkyFogModelOn() ) {
+		// the sky fog model: the LEAST fogged sky pixel is the zenith (the gate and the dither mask use that bound)
+		dist = r_hzmSkyFogHeight->value;
+	} else {
+		denom = rb_globalFog.projMat10 + 1.0f;
+		dist = rb_globalFog.projMat14 / ( denom < -1e-6f ? denom : -1e-6f );
+	}
+	f = ( dist - rb_globalFog.start ) / ( rb_globalFog.end - rb_globalFog.start );
+	f = f < 0.0f ? 0.0f : ( f > 1.0f ? 1.0f : f );
+	f *= scale;
+	return f > 1.0f ? 1.0f : f;
+}
+
 static void RB_IterateStagesGeneric( shaderCommands_t *input )
 {
 	int stage;
@@ -1798,6 +1882,14 @@ static void RB_IterateStagesGeneric( shaderCommands_t *input )
 		if ( !pStage )
 		{
 			break;
+		}
+
+		// HZM gl2 volumetric clouds: the profile sky's (single) talonclouds stage goes through the composite when this
+		// view's trace is in the tent target; otherwise today's draw below, unchanged
+		if ( stage == 0 && input->shader && input->shader->isSky && RB_HZM_CloudsCompositeReady( input->shader ) )
+		{
+			RB_HZM_CloudsCompositeStage( input, pStage );
+			continue;
 		}
 
 		// HZM gl2 CHARACTER LIGHTING (r_charLighting). Promote this stage's lightall

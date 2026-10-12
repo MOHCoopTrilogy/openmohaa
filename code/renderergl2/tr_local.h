@@ -677,6 +677,9 @@ typedef struct {
 	// outerbox holds the original and DrawSkyBox picks per frame. Otherwise NULL: in normal HD mode the HD set
 	// replaces outerbox outright and the original is never loaded (no doubled VRAM).
 	image_t		*outerboxAlt[6];
+	// HZM gl2 volumetric clouds: the skyParms outer-box token as PARSED (before the r_skyHD swap), for the profile
+	// fingerprint (tr_hzm_clouds.c R_HZM_CloudsFingerprint). Empty for "-".
+	char		hzmBoxName[MAX_QPATH];
 } skyParms_t;
 
 typedef struct {
@@ -805,6 +808,11 @@ typedef struct shader_s {
     qboolean alphaGenWarned;
     // HZM gl2 [2026-09-26] searchlights S1: latch for the one-per-shader ^~^~^ SEARCHLIGHT line (tr_shade.c).
     qboolean hzmDotToRgbNoted;
+    // HZM gl2 volumetric clouds: FinishShader's verdict on this sky shader's PARSED text, taken before the r_skyHD
+    // layer swap and any collapse (tr_hzm_clouds.c R_HZM_CloudsFingerprint). 0 not a sky / not checked, 1 matches the
+    // africanight profile, -1 differs (hzmVclFpWhy names the first field that differs; a string literal).
+    int hzmVclFp;
+    const char *hzmVclFpWhy;
 } shader_t;
 
 enum
@@ -1132,6 +1140,33 @@ typedef enum
 	UNIFORM_HZMSKYFOG,
 	UNIFORM_HZMSKYVP,
 	UNIFORM_HZMSKYTAN,
+
+	// HZM gl2 volumetric clouds (tr_hzm_clouds.c, vcl tree). Appended LAST, per the rule above; tr_glsl.c rows in the same order.
+	UNIFORM_VCLCOV,
+	UNIFORM_VCLCOVMAX,
+	UNIFORM_VCLNOISE,
+	UNIFORM_VCLVERTS,
+	UNIFORM_VCLCLOUD,
+	UNIFORM_VCLRIGHT,
+	UNIFORM_VCLUP,
+	UNIFORM_VCLFWD,
+	UNIFORM_VCLSCROLL,
+	UNIFORM_VCLVIEW,
+	UNIFORM_VCLVP,
+	UNIFORM_VCLMISC,
+	UNIFORM_VCLDITHER,
+	// HZM gl2 volumetric clouds v1.1 (2026-10-05): the procedural profile's per-map constants (tr_hzm_clouds.c), and the
+	// SKY FOG model shared by every sky draw (RB_SetGlobalFogUniforms fogAsSky / portal-sky views, the composites):
+	//   u_HzmSkyFog = (world up in EYE space, fog-layer height H; w 0 = model off = the legacy depth fraction)
+	//   u_HzmSkyVp  = (viewport x, y, 1/w, 1/h)     u_HzmSkyTan = (tan(fovX/2), tan(fovY/2), 1 = this draw is sky, 0)
+	UNIFORM_VCLPROCA,
+	UNIFORM_VCLPROCB,
+	UNIFORM_VCLLDIR,
+	UNIFORM_VCLLCOL,
+	UNIFORM_VCLAMBTOP,
+	UNIFORM_VCLAMBBOT,
+	UNIFORM_VCLFOG,
+	UNIFORM_VCLPROCC,		// v1.1 look v2: (billow frequency, base crispness, BASE1, TOPK)
 
 	UNIFORM_COUNT
 } uniform_t;
@@ -2448,6 +2483,68 @@ typedef struct {
 } backEndState_t;
 
 /*
+** HZM gl2 volumetric clouds (tr_hzm_clouds.c; docs/proposals/volumetric_clouds_2026-09-26/plan.md 2.4).
+** ONE struct inside tr, so R_Init's memset zeroes it (the keep-port contract: no function statics, permanent GPU
+** objects created only in the R_Init path, per-map pointers cleared at every world load).
+*/
+#define HZM_CLOUDS_AUTO 0		// r_hzmClouds -1 = this. 0 until the user's test passes (plan 2.2, T7)
+
+typedef struct {
+	qboolean		supported;			// resources + programs ready this R_Init
+	char			reason[64];			// why not (printed once, in every CLOUDS line)
+	int				res;				// 2 half, 4 quarter (decided at R_Init, never mid-map)
+	int				texW, texH;			// trace / tent target size (display / res)
+	GLuint			covTex;				// private HD talonclouds coverage, R8, REPEAT, explicit box mips
+	GLuint			covMaxTex;			// its conservative max mips (NEAREST) for the empty-ray skip
+	GLuint			noiseTex;			// 64^3 R8 Worley fBm, generated at R_Init
+	GLuint			vertTex;			// 9 x 54 RG32F: today's dome (s,t) per box-face vertex (h = 512)
+	int				covLevels;
+	image_t			*traceImage, *tentImage;
+	FBO_t			*traceFbo, *tentFbo;
+	shaderProgram_t	traceShader, tentShader, compositeShader;
+	float			noiseMs;
+	int				vramBytes;
+
+	// per map (set at the end of RE_LoadWorldMap, cleared at its start)
+	shader_t		*profileShader;
+	char			mapName[MAX_QPATH];
+	const char		*mapReason;
+	char			mapReasonBuf[48];
+	int				lastLogged;			// -1 nothing yet, else the state the last CLOUDS line printed (0/1)
+
+	// per view (backend): RB_HZM_CloudsTrace bumps serial for every main-list view; the composite runs only when the
+	// trace of THIS view is in the tent target (tracedSerial == serial), else today's stage draw
+	int				serial, tracedSerial;
+	int				tw, th;				// the traced sub-rectangle of the targets
+	int				vpX, vpY, vpW, vpH;	// the traced view's viewport (scene FBO pixels)
+	qboolean		fogGateOff;			// hysteresis: off at f >= 0.999, back on at f < 0.998
+	qboolean		frameHasClouds;		// the tone pass dithers this frame (a composite ran)
+
+	// probe counters (r_hzmCloudsProbe)
+	int				nTraced, nComposited, nFallback, nFrames;
+	int				probeNextMs;
+
+	// v1.1 (2026-10-05): the PROCEDURAL profile for painted boxes (plan addendum: docs/proposals/volumetric_clouds_2026-09-26/v11.md).
+	// kind 1 = africanight (the P1 texture-driven trace, its own compile-time profile), 2 = procedural (uniform-driven).
+	int				kind;
+	qboolean		africaOk;			// the HD talonclouds layer loaded (else africanight keeps today's stage)
+	const char		*africaWhy;
+	float			procMs;				// R_Init cost of the procedural coverage field
+	qboolean		procSupported;		// the procedural programs + coverage built this R_Init
+	shaderProgram_t	procTraceShader, skyCompShader;
+	GLuint			procCovTex, procCovMaxTex;	// 512^2 tileable rank-normalised coverage + its max mips
+	const struct hzmCloudFamily_s *family;	// the reviewed sky-box family (NULL = no procedural profile)
+	int				compositedSerial;	// the procedural composite ran for this view serial
+	vec4_t			procA, procB, procC, ldir, lcol, ambTop, ambBot;	// this frame's procedural uniforms
+	// GPU timer (r_hzmCloudsProbe): GL_TIMESTAMP pairs around trace+tent and the composite, read back 3 frames later
+	GLuint			gpuQ[4][4];
+	int				gpuQUsed[4];
+	int				gpuFrame;
+	float			gpuMs[512];
+	int				gpuN;
+} hzmClouds_t;
+
+/*
 ** trGlobals_t 
 **
 ** Most renderer globals are defined here.
@@ -2776,10 +2873,62 @@ typedef struct {
     qboolean        hzmLtSkyShaderTried;
     qboolean        hzmLtSkyShaderOk;
     image_t        *hzmLtBoltImage;
+
+    hzmClouds_t hzmClouds;				// HZM gl2 volumetric clouds (tr_hzm_clouds.c)
 } trGlobals_t;
 
 extern backEndState_t	backEnd;
 extern trGlobals_t	tr;
+
+// HZM gl2 volumetric clouds (tr_hzm_clouds.c)
+#ifndef GL_TEXTURE_3D
+#define GL_TEXTURE_3D                       0x806F
+#endif
+#ifndef GL_TEXTURE_BINDING_3D
+#define GL_TEXTURE_BINDING_3D               0x806A
+#endif
+#ifndef GL_TEXTURE_WRAP_R
+#define GL_TEXTURE_WRAP_R                   0x8072
+#endif
+typedef void (APIENTRY *hzmTexImage3D_t)(GLenum target, GLint level, GLint internalformat, GLsizei width,
+                                         GLsizei height, GLsizei depth, GLint border, GLenum format, GLenum type,
+                                         const GLvoid *pixels);
+extern hzmTexImage3D_t qglTexImage3D;	// NULL = no 3D textures = clouds off (reason no-tex3d)
+typedef void (APIENTRY *hzmPixelStorei_t)(GLenum pname, GLint param);
+extern hzmPixelStorei_t qglHzmPixelStorei;
+typedef void (APIENTRY *hzmQueryCounter_t)(GLuint id, GLenum target);
+typedef void (APIENTRY *hzmGetQueryObjectui64v_t)(GLuint id, GLenum pname, unsigned long long *params);
+extern hzmQueryCounter_t qglHzmQueryCounter;			// v1.1 CLOUDSGPU (NULL = no GPU timing)
+extern hzmGetQueryObjectui64v_t qglHzmGetQueryObjectui64v;
+extern cvar_t *r_hzmClouds;
+extern cvar_t *r_hzmCloudsDebug;
+extern cvar_t *r_hzmCloudsDither;
+extern cvar_t *r_hzmCloudsProbe;
+extern cvar_t *r_hzmCloudsLabel;
+extern cvar_t *r_hzmCloudsRes;
+extern cvar_t *r_hzmCloudsForceFail;
+extern cvar_t *r_hzmCloudsTune;		// dev: "k=v ..." overrides of the procedural profile (look-dev sweeps), flags 0
+float    RB_HZM_SkyFogAt( float sinElev );						// the model's fraction at an elevation (main view)
+void     RB_HZM_CloudsSkyComposite( void );						// tr_sky.c: the procedural composite
+void     R_HZM_Clouds_Register( void );
+void     R_HZM_Clouds_InitGL( void );							// R_Init, after GLSL + MSAA decided
+void     R_HZM_Clouds_Shutdown( void );							// RE_Shutdown
+void     R_HZM_Clouds_MapStart( void );							// RE_LoadWorldMap entry
+void     R_HZM_Clouds_MapLoaded( const char *baseName );		// RE_LoadWorldMap end
+void     R_HZM_CloudsFingerprint( shader_t *sh, const shaderStage_t *st );	// FinishShader, before the HD swap
+qboolean R_HZM_CloudsEnabled( void );
+void     RB_HZM_CloudsTrace( const drawSurf_t *drawSurfs, int numDrawSurfs );	// RB_DrawSurfs main list, !shadow
+qboolean RB_HZM_CloudsCompositeReady( const shader_t *shader );	// the sky pass: composite this view?
+void     RB_HZM_CloudsCompositeDone( void );
+void     RB_HZM_CloudsCompositeUniforms( shaderProgram_t *sp );	// tr_shade.c's composite draw
+qboolean RB_HZM_CloudsToneDither( shaderProgram_t *sp );		// RB_ToneMap: qtrue = dither this frame
+void     R_HZM_SkyVertexTable( float heightCloud, float out[6][9][9][2] );	// tr_sky.c: today's dome (s,t), own copy
+void     RB_HZM_CloudsFrameEnd( void );							// probe / label once per frame
+float    RB_HZM_SkyFogFraction( void );							// tr_shade.c: the composite's f at the sky
+int      GLSL_HZM_BuildClouds( shaderProgram_t *trace, shaderProgram_t *tent, shaderProgram_t *comp,
+                               const char *traceDefines, qboolean forceFail );	// tr_glsl.c: 1 = all three built
+void     GLSL_HZM_DeleteClouds( shaderProgram_t *trace, shaderProgram_t *tent, shaderProgram_t *comp );
+int      GLSL_HZM_BuildCloudsProc( shaderProgram_t *trace, shaderProgram_t *comp, const char *traceDefines, qboolean forceFail );
 extern glstate_t	glState;		// outside of TR since it shouldn't be cleared during ref re-init
 extern glRefConfig_t glRefConfig;
 

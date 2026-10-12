@@ -1852,6 +1852,10 @@ const void	*RB_DrawSurfs( const void *data ) {
 
 	if (!isShadowView)
 	{
+		// HZM gl2 volumetric clouds (plan 2.4 step 1-2): trace + tent for THIS view before its sky is drawn. Outside the
+		// r_depthPrepass block on purpose (vet E1); a view that fails its gates keeps today's stage draw.
+		RB_HZM_CloudsTrace( cmd->drawSurfs, cmd->numDrawSurfs );
+
 		RB_RenderDrawSurfList( cmd->drawSurfs, cmd->numDrawSurfs );
 
 		// HZM coop [2026-09-27] realistic lightning: the lit cloud lobe and the far bolt, additive at depth range (1,1)
@@ -2188,6 +2192,8 @@ const void	*RB_SwapBuffers( const void *data ) {
 
 	// HZM gl2 graphics probes: frame-end timestamp + readback of older frames, WCRC, glGetError drain.
 	R_GfxProbe_BackendFrameEnd();
+	// HZM gl2 volumetric clouds: per-frame flag reset + the ^~^~^ CLOUDSFRAMES probe (r_hzmCloudsProbe 1)
+	RB_HZM_CloudsFrameEnd();
 
 	R_HzmPerf_PresentBegin(); // HZM coop [bug-3486] time spent waiting for the GPU / the swap (tr_hzm_perf.c)
 

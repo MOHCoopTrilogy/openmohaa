@@ -2145,6 +2145,7 @@ void R_Register( void )
 	// HZM gl2 MSAA core (tr_msaa.c, plan P2a): r_msaaOverride, r_msaaBypass, the dev-only Auto/fallback cvars,
 	// ROM r_msaaActive/r_gpuVramMB/r_msaaForcedOff, and the V3-C1 archived-switch check.
 	R_Msaa_Register();
+	R_HZM_Clouds_Register();	// HZM gl2 volumetric clouds: r_hzmClouds* (flags 0, never archived)
 	ri.Cmd_AddCommand( "hzmtlprobe", R_HZM_TerrainLProbe_f ); // HZM [bug-3064] diagnostic, inert unless typed
 
 	//
@@ -2450,6 +2451,10 @@ void R_Init( void ) {
 	// ri.Error, no drop to the menu); then ROM r_msaaActive is published and the ^~^~^ MSAA line printed.
 	R_Msaa_AfterGLSL();
 
+	// HZM gl2 volumetric clouds (plan 2.4 Resources): every permanent GPU object of the feature, try-built, and the
+	// ^~^~^ VCLBUILD line that proves which DLL loaded. A failure turns the feature off with a reason, never ri.Error.
+	R_HZM_Clouds_InitGL();
+
 	R_InitVaos();
 
 	R_InitShaders();
@@ -2535,6 +2540,7 @@ void RE_Shutdown( qboolean destroyWindow ) {
 		if (glRefConfig.framebufferObject)
 			FBO_Shutdown();
 		R_GoreShutdown();		// HZM coop - gore tier 4 (UV wounds): forget instance images before deletion
+		R_HZM_Clouds_Shutdown();	// HZM volumetric clouds: its raw GL textures + programs (targets go with the lists)
 		R_DeleteTextures();
 		R_ShutdownVaos();
 		GLSL_ShutdownGPUShaders();

@@ -207,6 +207,13 @@ void GLimp_InitExtraExtensions(void)
 		ri.Printf(PRINT_ALL, result[2], extension);
 	}
 
+	// HZM gl2 volumetric clouds: glTexImage3D (OpenGL 1.2) is not in the qgl table. NULL = clouds off (no-tex3d).
+	qglTexImage3D = (hzmTexImage3D_t)SDL_GL_GetProcAddress("glTexImage3D");
+	qglHzmPixelStorei = (hzmPixelStorei_t)SDL_GL_GetProcAddress("glPixelStorei");
+	// v1.1 the clouds' GPU timer (r_hzmCloudsProbe): GL 3.3 / ARB_timer_query. NULL = no ^~^~^ CLOUDSGPU line.
+	qglHzmQueryCounter = (hzmQueryCounter_t)SDL_GL_GetProcAddress("glQueryCounter");
+	qglHzmGetQueryObjectui64v = (hzmGetQueryObjectui64v_t)SDL_GL_GetProcAddress("glGetQueryObjectui64v");
+
 	// HZM gl2 MSAA (plan P2b): the MRT colour resolve needs glDrawBuffers (GL 2.0) and glBindFragDataLocation (GL 3.0).
 	// Neither is in the qgl table; NULL means the new path keeps its blit resolves.
 	qglDrawBuffers = (hzmDrawBuffers_t)SDL_GL_GetProcAddress("glDrawBuffers");

@@ -9,7 +9,8 @@ project(omohrenderergl2)
 #      2026-09-27 added tr_hzm_wet.c - rain wetness r_hzmWet, docs/proposals/water_wetness_2026-09-27;
 #      2026-09-27 added tr_hzm_water.c, glsl/hzmwater_vp.glsl, glsl/hzmwater_fp.glsl - water pass r_hzmWater;
 #      2026-09-29 added tr_hzm_groundvar.c - ground variety r_groundVariety, docs/proposals/ground_variety_2026-09-29;
-#      2026-10-05 added tr_hzm_scope.c, glsl/hzmscope_fp.glsl - modern scope optics, bug-3462)
+#      2026-10-05 added tr_hzm_scope.c, glsl/hzmscope_fp.glsl - modern scope optics, bug-3462;
+#      2026-10-12 added tr_hzm_clouds.c + glsl/vclouds_*.glsl - volumetric clouds r_hzmClouds, docs/proposals/volumetric_clouds_2026-09-26)
 file(GLOB SOURCES_RENDERER "*.c" "*.cpp" "../renderercommon/tr_*.c")
 # Remove Quake III old model source
 list(REMOVE_ITEM SOURCES_RENDERER "${CMAKE_CURRENT_SOURCE_DIR}/tr_model.c")
