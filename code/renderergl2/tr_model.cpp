@@ -2707,6 +2707,44 @@ static int       s_psFrame = -1;
 static int       s_psStatJobs, s_psStatHits, s_psStatUsed;
 static cvar_t   *r_hzmSkinThreads;
 
+// HZM gl2 [perf1 A4] r_hzmSkinDepth - THE WORKER PASS FOR DEPTH-ONLY LISTS.
+// R_SkelPreskin ran for colour passes only, on the grounds that "a depth-only pass skips most characters". It
+// does - and draws every OTHER skeletal model: the main view's depth pre-pass and each sun-shadow cascade skinned
+// those inline, on the main thread, and the colour pass then skinned the pre-pass ones a second time on the
+// workers (the frame table is filled by the worker pass only). On the forest maps that inline skinning was
+// 7-10 % of the frame (census: r_hzmSkelCache 2, the SKELINLINE line).
+// Now a depth-only list gets the worker pass as well, for exactly the surfaces that list will draw (the back end's
+// own skip test, R_DepthViewSkips), and what it prepares stays in the frame table for the colour pass.
+// 0 = colour passes only (the old code), 1 = depth lists too, 2 = verify: a surface that was prepared is skinned
+// inline as well and the two compared bit for bit (SKELINLINE verify, the differing count must stay 0).
+static cvar_t *r_hzmSkinDepth;
+// the census: surfaces / vertices skinned inline by RB_SkelMesh, by why the worker pass did not have them
+enum { SKI_SMALL, SKI_SHADOW, SKI_PREPASS, SKI_COLOUR, SKI_NUM };
+static int s_skiSurfs[SKI_NUM], s_skiVerts[SKI_NUM];
+static int s_skiVerify, s_skiVerifyBad;
+static struct {
+    dtiki_t *tiki;
+    int      verts;
+} s_skiTop[48];
+
+static void SKI_Count(int why, dtiki_t *tiki, int verts)
+{
+    int i;
+
+    s_skiSurfs[why]++;
+    s_skiVerts[why] += verts;
+    if (why == SKI_SMALL) {
+        return;
+    }
+    for (i = 0; i < 47; i++) {
+        if (s_skiTop[i].tiki == tiki || !s_skiTop[i].tiki) {
+            break;
+        }
+    }
+    s_skiTop[i].tiki = tiki;
+    s_skiTop[i].verts += verts;
+}
+
 static std::vector<std::thread> *s_psThreads;
 static std::mutex               *s_psMx;
 static std::condition_variable  *s_psWork, *s_psDone;
@@ -2951,6 +2989,18 @@ extern "C" void R_SkelPreskin(drawSurf_t *drawSurfs, int numDrawSurfs)
     int         workers = PS_WantedWorkers();
     int         i, numJobs = 0;
 
+    qboolean    depthList = backEnd.depthFill;      // [perf1 A4]
+    qboolean    allowChars = qfalse, allowCutout = qfalse;
+
+    if (!r_hzmSkinDepth) {
+        r_hzmSkinDepth = ri.Cvar_Get("r_hzmSkinDepth", "1", 0);
+    }
+    if (depthList) {
+        if (!r_hzmSkinDepth->integer) {
+            return;         // the old code never came here for a depth-only list
+        }
+        R_DepthViewAllows(backEnd.viewParms.flags, backEnd.viewParms.shadowCascade, &allowChars, &allowCutout);
+    }
     SKEL_FastPackLatch();   // [render-perf 6] before any worker runs
     if (!workers || (lod_tool && lod_tool->integer) || !r_drawentitypoly->integer) {
         return;
@@ -2983,6 +3033,10 @@ extern "C" void R_SkelPreskin(drawSurf_t *drawSurfs, int numDrawSurfs)
         }
         R_DecomposeSort(drawSurf->sort, &entityNum, &shader, &fogNum, &dlighted, &pshadowed, &bStaticModel);
         if (bStaticModel || entityNum == REFENTITYNUM_WORLD) {
+            continue;
+        }
+        // [perf1 A4] a depth-only list draws only what RB_DepthFillSkip lets through: prepare just that
+        if (depthList && R_DepthViewSkips(shader, backEnd.refdef.entities, entityNum, allowChars, allowCutout)) {
             continue;
         }
         ent = &backEnd.refdef.entities[entityNum];
@@ -3287,6 +3341,28 @@ void RB_SkelMesh(skelSurfaceGame_t *sf)
     // HZM gl2 [bug-3487] prepared by R_SkelPreskin (worker threads, or a skin-cache hit found there)?
     if (s_psFrame == tr.frameCount && render_count >= 24) {
         psEntry_t *psE = PS_Slot(backEnd.currentEntity, sf, (int)render_count, qfalse);
+        if (psE && psE->data && r_hzmSkinDepth && r_hzmSkinDepth->integer >= 2) {
+            // [perf1 A4] verify: skin it here as well, and compare with what the worker pass prepared
+            SKEL_Skin(sf, tiki, skelmodel, mesh, render_count, scale, bones, morphs,
+                      (qboolean)(backEnd.currentEntity->e.hasMorph != 0), outXyz, outNormal, tess.texCoords[baseVertex]);
+            s_skiVerify++;
+            {
+                // positions are three floats in a four-float slot (the fourth is never written): compare the three
+                const float *prepXyz = (const float *)psE->data;
+                qboolean     bad     = (qboolean)(
+                    memcmp(outNormal, psE->data + render_count * sizeof(vec4_t), render_count * 4 * sizeof(int16_t))
+                    || memcmp(tess.texCoords[baseVertex], psE->data + render_count * (sizeof(vec4_t) + 4 * sizeof(int16_t)),
+                              render_count * sizeof(vec2_t)));
+                unsigned int vi;
+
+                for (vi = 0; vi < render_count && !bad; vi++) {
+                    bad = (qboolean)(memcmp(outXyz + vi * 4, prepXyz + vi * 4, 3 * sizeof(float)) != 0);
+                }
+                s_skiVerifyBad += bad;
+            }
+            s_psStatUsed++;
+            goto skc_skinned;
+        }
         if (psE && psE->data) {
             memcpy(outXyz, psE->data, render_count * sizeof(vec4_t));
             memcpy(outNormal, psE->data + render_count * sizeof(vec4_t), render_count * 4 * sizeof(int16_t));
@@ -3312,6 +3388,10 @@ void RB_SkelMesh(skelSurfaceGame_t *sf)
         s_skcMiss++;
     }
 
+    // [perf1 A4] census: this surface is skinned here, on the main thread - why?
+    SKI_Count(render_count < 24 ? SKI_SMALL
+              : (!backEnd.depthFill ? SKI_COLOUR : ((backEnd.viewParms.flags & VPF_DEPTHSHADOW) ? SKI_SHADOW : SKI_PREPASS)),
+              tiki, (int)render_count);
     SKEL_Skin(sf, tiki, skelmodel, mesh, render_count, scale, bones, morphs,
               (qboolean)(backEnd.currentEntity->e.hasMorph != 0), outXyz, outNormal, tess.texCoords[baseVertex]);
 
@@ -3326,6 +3406,36 @@ skc_skinned:
                   "prepared-hits=%d used=%d arena=%d KB\n", s_skcHit, s_skcMiss, s_skcStore, tr.frameCount - s_skcStatFrame,
                   s_skcBytes / 1024, s_psThreads ? (int)s_psThreads->size() : 0, s_psStatJobs, s_psStatHits, s_psStatUsed,
                   s_psArenaUsed / 1024);
+        {
+            // [perf1 A4] who was skinned inline (surfaces / vertices a frame), and the models that cost most
+            float fr  = 1.0f / (float)(tr.frameCount - s_skcStatFrame);
+            char  top[256];
+            int   n, k, best;
+
+            top[0] = 0;
+            for (n = 0; n < 4; n++) {
+                best = -1;
+                for (k = 0; k < 48 && s_skiTop[k].tiki; k++) {
+                    if (s_skiTop[k].verts > 0 && (best < 0 || s_skiTop[k].verts > s_skiTop[best].verts)) {
+                        best = k;
+                    }
+                }
+                if (best < 0) {
+                    break;
+                }
+                Q_strcat(top, sizeof(top), va(" %s %.0f", s_skiTop[best].tiki->name, s_skiTop[best].verts * fr));
+                s_skiTop[best].verts = 0;
+            }
+            ri.Printf(PRINT_ALL, "^~^~^ SKELINLINE a frame (surfaces/vertices): under 24 vertices %.0f/%.0f | shadow views "
+                      "%.0f/%.0f | main depth pre-pass %.0f/%.0f | colour pass %.0f/%.0f | verify (checked/DIFFERENT) %d/%d "
+                      "| most inline vertices:%s\n",
+                      s_skiSurfs[SKI_SMALL] * fr, s_skiVerts[SKI_SMALL] * fr, s_skiSurfs[SKI_SHADOW] * fr,
+                      s_skiVerts[SKI_SHADOW] * fr, s_skiSurfs[SKI_PREPASS] * fr, s_skiVerts[SKI_PREPASS] * fr,
+                      s_skiSurfs[SKI_COLOUR] * fr, s_skiVerts[SKI_COLOUR] * fr, s_skiVerify, s_skiVerifyBad, top);
+            memset(s_skiSurfs, 0, sizeof(s_skiSurfs));
+            memset(s_skiVerts, 0, sizeof(s_skiVerts));
+            memset(s_skiTop, 0, sizeof(s_skiTop));
+        }
         s_skcHit = s_skcMiss = s_skcStore = 0;
         s_psStatJobs = s_psStatHits = s_psStatUsed = 0;
         s_skcStatFrame = tr.frameCount;

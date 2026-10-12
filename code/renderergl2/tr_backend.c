@@ -824,9 +824,8 @@ void RB_RenderDrawSurfList( drawSurf_t *drawSurfs, int numDrawSurfs ) {
 
 	// HZM gl2 [bug-3487] skin this list's skeletal surfaces on worker threads before the loop needs them
 	// (tr_model.cpp R_SkelPreskin). Colour passes only: a depth-only pass skips most characters.
-	if ( !backEnd.depthFill ) {
-		R_SkelPreskin( drawSurfs, numDrawSurfs );
-	}
+	// HZM gl2 [perf1 A4] depth-only lists too (r_hzmSkinDepth; R_SkelPreskin decides and filters)
+	R_SkelPreskin( drawSurfs, numDrawSurfs );
 
 	for (i = 0, drawSurf = drawSurfs ; i < numDrawSurfs ; i++, drawSurf++) {
 		if ( drawSurf->sort == oldSort && drawSurf->cubemapIndex == oldCubemapIndex) {
