@@ -998,7 +998,11 @@ static qboolean FG_DrawGenerated( const fgFrame_t *prv, const fgFrame_t *cur, co
 			// the movers were drawn for the camera halfway between cur and the frame before it: that is this
 			// picture's camera unless a frame was dropped in between
 			if ( cur->vec && cur->midPrev == prv->seq ) useC = 1.0f;
-			if ( useC != 0.0f && cur->gun && hud == cur ) gunVec = 1.0f;
+			// Not while a muzzle flash is in one of the two frames: the weapon's kick and its recovery are its
+			// largest moves, and what it uncovers cannot come from the other frame then (one of them is lit
+			// white by the flash and its smoke) - measured, the in-between picture had a smeared patch beside
+			// the weapon after every shot. Those pictures keep the weapon unwarped, as before.
+			if ( useC != 0.0f && cur->gun && hud == cur && !cur->flash && !prv->flash ) gunVec = 1.0f;
 		}
 	}
 
