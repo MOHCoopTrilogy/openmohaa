@@ -2108,6 +2108,14 @@ static void CG_VmTagHandoff(refEntity_t *model, const refEntity_t *pre, refEntit
         s_from[slot] = -1; // not drawn for a while: no history
     } else if (iTagNum != s_tag[slot] && cg.time - g_iCoopVmTagSnap >= 0 && cg.time - g_iCoopVmTagSnap < 60) {
         s_from[slot] = -1; // HZM coop [adsbolt] ADS released mid-bolt: both tags hold the gun, no fade needed
+    } else if (iTagNum != s_tag[slot] && CG_AdsPoseFactor() > 0.5f
+               && iTagNum == cgi.Tag_NumForName(tiki, "tag_weapon_right")) {
+        // HZM coop [ads rifles 2026-10-12] back on the MAIN hand while AIMING: no fade. The hand-over at the end of a
+        // reload (`last weaponcommand mainhand attachtohand mainhand`) arrives while the view crossblends into the aim
+        // pose, whose tag_weapon_left sits ~16 u up the fore-end - fading from that tag swung the rifle out to the
+        // right and back for ~0.2 s after every aimed Kar98 reload (run ra2, capture frames 218-236). The right tag
+        // holds the gun in both poses of that blend (the clip's last frames and the aim pose), so the snap is exact.
+        s_from[slot] = -1;
     } else if (iTagNum != s_tag[slot]) {
         // a switch back while still fading reverses the fade from where the gun is now
         s_f0[slot]   = (s_from[slot] == iTagNum) ? 1.0f - s_f[slot] : 0.0f;
