@@ -671,6 +671,7 @@ const adsGunTune_t *CG_FindAdsTune(const char *wpn);
     void  CG_AddLightShow();
     qboolean CG_FrustumCullSphere(const vec3_t vPos, float fRadius);
     void  CG_OffsetFirstPersonView(refEntity_t *pREnt, qboolean bUseWorldPosition);
+    qboolean CG_VMAimedCycleActive(void); // HZM coop - the client-only aimed per-shot cycle clip is playing
     qboolean CG_AimingDownSights(void); // HZM coop - RMB-held iron-sight ADS gate (zoom + 3rd->1st person)
     qboolean CG_CoopHardcoreActive(void); // HZM coop - Hardcore host rule active (serverinfo g_coopHardcore + coop session)
     void  CG_DrawCoopBleed(void); // HZM coop [user 2026-10-05] bleed-out ring + teammate medic icons (cg_coopbleed.c)

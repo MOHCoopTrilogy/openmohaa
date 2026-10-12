@@ -2009,6 +2009,11 @@ static int CG_AdsAnimClass(void)
     if (!cg.snap) {
         return 2;
     }
+    // HZM coop [aimed per-shot cycle 2026-10-12] the server still says `charge` while the hands play the client-only
+    // cycle clip: hold the aligned pose and let the clip's own gun motion play, as for fire / rechamber
+    if (CG_VMAimedCycleActive()) {
+        return 1;
+    }
     a = cg.snap->ps.iViewModelAnim;
     switch (a) {
     case VM_ANIM_IDLE:

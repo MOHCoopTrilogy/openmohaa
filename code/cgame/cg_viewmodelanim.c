@@ -569,6 +569,12 @@ qboolean CG_VMAmmoPropEarly(dtiki_t *tiki)
     return qtrue;
 }
 
+// HZM coop [aimed per-shot cycle 2026-10-12] the client-only cycle clip is what the hands are playing right now
+qboolean CG_VMAimedCycleActive(void)
+{
+    return (cgi.anim && cgi.anim->g_iLastVMAnim == COOP_VM_ANIM_CYCLE) ? qtrue : qfalse;
+}
+
 qboolean CG_VMAdsTagRight(void)
 {
     // HZM coop [adsreload] bolt clips only: a reload clip keeps the server's tag (its ammo prop rides the other hand)
