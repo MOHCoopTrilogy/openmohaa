@@ -22,6 +22,7 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 // tr_shade.c
 
 #include "tr_local.h" 
+#include "tr_hzm_framegen.h" // HZM frame generation: the motion-vector pass (r_fgVelPass)
 #include "../renderercommon/hzm_storm.h" // HZM coop [2026-09-28] storm darkness
 
 /*
@@ -3686,6 +3687,17 @@ void RB_EndSurface( void ) {
 	}	
 	if (input->xyz[SHADER_MAX_VERTEXES-1][0] != 0) {
 		ri.Error (ERR_DROP, "RB_EndSurface() - SHADER_MAX_VERTEXES hit");
+	}
+
+	// HZM frame generation: the motion-vector pass re-collects entity surfaces; they go into its buffer, not the scene
+	if ( r_fgVelPass ) {
+		R_FG_VelocityDraw();
+		tess.numIndexes = 0;
+		tess.numVertexes = 0;
+		tess.firstIndex = 0;
+		tess.useCacheVao = qfalse;
+		tess.useInternalVao = qfalse;
+		return;
 	}
 
 	if ( tess.shader == tr.shadowShader ) {
