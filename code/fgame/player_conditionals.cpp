@@ -945,6 +945,18 @@ qboolean Player::CondCrouch(Conditional& condition)
         }
     }
 
+    // HZM coop [bug-3560] the statemap is shown the crouch key THROUGH Player::CoopCrouchSignal:
+    // a press spent getting up from prone is never shown, a press made while already crouched is
+    // withheld while it may still become a prone hold, and if it was only a tap it is shown on
+    // release instead - crouch stays the toggle it always was, it just no longer stands a man up
+    // 0.5 s before he lies down.
+    if (m_bCoopCrouchEat || m_bCoopCrouchDefer) {
+        return qfalse;
+    }
+    if (level.time < m_fCoopCrouchPulseEnd) {
+        return qtrue;
+    }
+
     return (last_ucmd.upmove) < 0;
 }
 

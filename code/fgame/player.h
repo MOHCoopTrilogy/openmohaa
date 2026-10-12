@@ -504,6 +504,18 @@ public:
     float m_fCoopCrouchHeld;   // level.time the crouch key went down (0 = not held)
     float m_fCoopCrouchUp;     // level.time the key was first seen UP (jitter grace, 0 = down)
     float m_fCoopProneEnter;   // level.time prone began - blocks an instant re-toggle
+    // HZM coop [bug-3560] a prone request is never refused silently (Player::CoopProneSay), a crouch
+    // press made while already crouched is held back from the statemap until it is known to be a tap
+    // or a prone hold (Player::CoopCrouchSignal), and a prone flag the body never followed is dropped
+    float m_fCoopProneAskT;      // level.time the crouch key went down in a state that blocks prone (0 = up)
+    float m_fCoopProneReqT;      // level.time this press's hold matured (0 = not yet)
+    int   m_iCoopProneWhySaid;   // refusal reason already reported for this press (0 = none)
+    bool  m_bCoopProneCueSaid;   // the player has had his one on-screen cue for this press
+    float m_fCoopProneUnconfT;   // level.time m_bCoopProne was first seen without the prone hull (0 = confirmed)
+    bool  m_bCoopCrouchRawPrev;  // the crouch key last think (edge detection)
+    bool  m_bCoopCrouchDefer;    // this press began crouched: withheld from the statemap while it may become prone
+    bool  m_bCoopCrouchEat;      // this press was spent getting up from prone: the statemap never sees it
+    float m_fCoopCrouchPulseEnd; // a withheld press released early is shown to the statemap until this time
     float m_fCoopHeadYaw;    // current head yaw offset, degrees, eased
     float m_fCoopHeadPitch;  // current head pitch offset
     float m_fCoopTorsoLag;   // current torso yaw lag, degrees
@@ -607,6 +619,7 @@ public:
     float m_fCoopCoverBadTime;   // level.time the pose first went invalid (grace before drop)
     float m_fCoopCoverAutoDwell; // HZM coop [user 2026-08-09] AUTO COVER: seconds spent crouched+still while uncovered
     float m_fCoopCoverAutoRetry; // HZM coop [user 2026-08-09] AUTO COVER: earliest level.time for the next auto attempt
+    float m_fCoopCoverAutoLast;  // HZM coop [bug-3560] level.time of the last dwell step (ClientThink is per-usercmd)
     bool  m_bHasJumped;
     float m_fLastInvulnerableTime;
     int   m_iInvulnerableTimeRemaining;
@@ -1211,6 +1224,8 @@ public:
     void  TickCoopLook();  // HZM coop - head tracking + torso counter-rotation
     bool  CoopMpRealismOff(int iBit); // HZM MP - host realism toggle active for this bit (g_mpRealismOff; MP only, 0 in coop)
     void  TickCoopProne(); // HZM coop - hold-crouch prone state machine
+    void  CoopCrouchSignal();                                       // HZM coop [bug-3560] what the statemap is shown of the crouch key
+    void  CoopProneSay(int iWhy, qboolean bCue, qboolean bWaiting); // HZM coop [bug-3560] report a refused / waiting prone request
     void  TickCoopStress(); // HZM coop - server-side stress envelope
     float  CoopBraceBonus();   // brace envelope as the STABILITY bonus sees it (prone scaled)
     float CoopActiveHeft();   // HZM coop - the active weapon's 0..1 weight, one shared accessor
