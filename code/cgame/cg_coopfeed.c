@@ -984,6 +984,8 @@ static void CG_CoopItemKeys(void)
     }
 }
 
+#define COOPITEM_WAKE_MS 3500 // how long a changed amount keeps the readout up while the HUD is faded
+
 static void CG_DrawCoopItems(void)
 {
     fontheader_t *font = CG_FeedFont();
@@ -992,6 +994,7 @@ static void CG_DrawCoopItems(void)
     float         iconPx, topPx, pitchPx, xPx, textH;
     vec4_t        c;
     int           i, shown = 0;
+    float         fade;
 
     if (!font || sx <= 0.0f || sy <= 0.0f) {
         return;
@@ -1001,6 +1004,53 @@ static void CG_DrawCoopItems(void)
         return;
     }
     CG_CoopItemKeys();
+
+    // [user 2026-10-12] the readout fades with the rest of the HUD (it sat in the feed's fade-exempt file and never
+    // did). ui_hudAlpha is the HUD auto-fade as cg_drawtools.cpp publishes it (1 when coop_hudFade is off). A change
+    // in any amount brings the readout back for COOPITEM_WAKE_MS by itself - using a medkit does not otherwise wake
+    // the HUD - and it then eases down to the HUD's own value again.
+    {
+        static cvar_t *pHudA = NULL;
+        static char    last[3][8];
+        static int     wakeUntil = 0;
+        float          wake = 0.0f;
+
+        if (!pHudA) {
+            pHudA = cgi.Cvar_Get("ui_hudAlpha", "1", 0);
+        }
+        for (i = 0; i < 3; i++) {
+            coopItem_t *it = &s_coopItems[i];
+
+            if (!it->cv) {
+                it->cv = cgi.Cvar_Get(it->cvarName, "", 0);
+            }
+            if (Q_strncmp(last[i], it->cv->string, sizeof(last[i]) - 1)) {
+                Q_strncpyz(last[i], it->cv->string, sizeof(last[i]));
+                wakeUntil = cg.time + COOPITEM_WAKE_MS;
+            }
+        }
+        if (cg.time < wakeUntil) {
+            wake = (float)(wakeUntil - cg.time) / 600.0f; // the last 0.6 s of the wake is the ease-out
+            if (wake > 1.0f) {
+                wake = 1.0f;
+            }
+        } else if (wakeUntil - cg.time > COOPITEM_WAKE_MS) {
+            wakeUntil = 0; // cg.time went backwards (new map)
+        }
+        fade = pHudA->value;
+        if (fade < 0.0f) {
+            fade = 0.0f;
+        }
+        if (fade > 1.0f) {
+            fade = 1.0f;
+        }
+        if (wake > fade) {
+            fade = wake;
+        }
+        if (fade <= 0.02f) {
+            return;
+        }
+    }
 
     topPx   = CG_CoopItemsTopPx(&iconPx);
     pitchPx = iconPx + COOPITEM_GAP_V * vs;
@@ -1030,7 +1080,7 @@ static void CG_DrawCoopItems(void)
 
         // icon
         c[0] = c[1] = c[2] = 1.0f;
-        c[3]                = 0.92f;
+        c[3]                = 0.92f * fade;
         cgi.R_SetColor(c);
         cgi.R_DrawStretchPic(xPx, topPx, iconPx, iconPx, 0.0f, 0.0f, 1.0f, 1.0f, it->hShader);
 
@@ -1046,11 +1096,11 @@ static void CG_DrawCoopItems(void)
             tx = (xPx + iconPx - 1.0f) / sx;
             ty = (topPx + iconPx - textH * 0.55f) / sy;
             c[0] = c[1] = c[2] = 0.0f;
-            c[3]                = 0.85f;
+            c[3]                = 0.85f * fade;
             cgi.R_SetColor(c);
             cgi.R_DrawString(font, num, tx + 1.0f, ty + 1.0f, -1, cgs.uiHiResScale);
             c[0] = c[1] = c[2] = (num[0] == '0' && !num[1]) ? 0.62f : 1.0f; // an empty slot reads dimmer
-            c[3]                = 0.95f;
+            c[3]                = 0.95f * fade;
             cgi.R_SetColor(c);
             cgi.R_DrawString(font, num, tx, ty, -1, cgs.uiHiResScale);
         }
@@ -1069,13 +1119,13 @@ static void CG_DrawCoopItems(void)
             }
             ty = (topPx + iconPx + textH * 0.50f) / sy;
             c[0] = c[1] = c[2] = 0.0f;
-            c[3]                = 0.70f;
+            c[3]                = 0.70f * fade;
             cgi.R_SetColor(c);
             cgi.R_DrawString(font, key, tx + 1.0f, ty + 1.0f, -1, cgs.uiHiResScale);
             c[0] = 0.80f;
             c[1] = 0.76f;
             c[2] = 0.62f;
-            c[3] = 0.78f;
+            c[3] = 0.78f * fade;
             cgi.R_SetColor(c);
             cgi.R_DrawString(font, key, tx, ty, -1, cgs.uiHiResScale);
         }
