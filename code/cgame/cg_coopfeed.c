@@ -620,6 +620,83 @@ it with "-"; CG_Init clears it on every connect and map load (cg_main.c), so a l
 the mission that set it.
 ====================
 */
+/*
+[bug-3522] The right edge the pinned line may use, in pixels. The line shares the top right corner with the script
+HUD: the retail mission-item icons (global/items.scr slots 21-26, 64 units square from 8 units down, stepping left
+from the edge) and the officer system's binoculars / paradrop icons. The line was always right-aligned 16 units from
+the edge, i.e. on top of the first icon's box; on a small screen its last characters sat on the icon art. It now ends
+left of the leftmost visible element that reaches into its row (elements in the right half of the screen only - a
+centred toast or a full-width overlay is not "an icon in the corner"). A faded icon still counts, so the line does
+not slide about as the HUD fades in and out.
+*/
+static float CG_CoopPinnedRightPx(float topPx, float bottomPx, float *lowPx)
+{
+    float W     = (float)cgs.glconfig.vidWidth, H = (float)cgs.glconfig.vidHeight;
+    float sx    = cgs.uiHiResScale[0], sy = cgs.uiHiResScale[1];
+    float right = W - 16.0f * sx;
+    int   i;
+
+    for (i = 0; i < MAX_HUDDRAW_ELEMENTS; i++) {
+        const hdelement_t *e = &cgi.HudDrawElements[i];
+        float              fX, fY, fW, fH, kx, ky;
+
+        if ((!e->hShader && !e->string[0]) || !e->vColor[3]) {
+            continue;
+        }
+        // the same placement maths as CG_HudDrawElements (cg_drawtools.cpp)
+        fX = (float)e->iX;
+        fY = (float)e->iY;
+        fW = (float)e->iWidth;
+        fH = (float)e->iHeight;
+        if (e->bVirtualScreen) {
+            kx = W / 640.0f;
+            ky = H / 480.0f;
+            if (e->iHorizontalAlign == HUD_ALIGN_X_CENTER) {
+                fX += 320.0f - fW * 0.5f;
+            } else if (e->iHorizontalAlign == HUD_ALIGN_X_RIGHT) {
+                fX += 640.0f;
+            }
+            if (e->iVerticalAlign == HUD_ALIGN_Y_CENTER) {
+                fY += 240.0f - fH * 0.5f;
+            } else if (e->iVerticalAlign == HUD_ALIGN_Y_BOTTOM) {
+                fY += 480.0f;
+            }
+            fX *= kx;
+            fY *= ky;
+            fW *= kx;
+            fH *= ky;
+        } else {
+            fX *= sx;
+            fY *= sy;
+            fW *= sx;
+            fH *= sy;
+            if (e->iHorizontalAlign == HUD_ALIGN_X_CENTER) {
+                fX += W * 0.5f - fW * 0.5f;
+            } else if (e->iHorizontalAlign == HUD_ALIGN_X_RIGHT) {
+                fX += W;
+            }
+            if (e->iVerticalAlign == HUD_ALIGN_Y_CENTER) {
+                fY += H * 0.5f - fH * 0.5f;
+            } else if (e->iVerticalAlign == HUD_ALIGN_Y_BOTTOM) {
+                fY += H;
+            }
+        }
+        if (fH < 14.0f * sy) {
+            fH = 14.0f * sy; // a text element has no height of its own
+        }
+        if (fX < W * 0.5f || fX >= W || fY >= bottomPx || fY + fH <= topPx) {
+            continue;
+        }
+        if (fX - 8.0f * sx < right) {
+            right = fX - 8.0f * sx;
+        }
+        if (lowPx && fY + fH > *lowPx) {
+            *lowPx = fY + fH; // the lowest edge of what is in the way
+        }
+    }
+    return right;
+}
+
 static void CG_DrawCoopPinned(void)
 {
     static cvar_t *cvLine = NULL;
@@ -643,8 +720,28 @@ static void CG_DrawCoopPinned(void)
     if (!text[0]) {
         return;
     }
-    x = (float)cgs.glconfig.vidWidth / cgs.uiHiResScale[0] - CG_FeedTextW(text, -1) - 16.0f;
-    y = 8.0f;
+    {
+        float sx = cgs.uiHiResScale[0], sy = cgs.uiHiResScale[1];
+        float W = (float)cgs.glconfig.vidWidth, H = (float)cgs.glconfig.vidHeight;
+        float tw = CG_FeedTextW(text, -1), low = 0.0f, right, compassRight;
+
+        y     = 8.0f;
+        right = CG_CoopPinnedRightPx((y - 2.0f) * sy, (y + 16.0f) * sy, &low);
+        x     = right / sx - tw;
+        // Beside the icons only when that keeps it off the compass bar, which ends at W/2 + half its width
+        // (cg_drawtools.cpp CG_CompassBarGeometry: min(0.42 W, 0.75 H)). Otherwise - 640x480 with two icons,
+        // any size with five or six - the line goes UNDER the icons, back at the right edge.
+        compassRight = W * 0.5f + 0.5f * ((0.42f * W < 0.75f * H) ? 0.42f * W : 0.75f * H) + 10.0f * sx;
+        if (low > 0.0f && x * sx < compassRight) {
+            y     = low / sy + 3.0f;
+            low   = 0.0f;
+            right = CG_CoopPinnedRightPx((y - 2.0f) * sy, (y + 16.0f) * sy, &low);
+            x     = right / sx - tw;
+        }
+        if (x < 4.0f) {
+            x = 4.0f;
+        }
+    }
     c[0] = c[1] = c[2] = 0.0f;
     c[3]                = 0.85f;
     cgi.R_SetColor(c);
@@ -747,13 +844,20 @@ static void CG_CoopItemKeyLabel(const char *nm, char *out, int outSize)
     out[n] = 0;
 }
 
-#define COOPITEM_FLOOR_U  48.0f // hi-res units above the bottom that stay clear: the retail team badge
-                                 // (cg_drawtools.cpp CG_DrawPlayerTeam) is 24 units tall and ends 46 up
+// [bug-3521, user 2026-10-11 "make sure it doesn't overlap with anything else on other resolutions"] hi-res units
+// above the bottom that stay clear. Was 48 = the retail team badge alone, and the row then sat INSIDE the health
+// cluster whenever that cluster was visible: the stamina arc (cg_drawtools.cpp CG_DrawStaminaArc) starts 95 units
+// up and the health cross of ui/hud_health.urc 92 up, both in hi-res units, x 32..288. The bug-3495 stills never
+// showed it because the cluster fades out on a calm player. The cluster does not scale below 1080p and the row
+// does, so the two met at every height under about 1070 px (covered icons and key labels at 1280x720, the whole
+// row at 640x480). 98 = the arc's top edge + 3.
+#define COOPITEM_FLOOR_U  98.0f
 
 /*
 The row's geometry in pixels, shared with the feed. The top follows the screen HEIGHT (66 virtual units up, where
-the old script icons were), unless that would put the key labels on the team badge, which is laid out in fixed
-hi-res units - below about 610 px of height it does, and then the row is lifted to clear it.
+the old script icons were), unless that would put the key labels on the retail health cluster, which is laid out in
+fixed hi-res units - below about 1070 px of height it does, and then the row is lifted to clear it (the feed sits
+on top of the row and rises with it).
 */
 static float CG_CoopItemsTopPx(float *iconPxOut)
 {
@@ -766,7 +870,7 @@ static float CG_CoopItemsTopPx(float *iconPxOut)
         iconPx = COOPITEM_MIN_ICON;
     }
     up   = COOPITEM_TOP_V * vs;                             // where it wants to be
-    need = COOPITEM_FLOOR_U * sy + 18.0f * sy + iconPx;     // badge + (gap and one line of label) + icon
+    need = COOPITEM_FLOOR_U * sy + 20.0f * sy + iconPx;     // cluster + (gap and one line of label) + icon
     if (up < need) {
         up = need;
     }
@@ -822,6 +926,10 @@ static void CG_DrawCoopItems(void)
     int           i, shown = 0;
 
     if (!font || sx <= 0.0f || sy <= 0.0f) {
+        return;
+    }
+    // a briefing map has no kit to show, and the ready gate's roster is drawn in this corner there
+    if (strstr(cgs.mapname, "briefing/")) {
         return;
     }
     CG_CoopItemKeys();
