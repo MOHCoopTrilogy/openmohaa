@@ -758,6 +758,8 @@ const adsGunTune_t *CG_FindAdsTune(const char *wpn);
     int      CG_HzmScopeWeaponOptic(const char *wpn);
     qboolean CG_HzmScopeWorldFov(float camFov, float *outFov);
     qboolean CG_HzmScopeActive(void);
+    qboolean CG_HzmScopeOwnsAds(void);
+    float    CG_HzmScopeHipFov(void);
     qboolean CG_HzmScopeDraw2D(void);
     // HZM coop [2026-09-27] realistic lightning (cg_hzmlightning.c)
     void CG_HzmLt_Init(void);

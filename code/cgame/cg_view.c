@@ -5864,6 +5864,11 @@ qboolean CG_AimingDownSights(void)
     if (CG_MpRealismOffActive(MPREALISM_NOADS)) {
         return qfalse;
     }
+    // HZM coop [bug-3462 follow-up] a rifle the modern scope view owns: the button is its scope toggle, never an
+    // iron-sight ADS as well (cg_hzmscope.c CG_HzmScopeOwnsAds - the zoom bounce after a held scope-out press)
+    if (CG_HzmScopeOwnsAds()) {
+        return qfalse;
+    }
     cgi.GetUserCmd(cgi.GetCurrentCmdNumber(), &cmd);
     return (cmd.buttons & BUTTON_COOPADS) ? qtrue : qfalse; // ADS on its own button, decoupled from secondary-fire/bash
 }
@@ -7536,10 +7541,17 @@ static int CG_CalcFov(void)
         {
             float fHzmScopeFov;
             if (CG_HzmScopeWorldFov(cg.camera_fov, &fHzmScopeFov)) {
+                // the gun's fov is the HIP fov for as long as this owns the view. fWeaponFov above came from
+                // cg.camera_fov, which is already lerping to the tik's zoom fov in the frame before STAT_INZOOM lands:
+                // the world was held at hip there but the rifle was drawn at ~25 degrees - one frame of a giant gun
+                // just before it is hidden (run sc_ease frame 6, 2026-10-12)
+                float fHzmHip = CG_HzmScopeHipFov();
                 if (fov_ratio == 1) {
-                    fov_x = fHzmScopeFov;
+                    fov_x      = fHzmScopeFov;
+                    fWeaponFov = fHzmHip;
                 } else {
-                    fov_x = RAD2DEG(atan(tan(DEG2RAD(fHzmScopeFov / 2.0)) * fov_ratio)) * 2.0;
+                    fov_x      = RAD2DEG(atan(tan(DEG2RAD(fHzmScopeFov / 2.0)) * fov_ratio)) * 2.0;
+                    fWeaponFov = RAD2DEG(atan(tan(DEG2RAD(fHzmHip / 2.0)) * fov_ratio)) * 2.0;
                 }
             }
         }

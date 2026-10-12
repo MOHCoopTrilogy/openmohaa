@@ -13,7 +13,7 @@ shadow masks only when it is not, i.e. on gl1 or with r_postProcess 0, so the tw
 change, from the post chain's own entry (RB_HZMScopeLive), never per frame.
 
 Tuning (flags 0 - TRAPS T7, defaults ship): r_ppScopeCA (chromatic fringe, 1 = a touch), r_ppScopeOuter (how dark
-the housing outside the lens is, 0..1).
+the housing outside the lens is, 0..1; 1 = flat black, the default).
 ===========================================================================
 */
 #include "tr_local.h"
@@ -31,7 +31,7 @@ static void RB_HZMScopeCvars(void)
 		r_ppScopeState = ri.Cvar_Get("r_ppScopeState", "0", 0);    // cgame-published state, never archived
 		r_ppScopeLive  = ri.Cvar_Get("r_ppScopeLive",  "0", 0);    // renderer-published
 		r_ppScopeCA    = ri.Cvar_Get("r_ppScopeCA",    "1", 0);
-		r_ppScopeOuter = ri.Cvar_Get("r_ppScopeOuter", "0.97", 0);   // housing keeps 3% of the blurred scene (0.9 left a visible smudge on bright maps)
+		r_ppScopeOuter = ri.Cvar_Get("r_ppScopeOuter", "1", 0);      // 1 = flat black housing. 0.97 (3% of the blurred frame) still read as a grey smudge on bright maps
 	}
 }
 

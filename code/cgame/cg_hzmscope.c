@@ -112,6 +112,41 @@ static void CG_HzmScopeCvars(void)
     r_ppScopeLive   = cgi.Cvar_Get("r_ppScopeLive", "0", 0);
 }
 
+static qhandle_t s_hRet[HO_NUM];
+static qhandle_t s_hAperture, s_hEyebox;
+static int       s_assets = -1; // -1 not probed yet, 0 the scopes pak is missing, 1 present
+
+/*
+CG_HzmScopeOn - the master switch AND the assets. zzzzzzzzzz_coop_scopes.pk3 is probed once per cgame load (a
+vid_restart or a map change reloads cgame, so these handles cannot go stale). Without the pak the modern view is off
+AS A WHOLE - retail overlay, server fov, no gl2 pass: before this the lens pass and the true magnification still ran
+under the retail overlay on an install that had the engine but not the pak.
+*/
+static qboolean CG_HzmScopeOn(void)
+{
+    if (!cg_hzmScope->integer) {
+        return qfalse;
+    }
+    if (s_assets < 0) {
+        s_hAperture = cgi.R_RegisterShaderNoMip("textures/hud/coop_scope/aperture");
+        s_hEyebox   = cgi.R_RegisterShaderNoMip("textures/hud/coop_scope/eyebox");
+        s_assets    = (s_hAperture && s_hEyebox) ? 1 : 0;
+    }
+    return s_assets > 0 ? qtrue : qfalse;
+}
+
+// an optic's reticle: loaded when its rifle is first in the hands, not on the frame the scope comes up
+static qhandle_t CG_HzmScopeReticle(int o)
+{
+    if (o < 0 || o >= HO_NUM) {
+        return 0;
+    }
+    if (!s_hRet[o]) {
+        s_hRet[o] = cgi.R_RegisterShaderNoMip(va("textures/hud/coop_scope/ret_%s", s_hzmOptics[o].tex));
+    }
+    return s_hRet[o];
+}
+
 /*
 CG_HzmScopeWeaponOptic - optic index of a weapon name, -1 if it is not a known scope. Also used by cg_view.c's
 CG_ActiveWeaponHasScope, whose own list predates the imported snipers (bug-256 coverage).
@@ -154,17 +189,23 @@ static qboolean CG_HzmScopeZoomed(int *optic, qboolean *known)
     if (!cg.snap || !cg_hzmScope->integer) {
         return qfalse;
     }
+    wpn = CG_HzmActiveWeaponName();
+    o   = CG_HzmScopeWeaponOptic(wpn);
+    if (o >= 0 && CG_HzmScopeOn()) {
+        CG_HzmScopeReticle(o); // the rifle is in the hands: have its reticle ready before the scope comes up
+    }
     if (cg.snap->ps.stats[STAT_INZOOM] <= 0 || cg.snap->ps.stats[STAT_INZOOM] > 30) {
+        return qfalse;
+    }
+    if (!CG_HzmScopeOn()) {
         return qfalse;
     }
     if (cg.snap->ps.pm_flags & (PMF_TURRET | PMF_CAMERA_VIEW)) {
         return qfalse;
     }
-    wpn = CG_HzmActiveWeaponName();
     if (strstr(wpn, "inocular") || !Q_stricmpn(wpn, "Spy Camera", 10) || !Q_stricmpn(wpn, "Bombing Run", 11)) {
         return qfalse; // these keep their retail overlays
     }
-    o = CG_HzmScopeWeaponOptic(wpn);
     if (o >= 0) {
         *optic = o;
         *known = qtrue;
@@ -219,7 +260,7 @@ static void CG_HzmScopeFrame(float camFov)
     hs.holdHip = qfalse;
     if (hs.frac <= 0.0f) {
         if (cg.nextSnap && cg.nextSnap->ps.stats[STAT_INZOOM] > 0 && cg.nextSnap->ps.stats[STAT_INZOOM] <= 30
-            && CG_HzmScopeWeaponOptic(CG_HzmActiveWeaponName()) >= 0 && cg_hzmScope->integer
+            && CG_HzmScopeWeaponOptic(CG_HzmActiveWeaponName()) >= 0 && CG_HzmScopeOn()
             && cg_scopeTrueMag->integer) {
             hs.holdHip = qtrue; // the zoom is in the next snapshot: hold the hip view until the ease takes it
         } else if (camFov > 45.0f && (!cg.snap || !cg.snap->ps.stats[STAT_INZOOM])
@@ -383,6 +424,29 @@ qboolean CG_HzmScopeActive(void)
     return (cg_hzmScope && hs.frac > 0.0f) ? qtrue : qfalse;
 }
 
+// the un-zoomed camera fov (pre-aspect) the ease starts from: cg_view.c draws the gun with it while this owns the view
+float CG_HzmScopeHipFov(void)
+{
+    return hs.hipFov;
+}
+
+/*
+CG_HzmScopeOwnsAds - the rifle in the hands is one the modern view owns: its ADS button IS the scope toggle, so
+cg_view.c's CG_AimingDownSights answers "no" for it even while the button is down and the scope is not up.
+[bug-3462 follow-up, 2026-10-12] It answered "yes", so a held press ran the iron-sight ADS view on top of the toggle:
+the press that scoped OUT was followed, 0.2 s after it, by a one-frame 1.4x zoom with the rifle rising (run sc_ease,
+frames 64-66) for as long as the button stayed down, and the press that scoped IN lifted the gun for the frames before
+the server's zoom arrived. Off with cg_hzmScope 0 or without the scopes pak - then it is exactly as before.
+*/
+qboolean CG_HzmScopeOwnsAds(void)
+{
+    CG_HzmScopeCvars();
+    if (!CG_HzmScopeOn()) {
+        return qfalse;
+    }
+    return CG_HzmScopeWeaponOptic(CG_HzmActiveWeaponName()) >= 0 ? qtrue : qfalse;
+}
+
 // solid black from the mask texture's own opaque corner (s1d: a "*white" fill drew grey boxes with white rims on gl1)
 static void CG_HzmFill(float x0, float y0, float x1, float y1, qhandle_t h)
 {
@@ -412,27 +476,17 @@ CG_HzmScopeDraw2D - from CG_DrawZoomOverlay. Returns qtrue when the modern scope
 */
 qboolean CG_HzmScopeDraw2D(void)
 {
-    static qhandle_t hRet[HO_NUM];
-    static qhandle_t hAperture, hEyebox;
-    float            W, H, cx, cy, R;
-    vec4_t           col;
-    int              o;
+    qhandle_t hRet, hAperture, hEyebox;
+    float     W, H, cx, cy, R;
+    vec4_t    col;
 
     CG_HzmScopeCvars();
-    if (hs.frac <= 0.0f || hs.optic < 0) {
-        return qfalse;
+    if (hs.frac <= 0.0f || hs.optic < 0 || s_assets <= 0) {
+        return qfalse; // not scoped, or the scopes pak is missing (then hs.frac never left 0): the retail overlay draws
     }
-    o = hs.optic;
-    if (!hRet[o]) {
-        hRet[o] = cgi.R_RegisterShaderNoMip(va("textures/hud/coop_scope/ret_%s", s_hzmOptics[o].tex));
-    }
-    if (!hRet[o]) {
-        return qfalse; // the scopes pak is missing (partial update): the retail overlay draws instead - never a default/white quad
-    }
-    if (!hAperture || !hEyebox) {
-        hAperture = cgi.R_RegisterShaderNoMip("textures/hud/coop_scope/aperture");
-        hEyebox   = cgi.R_RegisterShaderNoMip("textures/hud/coop_scope/eyebox");
-    }
+    hRet      = CG_HzmScopeReticle(hs.optic);
+    hAperture = s_hAperture;
+    hEyebox   = s_hEyebox;
 
     W  = (float)cgs.glconfig.vidWidth;
     H  = (float)cgs.glconfig.vidHeight;
@@ -449,7 +503,9 @@ qboolean CG_HzmScopeDraw2D(void)
         clip[1] = 0.0f;
         clip[2] = W;
         clip[3] = H;
-        VectorSet4(col, 0.0f, 0.0f, 0.0f, 0.93f * hs.ease); // black: the masks and their fills
+        // OPAQUE black housing. It was 0.93: with no blur the 7% that showed through was the sharp magnified scene
+        // carrying on past the lens rim out to the pupil mask - a second, ghost rim (run sc_variants v__22, gl1 too)
+        VectorSet4(col, 0.0f, 0.0f, 0.0f, hs.ease);
         cgi.R_SetColor(col);
         CG_HzmMask(cx, cy, R, hAperture, clip);
         // the shadow mask fills the whole screen too: clipping its fill to the lens box left the housing darkened twice
@@ -465,7 +521,9 @@ qboolean CG_HzmScopeDraw2D(void)
     // reticle there read as lines drawn outside the scope (review 1).
     VectorSet4(col, 0.0f, 0.0f, 0.0f, hs.ease * hs.ease * hs.ease);
     cgi.R_SetColor(col);
-    cgi.R_DrawStretchPic(cx - R, cy - R, 2.0f * R, 2.0f * R, 0.0f, 0.0f, 1.0f, 1.0f, hRet[o]);
+    if (hRet) {
+        cgi.R_DrawStretchPic(cx - R, cy - R, 2.0f * R, 2.0f * R, 0.0f, 0.0f, 1.0f, 1.0f, hRet);
+    }
     cgi.R_SetColor(NULL);
     return qtrue;
 }
