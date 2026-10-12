@@ -464,6 +464,23 @@ public:
     bool  m_bCoopBraceMounted;// player COMMITTED with Use. Only this drives the effects.
     int   m_iCoopBraceAvailSent; // last published prompt state, change-only
     bool  m_bCoopBraceUsePrev;   // Use edge tracker (toggle on press, not on hold)
+    // HZM coop [user 2026-10-05] USE-TO-LOOT (TickCoopLoot). Constructor-seeded, not archived.
+    SafePtr<Entity> m_pCoopLootTarget; // what the crosshair is on: a dropped enemy gun or an enemy body
+    int    m_iCoopLootKind;       // 0 none, 1 gun not owned, 2 gun owned, 3 owned + ammo full, 4 not owned + full, 5 body
+    float  m_fCoopLootScanTime;   // level.time of the last target selection (once per server frame)
+    bool   m_bCoopLootUsePrev;    // Use last frame, after the 150 ms release grace
+    float  m_fCoopLootLastHeld;   // level.time the key was last really down
+    bool   m_bCoopLootHeld;       // this press belongs to loot: Use is stripped until the key is released
+    bool   m_bCoopLootDone;       // ...and it has already acted or been cancelled
+    SafePtr<Entity> m_pCoopLootHoldEnt; // the target the press started on
+    float  m_fCoopLootPressTime;  // when it started
+    float  m_fCoopLootSeenTime;   // when that target was last the selected one (0.25 s loss grace)
+    Vector m_vCoopLootStart;      // body search: where the player stood ...
+    float  m_fCoopLootStartHealth;// ... and the health they had (any damage cancels)
+    int    m_iCoopLootTSent;      // last published coop_lootT / coop_lootH, change-only
+    int    m_iCoopLootHSent;
+    float  m_fCoopLootProbeNext;  // coop_lootProbe: once-a-second target line
+    float  m_fCoopLootFakeUntil;  // coop_lootProbe: the harness holds Use for this player until then
     bool  m_bCoopProneKeyBlock;  // crouch must be released before it can arm prone again
     float  m_fCoopReadyUpAt;     // trigger is dead until this time - the sprint-out ready-up
     int    m_iCoopGunHeftSent;   // change-only publish of the active weapon's handling weight
@@ -1378,6 +1395,16 @@ public:
     qboolean canUse(Entity *entity, bool requiresLookAt);
     int      getUseableEntities(int *touch, int maxcount, bool requiresLookAt = true);
     bool     CoopBraceUseTargetInView(); // [user 2026-09-27] USE first, brace second (TickCoopBrace)
+    // HZM coop [user 2026-10-05] use-to-loot: enemy guns, their ammo and body search on the Use key
+    void     TickCoopLoot();
+    void     CoopLootSelect(float fRange, float fCone, bool bSearchOn);
+    int      CoopLootKindOf(Entity *pEnt);
+    bool     CoopLootOwns(Weapon *pWeap);
+    bool     CoopLootUseElsewhere();
+    void     CoopLootPublish(int iT, int iH);
+    void     CoopLootSearchDone(Actor *pBody);
+    void     CoopLootForceSearch(Event *ev);
+    void     CoopLootFakeUse(Event *ev);
 };
 
 inline void Player::Archive(Archiver& arc)

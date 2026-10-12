@@ -793,6 +793,12 @@ static void CG_DrawCoopItems(void)
     }
 }
 
+// where the feed drew this frame, in pixels: the use-to-loot prompt (CG_DrawCoopLoot, below) steps up out of its
+// way on a screen small enough for the two to meet (640x480 with four or more feed rows)
+static int   s_feedBoxMs      = -1;
+static float s_feedBoxTopPx   = 0.0f;
+static float s_feedBoxRightPx = 0.0f;
+
 void CG_DrawCoopFeed(qboolean cineHide)
 {
     static const float tick[5][3] = {
@@ -926,6 +932,20 @@ void CG_DrawCoopFeed(qboolean cineHide)
         }
         ex = x0 + 6.0f + ((e->cat == 3 && e->hIcon) ? (FEED_ICON_SZ + 4.0f) : 0.0f);
 
+        if (a > 0.05f) {
+            if (s_feedBoxMs != now) {
+                s_feedBoxMs      = now;
+                s_feedBoxTopPx   = (float)cgs.glconfig.vidHeight;
+                s_feedBoxRightPx = 0.0f;
+            }
+            if ((ey - 2.0f) * sy < s_feedBoxTopPx) {
+                s_feedBoxTopPx = (ey - 2.0f) * sy;
+            }
+            if ((ex + maxW + 6.0f) * sx > s_feedBoxRightPx) {
+                s_feedBoxRightPx = (ex + maxW + 6.0f) * sx;
+            }
+        }
+
         // plate
         c[0] = 0.0f;
         c[1] = 0.0f;
@@ -1005,6 +1025,391 @@ void CG_DrawCoopFeed(qboolean cineHide)
             }
         }
         target += rowsH + FEED_GAP + 3.0f;
+    }
+    cgi.R_SetColor(NULL);
+}
+
+/*
+====================
+CG_DrawCoopLoot
+
+HZM coop [user 2026-10-05 / 2026-10-12] USE-TO-LOOT prompt (fgame Player::TickCoopLoot decides everything; this only
+draws it). "If you can do pickup / search icons instead that would be great ... Think of the original call of duty
+icons" - so the prompt is an icon group, not a sentence: centred, a little under the crosshair (63.5 % of the way
+down, where most shooters put it), and nothing at all when the server names no target.
+
+    [gun silhouette]        [3 rounds]              [3 rounds]              [magnifier]
+     [F] Kar98k             [F] ====                [F] ====                [F] ====
+     tap = take the gun     hold = take its ammo    a gun you own           an enemy body: hold to search
+
+A keycap alone is a tap; a keycap with a track beside it is a hold, and the track fills while the key is down. The
+gun is its own world model's silhouette (textures/hud/loot/w_*.tga, generated from the meshes by
+docs/proposals/use_pickup_2026-10-05/tools/build_icons.py together with the table in cg_coopfeed_loot.h); a gun the
+table does not list gets the generic rifle / pistol / SMG picture for its class. The key is the real +use binding.
+
+Wire: two client cvars the server sets change-only (`set coop_*` stufftext, one unquoted integer each):
+coop_lootT = kind * 100000 + class * 10000 + CS_WEAPONS index (kind 1 gun not owned, 2 owned, 3 owned + ammo full,
+4 not owned + ammo full, 5 body; 0 = nothing), coop_lootH = length in ms of the hold now in progress (0 = none).
+CG_Init zeroes both (cg_main.c), so a prompt cannot outlive the map it was raised on.
+
+Sizes follow the screen HEIGHT (1080 = 1.0, never below 0.75 so it stays legible at 640x480); text is the feed's
+verdana-12 in hi-res units. Images are registered WITH mipmaps (512 px sources drawn at about a third of that).
+====================
+*/
+typedef struct {
+    const char *name;      // CS_WEAPONS item name, finish suffix stripped
+    const char *tex;       // textures/hud/loot/<tex>
+    const char *shortName; // what the prompt calls it
+    float       vw, vh;    // visible width / height as fractions of the 2:1 canvas
+} lootArt_t;
+
+static const lootArt_t s_lootArt[] = {
+#include "cg_coopfeed_loot.h"
+};
+#define LOOT_ART_N ((int)(sizeof(s_lootArt) / sizeof(s_lootArt[0])))
+
+static const lootArt_t s_lootGeneric[3] = {
+    {"", "coop_loot_gun",    "", 0.965f, 0.414f},
+    {"", "coop_loot_pistol", "", 0.434f, 0.598f},
+    {"", "coop_loot_mg",     "", 0.816f, 0.629f},
+};
+
+static qhandle_t s_lootArtShader[LOOT_ART_N];
+static qhandle_t s_lootGenericShader[3];
+static qhandle_t s_lootAmmoShader = 0, s_lootSearchShader = 0, s_lootKeyShader = 0;
+
+static void CG_LootBox(float x, float y, float w, float h, float r, float g, float b, float a)
+{
+    vec4_t c;
+
+    c[0] = r;
+    c[1] = g;
+    c[2] = b;
+    c[3] = a;
+    cgi.R_SetColor(c);
+    cgi.R_DrawBox(x, y, w, h);
+}
+
+// text at a PIXEL position, in the feed font (which is laid out in hi-res units), with the feed's 1-unit shadow
+static void CG_LootText(fontheader_t *font, const char *s, float xPx, float yPx, float r, float g, float b, float a)
+{
+    vec4_t c;
+    float  x = xPx / cgs.uiHiResScale[0], y = yPx / cgs.uiHiResScale[1];
+
+    c[0] = c[1] = c[2] = 0.0f;
+    c[3]                = 0.85f * a;
+    cgi.R_SetColor(c);
+    cgi.R_DrawString(font, s, x + 1.0f, y + 1.0f, -1, cgs.uiHiResScale);
+    c[0] = r;
+    c[1] = g;
+    c[2] = b;
+    c[3] = a;
+    cgi.R_SetColor(c);
+    cgi.R_DrawString(font, s, x, y, -1, cgs.uiHiResScale);
+}
+
+// the keycap: a square frame cut in three so a longer key name stretches the middle, never the corners
+static float CG_LootKeycap(fontheader_t *font, const char *key, float x, float y, float h, float a)
+{
+    float  tw    = CG_FeedTextW(key, -1) * cgs.uiHiResScale[0];
+    float  th    = 12.0f * cgs.uiHiResScale[1];
+    float  w     = tw + h * 0.62f;
+    float  third = (float)((int)(h / 3.0f));
+    vec4_t c;
+
+    if (w < h) {
+        w = h;
+    }
+    c[0] = c[1] = c[2] = 1.0f;
+    c[3]                = a;
+    cgi.R_SetColor(c);
+    cgi.R_DrawStretchPic(x, y, third, h, 0.0f, 0.0f, 1.0f / 3.0f, 1.0f, s_lootKeyShader);
+    cgi.R_DrawStretchPic(x + third, y, w - 2.0f * third, h, 1.0f / 3.0f, 0.0f, 2.0f / 3.0f, 1.0f, s_lootKeyShader);
+    cgi.R_DrawStretchPic(x + w - third, y, third, h, 2.0f / 3.0f, 0.0f, 1.0f, 1.0f, s_lootKeyShader);
+    CG_LootText(font, key, x + (w - tw) * 0.5f, y + (h - th) * 0.5f - 1.0f * cgs.uiHiResScale[1], 0.94f, 0.91f, 0.84f, a);
+    return w;
+}
+
+void CG_DrawCoopLoot(void)
+{
+    static cvar_t *cvT = NULL, *cvH = NULL;
+    static int     shownT = 0, lastMs = 0;
+    static float   alpha  = 0.0f;
+    static int     holdCv = 0, holdMs = 0, holdStart = 0, holdEnd = 0;
+    static float   holdFracEnd = 0.0f;
+    static char    keyLabel[16] = "";
+    static int     keyNextMs    = 0;
+    static int     artT = -1, artIdx = -1, artCls = 0;
+    static char    artName[64] = "";
+    fontheader_t  *font;
+    int            t, h, dt, kind, cls, idx, n = 0, i;
+    float          s, W, H, yc, rowY, capH, capW, gap, trackW, trackH, total, x, frac, fillA;
+    float          textH;
+    struct {
+        int       what; // 0 gun, 1 ammo, 2 search
+        qhandle_t sh;
+        float     dw, dh, vw, r2, gw;
+    } g[2];
+    const lootArt_t *art       = NULL;
+    const char      *shortName = "";
+
+    if (!cvT) {
+        cvT = cgi.Cvar_Get("coop_lootT", "0", 0);
+        cvH = cgi.Cvar_Get("coop_lootH", "0", 0);
+    }
+    if (!cg.snap || (cg.snap->ps.pm_flags & PMF_INTERMISSION)) {
+        return;
+    }
+    dt = cg.time - lastMs;
+    if (dt < 0 || dt > 250) {
+        dt = 16;
+    }
+    lastMs = cg.time;
+
+    // --- what to show, and the fade (120 ms in, 180 ms out; a change of target swaps without a blink) ------
+    t = cvT->integer;
+    if (t > 0) {
+        shownT = t;
+        alpha += (float)dt / 120.0f;
+        if (alpha > 1.0f) {
+            alpha = 1.0f;
+        }
+    } else {
+        alpha -= (float)dt / 180.0f;
+        if (alpha <= 0.0f) {
+            alpha  = 0.0f;
+            shownT = 0;
+        }
+    }
+
+    // --- the hold: runs on this client's clock from the moment the server says one began -------------------
+    h = cvH->integer;
+    if (h != holdCv) {
+        if (h > 0) {
+            holdStart = cg.time;
+            holdMs    = h;
+        } else if (holdCv > 0) {
+            holdEnd     = cg.time;
+            holdFracEnd = (holdMs > 100) ? (float)(cg.time - holdStart - 100) / (float)(holdMs - 100) : 0.0f;
+            if (holdFracEnd < 0.0f) {
+                holdFracEnd = 0.0f;
+            } else if (holdFracEnd > 1.0f) {
+                holdFracEnd = 1.0f;
+            }
+        }
+        holdCv = h;
+    }
+    if (holdCv > 0 && (cg.time < holdStart || cg.time - holdStart > holdMs + 3000)) {
+        holdCv = 0; // cg.time ran backwards over a map load, or the "ended" message never came
+        cgi.Cvar_Set("coop_lootH", "0");
+    }
+    if (holdCv > 0) {
+        // nothing for the first 100 ms, so a tap never flashes the bar
+        frac  = (holdMs > 100) ? (float)(cg.time - holdStart - 100) / (float)(holdMs - 100) : 0.0f;
+        fillA = 1.0f;
+    } else {
+        frac  = holdFracEnd;
+        fillA = 1.0f - (float)(cg.time - holdEnd) / 150.0f;
+    }
+    if (frac < 0.0f) {
+        frac = 0.0f;
+    } else if (frac > 1.0f) {
+        frac = 1.0f;
+    }
+    if (fillA < 0.0f || cg.time < holdEnd) {
+        fillA = 0.0f;
+    }
+
+    if (!shownT || alpha <= 0.0f) {
+        return;
+    }
+    font = CG_FeedFont();
+    if (!font || cgs.uiHiResScale[0] <= 0.0f || cgs.uiHiResScale[1] <= 0.0f) {
+        return;
+    }
+    kind = shownT / 100000;
+    cls  = (shownT / 10000) % 10;
+    idx  = shownT % 10000;
+    if (kind < 1 || kind > 5) {
+        return;
+    }
+
+    if (!s_lootKeyShader) {
+        s_lootKeyShader    = cgi.R_RegisterShader("textures/hud/loot/coop_loot_key");
+        s_lootAmmoShader   = cgi.R_RegisterShader("textures/hud/loot/coop_loot_ammo");
+        s_lootSearchShader = cgi.R_RegisterShader("textures/hud/loot/coop_loot_search");
+    }
+    // the bound Use key, as the item row shows its keys; bindings change in a menu, so once a second is plenty
+    if (cg.time >= keyNextMs || cg.time + 2000 < keyNextMs) {
+        int         k1 = -1, k2 = -1;
+        const char *nm;
+
+        keyNextMs = cg.time + 1000;
+        cgi.Key_GetKeysForCommand("+use", &k1, &k2);
+        nm = (k1 >= 0) ? cgi.Key_KeynumToBindString(k1) : NULL;
+        if (nm && nm[0] && nm[0] != '?') {
+            CG_CoopItemKeyLabel(nm, keyLabel, sizeof(keyLabel));
+            keyLabel[8] = 0;
+        } else {
+            Q_strncpyz(keyLabel, "USE", sizeof(keyLabel));
+        }
+    }
+
+    // --- which gun (resolved once per target) ---------------------------------------------------------------
+    if (kind == 1 || kind == 4) {
+        if (artT != shownT) {
+            const char *cs = CG_ConfigString(CS_WEAPONS + idx);
+            char       *p;
+
+            artT   = shownT;
+            artIdx = -1;
+            artCls = (cls >= 0 && cls <= 2) ? cls : 0;
+            Q_strncpyz(artName, cs ? cs : "", sizeof(artName));
+            p = strstr(artName, " (");
+            if (p) {
+                *p = 0; // "<Base Gun> (<Finish>)" is the same gun
+            }
+            for (i = 0; i < LOOT_ART_N; i++) {
+                if (!Q_stricmp(artName, s_lootArt[i].name)) {
+                    artIdx = i;
+                    break;
+                }
+            }
+        }
+        if (artIdx >= 0) {
+            art = &s_lootArt[artIdx];
+            if (!s_lootArtShader[artIdx]) {
+                s_lootArtShader[artIdx] = cgi.R_RegisterShader(va("textures/hud/loot/%s", art->tex));
+            }
+            shortName = art->shortName;
+        } else {
+            art = &s_lootGeneric[artCls];
+            if (!s_lootGenericShader[artCls]) {
+                s_lootGenericShader[artCls] = cgi.R_RegisterShader(va("textures/hud/loot/%s", art->tex));
+            }
+            shortName = artName;
+        }
+    }
+
+    // --- layout, in pixels ------------------------------------------------------------------------------------
+    W = (float)cgs.glconfig.vidWidth;
+    H = (float)cgs.glconfig.vidHeight;
+    s = H / 1080.0f;
+    if (s < 0.75f) {
+        s = 0.75f;
+    }
+    textH = 12.0f * cgs.uiHiResScale[1];
+    capH  = (float)((int)(26.0f * s + 0.5f));
+    if (capH < textH + 5.0f) {
+        capH = textH + 5.0f;
+    }
+    capW = CG_FeedTextW(keyLabel, -1) * cgs.uiHiResScale[0] + capH * 0.62f;
+    if (capW < capH) {
+        capW = capH;
+    }
+    gap    = 30.0f * s;
+    trackW = (float)((int)(48.0f * s + 0.5f));
+    trackH = (float)((int)(5.0f * s + 0.5f));
+    if (trackH < 4.0f) {
+        trackH = 4.0f;
+    }
+
+    if (art) {
+        g[n].what = 0;
+        g[n].sh   = (artIdx >= 0) ? s_lootArtShader[artIdx] : s_lootGenericShader[artCls];
+        g[n].dw   = 168.0f * s;
+        g[n].dh   = 84.0f * s;
+        g[n].vw   = art->vw * g[n].dw;
+        g[n].r2   = capW + 6.0f * s + CG_FeedTextW(shortName, -1) * cgs.uiHiResScale[0];
+        n++;
+    }
+    if (kind >= 1 && kind <= 3) {
+        g[n].what = 1;
+        g[n].sh   = s_lootAmmoShader;
+        g[n].dw = g[n].dh = 46.0f * s;
+        g[n].vw           = 0.66f * g[n].dw;
+        g[n].r2           = (kind == 3) ? CG_FeedTextW("Full", -1) * cgs.uiHiResScale[0] : capW + 6.0f * s + trackW;
+        n++;
+    }
+    if (kind == 5) {
+        g[n].what = 2;
+        g[n].sh   = s_lootSearchShader;
+        g[n].dw = g[n].dh = 52.0f * s;
+        g[n].vw           = 0.92f * g[n].dw;
+        g[n].r2           = capW + 6.0f * s + trackW;
+        n++;
+    }
+    total = 0.0f;
+    for (i = 0; i < n; i++) {
+        g[i].gw = (g[i].vw > g[i].r2) ? g[i].vw : g[i].r2;
+        total  += g[i].gw + (i ? gap : 0.0f);
+    }
+    x    = (float)((int)(W * 0.5f - total * 0.5f));
+    yc   = (float)((int)(H * 0.635f));
+    rowY = yc + (float)((int)(32.0f * s));
+    // The event feed grows upward from the bottom left. Where its box would reach the prompt, the prompt steps UP
+    // just enough to clear it; on a screen with no room for that (640x480: the prompt may not crowd the crosshair)
+    // it steps to the RIGHT of the feed instead, by at most an eighth of the screen.
+    if (s_feedBoxMs >= 0 && cg.time - s_feedBoxMs >= 0 && cg.time - s_feedBoxMs < 250 && x < s_feedBoxRightPx + 8.0f
+        && rowY + capH > s_feedBoxTopPx - 6.0f) {
+        float lift = rowY + capH - (s_feedBoxTopPx - 6.0f);
+        float room = yc - (H * 0.5f + 84.0f * s);
+
+        if (lift <= room) {
+            yc   -= (float)((int)(lift + 0.5f));
+            rowY -= (float)((int)(lift + 0.5f));
+        } else {
+            float shift = s_feedBoxRightPx + 8.0f - x;
+
+            if (shift > W * 0.125f) {
+                shift = W * 0.125f;
+            }
+            x += (float)((int)(shift + 0.5f));
+        }
+    }
+
+    for (i = 0; i < n; i++) {
+        float  gx  = x + g[i].gw * 0.5f;
+        float  rx  = (float)((int)(gx - g[i].r2 * 0.5f));
+        float  dim = (kind == 3) ? 0.45f : 1.0f;
+        vec4_t c;
+
+        c[0] = c[1] = c[2] = 1.0f;
+        c[3]                = alpha * dim;
+        cgi.R_SetColor(c);
+        cgi.R_DrawStretchPic(
+            (float)((int)(gx - g[i].dw * 0.5f)), (float)((int)(yc - g[i].dh * 0.5f)), g[i].dw, g[i].dh, 0.0f, 0.0f, 1.0f,
+            1.0f, g[i].sh
+        );
+
+        if (g[i].what == 0) {
+            float w = CG_LootKeycap(font, keyLabel, rx, rowY, capH, alpha);
+
+            CG_LootText(
+                font, shortName, rx + w + 6.0f * s, rowY + (capH - textH) * 0.5f - 1.0f * cgs.uiHiResScale[1], 0.94f,
+                0.91f, 0.84f, alpha
+            );
+        } else if (kind == 3) {
+            CG_LootText(
+                font, "Full", rx, rowY + (capH - textH) * 0.5f - 1.0f * cgs.uiHiResScale[1], 0.94f, 0.91f, 0.84f,
+                alpha * 0.55f
+            );
+        } else {
+            float w  = CG_LootKeycap(font, keyLabel, rx, rowY, capH, alpha);
+            float tx = (float)((int)(rx + w + 6.0f * s));
+            float ty = (float)((int)(rowY + (capH - trackH) * 0.5f));
+
+            // the track: a dark slot with a thin cream rim, so an EMPTY track already says "hold"
+            CG_LootBox(tx - 2.0f, ty - 2.0f, trackW + 4.0f, trackH + 4.0f, 0.05f, 0.045f, 0.04f, 0.67f * alpha);
+            CG_LootBox(tx - 1.0f, ty - 1.0f, trackW + 2.0f, 1.0f, 0.94f, 0.91f, 0.84f, 0.58f * alpha);
+            CG_LootBox(tx - 1.0f, ty + trackH, trackW + 2.0f, 1.0f, 0.94f, 0.91f, 0.84f, 0.58f * alpha);
+            CG_LootBox(tx - 1.0f, ty, 1.0f, trackH, 0.94f, 0.91f, 0.84f, 0.58f * alpha);
+            CG_LootBox(tx + trackW, ty, 1.0f, trackH, 0.94f, 0.91f, 0.84f, 0.58f * alpha);
+            if (frac > 0.0f && fillA > 0.0f) {
+                CG_LootBox(tx, ty, (float)((int)(trackW * frac + 0.5f)), trackH, 0.94f, 0.91f, 0.84f, 0.94f * alpha * fillA);
+            }
+        }
+        x += g[i].gw + gap;
     }
     cgi.R_SetColor(NULL);
 }
