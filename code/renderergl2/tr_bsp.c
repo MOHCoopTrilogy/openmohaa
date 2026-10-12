@@ -3574,6 +3574,9 @@ void RE_LoadWorldMap( const char *name ) {
 	// try will not look at the partially loaded version
 	tr.world = NULL;
 
+	// HZM gl2 volumetric clouds: no profile until this world is loaded and checked (plan 2.4 State)
+	R_HZM_Clouds_MapStart();
+
 	Com_Memset( &s_worldData, 0, sizeof( s_worldData ) );
 	Q_strncpyz( s_worldData.name, name, sizeof( s_worldData.name ) );
 
@@ -4093,6 +4096,8 @@ void RE_LoadWorldMap( const char *name ) {
     R_GfxProbe_WorldLoaded(name);
     // HZM coop [2026-10-05] sky fog model: which worlds keep the legacy sky fog (Omaha / dday2 / m3l2 / m3l3)
     R_HZM_SkyFogMapLoaded();
+    // HZM gl2 volumetric clouds: attach the africanight profile (or say why not) - the ^~^~^ CLOUDS line
+    R_HZM_Clouds_MapLoaded(s_worldData.baseName);
     //=========================
 }
 

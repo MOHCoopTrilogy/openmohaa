@@ -157,6 +157,12 @@ protected:
     void             EventCoopGoreGibMark(Event *ev);        // HZM coop - gore tier 1e: script mark for scripted blasts
     void             EventCoopGoreDecapMark(Event *ev);      // HZM coop [user 2026-09-03] - script-forced decapitation (authored set piece)
     void             EventCoopBlastShield(Event *ev);        // HZM coop - bug-1586: mission-critical blast immunity
+    void             CoopGoreTryArtery(int location, int meansofdeath, const Vector &position, Entity *attacker); // HZM coop [gore phase A] artery spurt + bleed-out
+    void             CoopArteryEnterStage(int stage);        // HZM coop [gore phase A] heartbeat stage machine
+    void             CoopArteryOnDeath(void);                // HZM coop [gore phase A] pressure drops when the heart stops
+    void             CoopArteryStop(void);                   // HZM coop [gore phase A] remove the jet, orphan queued beats
+    void             CoopArteryPulse(void);                  // HZM coop [gore phase A] one heartbeat: flip the jet's anim, queue the next
+    void             EventCoopArteryBeat(Event *ev);         // HZM coop [gore phase A] queued heartbeat stage change
     void             CoopGoreTryWoundProp(int location, int meansofdeath, const Vector &position); // HZM coop - gore tier 3: wound prop at the hit point (bug-735: entry-point attach)
     void             CoopHeadshotKillFx(const Vector &pos, const Vector &dir); // HZM coop - guaranteed burst+wall-splat on a confirmed headshot kill
     void             CoopGoreDisfigureHead(void);             // HZM coop [user 2026-08-17] - headshot kill: force the HEAD surface to the gib-tier face
@@ -288,6 +294,17 @@ public:
     qboolean          m_bCoopHeadGore;         // HZM coop [user 2026-08-17] - a confirmed headshot KILL has
                                                // disfigured this corpse's head surface; the body tier loop
                                                // must never walk it back down
+    SafePtr<Entity>   m_pCoopArtery;           // HZM coop [gore phase A] attached pulsing artery jet (NULL = none)
+    SafePtr<Entity>   m_pCoopArteryAttacker;   // HZM coop [gore phase A] who opened it - credited with the bleed-out kill
+    int               m_iCoopArteryStage;      // HZM coop [gore phase A] 0 none, 1 strong, 2 mid, 3 weak, 4 bleed-out
+    int               m_iCoopArteryDir;        // HZM coop [gore phase A] jet side: 0..3 = bone-local +Y/-Y/+Z/-Z
+    int               m_iCoopArteryMod;        // HZM coop [gore phase A] means of death of the opening hit
+    int               m_iCoopArteryLoc;        // HZM coop [gore phase A] hit location of the opening hit (the bleed-out dies of it)
+    int               m_iCoopArteryGen;       // HZM coop [gore phase A] beat generation - stale queued beats are ignored
+    qboolean          m_bCoopArteryDying;      // HZM coop [gore phase A] victim is dead: weak beats, then stop
+    int               m_iCoopArteryNext;       // HZM coop [gore phase A] stage entered when this one ends
+    int               m_iCoopArteryFlip;       // HZM coop [gore phase A] a/b anim toggle - one flip per heartbeat
+    float             m_fCoopArteryStageEnd;   // HZM coop [gore phase A] level.time the current stage ends
     bool              m_bForceDropHealth;
     bool              m_bForceDropWeapon;
     bool m_bCoopSidearmSwap;   // HZM coop - already swapped to a sidearm once (hand shot)

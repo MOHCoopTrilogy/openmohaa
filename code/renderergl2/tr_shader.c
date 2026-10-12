@@ -2350,6 +2350,8 @@ static void ParseSkyParms( char **text ) {
 		ri.Printf( PRINT_WARNING, "WARNING: 'skyParms' missing parameter in shader '%s'\n", shader.name );
 		return;
 	}
+	// HZM gl2 volumetric clouds: the outer-box token as parsed, before any HD swap (R_HZM_CloudsFingerprint)
+	Q_strncpyz( shader.sky.hzmBoxName, strcmp( token, "-" ) ? token : "", sizeof( shader.sky.hzmBoxName ) );
 	if ( strcmp( token, "-" ) ) {
 		// HZM gl2 [2026-09-25] r_skyHD - HD replacement boxes under NEW names env/hzmhd/<box minus "env/">_<suf>.tga
 		// (docs/tools/gen_sky_hd.py). New names cannot lose a .dds/.jpg/.tga or pak-order contest (TRAPS T6).
@@ -4255,6 +4257,8 @@ static shader_t *FinishShader( void ) {
 
 	// HZM gl2 [2026-09-25] r_skyHD sky layers - after the bundles are final, before any collapse/copy
 	if ( shader.isSky ) {
+		// HZM gl2 volumetric clouds: fingerprint the parsed stages BEFORE the HD swap (plan 2.3, vet E13)
+		R_HZM_CloudsFingerprint( &shader, stages );
 		R_HZM_SkyHDLayers();
 	}
 

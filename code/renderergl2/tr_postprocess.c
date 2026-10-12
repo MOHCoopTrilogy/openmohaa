@@ -289,6 +289,11 @@ void RB_ToneMap(FBO_t *hdrFbo, ivec4_t hdrBox, FBO_t *ldrFbo, ivec4_t ldrBox, in
 			grade[2] = sat;
 			grade[3] = temp;
 
+			// HZM gl2 volumetric clouds: the animated cloud-masked dither samples tr.renderDepthImage, so write through
+			// screenScratch's depth-less alias (same colour image) while it is on - no feedback loop (tr_fbo.c globalFogFbo)
+			if (RB_HZM_CloudsToneDither(&tr.tonemapHzmShader) && ldrFbo == tr.screenScratchFbo)
+				ldrFbo = tr.globalFogFbo;
+
 			// HZM coop [2026-09-28] storm darkness: the display-referred gain rides u_HzmParams.x (0 = none, every
 			// other user of that spare vec4 sets and clears its own)
 			if (R_HZM_Storm()->active) {
@@ -314,6 +319,10 @@ void RB_ToneMap(FBO_t *hdrFbo, ivec4_t hdrBox, FBO_t *ldrFbo, ivec4_t ldrBox, in
 		GL_BindToTMU(tr.calcLevelsImage,  TB_LEVELSMAP);
 	else
 		GL_BindToTMU(tr.fixedLevelsImage, TB_LEVELSMAP);
+
+	// HZM gl2 volumetric clouds: the same dither on the Hable path (see the grade path above)
+	if (RB_HZM_CloudsToneDither(&tr.tonemapShader) && ldrFbo == tr.screenScratchFbo)
+		ldrFbo = tr.globalFogFbo;
 
 	FBO_Blit(hdrFbo, hdrBox, NULL, ldrFbo, ldrBox, &tr.tonemapShader, color, 0);
 }

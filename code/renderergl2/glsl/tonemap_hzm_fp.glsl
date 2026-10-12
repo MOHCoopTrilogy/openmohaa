@@ -22,6 +22,45 @@ varying vec2      var_TexCoords;
 // tr_postprocess.c RB_ToneMap set it). A gain after the curve keeps the ACES toe, which an exposure cut crushes.
 uniform vec4      u_HzmParams;
 
+// HZM gl2 volumetric clouds (tr_hzm_clouds.c RB_HZM_CloudsToneDither; plan 2.4 step 4): an ANIMATED cloud-masked
+// triangular dither right before the RGBA8 write. u_VclDither.x = amplitude / 255 (0 = off: this pass is then
+// byte-identical), y = the golden-ratio frame offset, z = 1 - the sky's fog fraction. The mask is the cloud presence
+// from the tent target x sky (depth at the far plane) - vc_post.py chain(mask=presence*sky*(1-f), dframe=frame).
+uniform sampler2D u_VclCloud;
+uniform sampler2D u_ScreenDepthMap;
+uniform vec4      u_VclDither;
+uniform vec4      u_VclVp;
+uniform vec4      u_VclMisc;
+uniform vec4      u_VclView;
+
+float VclIgn(vec2 p)
+{
+	return fract(52.9829189 * fract(0.06711056 * p.x + 0.00583715 * p.y));
+}
+
+vec3 VclDither(vec3 c)
+{
+	if (u_VclDither.x <= 0.0)
+	{
+		return c;
+	}
+	vec2 uv = (gl_FragCoord.xy - u_VclVp.xy) * u_VclVp.zw;
+	if (uv.x < 0.0 || uv.y < 0.0 || uv.x > 1.0 || uv.y > 1.0)
+	{
+		return c;
+	}
+	if (texture2D(u_ScreenDepthMap, gl_FragCoord.xy * u_VclView.zw).r < 1.0)
+	{
+		return c;
+	}
+	vec2 tp = clamp(uv * u_VclMisc.zw, vec2(0.5), u_VclMisc.zw - vec2(0.5));
+	vec4 cl = texture2D(u_VclCloud, tp * u_VclView.xy);
+	float pres = clamp(max(1.0 - cl.a, max(cl.r, max(cl.g, cl.b)) * 4.0) * 8.0, 0.0, 1.0) * u_VclDither.z;
+	vec2 p = floor(gl_FragCoord.xy) + vec2(u_VclDither.y);
+	float n = VclIgn(p) + VclIgn(p + vec2(17.0, 31.0)) - 1.0;
+	return c + vec3(n * u_VclDither.x * pres);
+}
+
 void main()
 {
 	// gl1 grades the CLAMPED 8-bit backbuffer; gl2's source is a float HDR FBO whose values
@@ -44,5 +83,5 @@ void main()
 	c.b = clamp(c.b * (1.0 - u_Color.w), 0.0, 1.0);
 
 	c *= 1.0 - u_HzmParams.x;   // HZM coop [2026-09-28] storm darkness
-	gl_FragColor = vec4(c, 1.0);
+	gl_FragColor = vec4(VclDither(c), 1.0);
 }

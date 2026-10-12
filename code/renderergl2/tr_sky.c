@@ -820,6 +820,57 @@ void R_InitSkyTexCoords( float heightCloud )
 	}
 }
 
+/*
+** R_HZM_SkyVertexTable - HZM gl2 volumetric clouds (tr_hzm_clouds.c, plan 2.4 / vet R2-1): the SAME per-vertex dome
+** (s,t) R_InitSkyTexCoords computes, into the caller's table instead of s_cloudTexCoords (which holds whatever sky
+** was parsed last). zFar is set to 1024 exactly as R_InitSkyTexCoords does, then restored.
+*/
+void R_HZM_SkyVertexTable( float heightCloud, float out[6][SKY_SUBDIVISIONS+1][SKY_SUBDIVISIONS+1][2] )
+{
+	int i, s, t;
+	float radiusWorld = 4096;
+	float p;
+	vec3_t skyVec;
+	vec3_t v;
+	float savedZFar = backEnd.viewParms.zFar;
+
+	backEnd.viewParms.zFar = 1024;
+
+	for ( i = 0; i < 6; i++ )
+	{
+		for ( t = 0; t <= SKY_SUBDIVISIONS; t++ )
+		{
+			for ( s = 0; s <= SKY_SUBDIVISIONS; s++ )
+			{
+				MakeSkyVec( ( s - HALF_SKY_SUBDIVISIONS ) / ( float ) HALF_SKY_SUBDIVISIONS, 
+							( t - HALF_SKY_SUBDIVISIONS ) / ( float ) HALF_SKY_SUBDIVISIONS, 
+							i, 
+							NULL,
+							skyVec );
+
+				p = ( 1.0f / ( 2 * DotProduct( skyVec, skyVec ) ) ) *
+					( -2 * skyVec[2] * radiusWorld + 
+					   2 * sqrt( SQR( skyVec[2] ) * SQR( radiusWorld ) + 
+					             2 * SQR( skyVec[0] ) * radiusWorld * heightCloud +
+								 SQR( skyVec[0] ) * SQR( heightCloud ) + 
+								 2 * SQR( skyVec[1] ) * radiusWorld * heightCloud +
+								 SQR( skyVec[1] ) * SQR( heightCloud ) + 
+								 2 * SQR( skyVec[2] ) * radiusWorld * heightCloud +
+								 SQR( skyVec[2] ) * SQR( heightCloud ) ) );
+
+				VectorScale( skyVec, p, v );
+				v[2] += radiusWorld;
+				VectorNormalize( v );
+
+				out[i][t][s][0] = Q_acos( v[0] );
+				out[i][t][s][1] = Q_acos( v[1] );
+			}
+		}
+	}
+
+	backEnd.viewParms.zFar = savedZFar;
+}
+
 //======================================================================================
 
 /*
@@ -959,6 +1010,8 @@ void RB_StageIteratorSky( void ) {
 
 	// draw the inner skybox
 
+	// HZM gl2 volumetric clouds v1.1: the procedural profile's composite over this sky (still at depth range 1,1)
+	RB_HZM_CloudsSkyComposite();
 
 	// back to normal depth range
 	qglDepthRange( 0.0, 1.0 );
