@@ -939,6 +939,23 @@ void CG_ViewModelAnimation(refEntity_t *pModel)
             || cgi.anim->g_iLastVMAnim == VM_ANIM_RELOAD_END) {
             CoopPerWeaponReloadAnim(pTiki, pszAnimSuffix, szAnimName, sizeof(szAnimName));
         }
+        // HZM coop [revolver reload 2026-10-12] EMPTY GUN: a reload that STARTS on an empty magazine / cylinder plays
+        // `<row>_empty` when fps_anims defines it (user: "reloading could be as easy as dumping the entire rounds out
+        // if they are all spent") - the row carries what only an empty gun shows, e.g. the cases falling as a
+        // top-break opens. No row = the normal reload row, silently. The `_ads` step below then looks for
+        // `<row>_empty_ads`. Client-only; the clip ammo is the snapshot's, so every client that predicts it agrees.
+        if (cgi.anim->g_iLastVMAnim == VM_ANIM_RELOAD && cg.snap && cg.snap->ps.stats[STAT_MAXCLIPAMMO] > 0
+            && cg.snap->ps.stats[STAT_CLIPAMMO] == 0) {
+            static cvar_t *pEmptyRows = NULL;
+            char           szEmpty[MAX_QPATH];
+            if (!pEmptyRows) {
+                pEmptyRows = cgi.Cvar_Get("coop_vmEmptyReload", "1", 0);
+            }
+            Com_sprintf(szEmpty, sizeof(szEmpty), "%s_empty", szAnimName);
+            if (pEmptyRows->integer && cgi.Anim_NumForName(pTiki, szEmpty) != -1) {
+                Q_strncpyz(szAnimName, szEmpty, sizeof(szAnimName));
+            }
+        }
         // HZM coop [adsanim 2026-10-04 / adsbolt] AIMED BOLT: a reload or bolt that starts while aiming plays the
         // gun's dedicated `<prefix>_<suffix>_ads` clip when fps_anims defines one (hand-keyed to start and end in
         // the `charge` aim pose with the cheek near the stock), and the slot is flagged as an aim pose below so the
