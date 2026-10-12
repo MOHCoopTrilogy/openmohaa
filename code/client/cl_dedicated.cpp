@@ -84,7 +84,8 @@ static qboolean   s_connectPending;
 static const char *s_hostInts[] = {
 	"coop_health", "coop_lmsLives",
 	// HOST RULES (ui/coop_hostrules.urc)
-	"coop_bloodTrail", "coop_chalPopup", "coop_coverAuto", "coop_hardcore", "coop_tinnitus", "coop_xpKillPopup",
+	"coop_bloodTrail", "coop_chalPopup", "coop_coverAuto", "coop_hardcore", "coop_lmsLateJoin", "coop_tinnitus",
+	"coop_xpKillPopup",
 };
 
 static void Ded_Status( const char *fmt, ... ) {
