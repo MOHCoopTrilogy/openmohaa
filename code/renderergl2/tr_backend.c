@@ -1877,6 +1877,16 @@ const void	*RB_DrawSurfs( const void *data ) {
 			SetViewportAndScissor();
 		}
 
+		// HZM frame generation: motion vectors of what moves by itself, for the main world view only. The opaque
+		// scene depth is finished here (resolved, with multisampling). Nothing runs unless r_hzmFrameGen is on.
+		if (glRefConfig.framebufferObject && R_FG_Wanted() && backEnd.viewParms.targetFbo == NULL
+		    && !( backEnd.refdef.rdflags & RDF_NOWORLDMODEL )
+		    && !backEnd.viewParms.isPortal && !backEnd.viewParms.isPortalSky)
+		{
+			R_FG_VelocityPass( cmd->drawSurfs, cmd->numDrawSurfs );
+			SetViewportAndScissor();
+		}
+
 		if (glRefConfig.framebufferObject && r_drawSunRays->integer)
 		{
 			FBO_t *oldFbo = glState.currentFBO;

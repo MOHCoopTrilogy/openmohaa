@@ -229,6 +229,11 @@ void CG_Rain(centity_t *cent)
     if (iNumSpawn > MAX_BEAMS) {
         iNumSpawn = MAX_BEAMS;
     }
+    {
+        extern int   CG_HZMRainSpawnCount(int iPerFrame, float *pCarry);
+        static float sCarryBrush = 0.0f;
+        iNumSpawn = CG_HZMRainSpawnCount(iNumSpawn, &sCarryBrush); // HZM coop [bug-3558] by elapsed time
+    }
 
     iRandom = rand();
 
@@ -239,6 +244,11 @@ void CG_Rain(centity_t *cent)
     }
 
     for (i = 0; i < iNumSpawn; ++i) {
+        {
+            extern int CG_HZMRainSeed(void);
+            int        iSeed = CG_HZMRainSeed(); // HZM coop [bug-3552] a fresh seed for every drop
+            if (iSeed >= 0) { iRandom = iSeed; }
+        }
         vStart[0] = (float)(iRandom % (int)(vOe[0] + 1.0)) + vOmins[0];
         iRandom   = ((214013 * iRandom + 2531011) >> 16) & 0x7FFF;
         vStart[1] = (float)(iRandom % (int)(vOe[1] + 1.0)) + vOmins[1];
@@ -274,6 +284,12 @@ void CG_Rain(centity_t *cent)
         if (!CG_RainBrushDropVisible(vStart, vEnd, &iLife)) {
             continue;
         }
+        {
+            extern qboolean CG_HZMRainTooNearX(const vec3_t vStart, const vec3_t vEnd);
+            if (CG_HZMRainTooNearX(vStart, vEnd)) {
+                continue; // HZM coop [2026-10-12] near cull (see CG_HZMRainTooNear)
+            }
+        }
 
         CG_CreateBeam(
             vStart,
@@ -302,6 +318,94 @@ void CG_Rain(centity_t *cent)
             "raineffect"
         );
     }
+}
+
+// HZM coop [bug-3552] A DIFFERENT DROP EVERY TIME. Both spawn loops draw every coordinate of every drop from one
+// 15-bit generator ((214013 * x + 2531011) >> 16 & 0x7FFF), seeded once a frame. That map runs into a loop of 135
+// states after about 300 steps, so one frame could produce only ~96 different drops however many were asked for -
+// the rest were exact copies on the same paths. Ordinary rain asks for ~50 a frame and never showed it; anything
+// denser (the downpour tier, snow) drew stacks of copies: dotted trails, a solid white blade by the eye, and a
+// visible density that followed the frame rate, not the count. Each drop now starts from a fresh seed of a 32-bit
+// xorshift; the loop's own arithmetic after that is untouched. coop_rainSeed 1 (default; 0 = one seed a frame).
+int CG_HZMRainSeed(void)
+{
+    static cvar_t      *pSeed = NULL;
+    static unsigned int uState = 0;
+
+    if (!pSeed) { pSeed = cgi.Cvar_Get("coop_rainSeed", "1", 0); }
+    if (!pSeed->integer) {
+        return -1;
+    }
+    if (!uState) {
+        uState = ((unsigned int)rand() << 16) ^ (unsigned int)rand() ^ (unsigned int)cg.time ^ 0x9E3779B9u;
+        if (!uState) { uState = 1u; }
+    }
+    uState ^= uState << 13;
+    uState ^= uState >> 17;
+    uState ^= uState << 5;
+    return (int)((uState >> 9) & 0x7FFF);
+}
+
+// HZM coop [bug-3558] SPAWN BY TIME. The spawn count was per FRAME (sqrt(area) * density / 200 every frame), so a
+// 30 fps player drew half the rain of a 60 fps one and a 200 fps one over three times as much - and filled the 4096
+// streak pool that much sooner. The per-frame count is now scaled by the frame's length against a reference frame
+// rate: coop_rainByTime 1 (default; 0 = the old per-frame count), coop_rainRefFps 125 (the rate at which the count is
+// what it was: 125 is the frame cap the mod sets on a hosting machine, start_server.cfg, so the host's rain is unchanged). The fraction is carried to the next frame, so a count under one a frame still spawns; a frame
+// longer than four reference frames (a hitch) counts as four, so it never dumps a burst.
+int CG_HZMRainSpawnCount(int iPerFrame, float *pCarry)
+{
+    static cvar_t *pByTime = NULL;
+    static cvar_t *pRefFps = NULL;
+    float          fRef, fScale, fWant;
+
+    if (!pByTime) { pByTime = cgi.Cvar_Get("coop_rainByTime", "1", 0); }
+    if (!pRefFps) { pRefFps = cgi.Cvar_Get("coop_rainRefFps", "125", 0); }
+    if (!pByTime->integer) {
+        return iPerFrame;
+    }
+    fRef = pRefFps->value;
+    if (fRef < 20.0f) { fRef = 20.0f; } else if (fRef > 500.0f) { fRef = 500.0f; }
+    fScale = (float)cg.frametime * fRef / 1000.0f;
+    if (fScale < 0.0f) { fScale = 0.0f; } else if (fScale > 4.0f) { fScale = 4.0f; }
+    fWant     = (float)iPerFrame * fScale + *pCarry;
+    iPerFrame = (int)fWant;
+    *pCarry   = fWant - (float)iPerFrame;
+    if (iPerFrame > MAX_BEAMS) {
+        iPerFrame = MAX_BEAMS;
+    }
+    return iPerFrame;
+}
+
+// HZM coop [2026-10-12] NEAR CULL. A streak that passes within a few units of the eye is drawn as one white blade
+// across a strip of the screen - rare in ordinary rain, constant in the downpour tier (sixteen times the drops, long
+// streaks) and in the blizzard's driven flakes. A drop whose path - including the streak's own length trailing behind
+// the start - comes closer to the viewer than coop_rainNearCull units (default 36, 0 = off) is not spawned. Tested
+// against where the viewer is NOW: right for rain (a drop lives ~0.2 s), approximate for a flake that lives a second.
+static qboolean CG_HZMRainTooNear(const vec3_t vStart, const vec3_t vEnd)
+{
+    static cvar_t *pNear = NULL;
+    vec3_t         vDir, vA, vTo, vC, vD;
+    float          fLen, fT;
+
+    if (!pNear) { pNear = cgi.Cvar_Get("coop_rainNearCull", "36", 0); }
+    if (pNear->value <= 0.0f) {
+        return qfalse;
+    }
+    VectorSubtract(vEnd, vStart, vDir);
+    fLen = VectorNormalize(vDir);
+    VectorMA(vStart, -cg.rain.length, vDir, vA); // the streak trails this far behind the drop
+    fLen += cg.rain.length;
+    VectorSubtract(cg.refdef.vieworg, vA, vTo);
+    fT = DotProduct(vTo, vDir);
+    if (fT < 0.0f) { fT = 0.0f; } else if (fT > fLen) { fT = fLen; }
+    VectorMA(vA, fT, vDir, vC);
+    VectorSubtract(vC, cg.refdef.vieworg, vD);
+    return (VectorLengthSquared(vD) < pNear->value * pNear->value) ? qtrue : qfalse;
+}
+
+qboolean CG_HZMRainTooNearX(const vec3_t vStart, const vec3_t vEnd)
+{
+    return CG_HZMRainTooNear(vStart, vEnd);
 }
 
 // HZM coop - GLOBAL dynamic precipitation. Vanilla CG_Rain only renders inside a map-placed rain BRUSH
@@ -408,6 +512,10 @@ void CG_RainGlobal(void)
     if (iNumSpawn > MAX_BEAMS) {
         iNumSpawn = MAX_BEAMS;
     }
+    {
+        static float sCarryGlobal = 0.0f;
+        iNumSpawn = CG_HZMRainSpawnCount(iNumSpawn, &sCarryGlobal); // HZM coop [bug-3558] by elapsed time
+    }
 
     iSlant     = (cg.rain.slant < 1) ? 1 : cg.rain.slant;            // snow uses slant 1; guard div-by-zero
     iSpeedVary = (cg.rain.speed_vary < 1) ? 1 : cg.rain.speed_vary;  // guard div-by-zero
@@ -419,6 +527,10 @@ void CG_RainGlobal(void)
         trace_t skyTr;
         vec3_t  vSkyStart, vSkyEnd;
 
+        {
+            int iSeed = CG_HZMRainSeed(); // HZM coop [bug-3552] a fresh seed for every drop
+            if (iSeed >= 0) { iRandom = iSeed; }
+        }
         vStart[0] = (float)(iRandom % (int)(vOe[0] + 1.0f)) + vOmins[0];
         iRandom   = ((214013 * iRandom + 2531011) >> 16) & 0x7FFF;
         vStart[1] = (float)(iRandom % (int)(vOe[1] + 1.0f)) + vOmins[1];
@@ -525,6 +637,9 @@ void CG_RainGlobal(void)
             }
         }
 
+        if (CG_HZMRainTooNear(vStart, vEnd)) {
+            continue; // HZM coop [2026-10-12] near cull
+        }
         CG_CreateBeam(
             vStart, vec_zero, 0, 1, 1.0, cg.rain.width, BEAM_INVERTED_FAST, 1000.0, iLife, qtrue,
             vEnd, 0, 0, 0, 1, 0, shadername, fcolor, 0, 0.0, cg.rain.length, 1.0, 0, "raineffect"

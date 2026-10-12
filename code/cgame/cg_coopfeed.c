@@ -66,6 +66,7 @@ typedef struct {
     int       hintMark;   // category 4: mark the key seen on its first visible frame
     float     y;      // current bottom offset (units, animated)
     int       placed;
+    int       seq;    // arrival order on the rows: two lines placed in one frame have the same born
 } feedLine_t;
 
 // [user 2026-10-06, feed round 2] "No line may be lost when several arrive in one frame". Until now a 4th line pushed
@@ -89,6 +90,14 @@ static int           s_pendN      = 0;
 static fontheader_t *s_feedFont   = NULL;
 static int           s_feedInit   = 0;
 static int           s_feedLastT  = 0;
+// [user 2026-10-12, feed round 3, bug-3543] "the feed holds a line while the HUD is hidden and starts its clock when
+// the HUD returns". Until now a line went on ageing under drawhud 0 / a cinematic and was gone before anyone saw it
+// (e3l3's "weapons are secured" fires during the mission title). While hidden, every clock stands still
+// (CG_DrawCoopFeed) and at most FEED_HELD_MAX lines are kept: a newer line pushes out the oldest that is NOT an
+// alert, and an alert is never pushed out (CG_FeedHeldCap). Not held: the intermission (the map is over).
+#define FEED_HELD_MAX 6
+static int           s_feedHidden = 0;
+static int           s_feedSeq    = 0;
 static cvar_t       *s_cvFeed     = NULL;
 static cvar_t       *s_cvHints    = NULL;
 static cvar_t       *s_cvX        = NULL;
@@ -311,8 +320,48 @@ static qboolean CG_FeedLive(const feedLine_t *e, int now)
     return (e->active && !e->dieAt && now < e->refresh + e->hold) ? qtrue : qfalse;
 }
 
-static qboolean CG_FeedMakeRoom(int now, qboolean force);
+static qboolean CG_FeedMakeRoom(int now, qboolean force, int cat);
 static void     CG_FeedPlace(int cat, const char *key, const char *icon, const char *text, int count, int now, int arrived);
+
+/*
+The HUD is hidden and one more line has arrived: keep at most FEED_HELD_MAX (rows + waiting). Over that, the oldest
+line that is not an alert goes - from the rows first (they are older than anything waiting), then from the waiting
+list. Returns qfalse when everything held is an alert and the new line is not: then the new line is the one not kept.
+*/
+static qboolean CG_FeedHeldCap(int cat, int now)
+{
+    int i, held = s_pendN, oldest = -1;
+
+    for (i = 0; i < FEED_SLOTS; i++) {
+        if (CG_FeedLive(&s_feed[i], now)) {
+            held++;
+            if (s_feed[i].cat != 0 && (oldest < 0 || s_feed[i].born < s_feed[oldest].born)) {
+                oldest = i;
+            }
+        }
+    }
+    if (held < FEED_HELD_MAX) {
+        return qtrue;
+    }
+    if (oldest >= 0) {
+        if (s_cvDebug && s_cvDebug->integer) {
+            cgi.Printf("^~^~^ FEEDHELD drop row cat=%d key=%s\n", s_feed[oldest].cat, s_feed[oldest].key);
+        }
+        s_feed[oldest].active = 0;
+        return qtrue;
+    }
+    for (i = 0; i < s_pendN; i++) {
+        if (s_pend[i].cat != 0) {
+            if (s_cvDebug && s_cvDebug->integer) {
+                cgi.Printf("^~^~^ FEEDHELD drop waiting cat=%d key=%s\n", s_pend[i].cat, s_pend[i].key);
+            }
+            s_pendN--;
+            memmove(&s_pend[i], &s_pend[i + 1], sizeof(s_pend[0]) * (s_pendN - i));
+            return qtrue;
+        }
+    }
+    return (cat == 0) ? qtrue : qfalse;
+}
 
 static void CG_FeedPush(int cat, const char *key, const char *icon, const char *text)
 {
@@ -352,14 +401,20 @@ static void CG_FeedPush(int cat, const char *key, const char *icon, const char *
             return;
         }
     }
+    if (s_feedHidden && !CG_FeedHeldCap(cat, now)) {
+        if (s_cvDebug && s_cvDebug->integer) {
+            cgi.Printf("^~^~^ FEEDHELD not kept cat=%d key=%s\n", cat, key);
+        }
+        return;
+    }
     // a row is free (or its line has had FEED_MIN_SHOW) and nobody is ahead: show it now
-    if (!s_pendN && CG_FeedMakeRoom(now, qfalse)) {
+    if (!s_pendN && CG_FeedMakeRoom(now, qfalse, cat)) {
         CG_FeedPlace(cat, key, icon, text, 1, now, now);
         return;
     }
     // otherwise it waits. A full queue sends its head up early rather than drop anything.
     if (s_pendN >= FEED_PENDING) {
-        CG_FeedMakeRoom(now, qtrue);
+        CG_FeedMakeRoom(now, qtrue, s_pend[0].cat);
         CG_FeedPlace(s_pend[0].cat, s_pend[0].key, s_pend[0].icon, s_pend[0].text, s_pend[0].count, now, s_pend[0].at);
         s_pendN--;
         memmove(&s_pend[0], &s_pend[1], sizeof(s_pend[0]) * s_pendN);
@@ -393,7 +448,7 @@ static void CG_FeedDrain(int now)
     if (s_pendN > 0 && s_pend[0].at > now + 1000) {
         s_pendN = 0;
     }
-    while (s_pendN > 0 && CG_FeedMakeRoom(now, qfalse)) {
+    while (s_pendN > 0 && CG_FeedMakeRoom(now, qfalse, s_pend[0].cat)) {
         CG_FeedPlace(s_pend[0].cat, s_pend[0].key, s_pend[0].icon, s_pend[0].text, s_pend[0].count, now, s_pend[0].at);
         s_pendN--;
         memmove(&s_pend[0], &s_pend[1], sizeof(s_pend[0]) * s_pendN);
@@ -403,10 +458,14 @@ static void CG_FeedDrain(int now)
 /*
 Is there a row for one more line right now? Yes when fewer than FEED_VISIBLE lines are live, or when the oldest live
 line has been up for FEED_MIN_SHOW - it then leaves with the fast fade. force = take its row whatever its age.
+[user 2026-10-12, feed round 3] An alert keeps its row for its whole time: the row that is given up is the oldest
+that is NOT an alert, and when all three are alerts only another alert (cat 0) may take one. Until now three
+informational lines waiting behind an alert took its row after FEED_MIN_SHOW - seen when a held alert came back with
+the HUD and was gone 1.5 s later.
 */
-static qboolean CG_FeedMakeRoom(int now, qboolean force)
+static qboolean CG_FeedMakeRoom(int now, qboolean force, int cat)
 {
-    int i, live = 0, oldest = -1;
+    int i, live = 0, oldest = -1, oldestInfo = -1;
 
     for (i = 0; i < FEED_SLOTS; i++) {
         if (CG_FeedLive(&s_feed[i], now)) {
@@ -414,10 +473,18 @@ static qboolean CG_FeedMakeRoom(int now, qboolean force)
             if (oldest < 0 || s_feed[i].born < s_feed[oldest].born) {
                 oldest = i;
             }
+            if (s_feed[i].cat != 0 && (oldestInfo < 0 || s_feed[i].born < s_feed[oldestInfo].born)) {
+                oldestInfo = i;
+            }
         }
     }
     if (live < FEED_VISIBLE || oldest < 0) {
         return qtrue;
+    }
+    if (oldestInfo >= 0) {
+        oldest = oldestInfo;
+    } else if (cat != 0 && !force) {
+        return qfalse;
     }
     if (!force && now - s_feed[oldest].born < FEED_MIN_SHOW) {
         return qfalse;
@@ -461,6 +528,7 @@ static void CG_FeedPlace(int cat, const char *key, const char *icon, const char 
     e = &s_feed[slot];
     memset(e, 0, sizeof(*e));
     e->active  = 1;
+    e->seq     = ++s_feedSeq;
     e->cat     = cat;
     e->count   = count > 0 ? count : 1;
     e->born    = now;
@@ -794,10 +862,19 @@ typedef struct {
     char        key[16];
 } coopItem_t;
 
-static coopItem_t s_coopItems[3] = {
-    {"coop_hudMed",  "append name ,8mk", "textures/hud/coop_medkit_icon",  NULL, 0, ""},
-    {"coop_hudCov",  "append name ,9cv", "textures/hud/coop_cover_icon",   NULL, 0, ""},
-    {"coop_hudAmmo", "append name ,abx", "textures/hud/coop_ammobox_icon", NULL, 0, ""},
+// [user 2026-10-12] "the new text on the left side also seems to overlap with the paradrop and airstrike icons when
+// you get those" / "those icons could also be made smaller and higher def like your new icons you just did with
+// hotkeys". The two officer rewards were script HUD pairs (officer.scr slots 50-53) in this same corner. They are
+// entries of this row now: coop_hudBinoc = bombing-run strikes left (the binoculars; selected with the pistol
+// key), coop_hudSmoke = "y" while the signal smoke is carried (no amount; thrown from the grenade key). Only the
+// carrier's client is sent a value, so the entry is absent for everyone else. Art: docs/tools/gen_reward_icons.py.
+#define COOPITEM_N 5
+static coopItem_t s_coopItems[COOPITEM_N] = {
+    {"coop_hudMed",   "append name ,8mk",       "textures/hud/coop_medkit_icon",     NULL, 0, ""},
+    {"coop_hudCov",   "append name ,9cv",       "textures/hud/coop_cover_icon",      NULL, 0, ""},
+    {"coop_hudAmmo",  "append name ,abx",       "textures/hud/coop_ammobox_icon",    NULL, 0, ""},
+    {"coop_hudBinoc", "useweaponclass pistol",  "textures/hud/coop_reward_strike",   NULL, 0, ""},
+    {"coop_hudSmoke", "useweaponclass grenade", "textures/hud/coop_reward_paradrop", NULL, 0, ""},
 };
 
 // A key name as it is shown under an icon: upper case, and the long ones shortened so that what tells two keys
@@ -889,7 +966,7 @@ static void CG_CoopItemKeys(void)
         return;
     }
     nextMs = cg.time + 1000; // bindings change in a menu, never mid-frame: once a second is plenty
-    for (i = 0; i < 3; i++) {
+    for (i = 0; i < COOPITEM_N; i++) {
         coopItem_t *it = &s_coopItems[i];
         const char *nm;
 
@@ -916,6 +993,8 @@ static void CG_CoopItemKeys(void)
     }
 }
 
+#define COOPITEM_WAKE_MS 3500 // how long a changed amount keeps the readout up while the HUD is faded
+
 static void CG_DrawCoopItems(void)
 {
     fontheader_t *font = CG_FeedFont();
@@ -924,6 +1003,7 @@ static void CG_DrawCoopItems(void)
     float         iconPx, topPx, pitchPx, xPx, textH;
     vec4_t        c;
     int           i, shown = 0;
+    float         fade;
 
     if (!font || sx <= 0.0f || sy <= 0.0f) {
         return;
@@ -934,6 +1014,53 @@ static void CG_DrawCoopItems(void)
     }
     CG_CoopItemKeys();
 
+    // [user 2026-10-12] the readout fades with the rest of the HUD (it sat in the feed's fade-exempt file and never
+    // did). ui_hudAlpha is the HUD auto-fade as cg_drawtools.cpp publishes it (1 when coop_hudFade is off). A change
+    // in any amount brings the readout back for COOPITEM_WAKE_MS by itself - using a medkit does not otherwise wake
+    // the HUD - and it then eases down to the HUD's own value again.
+    {
+        static cvar_t *pHudA = NULL;
+        static char    last[COOPITEM_N][8];
+        static int     wakeUntil = 0;
+        float          wake = 0.0f;
+
+        if (!pHudA) {
+            pHudA = cgi.Cvar_Get("ui_hudAlpha", "1", 0);
+        }
+        for (i = 0; i < COOPITEM_N; i++) {
+            coopItem_t *it = &s_coopItems[i];
+
+            if (!it->cv) {
+                it->cv = cgi.Cvar_Get(it->cvarName, "", 0);
+            }
+            if (Q_strncmp(last[i], it->cv->string, sizeof(last[i]) - 1)) {
+                Q_strncpyz(last[i], it->cv->string, sizeof(last[i]));
+                wakeUntil = cg.time + COOPITEM_WAKE_MS;
+            }
+        }
+        if (cg.time < wakeUntil) {
+            wake = (float)(wakeUntil - cg.time) / 600.0f; // the last 0.6 s of the wake is the ease-out
+            if (wake > 1.0f) {
+                wake = 1.0f;
+            }
+        } else if (wakeUntil - cg.time > COOPITEM_WAKE_MS) {
+            wakeUntil = 0; // cg.time went backwards (new map)
+        }
+        fade = pHudA->value;
+        if (fade < 0.0f) {
+            fade = 0.0f;
+        }
+        if (fade > 1.0f) {
+            fade = 1.0f;
+        }
+        if (wake > fade) {
+            fade = wake;
+        }
+        if (fade <= 0.02f) {
+            return;
+        }
+    }
+
     topPx   = CG_CoopItemsTopPx(&iconPx);
     pitchPx = iconPx + COOPITEM_GAP_V * vs;
     if (pitchPx < COOPITEM_KEY_PX * sx) {
@@ -942,7 +1069,7 @@ static void CG_DrawCoopItems(void)
     textH = 12.0f * sy;
     xPx   = COOPITEM_LEFT_V * vs;
 
-    for (i = 0; i < 3; i++) {
+    for (i = 0; i < COOPITEM_N; i++) {
         coopItem_t *it = &s_coopItems[i];
         const char *v;
         char        num[8], key[16];
@@ -962,7 +1089,7 @@ static void CG_DrawCoopItems(void)
 
         // icon
         c[0] = c[1] = c[2] = 1.0f;
-        c[3]                = 0.92f;
+        c[3]                = 0.92f * fade;
         cgi.R_SetColor(c);
         cgi.R_DrawStretchPic(xPx, topPx, iconPx, iconPx, 0.0f, 0.0f, 1.0f, 1.0f, it->hShader);
 
@@ -978,11 +1105,11 @@ static void CG_DrawCoopItems(void)
             tx = (xPx + iconPx - 1.0f) / sx;
             ty = (topPx + iconPx - textH * 0.55f) / sy;
             c[0] = c[1] = c[2] = 0.0f;
-            c[3]                = 0.85f;
+            c[3]                = 0.85f * fade;
             cgi.R_SetColor(c);
             cgi.R_DrawString(font, num, tx + 1.0f, ty + 1.0f, -1, cgs.uiHiResScale);
             c[0] = c[1] = c[2] = (num[0] == '0' && !num[1]) ? 0.62f : 1.0f; // an empty slot reads dimmer
-            c[3]                = 0.95f;
+            c[3]                = 0.95f * fade;
             cgi.R_SetColor(c);
             cgi.R_DrawString(font, num, tx, ty, -1, cgs.uiHiResScale);
         }
@@ -1001,13 +1128,13 @@ static void CG_DrawCoopItems(void)
             }
             ty = (topPx + iconPx + textH * 0.50f) / sy;
             c[0] = c[1] = c[2] = 0.0f;
-            c[3]                = 0.70f;
+            c[3]                = 0.70f * fade;
             cgi.R_SetColor(c);
             cgi.R_DrawString(font, key, tx + 1.0f, ty + 1.0f, -1, cgs.uiHiResScale);
             c[0] = 0.80f;
             c[1] = 0.76f;
             c[2] = 0.62f;
-            c[3] = 0.78f;
+            c[3] = 0.78f * fade;
             cgi.R_SetColor(c);
             cgi.R_DrawString(font, key, tx, ty, -1, cgs.uiHiResScale);
         }
@@ -1047,8 +1174,62 @@ void CG_DrawCoopFeed(qboolean cineHide)
         CG_DrawCoopPinned();        // [bug-3485] not part of the feed: coop_feed 0 does not hide it
     }
     now = cg.time;
-    CG_FeedDrain(now);
     dt  = now - s_feedLastT;
+    // hidden by drawhud 0 or a cinematic: hold the lines - every clock is moved along with the time, so nothing ages,
+    // fades or gives up its row. Not for a gap of more than a second between two calls (a map load).
+    i = (cineHide || (cg.snap && (cg.snap->ps.pm_flags & PMF_NO_HUD) && !(cg.snap->ps.pm_flags & PMF_INTERMISSION))) ? 1 : 0;
+    if (i) {
+        if (dt > 0 && dt <= 1000) {
+            for (j = 0; j < FEED_SLOTS; j++) {
+                if (s_feed[j].active) {
+                    s_feed[j].born    += dt;
+                    s_feed[j].refresh += dt;
+                    if (s_feed[j].dieAt) {
+                        s_feed[j].dieAt += dt;
+                    }
+                }
+            }
+        }
+    } else if (s_feedHidden) {
+        // the HUD is back: what was held starts its clock now; a line that was already leaving is not brought back
+        k = 0;
+        for (j = 0; j < FEED_SLOTS; j++) {
+            if (!s_feed[j].active) {
+                continue;
+            }
+            if (!CG_FeedLive(&s_feed[j], now)) {
+                s_feed[j].active = 0;
+                continue;
+            }
+            s_feed[j].refresh = now;
+            k++;
+        }
+        // all start now, in the order they arrived (the rows are sorted by born): 1 ms apart is enough
+        for (j = 0; j < FEED_SLOTS; j++) {
+            int m;
+
+            order[j] = 0; // how many held rows are NEWER than row j
+            if (!s_feed[j].active) {
+                continue;
+            }
+            for (m = 0; m < FEED_SLOTS; m++) {
+                // by arrival, not by born: every line placed while hidden has had its born moved to the same frame
+                if (m != j && s_feed[m].active && s_feed[m].seq > s_feed[j].seq) {
+                    order[j]++;
+                }
+            }
+        }
+        for (j = 0; j < FEED_SLOTS; j++) {
+            if (s_feed[j].active) {
+                s_feed[j].born = now - order[j];
+            }
+        }
+        if (s_cvDebug && s_cvDebug->integer) {
+            cgi.Printf("^~^~^ FEEDHELD release rows=%d waiting=%d t=%d\n", k, s_pendN, now);
+        }
+    }
+    s_feedHidden = i;
+    CG_FeedDrain(now);
     if (dt < 0 || dt > 250) {
         dt = 16;
     }
@@ -1068,7 +1249,8 @@ void CG_DrawCoopFeed(qboolean cineHide)
         order[n++] = i;
     }
     for (i = 1; i < n; i++) {
-        for (j = i; j > 0 && s_feed[order[j]].born < s_feed[order[j - 1]].born; j--) {
+        for (j = i; j > 0 && (s_feed[order[j]].born < s_feed[order[j - 1]].born
+                             || (s_feed[order[j]].born == s_feed[order[j - 1]].born && s_feed[order[j]].seq < s_feed[order[j - 1]].seq)); j--) {
             k            = order[j];
             order[j]     = order[j - 1];
             order[j - 1] = k;
