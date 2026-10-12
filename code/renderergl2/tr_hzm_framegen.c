@@ -144,7 +144,8 @@ typedef struct {
 	qboolean		vecOK;			// its programs and textures exist
 	GLuint			velProg;
 	GLint			uVelMidVP, uVelCurVP, uVelSize, uVelPass, uVelSunVP;
-	GLint			uWideShadow, uWideInvVP, uWideSunVP, uWideSunDir, uWideL;
+	GLint			uWideShadow, uWideInvVP, uWideSunVP, uWideSunDir, uWideL, uWideEnc;
+	qboolean		m10;			// M is GL_RGB10_A2 (r_hzmFrameGenVecBits 10 when the textures were made)
 	qboolean		velShadow;		// this frame: movers are also drawn as the sun sees them
 	float			sunVP[16], invCurVP[16], sunDir[3];
 	qboolean		vecTried;
@@ -179,7 +180,7 @@ typedef struct {
 	qboolean		ctxInit;
 	GLuint			prog, vao;
 	GLint			uMode, uTint, uRes, uGun, uCurFromOut, uOutFromCur, uPrvFromOut, uOutFromPrv, uFadeK, uFadeB, uHudThr;
-	GLint			uOutVP, uCurInvW, uPrvInvW, uCurK, uPrvK, uUseC, uEdge, uLayer, uLayerCol, uLayerST, uGunVec, uGunFlash, uOccl, uFill;
+	GLint			uOutVP, uCurInvW, uPrvInvW, uCurK, uPrvK, uUseC, uEdge, uLayer, uLayerCol, uLayerST, uGunVec, uGunFlash, uOccl, uFill, uMDec;
 
 	// ---- shared, under mx
 	SDL_Thread		*thread;
@@ -224,6 +225,7 @@ cvar_t *r_hzmFrameGenLayers;
 cvar_t *r_hzmFrameGenGun;
 cvar_t *r_hzmFrameGenOccl;
 cvar_t *r_hzmFrameGenFill;
+cvar_t *r_hzmFrameGenVecBits;
 cvar_t *r_hzmFrameGenGunMax;
 cvar_t *r_hzmFrameGenFovStep;
 int r_fgVelPass;		// the motion-vector pass is collecting surfaces: RB_EndSurface hands them to R_FG_VelocityDraw
@@ -243,6 +245,7 @@ static const char *fg_fs =
 	"uniform float uGunVec;\n"		// the newer frame's C also holds the first-person weapon where it is halfway (a < 0)
 	"uniform float uOccl;\n"
 	"uniform float uFill;\n"
+	"uniform float uMDec;\n"		// M is 10 bits a channel: displacement = ( value - 0.5 ) * 64 game units
 	"uniform float uGunFlash;\n"		// a muzzle flash is in one of the two frames
 	"uniform sampler2D uLayerT;\n"
 	"uniform float uLayer;\n"
@@ -303,6 +306,7 @@ static const char *fg_fs =
 	"	vec4 o = outFromSrc * c;\n"
 	"	if ( k != 0.0 ) {\n"
 	"		vec4 m = texelFetch( mot, texel( mot, q ), 0 );\n"
+	"		if ( uMDec != 0.0 ) m.rgb = ( m.rgb - 0.5 ) * 64.0;\n"
 	"		if ( m.a > 0.5 ) o -= ( k * dot( invW, c ) ) * ( uOutVP * vec4( m.rgb, 0.0 ) );\n"
 	"	}\n"
 	"	if ( o.w < 0.00001 ) return vec3( -10.0, -10.0, 0.0 );\n"
@@ -573,6 +577,7 @@ static const char *fg_fs =
 	"	if ( uTint == 2 ) {\n"
 	// r_hzmFrameGenDebug 5: the newer frame's motion vectors (displacement in world units, grey = none, dark = not a mover)
 	"		vec4 m = texelFetch( uCurM, texel( uCurM, vUV ), 0 );\n"
+	"		if ( uMDec != 0.0 ) m.rgb = ( m.rgb - 0.5 ) * 64.0;\n"
 	"		c = m.a > 0.5 ? clamp( vec3( 0.5 ) + m.rgb * 0.1, 0.0, 1.0 ) : c * 0.25;\n"
 	"	}\n"
 	"	oColor = vec4( uTint == 1 ? c * tint : c, 1.0 );\n"
@@ -645,6 +650,7 @@ static const char *fg_quad_vs =
 static const char *fg_wide_fs =
 	"uniform sampler2D uM, uD;\n"
 	"uniform float uShadow;\n"
+	"uniform float uEnc;\n"		// M is 10 bits a channel: +-32 game units a frame, steps of 1/16 unit
 	"uniform mat4 uInvVP, uSunVP;\n"
 	"uniform vec3 uSunDir;\n"
 	"uniform vec3 uL;\n"			// L's place in the scratch target: x, y, size
@@ -652,7 +658,7 @@ static const char *fg_wide_fs =
 	"void main() {\n"
 	"	ivec2 c = ivec2( gl_FragCoord.xy );\n"
 	"	vec4 m = texelFetch( uM, c, 0 );\n"
-	"	if ( m.a > 0.5 ) { oColor = m; return; }\n"
+	"	if ( m.a > 0.5 ) { oColor = uEnc != 0.0 ? vec4( clamp( m.rgb / 64.0 + 0.5, 0.0, 1.0 ), m.a ) : m; return; }\n"
 	"	ivec2 sz = textureSize( uD, 0 ) - ivec2( 1 );\n"		// uM is the scratch target, twice as wide
 	"	float d = texelFetch( uD, c, 0 ).r;\n"
 	"	float bd = 0.004 * ( 1.0 - d ) + 0.000001;\n"
@@ -683,7 +689,7 @@ static const char *fg_wide_fs =
 	"			}\n"
 	"		}\n"
 	"	}\n"
-	"	oColor = best;\n"
+	"	oColor = uEnc != 0.0 ? vec4( clamp( best.rgb / 64.0 + 0.5, 0.0, 1.0 ), best.a ) : best;\n"
 	"}\n";
 
 /*
@@ -933,6 +939,7 @@ static qboolean FG_CtxInit( void )
 	fg.uGunFlash = qglGetUniformLocation( fg.prog, "uGunFlash" );
 	fg.uOccl = qglGetUniformLocation( fg.prog, "uOccl" );
 	fg.uFill = qglGetUniformLocation( fg.prog, "uFill" );
+	fg.uMDec = qglGetUniformLocation( fg.prog, "uMDec" );
 	qglDisable( GL_DEPTH_TEST );
 	qglDisable( GL_BLEND );
 	qglDisable( GL_CULL_FACE );
@@ -1019,6 +1026,7 @@ static qboolean FG_DrawGenerated( const fgFrame_t *prv, const fgFrame_t *cur, co
 	qglUniform1f( fg.uGunVec, gunVec );
 	qglUniform1f( fg.uOccl, r_hzmFrameGenOccl->integer ? 1.0f : 0.0f );
 	qglUniform1f( fg.uFill, r_hzmFrameGenFill->integer ? 1.0f : 0.0f );
+	qglUniform1f( fg.uMDec, fg.m10 ? 1.0f : 0.0f );
 	qglUniform1f( fg.uGunFlash, ( cur->flash || prv->flash ) ? 1.0f : 0.0f );
 	qglUniform1f( fg.uEdge, r_hzmFrameGenEdge->integer ? 1.0f : 0.0f );
 	if ( prvK != 0.0f ) {
@@ -2035,6 +2043,7 @@ entityDone:
 		GL_BindToTMU( fg.MC0, 0 );
 		GL_BindToTMU( tr.renderDepthImage, 1 );
 		qglUniform1f( fg.uWideShadow, fg.velShadow ? 1.0f : 0.0f );
+		qglUniform1f( fg.uWideEnc, fg.m10 ? 1.0f : 0.0f );
 		if ( fg.velShadow ) {
 			qglUniformMatrix4fv( fg.uWideInvVP, 1, GL_FALSE, fg.invCurVP );
 			qglUniformMatrix4fv( fg.uWideSunVP, 1, GL_FALSE, fg.sunVP );
@@ -2108,9 +2117,10 @@ static qboolean FG_CreateVectorResources( void )
 	if ( !glRefConfig.textureFloat ) {
 		return qfalse;
 	}
+	fg.m10 = ( r_hzmFrameGenVecBits->integer == 10 ) ? qtrue : qfalse;
 	for ( i = 0; i < FG_SETS; i++ ) {
 		fgSet_t *s = &fg.sets[i];
-		s->M = R_CreateImage( va( "_hzmfgM%d", i ), NULL, mw, mh, IMGTYPE_COLORALPHA, IMGFLAG_NO_COMPRESSION | IMGFLAG_CLAMPTOEDGE, GL_RGBA16F_ARB );
+		s->M = R_CreateImage( va( "_hzmfgM%d", i ), NULL, mw, mh, IMGTYPE_COLORALPHA, IMGFLAG_NO_COMPRESSION | IMGFLAG_CLAMPTOEDGE, fg.m10 ? GL_RGB10_A2 : GL_RGBA16F_ARB );
 		s->C = R_CreateImage( va( "_hzmfgC%d", i ), NULL, mw, mh, IMGTYPE_COLORALPHA, IMGFLAG_NO_COMPRESSION | IMGFLAG_CLAMPTOEDGE, GL_RGBA16F_ARB );
 		if ( !s->M || !s->C ) {
 			return qfalse;
@@ -2151,6 +2161,7 @@ static qboolean FG_CreateVectorResources( void )
 	fg.uWideSunVP = qglGetUniformLocation( fg.wideProg, "uSunVP" );
 	fg.uWideSunDir = qglGetUniformLocation( fg.wideProg, "uSunDir" );
 	fg.uWideL = qglGetUniformLocation( fg.wideProg, "uL" );
+	fg.uWideEnc = qglGetUniformLocation( fg.wideProg, "uEnc" );
 	fg.velProg = FG_MainProgram( fg_vel_vs, fg_vel_fs, qtrue );
 	if ( !fg.velProg ) {
 		return qfalse;
@@ -2810,6 +2821,10 @@ void R_FG_Init( void )
 	// with the vectors: what a mover uncovers and neither frame shows is filled from 1 = the nearest background
 	// around it (shadowed ground included), 0 = the background along its motion only, as before
 	r_hzmFrameGenFill = ri.Cvar_Get( "r_hzmFrameGenFill", "1", 0 );
+	// the displacement texture kept with every frame set (M): 16 = half floats, 8 bytes a pixel; 10 = 10 bits a
+	// channel, 4 bytes a pixel, +-32 game units a frame in steps of 1/16 unit. Read when the vector textures are
+	// made (the first time the vectors are wanted after the renderer starts).
+	r_hzmFrameGenVecBits = ri.Cvar_Get( "r_hzmFrameGenVecBits", "16", 0 );
 	// a part of the weapon (one batch: the gun, its magazine, a hand) with a vertex that moves further than this in
 	// one frame, in view space (game units), keeps the newer frame's place
 	r_hzmFrameGenGunMax = ri.Cvar_Get( "r_hzmFrameGenGunMax", "2.5", 0 );
