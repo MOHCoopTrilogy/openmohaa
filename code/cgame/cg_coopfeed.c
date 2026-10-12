@@ -602,7 +602,8 @@ static void CG_CoopItemKeyLabel(const char *nm, char *out, int outSize)
     static const struct {
         const char *from, *to;
     } sub[] = {
-        {"PAD0_", ""}, {"MWHEELUP", "WH-UP"}, {"MWHEELDOWN", "WH-DN"}, {"MOUSE", "M"}, {"DPAD_", "D-"},
+        {"PAD0_", ""}, {"MWHEELUP", "WH-UP"}, {"MWHEELDOWN", "WH-DN"}, {"MOUSE", "M"},
+        {"DPAD_RIGHT", "D-RT"}, {"DPAD_LEFT", "D-LT"}, {"DPAD_DOWN", "D-DN"}, {"DPAD_UP", "D-UP"}, {"DPAD_", "D-"},
         {"LEFTSTICK", "LS"}, {"RIGHTSTICK", "RS"}, {"SHOULDER", "SH"}, {"TRIGGER", "TR"}, {"LEFTARROW", "LEFT"},
         {"RIGHTARROW", "RIGHT"}, {"UPARROW", "UP"}, {"DOWNARROW", "DOWN"}, {"SEMICOLON", ";"},
     };
@@ -686,6 +687,15 @@ static void CG_CoopItemKeys(void)
             continue;
         }
         nm = cgi.Key_KeynumToBindString(k1);
+        // two bindings: show the keyboard / mouse one. A gamepad control bound to the same action (the mod binds the
+        // d-pad by default) is not what a player at a keyboard is looking for, and its name is long.
+        if (k2 >= 0 && nm && !Q_stricmpn(nm, "PAD", 3)) {
+            const char *nm2 = cgi.Key_KeynumToBindString(k2);
+
+            if (nm2 && nm2[0] && Q_stricmpn(nm2, "PAD", 3)) {
+                nm = nm2;
+            }
+        }
         if (!nm || !nm[0]) {
             continue;
         }
