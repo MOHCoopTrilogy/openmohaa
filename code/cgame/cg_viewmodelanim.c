@@ -504,6 +504,8 @@ int CG_GetVMAnimPrefixIndex()
 // catch entering ADS and miss leaving it - which is the direction actually complained about.
 // HZM coop - client-only viewmodel anim id for the lower/raise idle gesture. NOT a server value.
 #define COOP_VM_ANIM_IDLELOWER 15
+// HZM coop [aimed per-shot cycle 2026-10-12] client-only: the hands rack a hand-cycled gun after an aimed shot
+#define COOP_VM_ANIM_CYCLE 16
 
 static int s_iCoopPrevVMAnim = -1;
 static qboolean s_coopAdsClip = qfalse; // HZM coop [adsanim] the clip being started is a <gun>_<anim>_ads variant
@@ -757,6 +759,47 @@ void CG_ViewModelAnimation(refEntity_t *pModel)
         cgi.anim->g_iLastVMAnimChanged = cg.snap->ps.iViewModelAnimChanged;
     }
 
+    // HZM coop [aimed per-shot cycle 2026-10-12] user: "That hi standard needs a first person ads cock animation
+    // between shots too". The aimed pistol fire plays the static aim pose (`charge`); a gun that is cycled by hand
+    // after every shot (silenced Hi-Standard, fire delay 1.0 s) then never showed it. When the clip ammo drops
+    // while aiming, the aim pose is up and rounds are left, play `<prefix>_cycle_ads` if fps_anims has that row
+    // (no row = nothing happens). Client-only id, started and ended here; any real change from the server above
+    // simply replaces it (the next shot, a reload, a weapon switch).
+    {
+        static cvar_t *pCycle       = NULL;
+        static int     s_cycClip    = -1;
+        static int     s_cycItem    = -1;
+        static int     s_cycEnd     = 0;
+        int            iClip        = cg.snap->ps.stats[STAT_CLIPAMMO];
+        int            iItem        = cg.snap->ps.activeItems[1];
+        if (!pCycle) {
+            pCycle = cgi.Cvar_Get("coop_vmAimedCycle", "1", 0);
+        }
+        if (cgi.anim->g_iLastVMAnim != COOP_VM_ANIM_CYCLE) {
+            s_cycEnd = 0;
+        }
+        if (iItem == s_cycItem && s_cycClip > 0 && iClip > 0 && iClip < s_cycClip && pCycle->integer
+            && cgi.anim->g_iLastVMAnim == VM_ANIM_CHARGE && CG_AimingDownSights()) {
+            char szCyc[MAX_QPATH];
+            int  iCyc;
+            Com_sprintf(szCyc, sizeof(szCyc), "%s_cycle_ads", AnimPrefixList[iAnimPrefixIndex]);
+            iCyc = cgi.Anim_NumForName(pTiki, szCyc);
+            if (iCyc != -1) {
+                bAnimChanged            = qtrue;
+                s_iCoopPrevVMAnim       = cgi.anim->g_iLastVMAnim;
+                cgi.anim->g_iLastVMAnim = COOP_VM_ANIM_CYCLE;
+                s_cycEnd                = cg.time + (int)(cgi.Anim_Time(pTiki, iCyc) * 1000.0f) - 50;
+            }
+        } else if (s_cycEnd && cg.time >= s_cycEnd && cgi.anim->g_iLastVMAnim == COOP_VM_ANIM_CYCLE) {
+            bAnimChanged            = qtrue; // back to the aim pose
+            s_iCoopPrevVMAnim       = cgi.anim->g_iLastVMAnim;
+            cgi.anim->g_iLastVMAnim = VM_ANIM_CHARGE;
+            s_cycEnd                = 0;
+        }
+        s_cycClip = iClip;
+        s_cycItem = iItem;
+    }
+
     /*
     HZM coop [user 2026-08-21] IDLE WEAPON HANDLING - "occassional animations play in relationship to
     the way each gun reloads. Adjusting the slide or bolt on a weapon, things like that."
@@ -889,6 +932,9 @@ void CG_ViewModelAnimation(refEntity_t *pModel)
         case VM_ANIM_RECHAMBER:
             pszAnimSuffix = "rechamber";
             break;
+        case COOP_VM_ANIM_CYCLE:
+            pszAnimSuffix = "cycle";
+            break;
         case COOP_VM_ANIM_IDLELOWER:
             // HZM coop [user 2026-08-21] the lower/raise idle gesture. CLIENT-ONLY: this value is
             // never networked - the server has no idea it exists - it is only ever written locally
@@ -970,7 +1016,7 @@ void CG_ViewModelAnimation(refEntity_t *pModel)
             }
             if (pAdsAnims->integer && !bWeaponChanged && CG_AimingDownSights()
                 && (a == VM_ANIM_RELOAD || a == VM_ANIM_RELOAD_SINGLE || a == VM_ANIM_RELOAD_END
-                    || a == VM_ANIM_RECHAMBER)) {
+                    || a == VM_ANIM_RECHAMBER || a == COOP_VM_ANIM_CYCLE)) {
                 char szAds[MAX_QPATH];
                 Com_sprintf(szAds, sizeof(szAds), "%s_ads", szAnimName);
                 if (cgi.Anim_NumForName(pTiki, szAds) != -1

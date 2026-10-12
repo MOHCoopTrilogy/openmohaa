@@ -2945,6 +2945,36 @@ void CG_ModelAnim(centity_t *cent, qboolean bDoShaderTime)
                 bPlaying = qtrue;
             }
         }
+        // HZM coop [aimed per-shot cycle 2026-10-12] the same for `fire` -> `fire_ads` (a hand-cycled gun: the slide
+        // is racked after the shot) while aiming with rounds left; the last round leaves the slide to idle_empty
+        {
+            static int s_fireEnt = -1, s_fireSeen = 0, s_fireChoice = 0;
+            int        iFire = pAimedGun->integer ? cgi.Anim_NumForName(model.tiki, "fire") : -1;
+            qboolean   bFire  = qfalse;
+            float      fFireT = 999.0f; // the newest fire animation's time: small = a shot has just started
+            for (k = 0; k < MAX_FRAMEINFOS && iFire != -1; k++) {
+                if (model.frameInfo[k].weight && model.frameInfo[k].index == iFire) {
+                    bFire = qtrue;
+                    if (model.frameInfo[k].time < fFireT) {
+                        fFireT = model.frameInfo[k].time;
+                    }
+                }
+            }
+            if (bFire) {
+                int iFireAds;
+                if (s_fireEnt != s1->number || cg.time - s_fireSeen > 250 || cg.time < s_fireSeen || fFireT < 0.08f) {
+                    s_fireChoice = (CG_AimingDownSights() && cg.snap->ps.stats[STAT_CLIPAMMO] > 0) ? 1 : 0;
+                }
+                s_fireEnt  = s1->number;
+                s_fireSeen = cg.time;
+                iFireAds   = s_fireChoice ? cgi.Anim_NumForName(model.tiki, "fire_ads") : -1;
+                for (k = 0; k < MAX_FRAMEINFOS && iFireAds != -1; k++) {
+                    if (model.frameInfo[k].weight && model.frameInfo[k].index == iFire) {
+                        model.frameInfo[k].index = iFireAds;
+                    }
+                }
+            }
+        }
         if (bPlaying) {
             if (s_lastEnt != s1->number || cg.time - s_lastSeen > 250 || cg.time < s_lastSeen) {
                 // a new reload of this gun: choose once
