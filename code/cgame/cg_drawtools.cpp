@@ -1844,6 +1844,7 @@ rebuilding the client for each nudge is a bad loop. Defaults are the computed va
 =================
 */
 extern "C" void CG_DrawCoopFeed(qboolean cineHide); // HZM coop [user 2026-10-05] event feed (cg_coopfeed.c)
+extern "C" void CG_DrawCoopLoot(void);             // HZM coop [user 2026-10-05] use-to-loot prompt (cg_coopfeed.c)
 
 static void CG_DrawStaminaArc(void)
 {
@@ -3959,6 +3960,7 @@ void CG_Draw2D(void)
         CG_DrawBracePip();      // HZM coop - gun-brace indicator, drawn over the crosshair
         CG_DrawHitMarker();     // HZM coop - hit/kill confirmation at the true aim point
         CG_DrawCoopBleed();     // HZM coop [user 2026-10-05] bleed-out ring + teammate medic icons (cg_coopbleed.c)
+        CG_DrawCoopLoot();      // HZM coop [user 2026-10-05] use-to-loot: gun / ammo / search icons under the crosshair
     }
     CG_DrawDamageIndicator();
     CG_DrawCoopIcons();

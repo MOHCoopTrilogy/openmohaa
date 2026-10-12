@@ -709,6 +709,26 @@ Event EV_Player_CoopLobbyHoldPose
     "it is the exact call the pose-cycler uses, and is a no-op once the pose is already correct.",
     EV_NORMAL
 );
+Event EV_Player_CoopLootUse
+(
+    "coop_lootuse",
+    EV_DEFAULT,
+    "f",
+    "seconds",
+    "HZM coop use-to-loot, test harness only (needs coop_lootProbe 1): hold the Use key for this player for\n"
+    "that many seconds, as far as the loot tick is concerned.",
+    EV_NORMAL
+);
+Event EV_Player_CoopLootSearch
+(
+    "coop_lootsearch",
+    EV_DEFAULT,
+    "e",
+    "actor",
+    "HZM coop use-to-loot, test harness only (needs coop_lootProbe 1): complete a body search of that actor\n"
+    "for this player at once, through the same call into coop_mod/loot.scr a real search ends in.",
+    EV_NORMAL
+);
 Event EV_Player_CoopLobbyInput
 (
     "coop_lobbyinput",
@@ -2082,6 +2102,8 @@ CLASS_DECLARATION(Sentient, Player, "player") {
     {&EV_Player_CoopNavBuild,            &Player::EventCoopNavBuild            },
     {&EV_Player_CoopLobbyHoldPose,       &Player::CoopLobbyHoldPose            },
     {&EV_Player_CoopLobbyInput,          &Player::CoopLobbyInput               },
+    {&EV_Player_CoopLootUse,             &Player::CoopLootFakeUse              },
+    {&EV_Player_CoopLootSearch,          &Player::CoopLootForceSearch          },
     {&EV_Player_CoopLobbyCursor,         &Player::CoopLobbyCursor              },
     {&EV_Player_SafeZoom,                 &Player::SafeZoomed                   },
     {&EV_Player_ZoomOff,                  &Player::ZoomOffEvent                 },
@@ -2374,6 +2396,21 @@ Player::Player()
     m_bCoopBraceAvail     = false;
     m_bCoopBraceMounted   = false;
     m_bCoopBraceUsePrev   = false;
+    // HZM coop [user 2026-10-05] use-to-loot. Sent = 0: the client clears both cvars in CG_Init, so idle is in step
+    m_iCoopLootKind        = 0;
+    m_fCoopLootScanTime    = -1.0f;
+    m_bCoopLootUsePrev     = false;
+    m_fCoopLootLastHeld    = -10.0f;
+    m_bCoopLootHeld        = false;
+    m_bCoopLootDone        = false;
+    m_fCoopLootPressTime   = 0.0f;
+    m_fCoopLootSeenTime    = 0.0f;
+    m_vCoopLootStart       = vec_zero;
+    m_fCoopLootStartHealth = 0.0f;
+    m_iCoopLootTSent       = 0;
+    m_iCoopLootHSent       = 0;
+    m_fCoopLootProbeNext   = 0.0f;
+    m_fCoopLootFakeUntil   = 0.0f;
     m_fCoopHitMarkNext    = 0.0f;
     m_iCoopHsCueSent      = 0;
     m_iCoopBraceAvailSent = -1;
@@ -6078,6 +6115,10 @@ void Player::ClientThink(void)
     }
 
     TickCoopCover(); // HZM coop - take cover [214]: validate the pose with this frame's traces
+    // HZM coop [user 2026-10-05] USE-TO-LOOT ticks BEFORE the brace: both are on the Use key, and a press that
+    // loot claims is stripped from the usercmd here, so neither the brace mount just below nor DoUse further
+    // down ever sees it. Any new Use-key feature must sit after this call or it will fight loot for the key.
+    TickCoopLoot();
     // HZM coop [user 2026-08-27] BRACING ticks HERE, immediately after cover, because scheme C
     // consumes THIS frame's m_bCoopCoverPeek - the tick-order trap already documented above.
     TickCoopBrace();
@@ -15641,6 +15682,616 @@ bool Player::CoopBraceUseTargetInView()
         }
     }
     return false;
+}
+
+/*
+====================
+HZM coop [user 2026-10-05] USE-TO-LOOT - docs/proposals/use_pickup_2026-10-05/PLAN.md
+
+"When an enemy drops a weapon instead of it auto picking up the ammo or weapon, you get prompted ... you can pick it
+up if you don't already own the weapon itself ... Cycling ammo just lets you take the ammo type ... you should only
+get one clips worth ... Hold Use to search body which will allow you to scavenge for ammo, grenades or canteens. It
+should be random and honestly not lean towards the player always finding stuff."
+
+TAP Use on an enemy's dropped gun you do not own = take the gun (its loaded magazine, nothing more).
+HOLD Use (coop_lootHoldTime, 0.5 s) on any such gun = one magazine of its ammo type into your pool; the gun is gone.
+HOLD Use (coop_lootSearchTime, 1.75 s) on an enemy body = search it, once, for whoever finishes first; moving,
+taking damage, firing or letting go cancels and leaves the body unsearched. What it yields is decided by
+coop_mod/loot.scr::searched, so the odds are tuned without an engine build.
+
+The server decides everything from the usercmd (no new button bit - TRAPS T22 - and no new wire state): the target
+is whatever lies nearest the crosshair within coop_lootRange, with a clear line to it; press against hold is timed
+here, with a 150 ms release grace because a held key reads as released on the odd frame (TRAPS T23). A press that
+loot takes is stripped from the usercmd until the key comes up again, so DoUse and the brace mount never see it -
+not even when the target vanishes mid-hold. Doors, ladders, switches, mounted guns, vehicles and a downed teammate
+in reach always win: with one of those in front there is no loot target at all.
+
+The client is told only WHAT is targeted and for how long a hold runs, change-only, as two integers on the
+`set coop_*` stufftext channel the brace prompt uses: coop_lootT = kind * 100000 + weapon class * 10000 + weapon item index (kinds below),
+coop_lootH = length of the hold in progress in ms (0 = none). cgame draws the prompt (cg_coopfeed.c).
+====================
+*/
+#define HZM_LOOT_RELEASE_GRACE 0.15f // a key must read released this long before it counts
+#define HZM_LOOT_LOST_GRACE    0.25f // the crosshair may leave the target of a hold this long
+#define HZM_LOOT_LOCK_LEASE    0.30f // a body search lock not renewed for this long is free again
+#define HZM_LOOT_MOVE_CANCEL   32.0f // a search is over once the searcher has moved this far
+// Aim tolerance, as a radius around the target point. A rifle is ~45 units long and a body ~70, and the point is
+// only their origin: with 12 / 24 a player looking straight at the muzzle end of a gun got no prompt at all.
+#define HZM_LOOT_WEAPON_R      22.0f
+#define HZM_LOOT_BODY_R        30.0f
+#define HZM_LOOT_REVIVE_R      96.0f // a downed teammate this close owns the Use key (coop_teamReviveRange is 80)
+
+enum {
+    HZM_LOOT_NONE = 0,
+    HZM_LOOT_GUN_NEW,       // tap = take the gun, hold = take its ammo
+    HZM_LOOT_GUN_OWNED,     // hold = take its ammo
+    HZM_LOOT_GUN_OWNED_FULL,// nothing to do: that ammo pool is full
+    HZM_LOOT_GUN_NEW_FULL,  // tap = take the gun
+    HZM_LOOT_BODY           // hold = search
+};
+
+static cvar_t *s_lootRange = NULL, *s_lootCone = NULL, *s_lootHold = NULL, *s_lootSearchTime = NULL;
+static cvar_t *s_lootSearch = NULL, *s_lootProbe = NULL;
+
+static void s_hzmLootCvars(void)
+{
+    if (s_lootRange) {
+        return;
+    }
+    // flags 0 on purpose (TRAPS T7): coop_defaults.cfg seeds them, a menu change persists through that file
+    s_lootRange      = gi.Cvar_Get("coop_lootRange", "80", 0);
+    s_lootCone       = gi.Cvar_Get("coop_lootCone", "7", 0);
+    s_lootHold       = gi.Cvar_Get("coop_lootHoldTime", "0.5", 0);
+    s_lootSearchTime = gi.Cvar_Get("coop_lootSearchTime", "1.75", 0);
+    s_lootSearch     = gi.Cvar_Get("coop_lootSearch", "1", 0);
+    s_lootProbe      = gi.Cvar_Get("coop_lootProbe", "0", 0);
+}
+
+// "<Base Gun> (<Finish>)" and "<Base Gun>" are the same gun (TRAPS, weapon variant suffixes: split on " (")
+static bool s_hzmLootSameGun(const char *a, const char *b)
+{
+    const char *pa = strstr(a, " (");
+    const char *pb = strstr(b, " (");
+    size_t      la = pa ? (size_t)(pa - a) : strlen(a);
+    size_t      lb = pb ? (size_t)(pb - b) : strlen(b);
+
+    return la == lb && !Q_stricmpn(a, b, (int)la);
+}
+
+bool Player::CoopLootOwns(Weapon *pWeap)
+{
+    const str sWant = pWeap->getName();
+    int       i;
+
+    for (i = 1; i <= inventory.NumObjects(); i++) {
+        Entity *pEnt = G_GetEntity(inventory.ObjectAt(i));
+
+        if (pEnt && pEnt != pWeap && pEnt->IsSubclassOfWeapon()) {
+            const str sHave = static_cast<Weapon *>(pEnt)->getName();
+
+            if (s_hzmLootSameGun(sWant.c_str(), sHave.c_str())) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+// What this entity is to this player right now (the kinds above); 0 = not lootable.
+int Player::CoopLootKindOf(Entity *pEnt)
+{
+    if (!pEnt || !pEnt->edict || !pEnt->edict->inuse) {
+        return HZM_LOOT_NONE;
+    }
+    if (pEnt->IsSubclassOfWeapon()) {
+        Weapon         *pWeap = static_cast<Weapon *>(pEnt);
+        ScriptVariable *pNoPick;
+        bool            bFull, bOwn;
+
+        if (!pWeap->CoopLootCandidate()) {
+            return HZM_LOOT_NONE;
+        }
+        bFull = G_CoopLootAmmoFull(this, pWeap->GetAmmoType(FIRE_PRIMARY));
+        // a forced-weapon map (itemhandler.scr::forceWeaponOnAll sets level.coop_lootNoPickup) refuses every
+        // other gun in its own pickup rule: offer the ammo only, never a gun the map would take straight back
+        pNoPick = level.vars ? level.vars->GetVariable("coop_lootNoPickup") : NULL;
+        bOwn    = (pNoPick && pNoPick->GetType() != VARIABLE_NONE) || CoopLootOwns(pWeap);
+        if (bOwn) {
+            return bFull ? HZM_LOOT_GUN_OWNED_FULL : HZM_LOOT_GUN_OWNED;
+        }
+        return bFull ? HZM_LOOT_GUN_NEW_FULL : HZM_LOOT_GUN_NEW;
+    }
+    if (pEnt->IsSubclassOfActor()) {
+        Actor *pBody = static_cast<Actor *>(pEnt);
+
+        // enemy bodies only (decision 5), each searched once
+        if (!pBody->IsDead() || pBody->m_iCoopLootState != 0 || pBody->m_Team != TEAM_GERMAN || pBody->hidden()) {
+            return HZM_LOOT_NONE;
+        }
+        if (pBody->m_iCoopLootLock >= 0 && pBody->m_iCoopLootLock != entnum
+            && level.time - pBody->m_fCoopLootLockTime < HZM_LOOT_LOCK_LEASE) {
+            return HZM_LOOT_NONE; // someone else is searching it
+        }
+        return HZM_LOOT_BODY;
+    }
+    return HZM_LOOT_NONE;
+}
+
+// Is there something in front that Use is FOR? The same view query DoUse makes. With one of these in reach loot
+// offers nothing, so the key does exactly what it did before this feature existed.
+bool Player::CoopLootUseElsewhere()
+{
+    int       touch[MAX_GENTITIES];
+    const int num = getUseableEntities(touch, MAX_GENTITIES, true);
+    int       i;
+
+    for (i = 0; i < num; i++) {
+        gentity_t *hit = &g_entities[touch[i]];
+        Entity    *e   = hit->entity;
+
+        if (!hit->inuse || !e || e == this) {
+            continue;
+        }
+        if (s_hzmIsUseTarget(e) || e->IsSubclassOfVehicle() || e->isSubclassOf(TurretGun)) {
+            return true;
+        }
+    }
+    // a downed teammate in reach: the hold belongs to the revive (coop_mod/dbno.scr polls useheld, which a
+    // loot press would blank)
+    for (i = 0; i < game.maxclients; i++) {
+        gentity_t *g = &g_entities[i];
+
+        if (g->inuse && g->entity && g->entity != this && g->entity->IsSubclassOfPlayer()) {
+            Player *pMate = static_cast<Player *>(g->entity);
+
+            if (pMate->IsCoopDbno() && (pMate->origin - origin).lengthSquared() < HZM_LOOT_REVIVE_R * HZM_LOOT_REVIVE_R) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+// Pick the one target: the candidate nearest the crosshair inside the aim tolerance, with a clear line to it.
+// One AreaEntities call, integer and dot-product tests per entity, and at most three traces - and those only
+// when something lootable is actually in the box. A gun wins a near tie with a body, so a gun lying on its
+// owner stays takeable.
+void Player::CoopLootSelect(float fRange, float fCone, bool bSearchOn)
+{
+    int     touch[MAX_GENTITIES];
+    Entity *pCand[3] = {NULL, NULL, NULL};
+    float   fScore[3] = {9999.0f, 9999.0f, 9999.0f};
+    float   fRad[3]   = {0.0f, 0.0f, 0.0f};
+    Vector  vPt[3];
+    Vector  vFwd;
+    Vector  vEye = m_vViewPos;
+    Vector  vMins(origin.x - fRange, origin.y - fRange, origin.z - 64.0f);
+    Vector  vMaxs(origin.x + fRange, origin.y + fRange, origin.z + 128.0f);
+    int     num, i, k, j;
+
+    m_pCoopLootTarget = NULL;
+    m_iCoopLootKind   = HZM_LOOT_NONE;
+
+    AngleVectors(m_vViewAng, vFwd, NULL, NULL);
+    // one step down a slope to a head above: what a hand could plausibly reach without a jump
+    num = gi.AreaEntities(vMins, vMaxs, touch, MAX_GENTITIES);
+    for (i = 0; i < num; i++) {
+        gentity_t *g = &g_entities[touch[i]];
+        Entity    *e = g->entity;
+        Vector     vTo, vDelta;
+        float      fR, fDist, fAng, fAllow, fSc;
+        bool       bWeap;
+
+        if (!g->inuse || !e || e == this) {
+            continue;
+        }
+        // coop_lootProbe 2: once a second, why each gun / body in reach is or is not a candidate
+        if (s_lootProbe->integer >= 2 && level.time >= m_fCoopLootProbeNext && (e->IsSubclassOfWeapon() || e->IsSubclassOfActor())) {
+            if (e->IsSubclassOfWeapon()) {
+                Weapon *w = static_cast<Weapon *>(e);
+                gi.Printf(
+                    "^~^~^ LOOT scan e=%d weapon=%d name=%s flagged=%d cand=%d owned=%d hidden=%d dist=%.0f\n", entnum,
+                    e->entnum, w->getName().c_str(), w->m_bCoopUseLoot ? 1 : 0, w->CoopLootCandidate() ? 1 : 0,
+                    w->GetOwner() ? 1 : 0, e->hidden() ? 1 : 0, (e->origin - vEye).length()
+                );
+            } else {
+                Actor *a = static_cast<Actor *>(e);
+                gi.Printf(
+                    "^~^~^ LOOT scan e=%d actor=%d dead=%d team=%d searched=%d lock=%d hidden=%d dist=%.0f\n", entnum,
+                    e->entnum, a->IsDead() ? 1 : 0, a->m_Team, a->m_iCoopLootState, a->m_iCoopLootLock,
+                    e->hidden() ? 1 : 0, (e->centroid - vEye).length()
+                );
+            }
+        }
+        if (e->IsSubclassOfWeapon()) {
+            if (!static_cast<Weapon *>(e)->CoopLootCandidate()) {
+                continue;
+            }
+            vTo    = e->origin;
+            vTo.z += 4.0f;
+            fR     = HZM_LOOT_WEAPON_R;
+            bWeap  = true;
+        } else if (bSearchOn && e->IsSubclassOfActor()) {
+            if (CoopLootKindOf(e) != HZM_LOOT_BODY) {
+                continue;
+            }
+            vTo   = e->centroid;
+            fR    = HZM_LOOT_BODY_R;
+            bWeap = false;
+        } else {
+            continue;
+        }
+        // REACH is measured along the ground from the player's feet, not from the eye: a standing eye is 82 units
+        // up, so a gun lying one step ahead is already ~100 units from it and an eye-based 80 would only ever
+        // reach what is underfoot. The aim test below is from the eye.
+        {
+            Vector vFlat = vTo - origin;
+
+            vFlat.z = 0.0f;
+            if (vFlat.length() > fRange) {
+                continue;
+            }
+        }
+        vDelta = vTo - vEye;
+        fDist  = vDelta.length();
+        if (fDist < 1.0f) {
+            fAng = 0.0f;
+        } else {
+            float fDot = (vDelta * vFwd) / fDist;
+
+            if (fDot > 1.0f) {
+                fDot = 1.0f;
+            } else if (fDot < -1.0f) {
+                fDot = -1.0f;
+            }
+            fAng = RAD2DEG(acos(fDot));
+        }
+        fAllow = (fDist > fR) ? RAD2DEG(atan(fR / fDist)) : 90.0f;
+        if (fAllow < fCone) {
+            fAllow = fCone;
+        }
+        if (fAng > fAllow) {
+            continue;
+        }
+        fSc = fAng - (bWeap ? 2.0f : 0.0f);
+        for (k = 0; k < 3; k++) {
+            if (fSc < fScore[k]) {
+                for (j = 2; j > k; j--) {
+                    pCand[j]  = pCand[j - 1];
+                    fScore[j] = fScore[j - 1];
+                    fRad[j]   = fRad[j - 1];
+                    vPt[j]    = vPt[j - 1];
+                }
+                pCand[k]  = e;
+                fScore[k] = fSc;
+                fRad[k]   = fR;
+                vPt[k]    = vTo;
+                break;
+            }
+        }
+    }
+    for (k = 0; k < 3 && pCand[k]; k++) {
+        trace_t tr = G_Trace(vEye, vec_zero, vec_zero, vPt[k], this, MASK_SOLID, false, "Player::CoopLootSelect");
+
+        // clear, or stopped by the target itself, or stopped within the target's own radius (a gun half sunk
+        // into a slope has its origin a hair inside the floor)
+        if (tr.fraction >= 1.0f || tr.ent == pCand[k]->edict || (Vector(tr.endpos) - vPt[k]).length() <= fRad[k]) {
+            m_pCoopLootTarget = pCand[k];
+            break;
+        }
+    }
+    if (m_pCoopLootTarget && CoopLootUseElsewhere()) {
+        m_pCoopLootTarget = NULL;
+    }
+    m_iCoopLootKind = CoopLootKindOf(m_pCoopLootTarget);
+    if (!m_iCoopLootKind) {
+        m_pCoopLootTarget = NULL;
+    }
+}
+
+void Player::CoopLootPublish(int iT, int iH)
+{
+    if (iT != m_iCoopLootTSent) {
+        m_iCoopLootTSent = iT;
+        gi.SendServerCommand(edict - g_entities, "stufftext \"set coop_lootT %d\"", iT);
+    }
+    if (iH != m_iCoopLootHSent) {
+        m_iCoopLootHSent = iH;
+        gi.SendServerCommand(edict - g_entities, "stufftext \"set coop_lootH %d\"", iH);
+    }
+}
+
+// A search is complete. The body is spent for everyone; the engine names one random gun the searcher carries
+// (uniform over the guns with a magazine - an ammo find is for that gun's type) and the searcher's own grenade
+// type, and the script rolls the table and hands out whatever it comes to.
+void Player::CoopLootSearchDone(Actor *pBody)
+{
+    Weapon *pPick  = NULL;
+    int     nGuns  = 0;
+    str     sNade  = "";
+    str     sAmmo  = "";
+    int     iClip  = 0;
+    int     i;
+
+    pBody->m_iCoopLootState = 1;
+    pBody->m_iCoopLootLock  = -1;
+
+    for (i = 1; i <= inventory.NumObjects(); i++) {
+        Entity *pEnt = G_GetEntity(inventory.ObjectAt(i));
+        Weapon *pWeap;
+        str     sType;
+
+        if (!pEnt || !pEnt->IsSubclassOfWeapon()) {
+            continue;
+        }
+        pWeap = static_cast<Weapon *>(pEnt);
+        sType = pWeap->GetAmmoType(FIRE_PRIMARY);
+        if (!sType.length() || !str::icmp(sType, "none")) {
+            continue;
+        }
+        if (pWeap->GetWeaponClass() & WEAPON_CLASS_GRENADE) {
+            // the first thrown grenade carried; a smoke grenade only when nothing else is
+            if (!sNade.length() || (strstr(sNade.c_str(), "smoke") && !strstr(sType.c_str(), "smoke"))) {
+                sNade = sType;
+            }
+            continue;
+        }
+        if (pWeap->CoopLootClip() <= 0 || strstr(pWeap->model.c_str(), "dbno_pistol")) {
+            continue;
+        }
+        nGuns++;
+        if ((int)G_Random((float)nGuns) == 0) {
+            pPick = pWeap;
+        }
+    }
+    if (pPick) {
+        sAmmo = pPick->GetAmmoType(FIRE_PRIMARY);
+        iClip = pPick->CoopLootClip();
+        // a pocket that is already full has no room for the find: the script is told there is no magazine to
+        // fill (and likewise no grenade type), so it reports nothing rather than rounds that went nowhere
+        if (G_CoopLootAmmoFull(this, sAmmo)) {
+            iClip = 0;
+        }
+    }
+    if (sNade.length() && G_CoopLootAmmoFull(this, sNade)) {
+        sNade = "";
+    }
+    if (s_lootProbe && s_lootProbe->integer) {
+        gi.Printf(
+            "^~^~^ LOOT searched e=%d body=%d guns=%d ammo=%s clip=%d nade=%s\n", entnum, pBody->entnum, nGuns,
+            sAmmo.length() ? sAmmo.c_str() : "-", iClip, sNade.length() ? sNade.c_str() : "-"
+        );
+    }
+    try {
+        Event parms(EV_Listener_ExecuteScript, 5);
+        parms.AddEntity(this);
+        parms.AddEntity(pBody);
+        parms.AddString(sAmmo);
+        parms.AddInteger(iClip);
+        parms.AddString(sNade);
+        Director.ExecuteThread("coop_mod/loot.scr", "searched", parms);
+    } catch (ScriptException& exc) {
+        // a game.dll newer than the pk3 beside it: the search finds nothing rather than taking the server down
+        gi.DPrintf("Player::CoopLootSearchDone: %s\n", exc.string.c_str());
+    }
+}
+
+void Player::TickCoopLoot()
+{
+    bool    bRawUse, bHeld, bPress, bBlocked;
+    float   fHoldTime, fSearchTime;
+    int     iHoldMs = 0;
+    Entity *pTarget;
+
+    if (!current_ucmd) {
+        return;
+    }
+    // Off (multiplayer, single player, coop_lootUse 0) and for bots: nothing below runs and nothing is sent,
+    // except taking down a prompt that was up when the switch was thrown.
+    if (!G_CoopLootActive() || G_IsBot(edict)) {
+        if (m_iCoopLootTSent > 0 || m_iCoopLootHSent > 0) {
+            CoopLootPublish(0, 0);
+        }
+        m_pCoopLootTarget  = NULL;
+        m_iCoopLootKind    = HZM_LOOT_NONE;
+        m_bCoopLootHeld    = false;
+        m_bCoopLootUsePrev = false;
+        return;
+    }
+    s_hzmLootCvars();
+    fHoldTime   = s_lootHold->value < 0.2f ? 0.2f : s_lootHold->value;
+    fSearchTime = s_lootSearchTime->value < 0.3f ? 0.3f : s_lootSearchTime->value;
+
+    // --- the key, with the release grace --------------------------------------------------------
+    // (m_fCoopLootFakeUntil is the harness pressing Use for a player: script `coop_lootuse`, coop_lootProbe only)
+    bRawUse = (current_ucmd->buttons & BUTTON_USE) || level.time < m_fCoopLootFakeUntil;
+    if (bRawUse) {
+        m_fCoopLootLastHeld = level.time;
+    }
+    bHeld              = bRawUse || (m_bCoopLootUsePrev && level.time - m_fCoopLootLastHeld < HZM_LOOT_RELEASE_GRACE);
+    bPress             = bHeld && !m_bCoopLootUsePrev;
+    m_bCoopLootUsePrev = bHeld;
+
+    // --- the target: integer gates first, then one selection per server frame ---------------------
+    bBlocked = deadflag || IsSpectator() || m_bCoopDbno || m_bIsDisguised || (flags & FL_IMMOBILE) || m_pTurret
+            || m_pVehicle || m_pLadder || m_bCoopBraceMounted || level.playerfrozen || m_bFrozen
+            || level.intermissiontime
+            || (client->ps.pm_flags & (PMF_SPECTATING | PMF_INTERMISSION | PMF_FROZEN | PMF_NO_MOVE));
+    if (bBlocked) {
+        m_pCoopLootTarget = NULL;
+        m_iCoopLootKind   = HZM_LOOT_NONE;
+    } else if (level.time != m_fCoopLootScanTime) {
+        float fRange = s_lootRange->value, fCone = s_lootCone->value;
+
+        if (fRange < 32.0f) {
+            fRange = 32.0f;
+        } else if (fRange > 160.0f) {
+            fRange = 160.0f;
+        }
+        if (fCone < 2.0f) {
+            fCone = 2.0f;
+        } else if (fCone > 30.0f) {
+            fCone = 30.0f;
+        }
+        m_fCoopLootScanTime = level.time;
+        CoopLootSelect(fRange, fCone, s_lootSearch->integer != 0);
+    } else if (!m_pCoopLootTarget) {
+        m_iCoopLootKind = HZM_LOOT_NONE;
+    }
+    pTarget = m_pCoopLootTarget;
+
+    // --- a press on a target belongs to loot until the key comes up -------------------------------
+    if (bPress && pTarget && m_iCoopLootKind && !m_bCoopLootHeld) {
+        m_bCoopLootHeld        = true;
+        m_bCoopLootDone        = false;
+        m_pCoopLootHoldEnt     = pTarget;
+        m_fCoopLootPressTime   = level.time;
+        m_fCoopLootSeenTime    = level.time;
+        m_vCoopLootStart       = origin;
+        m_fCoopLootStartHealth = health;
+        if (s_lootProbe->integer) {
+            gi.Printf("^~^~^ LOOT press e=%d target=%d kind=%d t=%.2f\n", entnum, pTarget->entnum, m_iCoopLootKind, level.time);
+        }
+    }
+
+    if (m_bCoopLootHeld) {
+        current_ucmd->buttons &= ~BUTTON_USE;
+
+        if (!m_bCoopLootDone) {
+            Entity     *pHold   = m_pCoopLootHoldEnt;
+            const int   iKind   = bBlocked ? HZM_LOOT_NONE : CoopLootKindOf(pHold);
+            const float fFor    = m_fCoopLootLastHeld - m_fCoopLootPressTime; // how long the key was really down
+            const char *pszWhy  = NULL; // set = this press is over without an action
+            const char *pszDid  = NULL; // set = this press acted
+            int         iResult = 0;
+
+            if (pHold && pHold == pTarget) {
+                m_fCoopLootSeenTime = level.time;
+            }
+            if (!pHold || !iKind) {
+                pszWhy = "gone";
+            } else if (level.time - m_fCoopLootSeenTime > HZM_LOOT_LOST_GRACE) {
+                pszWhy = "lost";
+            } else if (iKind == HZM_LOOT_BODY) {
+                Actor *pBody = static_cast<Actor *>(pHold);
+
+                pBody->m_iCoopLootLock     = entnum; // the lease: renewed every frame of the hold
+                pBody->m_fCoopLootLockTime = level.time;
+                if (!bHeld) {
+                    pszWhy = "released";
+                } else if ((origin - m_vCoopLootStart).length() > HZM_LOOT_MOVE_CANCEL) {
+                    pszWhy = "moved";
+                } else if (health < m_fCoopLootStartHealth) {
+                    pszWhy = "hurt";
+                } else if (current_ucmd->buttons & (BUTTON_ATTACKLEFT | BUTTON_ATTACKRIGHT)) {
+                    pszWhy = "fired";
+                } else if (bRawUse && fFor >= fSearchTime) {
+                    CoopLootSearchDone(pBody);
+                    pszDid = "search";
+                } else {
+                    iHoldMs = (int)(fSearchTime * 1000.0f);
+                }
+                if (pszWhy && pBody->m_iCoopLootLock == entnum) {
+                    pBody->m_iCoopLootLock = -1; // cancelled: free for anyone, still unsearched
+                }
+            } else {
+                Weapon *pWeap = static_cast<Weapon *>(pHold);
+
+                if (!bHeld) {
+                    // released before the hold time: a tap
+                    if (iKind == HZM_LOOT_GUN_NEW || iKind == HZM_LOOT_GUN_NEW_FULL) {
+                        pWeap->CoopLootPickup(this);
+                        pszDid = "pickup";
+                    } else {
+                        pszWhy = "tap-owned";
+                    }
+                } else if (bRawUse && fFor >= fHoldTime) {
+                    // fires AT the threshold, not on release
+                    if (iKind == HZM_LOOT_GUN_NEW || iKind == HZM_LOOT_GUN_OWNED) {
+                        iResult = pWeap->CoopLootTakeAmmo(this);
+                        pszDid  = "ammo";
+                    } else {
+                        pszWhy = "ammo-full";
+                    }
+                } else if (iKind == HZM_LOOT_GUN_NEW || iKind == HZM_LOOT_GUN_OWNED) {
+                    iHoldMs = (int)(fHoldTime * 1000.0f);
+                }
+            }
+            if (pszWhy || pszDid) {
+                m_bCoopLootDone = true;
+                if (s_lootProbe->integer) {
+                    gi.Printf(
+                        "^~^~^ LOOT %s e=%d target=%d kind=%d held=%.2f %s=%d t=%.2f\n", pszDid ? pszDid : "cancel",
+                        entnum, pHold ? pHold->entnum : -1, iKind, fFor, pszDid ? "result" : pszWhy, iResult, level.time
+                    );
+                }
+            }
+        }
+        if (!bHeld) {
+            m_bCoopLootHeld    = false;
+            m_pCoopLootHoldEnt = NULL;
+        }
+    }
+
+    // --- tell the client, change-only ------------------------------------------------------------
+    {
+        Entity *pShow = (m_bCoopLootHeld && !m_bCoopLootDone && m_pCoopLootHoldEnt) ? (Entity *)m_pCoopLootHoldEnt : pTarget;
+        int     iKind = bBlocked ? HZM_LOOT_NONE : CoopLootKindOf(pShow);
+        int     iT    = 0;
+
+        if (iKind) {
+            iT = iKind * 100000;
+            if (pShow->IsSubclassOfWeapon()) {
+                Weapon   *pW   = static_cast<Weapon *>(pShow);
+                const int iCls = pW->GetWeaponClass();
+
+                // + class digit, so a gun the client has no picture of still gets the right kind of generic one:
+                // 0 = rifle / anything else, 1 = pistol, 2 = SMG or machine gun
+                iT += ((iCls & WEAPON_CLASS_PISTOL) ? 1 : ((iCls & (WEAPON_CLASS_SMG | WEAPON_CLASS_MG)) ? 2 : 0)) * 10000;
+                iT += pW->getIndex() % 10000;
+            }
+        }
+        CoopLootPublish(iT, iT ? iHoldMs : 0);
+
+        if (s_lootProbe->integer && !iT && level.time >= m_fCoopLootProbeNext) {
+            m_fCoopLootProbeNext = level.time + 1.0f;
+            if (s_lootProbe->integer >= 2) {
+                gi.Printf(
+                    "^~^~^ LOOT none e=%d blocked=%d eye=(%.0f %.0f %.0f) view=(%.0f %.0f)\n", entnum, bBlocked ? 1 : 0,
+                    m_vViewPos.x, m_vViewPos.y, m_vViewPos.z, m_vViewAng.x, m_vViewAng.y
+                );
+            }
+        } else if (s_lootProbe->integer && iT && level.time >= m_fCoopLootProbeNext) {
+            m_fCoopLootProbeNext = level.time + 1.0f;
+            gi.Printf(
+                "^~^~^ LOOT target e=%d ent=%d kind=%d class=%s name=%s dist=%.0f\n", entnum, pShow->entnum, iKind,
+                pShow->getClassname(), pShow->IsSubclassOfWeapon() ? static_cast<Weapon *>(pShow)->getName().c_str() : "body",
+                (pShow->origin - origin).length()
+            );
+        }
+    }
+}
+
+// Harness only (coop_lootProbe 1): `player coop_lootuse <seconds>` holds Use for that player, so a test driver
+// can time a tap or a hold for any client - a remote one included - to the frame.
+void Player::CoopLootFakeUse(Event *ev)
+{
+    s_hzmLootCvars();
+    if (s_lootProbe->integer) {
+        m_fCoopLootFakeUntil = level.time + ev->GetFloat(1);
+    }
+}
+
+// Harness only (coop_lootProbe 1): `player coop_lootsearch <actor>` completes a search of that actor at once,
+// through the same engine -> script call a real search ends in. For measuring the loot table.
+void Player::CoopLootForceSearch(Event *ev)
+{
+    Entity *pEnt = ev->GetEntity(1);
+
+    s_hzmLootCvars();
+    if (s_lootProbe->integer && pEnt && pEnt->IsSubclassOfActor()) {
+        CoopLootSearchDone(static_cast<Actor *>(pEnt));
+    }
 }
 
 void Player::TickCoopBrace()

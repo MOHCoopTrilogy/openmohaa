@@ -3093,6 +3093,9 @@ Actor::Actor()
     m_iCoopReloAllow       = 0;   // [HZM coop bug-1815] bounding-overwatch permission expiry
     m_iCoopBoundOwnedUntil = 0;   // [HZM coop 2026-08-30] squad-brain ownership expiry (0 = nobody owns me)
     m_iCoopBoundDenyLog    = 0;   // [HZM coop 2026-08-30] BOUNDGATE deny print rate limit
+    m_iCoopLootState       = 0;   // [HZM coop 2026-10-05] use-to-loot: body not searched
+    m_iCoopLootLock        = -1;
+    m_fCoopLootLockTime    = 0.0f;
 
     m_csSpecialAttack       = STRING_NULL;
     m_bNeedReload           = false;

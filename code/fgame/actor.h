@@ -672,6 +672,13 @@ public:
        can miss entirely if the actor is not in Cover_Shoot that frame - which would hide
        exactly the mis-scoping this print exists to catch. */
     int m_iCoopBoundDenyLog;
+    /* [HZM coop, user 2026-10-05] use-to-loot body search (Player::TickCoopLoot). A body is searched ONCE, by
+       whoever finishes first; while someone is searching it nobody else is offered it. The lock is a lease the
+       searcher renews every frame, so a searcher who disconnects mid-hold frees the body by not renewing.
+       Constructor-seeded, not archived. */
+    int   m_iCoopLootState;    // 0 = not searched, 1 = searched
+    int   m_iCoopLootLock;     // entnum of the player searching, -1 = nobody
+    float m_fCoopLootLockTime; // level.time of the last renewal
     /* should lock think state ? */
     bool m_bLockThinkState;
     /* think state changed */

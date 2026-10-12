@@ -975,6 +975,9 @@ void CG_Init(clientGameImport_t *imported, int serverMessageNum, int serverComma
             // bug-1307: the scripted-suppression floor and one-shot bump. Without these a
             // disconnect mid-set-piece leaves a permanently forced blur - bug-1202 again.
             "coop_suppHold", "coop_suppBump",
+            // [2026-10-12] use-to-loot prompt (cg_coopfeed.c CG_DrawCoopLoot): target and hold length. Server-set,
+            // change-only - a value left over from the last map would show a prompt for nothing.
+            "coop_lootT", "coop_lootH",
             // [2026-08-21] coop_vaultView is a COUNTER, so a stale value is not a stuck view -
             // but zeroing it on a fresh connect keeps the client edge-detector in step with a
             // server that starts its own counter at 0 again.

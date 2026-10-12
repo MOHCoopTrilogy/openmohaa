@@ -38,6 +38,7 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 #include "weaputils.h"
 #include "player.h"
 #include "vehicleturret.h"
+#include "g_bot.h" // HZM coop use-to-loot: bots keep touch pickup (G_IsBot)
 #include "debuglines.h"
 #include "g_spawn.h"
 
@@ -914,6 +915,11 @@ Event EV_Weapon_GetPutaway
 CLASS_DECLARATION(Item, Weapon, NULL) {
     {&EV_SetAnim,                       &Weapon::SetWeaponAnimEvent     },
     {&EV_Item_Pickup,                   &Weapon::PickupWeapon           },
+    // HZM coop [user 2026-10-05] use-to-loot: both ways a player reaches Trigger::TriggerStuff on a weapon
+    // (walking into it, and Player::DoUse's EV_Use) pass the gate first; it is a plain pass-through for
+    // every weapon an AI did not drop in a coop session. Subclasses with their own EV_Use (turrets) keep it.
+    {&EV_Touch,                         &Weapon::CoopLootTrigger        },
+    {&EV_Use,                           &Weapon::CoopLootTrigger        },
     {&EV_Weapon_DoneRaising,            &Weapon::DoneRaising            },
     {&EV_Weapon_DoneFiring,             &Weapon::DoneFiring             },
     {&EV_Weapon_Idle,                   &Weapon::Idle                   },
@@ -1036,6 +1042,10 @@ Weapon::Weapon()
     // player's hands the first time anything called CoopQDrawUnpose().
     m_vCoopQDrawAng       = Vector(0, 0, 0);
     m_bCoopQDrawPosed     = false;
+    // HZM coop [user 2026-10-05] use-to-loot: same rule - seeded before the savegame return, not archived
+    m_bCoopUseLoot       = false;
+    m_iCoopLootGrantTo   = -1;
+    m_fCoopLootGrantTime = 0.0f;
 
     if (LoadingSavegame) {
         // Archive function will setup all necessary data
@@ -3358,6 +3368,14 @@ qboolean Weapon::Drop(void)
     avelocity = Vector(0, G_CRandom(120), 0);
     spawnflags |= DROPPED_PLAYER_ITEM;
 
+    // HZM coop [user 2026-10-05] USE-TO-LOOT. DROPPED_PLAYER_ITEM above is set for EVERY owner, so it cannot
+    // tell an enemy's gun from a player's: this flag can. Only a gun with a magazine that an Actor dropped in a
+    // coop session - grenades, binoculars and detectors (clipsize 0) keep touch pickup, and so does anything a
+    // player drops, including a looted gun dropped again (the flag is rewritten on every drop).
+    m_bCoopUseLoot     = (owner && !owner->isClient() && owner->IsSubclassOfActor() && ammo_clip_size[FIRE_PRIMARY] > 0
+                      && !(weapon_class & WEAPON_CLASS_THROWABLE) && G_CoopLootActive());
+    m_iCoopLootGrantTo = -1;
+
     if (owner && owner->isClient()) {
         if (owner->deadflag && g_dropclips->integer > 0) {
             int ammo;
@@ -3966,7 +3984,23 @@ void Weapon::PickupWeapon(Event *ev)
     }
     const bool bOneMag = (coop_onemag && coop_onemag->integer && ammo_clip_size[FIRE_PRIMARY] > 0);
 
-    if ((g_gametype->integer || g_realismmode->integer) && !hasclass && !IsSecondaryWeapon()
+    // HZM coop [user 2026-10-05] USE-TO-LOOT: "you can pick it up if you don't already own the weapon itself".
+    // bLootGrant = Player::TickCoopLoot let THIS player's tap through a moment ago. Stock rules would turn that
+    // tap into an ammo take whenever the player carries another gun of the same class (a Garand owner tapping a
+    // Kar98), and would refuse a second primary of another class outright (the script then flips the gametype
+    // to 0 for a frame to force it). A granted tap on a gun the player does not own is simply a new gun.
+    const bool bLoot      = (m_bCoopUseLoot && G_CoopLootActive());
+    const bool bLootGrant = (bLoot && other->isClient() && m_iCoopLootGrantTo == other->entnum
+                             && level.time - m_fCoopLootGrantTime < 0.5f);
+    bool       bLootNew   = false;
+    if (bLootGrant && !hasweapon) {
+        hasclass = false;
+    }
+    if (bLoot && !bLootGrant && other->isClient() && !G_IsBot(other->edict) && CoopLootGrantPending(other->entnum)) {
+        return; // granted to another player this very moment
+    }
+
+    if (!bLootGrant && (g_gametype->integer || g_realismmode->integer) && !hasclass && !IsSecondaryWeapon()
         && sen->HasPrimaryWeapon()) {
         // Make sure the sentient doesn't have a primary weapon on DM modes
         return;
@@ -4023,6 +4057,14 @@ void Weapon::PickupWeapon(Event *ev)
         iGiveAmmo = startammo[FIRE_PRIMARY];
         if (bOneMag && iGiveAmmo > ammo_clip_size[FIRE_PRIMARY]) {
             iGiveAmmo = ammo_clip_size[FIRE_PRIMARY];
+        }
+        // HZM coop [user 2026-10-05, decision 2] a looted gun arrives with its loaded magazine and nothing
+        // else: one clip's worth, the same as taking its ammo instead. (Touch pickup gave the magazine in the
+        // gun PLUS up to another clip of reserve.)
+        if (bLoot) {
+            ammo_in_clip[FIRE_PRIMARY] = ammo_clip_size[FIRE_PRIMARY];
+            iGiveAmmo                  = 0;
+            bLootNew                   = true;
         }
 
         Sound(sPickupSound);
@@ -4092,7 +4134,7 @@ void Weapon::PickupWeapon(Event *ev)
     // bOneMag can legitimately reach here with startammo zeroed - the branch above clears it when
     // that firemode is already full - so gate on the amount actually being granted, or the weapon
     // would be consumed while handing over nothing.
-    if ((startammo[FIRE_PRIMARY] || (bOneMag && iGiveAmmo)) && ammo_type[FIRE_PRIMARY].length()
+    if (!bLootNew && (startammo[FIRE_PRIMARY] || (bOneMag && iGiveAmmo)) && ammo_type[FIRE_PRIMARY].length()
         && other->isClient()) {
         str        sMessage;
         const str& sAmmoType = ammo_type[FIRE_PRIMARY];
@@ -4143,7 +4185,169 @@ void Weapon::PickupWeapon(Event *ev)
         }
     }
 
+    if (bLoot) {
+        static cvar_t *s_probe = NULL;
+        if (!s_probe) {
+            s_probe = gi.Cvar_Get("coop_lootProbe", "0", 0);
+        }
+        if (s_probe->integer) {
+            // (the ammo branch posted EV_Remove and has no owner; the new-gun branch is now in the inventory)
+            gi.Printf(
+                "^~^~^ LOOT picked e=%d gun=%d name=%s asNewGun=%d granted=%d inClip=%d pool_%s=%d\n", other->entnum, entnum,
+                item_name.c_str(), bLootNew ? 1 : 0, bLootGrant ? 1 : 0, ammo_in_clip[FIRE_PRIMARY],
+                ammo_type[FIRE_PRIMARY].c_str(), sen->AmmoCount(ammo_type[FIRE_PRIMARY])
+            );
+        }
+    }
+
     Unregister(STRING_PICKUP);
+}
+
+/*
+====================
+HZM coop [user 2026-10-05] USE-TO-LOOT - docs/proposals/use_pickup_2026-10-05/PLAN.md
+
+"When an enemy drops a weapon instead of it auto picking up the ammo or weapon, you get prompted" - the weapon half.
+Player::TickCoopLoot (player.cpp) picks the target under the crosshair, times press against hold, and calls the
+two actions below; everything here is the dropped gun's side of it.
+
+G_CoopLootActive: coop only. The coop framework sets level.coop_mainScriptLoaded on every coop map and the
+multiplayer framework refuses to start where it is set (HZM_CoopJoinSession in player.cpp is the same test), so
+this is false on every multiplayer arena - campaign-map arenas included, which run global/ambient.scr in place
+of the map script - and in single player. Tested by TYPE, never by value. coop_lootUse 0 = the old touch pickup.
+====================
+*/
+bool G_CoopLootActive(void)
+{
+    static cvar_t  *s_on = NULL;
+    ScriptVariable *pCoop;
+
+    if (!s_on) {
+        s_on = gi.Cvar_Get("coop_lootUse", "1", 0);
+    }
+    if (!s_on->integer || g_gametype->integer == GT_SINGLE_PLAYER || !level.vars) {
+        return false;
+    }
+    pCoop = level.vars->GetVariable("coop_mainScriptLoaded");
+    return (pCoop && pCoop->GetType() != VARIABLE_NONE);
+}
+
+// "Full" needs the pool to exist: Sentient::MaxAmmoCount is 0 for a type the player has never held, and
+// 0 >= 0 would read as full for exactly the player who has none of it.
+bool G_CoopLootAmmoFull(Sentient *pSen, const str& sType)
+{
+    int iMax;
+
+    if (!pSen || !sType.length()) {
+        return true;
+    }
+    iMax = pSen->MaxAmmoCount(sType);
+    return (iMax > 0 && pSen->AmmoCount(sType) >= iMax);
+}
+
+// A gun the loot tick may offer: flagged at the drop, still lying there (no owner, visible), and made
+// triggerable by the script (coop_mod/itemhandler.scr::enableWeapon does that for the gun the enemy held; the
+// spare guns off his back stay untriggerable, exactly as they were for touch pickup).
+bool Weapon::CoopLootCandidate(void)
+{
+    return m_bCoopUseLoot && !owner && triggerable && edict && edict->inuse && !hidden()
+        && ammo_clip_size[FIRE_PRIMARY] > 0 && ammo_type[FIRE_PRIMARY].length();
+}
+
+// The gate. A human player neither walks into a loot gun nor "uses" it through Player::DoUse (which sends
+// EV_Use to everything in its 32-unit box): only the tap that TickCoopLoot granted gets through, and only for
+// that player. Bots keep touch pickup (decision 6), and so does everything when coop_lootUse is turned off.
+void Weapon::CoopLootTrigger(Event *ev)
+{
+    if (m_bCoopUseLoot && !owner) {
+        Entity *other = ev->GetEntity(1);
+
+        if (other && other->isClient() && !G_IsBot(other->edict) && G_CoopLootActive()
+            && !(m_iCoopLootGrantTo == other->entnum && level.time - m_fCoopLootGrantTime < 0.05f)) {
+            return;
+        }
+    }
+    Trigger::TriggerStuff(ev);
+}
+
+// TAKEN ONCE. A tap does not take the gun there and then: Trigger::TriggerStuff POSTS the pickup, so for the rest
+// of that server frame the gun still lies there, unowned. Without this a second player whose tap or hold completed
+// in the same frame got it too (the gun for one, a magazine of its ammo for the other). While a grant is pending
+// the gun belongs to the player it was granted to and nobody else can act on it.
+bool Weapon::CoopLootGrantPending(int iExceptEntnum)
+{
+    return m_iCoopLootGrantTo >= 0 && m_iCoopLootGrantTo != iExceptEntnum && level.time - m_fCoopLootGrantTime < 0.5f;
+}
+
+// TAP on a gun the player does not own. Runs the unchanged chain - Trigger::TriggerStuff -> EV_Trigger_Effect ->
+// Item::ItemTouch -> Weapon::PickupWeapon, plus the script's `trigger` / `pickup` waittills - so
+// coop_mod/itemhandler.scr sees exactly what it sees for a touch pickup and registers the gun in the player's
+// coop inventory. trigger_time is cleared first: nothing has been allowed to touch this gun, but a stale
+// retrigger delay must not swallow the one press that is.
+void Weapon::CoopLootPickup(Sentient *pTaker)
+{
+    Event *e;
+
+    if (!pTaker || !CoopLootCandidate() || CoopLootGrantPending(pTaker->entnum)) {
+        return; // (someone else's tap on this gun is already on its way: it is theirs)
+    }
+    m_iCoopLootGrantTo   = pTaker->entnum;
+    m_fCoopLootGrantTime = level.time;
+    trigger_time         = 0;
+
+    e = new Event(EV_Use);
+    e->AddListener(pTaker);
+    ProcessEvent(e);
+}
+
+// HOLD. "Cycling ammo just lets you take the ammo type and will apply to whatever guns you already have of that
+// ammo type ... you should only get one clips worth." One magazine goes into the pool (pooled per type, so every
+// owned gun of that type can fire it) and the dropped gun is consumed (decision 1) - the retail rule for touching
+// a gun you already carry. Returns the rounds actually gained, or -1 when that pool is already full.
+int Weapon::CoopLootTakeAmmo(Sentient *pTaker)
+{
+    const str& sType = ammo_type[FIRE_PRIMARY];
+    int        iBefore, iGot;
+    str        sMessage;
+
+    if (!pTaker || !CoopLootCandidate() || CoopLootGrantPending(pTaker->entnum) || G_CoopLootAmmoFull(pTaker, sType)) {
+        return -1;
+    }
+    iBefore = pTaker->AmmoCount(sType);
+    pTaker->GiveAmmo(sType, ammo_clip_size[FIRE_PRIMARY]);
+    iGot = pTaker->AmmoCount(sType) - iBefore;
+    {
+        static cvar_t *s_probe = NULL;
+        if (!s_probe) {
+            s_probe = gi.Cvar_Get("coop_lootProbe", "0", 0);
+        }
+        if (s_probe->integer) {
+            gi.Printf(
+                "^~^~^ LOOT ammotake e=%d gun=%d name=%s type=%s clip=%d pool %d -> %d (max %d)\n", pTaker->entnum, entnum,
+                item_name.c_str(), sType.c_str(), ammo_clip_size[FIRE_PRIMARY], iBefore, iBefore + iGot,
+                pTaker->MaxAmmoCount(sType)
+            );
+        }
+    }
+
+    if (iGot == 1) {
+        sMessage = gi.LV_ConvertString(va("Got 1 %s Round", GetCapitalized(sType).c_str()));
+    } else {
+        sMessage = gi.LV_ConvertString(va("Got %i %s Rounds", iGot, GetCapitalized(sType).c_str()));
+    }
+    gi.SendServerCommand(pTaker->edict - g_entities, "print \"" HUD_MESSAGE_YELLOW "%s\n\"", sMessage.c_str());
+    // on the taker, not on this gun: it is removed before the next snapshot and its sound would go with it
+    pTaker->Sound(m_sAmmoPickupSound, CHAN_ITEM);
+
+    setSolidType(SOLID_NOT);
+    hideModel();
+    CancelEventsOfType(EV_Item_DropToFloor);
+    CancelEventsOfType(EV_Item_Respawn);
+    CancelEventsOfType(EV_FadeOut);
+    CancelEventsOfType(EV_Remove);
+    CancelEventsOfType(EV_Weapon_FallingAngleAdjust);
+    PostEvent(EV_Remove, 0);
+    return iGot;
 }
 
 //======================

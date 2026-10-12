@@ -341,6 +341,19 @@ public:
 
     int GetWeaponClass(void) const;
 
+    // HZM coop [user 2026-10-05] USE-TO-LOOT (docs/proposals/use_pickup_2026-10-05/PLAN.md). A weapon an AI
+    // dropped in a coop session is taken with the Use key, never by walking over it. Constructor-seeded and
+    // deliberately NOT archived (coop runs no saves; the single-player savegame layout is untouched).
+    bool  m_bCoopUseLoot;       // set in Drop() when the owner was an Actor and the feature is on
+    int   m_iCoopLootGrantTo;   // entnum of the player Player::TickCoopLoot let through, -1 = nobody
+    float m_fCoopLootGrantTime; // level.time of that grant (the pickup itself runs from a posted event)
+    bool  CoopLootCandidate(void);         // lying there, flagged, and the script made it usable
+    void  CoopLootPickup(Sentient *pTaker); // tap: the unchanged trigger -> pickup chain, for this player only
+    int   CoopLootTakeAmmo(Sentient *pTaker); // hold: one magazine to the pool, the gun is consumed; -1 = refused
+    void  CoopLootTrigger(Event *ev);      // EV_Touch / EV_Use gate in front of Trigger::TriggerStuff
+    bool  CoopLootGrantPending(int iExceptEntnum); // another player's tap is already on its way
+    int   CoopLootClip(void) { return ammo_clip_size[FIRE_PRIMARY]; }
+
     const_str GetWeaponGroup(void) const;
 
     void  SetItemSlot(int slot);
@@ -657,3 +670,8 @@ inline void Weapon::Archive(Archiver& arc)
 }
 
 typedef SafePtr<Weapon> WeaponPtr;
+
+// HZM coop [user 2026-10-05] use-to-loot (weapon.cpp). Active = a coop map with the coop framework loaded and
+// coop_lootUse on; never in multiplayer or single player.
+bool G_CoopLootActive(void);
+bool G_CoopLootAmmoFull(Sentient *pSen, const str& sType);
