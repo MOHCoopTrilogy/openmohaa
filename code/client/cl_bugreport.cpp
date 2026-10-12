@@ -3081,7 +3081,12 @@ static void CL_BugReportPrepare_f( void ) {
 										  "r_autoExposure", "r_ssao", "r_sunShadows", "r_shadows", "r_dlightMode",
 										  "r_pshadowDist", "r_depthPrepass", "r_ext_direct_state_access", "r_pbr",
 										  "r_normalMapping", "r_specularMapping", "r_cubeMapping", "s_volume",
-										  "s_khz", "rate", "snaps", "cl_maxpackets"};
+										  "s_khz", "rate", "snaps", "cl_maxpackets",
+										  // HZM gl2 video-memory readout (renderergl2/tr_hzm_vram.c): which adapter it matched and how,
+										  // which sources answered, and the numbers it showed - so a report tells us when detection
+										  // went wrong on a card we do not own. Local cvars only; nothing new is sent or queried.
+										  "r_hzmVramBar", "r_vramAdapter", "r_vramHow", "r_vramSource", "r_vramGameMB",
+										  "r_vramOtherMB", "r_vramCardMB", "r_vramBudgetMB", "r_gpuVramMB"};
 		for ( size_t i = 0; i < sizeof( gfx ) / sizeof( gfx[0] ); i++ ) {
 			cvar_t *v = Cvar_FindVar( gfx[i] );
 			if ( v ) {

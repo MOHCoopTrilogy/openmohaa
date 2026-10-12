@@ -32,6 +32,12 @@ gl2 only; gl1 is untouched.
 ===========================================================================
 */
 
+#ifdef USE_INTERNAL_SDL_HEADERS
+#    include "SDL.h"
+#else
+#    include <SDL.h>
+#endif
+
 #include "tr_local.h"
 
 #ifdef _WIN32
@@ -386,191 +392,423 @@ void R_HzmVramAcct_f(void)
 
 /*
 ===========================================================================
-P2.1 - THE NUMBERS THE MENU BLOCK SHOWS (plan section 4.2 / 4.3).
+P2.1 - THE NUMBERS THE VIDEO PANEL SHOWS (plan section 4.2 / 4.3; user 2026-10-12: "on by default, assuming it is
+smart enough to detect the video card, vram and usage for anyone. If it can't it needs to be able to").
 
-Switch: r_hzmVramBar (flags 0). -1 = automatic = HZM_VRAMBAR_AUTO, which is 0 today: DORMANT. Dormant means the ROM
-cvars below keep their empty values, the menu block stays hidden (it is gated on r_vramCardMB > 0) and
-R_HzmVramEndFrame returns on its first test. 1 switches it on for this renderer lifetime.
+Switch: r_hzmVramBar (archived, -1 = automatic = HZM_VRAMBAR_AUTO; 0 off; 1 on; 2 on + one VRAMPOLL line per
+publish). Off / dormant: r_vramShow stays 0, the menu block draws nothing, R_HzmVramEndFrame returns on its first
+test, no thread is started and no Windows library is loaded.
 
-"Costs nothing while the menu is closed": nothing here runs on a timer. The block's bar track is drawn with one
-small texture of its own (VRAM_MARK_IMAGE). gl2 already stamps image->frameUsed on every bind (tr_backend.c
-GL_BindToTMU), so "is the block on screen" is one integer compare per frame in RE_EndFrame - and only then, at most
-twice a second, are the tables walked and Windows asked. Closed menu: the compare, nothing else. Switch off: not
-even that.
+WHAT IS SHOWN, AND FROM WHERE. Each number has its own chain; the first source that answers wins, and a number no
+source can give is LEFT OUT (the line says so or is empty) - never estimated.
 
-Published (all CVAR_ROM, never archived - they describe this machine right now):
-  r_vramCardMB     the card's dedicated memory (0 = unknown or dormant: the block hides)
-  r_vramBudgetMB   what Windows allows this process (DXGI local-segment budget; 0 = unknown)
-  r_vramGameMB     our own count      r_vramPendingMB  what Apply would add or free (latched settings)
-  r_vramOtherMB    other programs on the same card (-1 = unknown: no segment is drawn)
-  r_vramSource     where "other" came from: counters / nvx / none
-  r_vramBarGame / r_vramBarPending / r_vramBarAll / r_vramBarBudget   0-100 of the card, for `statbar horizontal 0 100`
-  r_vramHot        1 when the game (after Apply) reaches 90 % of the budget (of the card when there is no budget)
-  r_vramTextGame / r_vramTextOther / r_vramTextLimit / r_vramTextWarn   the lines, ready to print (a Label shows a
-                   cvar's raw string and cannot format one)
+  this game        our own count (the walk above). Always known. P2.0: within 1.3 % of the per-process counter.
+  adapter          the one the game DRAWS on: DXGI adapters matched to the GL device (tr_hzm_vram_pick.h: LUID from
+                   GL_EXT_memory_object_win32, else the renderer name, else the vendor, else the only one).
+                   No DXGI: the name is GL_RENDERER.
+  scale of the bar 1. a card with its own memory (512 MB or more dedicated): DXGI DedicatedVideoMemory
+                   2. an integrated chip (little or no dedicated memory - it draws from system RAM): the budget
+                      Windows gives this process, else dedicated + shared from DXGI. Never "0 GB".
+                   3. no DXGI adapter: GL_NVX_gpu_memory_info total (NVIDIA), else the registry
+                      (HardwareInformation.qwMemorySize of the display class entry whose name matches GL_RENDERER)
+                   4. none: no bar. The lines still show.
+  the limit        IDXGIAdapter3::QueryVideoMemoryInfo budget, local segment (Windows 10+, any vendor). Else no
+                   marker, and the line names the card size or the shared memory instead.
+  other programs   1. the adapter's dedicated (integrated: shared) usage from the Windows GPU counter of that adapter's
+                      LUID, minus this process's usage (DXGI CurrentUsage, else our count)
+                   2. NVIDIA: NVX total - available - our count      3. AMD: GL_ATI_meminfo free memory, the same way
+                   4. none: the segment is not drawn and the line reads "OTHER n/a"
+A guess of the adapter ("largest", two cards nothing tells apart) uses nothing of that adapter's that could belong
+to the other one: no shared-memory scale, no budget marker.
 
-"Other programs" = the adapter's dedicated usage, from the Windows GPU performance counter the Task Manager reads
-(GPU Adapter Memory, the instance of OUR adapter's LUID), minus this process's own usage from DXGI. P2.0 measured
-that DXGI figure against the per-process counter on ten maps: within 7 MB every time, so it is used as "this
-process" here and no second counter is opened. Without the counters: NVIDIA's total - available - ours. Else none.
+NEVER ON THE RENDER THREAD. Opening DXGI and the counter library can take from a few ms to, on a machine with broken
+counters, seconds. All of it runs on one worker thread of this DLL (opened at R_Init, polled on request); the render
+thread only signals it and reads its last answer under a lock, and makes the two cheap GL queries itself. If the
+worker never answers, the block shows the game's own number alone. RE_Shutdown stops the worker (3 s grace, then
+terminated: the DLL is about to unload).
+
+"Costs nothing while the menu is closed": nothing here runs on a timer. One transparent Label of the menu block uses
+a texture of its own (VRAM_MARK_IMAGE); gl2 stamps image->frameUsed on every bind (tr_backend.c GL_BindToTMU), so
+"the block is on screen" is one integer compare per frame in RE_EndFrame - and only then, at most twice a second, are
+the tables walked and the worker asked. Closed menu: that compare, nothing else.
+
+Test hooks (flags 0, never saved): r_vramDebugNo, a bit mask that takes sources away - 1 LUID, 2 DXGI adapter list,
+4 DXGI budget, 8 Windows counters, 16 NVX, 32 ATI, 64 registry; r_vramDebugAdapter N, use DXGI adapter N whatever
+the match says (N+1; 0 = off) - e.g. Microsoft's software adapter, which has no dedicated memory at all, to see the
+integrated-chip path; r_vramDebugCardMB, pretend the scale and the limit are this small.
 ===========================================================================
 */
+#include "tr_hzm_vram_pick.h"
+
 #define HZM_VRAMBAR_AUTO 0
-#define VRAM_MARK_IMAGE  "textures/hud/vram/track" // as the UI names it: no extension (docs/tools/gen_menu_graphics.py)
+#define VRAM_MARK_IMAGE  "textures/hud/vram/mark" // as the UI names it: no extension (docs/tools/gen_vram_panel.py)
 #define VRAM_POLL_MS     500
+#define VRAM_UMA_MB      512 // less dedicated memory than this = an integrated chip drawing from system RAM
 
 static cvar_t  *r_hzmVramBar;
 static qboolean s_vramOn       = qfalse;
 static image_t *s_vramMark     = NULL;
 static int      s_vramLastPoll = -100000;
+static int      s_vramSerialPublished = -1;
+static int      s_vramLastPublish     = 0;
+
+// what the worker knows; copied whole under the lock
+typedef struct {
+    int          ready;    // the open has finished (successfully or not)
+    int          serial;   // +1 after the open and after every poll
+    int          nAdapters;
+    hzmAdapter_t adapters[HZM_VRAM_MAX_ADAPTERS];
+    int          pick;     // index into adapters, -1
+    char         how[12];
+    int          guess;
+    int          dup;      // one card listed several times: the pick's LUID may not be the game's
+    int          budgetMB; // -1 = not available
+    int          procMB;
+    int          adapterUseMB;
+    int          regMB;    // registry total for the GL renderer's name, -1
+    int          openMs, pollMs;
+} hzmVramOsState_t;
+
+// what the render thread hands the worker before it starts
+typedef struct {
+    char         glVendor[128];
+    char         glRenderer[160];
+    int          haveLuid;
+    unsigned int luidLow;
+    int          luidHigh;
+    int          debugNo;
+    int          debugAdapter;
+} hzmVramOsIn_t;
+
+static hzmVramOsState_t s_os;
+static hzmVramOsIn_t    s_osIn;
 
 #ifdef _WIN32
 #    include <pdh.h>
-// per process (the adapter never changes), released in R_HzmVramShutdown: the DLL unloads on every vid_restart
-static HMODULE        s_dxgiDll  = NULL;
-static IDXGIAdapter3 *s_adapter3 = NULL;
-static int            s_cardMB   = -1;
-static LUID           s_luid;
-static HMODULE        s_pdhDll = NULL;
-static PDH_HQUERY     s_pdhQuery;
-static PDH_HCOUNTER   s_pdhCounter;
-static qboolean       s_pdhOk    = qfalse;
-static qboolean       s_osTried  = qfalse;
+
+static CRITICAL_SECTION s_osLock;
+static qboolean         s_osLockInit = qfalse;
+static HANDLE           s_osThread   = NULL;
+static HANDLE           s_osEvent    = NULL;
+static volatile LONG    s_osQuit     = 0;
+
 typedef PDH_STATUS(WINAPI *pdhOpen_t)(LPCSTR, DWORD_PTR, PDH_HQUERY *);
 typedef PDH_STATUS(WINAPI *pdhAdd_t)(PDH_HQUERY, LPCSTR, DWORD_PTR, PDH_HCOUNTER *);
 typedef PDH_STATUS(WINAPI *pdhCollect_t)(PDH_HQUERY);
 typedef PDH_STATUS(WINAPI *pdhValue_t)(PDH_HCOUNTER, DWORD, LPDWORD, PPDH_FMT_COUNTERVALUE);
 typedef PDH_STATUS(WINAPI *pdhClose_t)(PDH_HQUERY);
-static pdhCollect_t s_pdhCollect = NULL;
-static pdhValue_t   s_pdhValue   = NULL;
-static pdhClose_t   s_pdhClose   = NULL;
 
-static void R_HzmVramOsOpen(void)
+// the registry's idea of the card's memory: the display class entry whose DriverDesc matches the GL renderer name
+static int R_HzmVramRegistryMB(const char *glRenderer)
+{
+    static const char *cls = "SYSTEM\\CurrentControlSet\\Control\\Class\\{4d36e968-e325-11ce-bfc1-08002be10318}";
+    HKEY               hCls;
+    int                i, best = -1, bestScore = 0;
+
+    if (RegOpenKeyExA(HKEY_LOCAL_MACHINE, cls, 0, KEY_READ, &hCls) != ERROR_SUCCESS) {
+        return -1;
+    }
+    for (i = 0; i < 16; i++) {
+        char      sub[8], desc[160];
+        HKEY      h;
+        DWORD     type = 0, size = sizeof(desc);
+        ULONGLONG q    = 0;
+        int       score;
+
+        Com_sprintf(sub, sizeof(sub), "%04d", i);
+        if (RegOpenKeyExA(hCls, sub, 0, KEY_READ, &h) != ERROR_SUCCESS) {
+            continue; // not every number exists, and some are not readable: neither ends the search
+        }
+        desc[0] = 0;
+        if (RegQueryValueExA(h, "DriverDesc", NULL, &type, (LPBYTE)desc, &size) == ERROR_SUCCESS && type == REG_SZ) {
+            desc[sizeof(desc) - 1] = 0;
+            score = HZM_VramNameScore(glRenderer, desc);
+            size  = sizeof(q);
+            if (score > bestScore
+                && RegQueryValueExA(h, "HardwareInformation.qwMemorySize", NULL, &type, (LPBYTE)&q, &size) == ERROR_SUCCESS
+                && type == REG_QWORD && q >= (64ULL << 20)) {
+                bestScore = score;
+                best      = (int)(q >> 20);
+            }
+        }
+        RegCloseKey(h);
+    }
+    RegCloseKey(hCls);
+    return best;
+}
+
+static DWORD WINAPI R_HzmVramWorker(LPVOID arg)
 {
     static const GUID iidFactory1 = {0x770aae78, 0xf26f, 0x4dba, {0xa8, 0x29, 0x25, 0x3c, 0x83, 0xd1, 0xb3, 0x87}};
     static const GUID iidAdapter3 = {0x645967a4, 0x1392, 0x4310, {0xa7, 0x98, 0x80, 0x53, 0xce, 0x3e, 0x93, 0xfd}};
     typedef HRESULT(WINAPI * createFactory1_t)(REFIID, void **);
-    createFactory1_t create;
+    hzmVramOsIn_t    in = s_osIn; // fixed for this worker's life
+    hzmVramOsState_t st;
+    HMODULE          dxgiDll = NULL, pdhDll = NULL;
     IDXGIFactory1   *factory = NULL;
-    IDXGIAdapter1   *adapter = NULL, *best = NULL;
-    SIZE_T           bestMem = 0;
-    UINT             n;
+    IDXGIAdapter1   *kept[HZM_VRAM_MAX_ADAPTERS];
+    IDXGIAdapter3   *adapter3 = NULL;
+    PDH_HQUERY       query    = NULL;
+    PDH_HCOUNTER     counter  = NULL;
+    pdhCollect_t     pdhCollect = NULL;
+    pdhValue_t       pdhValue   = NULL;
+    pdhClose_t       pdhClose   = NULL;
+    qboolean         haveCounter = qfalse;
+    DWORD            t0 = GetTickCount();
+    int              i;
 
-    if (s_osTried) {
-        return;
-    }
-    s_osTried = qtrue;
-    s_dxgiDll = LoadLibraryA("dxgi.dll");
-    if (!s_dxgiDll) {
-        return;
-    }
-    create = (createFactory1_t)GetProcAddress(s_dxgiDll, "CreateDXGIFactory1");
-    if (!create || FAILED(create(&iidFactory1, (void **)&factory)) || !factory) {
-        return;
-    }
-    // the adapter with the most dedicated memory that is not software: the card the game renders on (an
-    // integrated chip beside it reports a few hundred MB)
-    for (n = 0; IDXGIFactory1_EnumAdapters1(factory, n, &adapter) == S_OK; n++) {
-        DXGI_ADAPTER_DESC1 desc;
+    (void)arg;
+    memset(&st, 0, sizeof(st));
+    memset(kept, 0, sizeof(kept));
+    st.pick = -1;
+    st.budgetMB = st.procMB = st.adapterUseMB = st.regMB = -1;
+    Q_strncpyz(st.how, "none", sizeof(st.how));
 
-        if (SUCCEEDED(IDXGIAdapter1_GetDesc1(adapter, &desc)) && !(desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE)
-            && desc.DedicatedVideoMemory > bestMem) {
-            if (best) {
-                IDXGIAdapter1_Release(best);
+    // ---- the adapter list ------------------------------------------------------------------------------
+    if (!(in.debugNo & 2)) {
+        dxgiDll = LoadLibraryA("dxgi.dll");
+    }
+    if (dxgiDll) {
+        createFactory1_t create = (createFactory1_t)GetProcAddress(dxgiDll, "CreateDXGIFactory1");
+
+        if (create && SUCCEEDED(create(&iidFactory1, (void **)&factory)) && factory) {
+            IDXGIAdapter1 *a = NULL;
+            UINT           n;
+
+            for (n = 0; st.nAdapters < HZM_VRAM_MAX_ADAPTERS && IDXGIFactory1_EnumAdapters1(factory, n, &a) == S_OK; n++) {
+                DXGI_ADAPTER_DESC1 d;
+
+                if (SUCCEEDED(IDXGIAdapter1_GetDesc1(a, &d))) {
+                    hzmAdapter_t *o = &st.adapters[st.nAdapters];
+
+                    WideCharToMultiByte(CP_ACP, 0, d.Description, -1, o->name, sizeof(o->name) - 1, "?", NULL);
+                    o->name[sizeof(o->name) - 1] = 0;
+                    o->vendorId    = d.VendorId;
+                    o->deviceId    = d.DeviceId;
+                    o->dedicatedMB = (unsigned int)(d.DedicatedVideoMemory >> 20);
+                    o->sharedMB    = (unsigned int)(d.SharedSystemMemory >> 20);
+                    o->luidLow     = d.AdapterLuid.LowPart;
+                    o->luidHigh    = d.AdapterLuid.HighPart;
+                    o->software    = (d.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) ? 1 : 0;
+                    kept[st.nAdapters++] = a;
+                } else {
+                    IDXGIAdapter1_Release(a);
+                }
+                a = NULL;
             }
-            best    = adapter;
-            bestMem = desc.DedicatedVideoMemory;
-            s_luid  = desc.AdapterLuid;
-        } else {
-            IDXGIAdapter1_Release(adapter);
         }
-        adapter = NULL;
     }
-    if (best) {
-        s_cardMB = (int)(bestMem >> 20);
-        if (FAILED(IDXGIAdapter1_QueryInterface(best, &iidAdapter3, (void **)&s_adapter3))) {
-            s_adapter3 = NULL;
-        }
-        IDXGIAdapter1_Release(best);
-    }
-    IDXGIFactory1_Release(factory);
-
-    // the adapter-wide counter, by name (no import: the renderer must load where pdh.dll is missing)
-    s_pdhDll = LoadLibraryA("pdh.dll");
-    if (s_pdhDll && best) {
-        pdhOpen_t open = (pdhOpen_t)GetProcAddress(s_pdhDll, "PdhOpenQueryA");
-        pdhAdd_t  add  = (pdhAdd_t)GetProcAddress(s_pdhDll, "PdhAddEnglishCounterA");
-        char      path[160];
-
-        s_pdhCollect = (pdhCollect_t)GetProcAddress(s_pdhDll, "PdhCollectQueryData");
-        s_pdhValue   = (pdhValue_t)GetProcAddress(s_pdhDll, "PdhGetFormattedCounterValue");
-        s_pdhClose   = (pdhClose_t)GetProcAddress(s_pdhDll, "PdhCloseQuery");
-        Com_sprintf(
-            path, sizeof(path), "\\GPU Adapter Memory(luid_0x%08lX_0x%08lX_phys_0)\\Dedicated Usage",
-            (unsigned long)s_luid.HighPart, (unsigned long)s_luid.LowPart
+    if (st.nAdapters > 0) {
+        hzmPick_t p = HZM_VramPickAdapter(
+            st.adapters, st.nAdapters, in.haveLuid && !(in.debugNo & 1), in.luidLow, in.luidHigh, in.glVendor,
+            in.glRenderer
         );
-        if (open && add && s_pdhCollect && s_pdhValue && s_pdhClose && open(NULL, 0, &s_pdhQuery) == ERROR_SUCCESS) {
-            if (add(s_pdhQuery, path, 0, &s_pdhCounter) == ERROR_SUCCESS && s_pdhCollect(s_pdhQuery) == ERROR_SUCCESS) {
-                s_pdhOk = qtrue;
-            } else {
-                s_pdhClose(s_pdhQuery);
+
+        if (in.debugAdapter > 0 && in.debugAdapter <= st.nAdapters) {
+            p.index = in.debugAdapter - 1;
+            p.how   = "forced";
+            p.guess = 0;
+            p.dup   = 0;
+        }
+        st.pick  = p.index;
+        st.guess = p.guess;
+        st.dup   = p.dup;
+        Q_strncpyz(st.how, p.how, sizeof(st.how));
+    }
+    // ---- the limit: IDXGIAdapter3 of the pick (Windows 10+) -------------------------------------------------
+    if (st.pick >= 0 && !(in.debugNo & 4)) {
+        if (FAILED(IDXGIAdapter1_QueryInterface(kept[st.pick], &iidAdapter3, (void **)&adapter3))) {
+            adapter3 = NULL;
+        }
+    }
+    // ---- the adapter-wide counter, by name (no import: the renderer must load where pdh.dll is missing) -----
+    if (st.pick >= 0 && !(in.debugNo & 8)) {
+        pdhDll = LoadLibraryA("pdh.dll");
+        if (pdhDll) {
+            pdhOpen_t open = (pdhOpen_t)GetProcAddress(pdhDll, "PdhOpenQueryA");
+            pdhAdd_t  add  = (pdhAdd_t)GetProcAddress(pdhDll, "PdhAddEnglishCounterA");
+            char      path[176];
+            // an integrated chip's memory is all "shared"; a card's is "dedicated"
+            const char *what = (st.adapters[st.pick].dedicatedMB < VRAM_UMA_MB) ? "Shared Usage" : "Dedicated Usage";
+
+            pdhCollect = (pdhCollect_t)GetProcAddress(pdhDll, "PdhCollectQueryData");
+            pdhValue   = (pdhValue_t)GetProcAddress(pdhDll, "PdhGetFormattedCounterValue");
+            pdhClose   = (pdhClose_t)GetProcAddress(pdhDll, "PdhCloseQuery");
+            Com_sprintf(
+                path, sizeof(path), "\\GPU Adapter Memory(luid_0x%08lX_0x%08lX_phys_0)\\%s",
+                (unsigned long)st.adapters[st.pick].luidHigh, (unsigned long)st.adapters[st.pick].luidLow, what
+            );
+            if (open && add && pdhCollect && pdhValue && pdhClose && open(NULL, 0, &query) == ERROR_SUCCESS) {
+                if (add(query, path, 0, &counter) == ERROR_SUCCESS && pdhCollect(query) == ERROR_SUCCESS) {
+                    haveCounter = qtrue;
+                } else {
+                    pdhClose(query);
+                    query = NULL;
+                }
             }
         }
     }
-}
+    // ---- the registry, only when DXGI gave no adapter at all -----------------------------------------------------
+    if (st.pick < 0 && !(in.debugNo & 64)) {
+        st.regMB = R_HzmVramRegistryMB(in.glRenderer);
+    }
+    st.openMs = (int)(GetTickCount() - t0);
 
-// MB; -1 = not available
-static void R_HzmVramOsRead(int *cardMB, int *budgetMB, int *procMB, int *adapterMB)
-{
-    *cardMB = *budgetMB = *procMB = *adapterMB = -1;
-    R_HzmVramOsOpen();
-    *cardMB = s_cardMB;
-    if (s_adapter3) {
-        DXGI_QUERY_VIDEO_MEMORY_INFO info;
+    for (;;) {
+        DWORD t1 = GetTickCount();
 
-        memset(&info, 0, sizeof(info));
-        if (SUCCEEDED(IDXGIAdapter3_QueryVideoMemoryInfo(s_adapter3, 0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &info))) {
-            *budgetMB = (int)(info.Budget >> 20);
-            *procMB   = (int)(info.CurrentUsage >> 20);
+        st.budgetMB = st.procMB = st.adapterUseMB = -1;
+        if (adapter3) {
+            DXGI_QUERY_VIDEO_MEMORY_INFO info;
+
+            memset(&info, 0, sizeof(info));
+            if (SUCCEEDED(IDXGIAdapter3_QueryVideoMemoryInfo(adapter3, 0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &info))
+                && info.Budget > 0) {
+                st.budgetMB = (int)(info.Budget >> 20);
+                st.procMB   = (int)(info.CurrentUsage >> 20);
+            }
+        }
+        if (haveCounter) {
+            PDH_FMT_COUNTERVALUE v;
+
+            if (pdhCollect(query) == ERROR_SUCCESS && pdhValue(counter, PDH_FMT_LARGE, NULL, &v) == ERROR_SUCCESS
+                && v.CStatus == ERROR_SUCCESS && v.largeValue >= 0) {
+                st.adapterUseMB = (int)(v.largeValue >> 20);
+            }
+        }
+        st.pollMs = (int)(GetTickCount() - t1);
+        st.ready  = 1;
+        st.serial++;
+        EnterCriticalSection(&s_osLock);
+        s_os = st;
+        LeaveCriticalSection(&s_osLock);
+
+        WaitForSingleObject(s_osEvent, INFINITE);
+        if (InterlockedCompareExchange(&s_osQuit, 0, 0)) {
+            break;
         }
     }
-    if (s_pdhOk) {
-        PDH_FMT_COUNTERVALUE v;
 
-        if (s_pdhCollect(s_pdhQuery) == ERROR_SUCCESS
-            && s_pdhValue(s_pdhCounter, PDH_FMT_LARGE, NULL, &v) == ERROR_SUCCESS && v.CStatus == ERROR_SUCCESS) {
-            *adapterMB = (int)(v.largeValue >> 20);
+    if (query && pdhClose) {
+        pdhClose(query);
+    }
+    if (adapter3) {
+        IDXGIAdapter3_Release(adapter3);
+    }
+    for (i = 0; i < HZM_VRAM_MAX_ADAPTERS; i++) {
+        if (kept[i]) {
+            IDXGIAdapter1_Release(kept[i]);
         }
+    }
+    if (factory) {
+        IDXGIFactory1_Release(factory);
+    }
+    if (pdhDll) {
+        FreeLibrary(pdhDll);
+    }
+    if (dxgiDll) {
+        FreeLibrary(dxgiDll);
+    }
+    return 0;
+}
+
+static void R_HzmVramOsStart(void)
+{
+    if (s_osThread) {
+        return;
+    }
+    if (!s_osLockInit) {
+        InitializeCriticalSection(&s_osLock);
+        s_osLockInit = qtrue;
+    }
+    memset(&s_os, 0, sizeof(s_os));
+    s_os.pick = -1;
+    s_os.budgetMB = s_os.procMB = s_os.adapterUseMB = s_os.regMB = -1;
+    s_osQuit  = 0;
+    s_osEvent = CreateEventA(NULL, FALSE, FALSE, NULL);
+    if (s_osEvent) {
+        s_osThread = CreateThread(NULL, 0, R_HzmVramWorker, NULL, 0, NULL);
     }
 }
 
-static void R_HzmVramOsClose(void)
+// ask for fresh numbers; returns at once
+static void R_HzmVramOsRequest(void)
 {
-    if (s_pdhOk && s_pdhClose) {
-        s_pdhClose(s_pdhQuery);
+    if (s_osThread && s_osEvent) {
+        SetEvent(s_osEvent);
     }
-    s_pdhOk = qfalse;
-    if (s_adapter3) {
-        IDXGIAdapter3_Release(s_adapter3);
-        s_adapter3 = NULL;
+}
+
+static void R_HzmVramOsSnapshot(hzmVramOsState_t *out)
+{
+    if (!s_osLockInit) {
+        memset(out, 0, sizeof(*out));
+        out->pick = -1;
+        out->budgetMB = out->procMB = out->adapterUseMB = out->regMB = -1;
+        return;
     }
-    if (s_pdhDll) {
-        FreeLibrary(s_pdhDll);
-        s_pdhDll = NULL;
+    EnterCriticalSection(&s_osLock);
+    *out = s_os;
+    LeaveCriticalSection(&s_osLock);
+}
+
+static void R_HzmVramOsStop(void)
+{
+    if (s_osThread) {
+        InterlockedExchange(&s_osQuit, 1);
+        SetEvent(s_osEvent);
+        if (WaitForSingleObject(s_osThread, 3000) != WAIT_OBJECT_0) {
+            // a counter library that never returns: the DLL is about to unload, the thread cannot be left in it
+            TerminateThread(s_osThread, 0);
+        }
+        CloseHandle(s_osThread);
+        s_osThread = NULL;
     }
-    if (s_dxgiDll) {
-        FreeLibrary(s_dxgiDll);
-        s_dxgiDll = NULL;
+    if (s_osEvent) {
+        CloseHandle(s_osEvent);
+        s_osEvent = NULL;
     }
-    s_osTried = qfalse;
-    s_cardMB  = -1;
+}
+
+// the GL device's LUID, when the driver has GL_EXT_memory_object_win32 (render thread)
+static void R_HzmVramGlLuid(hzmVramOsIn_t *in)
+{
+    typedef void(APIENTRY * getUBv_t)(GLenum, GLubyte *);
+    getUBv_t get;
+
+    in->haveLuid = 0;
+    if (!SDL_GL_ExtensionSupported("GL_EXT_memory_object_win32")) {
+        return;
+    }
+    get = (getUBv_t)SDL_GL_GetProcAddress("glGetUnsignedBytevEXT");
+    if (get) {
+        GLubyte luid[8];
+        int     i;
+
+        memset(luid, 0, sizeof(luid));
+        get(0x9599 /* GL_DEVICE_LUID_EXT */, luid);
+        for (i = 0; i < 16 && qglGetError() != GL_NO_ERROR; i++) {
+            luid[0] = luid[1] = luid[2] = luid[3] = luid[4] = luid[5] = luid[6] = luid[7] = 0; // not answered
+        }
+        in->luidLow  = (unsigned int)luid[0] | ((unsigned int)luid[1] << 8) | ((unsigned int)luid[2] << 16) | ((unsigned int)luid[3] << 24);
+        in->luidHigh = (int)((unsigned int)luid[4] | ((unsigned int)luid[5] << 8) | ((unsigned int)luid[6] << 16) | ((unsigned int)luid[7] << 24));
+        in->haveLuid = (in->luidLow || in->luidHigh) ? 1 : 0;
+    }
 }
 #else
-static void R_HzmVramOsRead(int *cardMB, int *budgetMB, int *procMB, int *adapterMB)
+static void R_HzmVramOsStart(void) {}
+static void R_HzmVramOsRequest(void) {}
+static void R_HzmVramOsStop(void) {}
+static void R_HzmVramGlLuid(hzmVramOsIn_t *in)
 {
-    *cardMB = *budgetMB = *procMB = *adapterMB = -1;
+    in->haveLuid = 0;
 }
-static void R_HzmVramOsClose(void) {}
+static void R_HzmVramOsSnapshot(hzmVramOsState_t *out)
+{
+    memset(out, 0, sizeof(*out));
+    out->pick = -1;
+    out->budgetMB = out->procMB = out->adapterUseMB = out->regMB = -1;
+}
 #endif
 
 static void R_VramSet(const char *name, const char *value)
@@ -710,160 +948,276 @@ static double R_HzmVramPendingBytes(const hzmVram_t *now)
     return delta;
 }
 
-static const char *R_VramGB(int mb)
-{
-    return va("%.1f GB", (double)mb / 1024.0);
-}
+// what the chain resolved to at the last publish - also what `vramacct` and the bug report read
+typedef struct {
+    char name[128];     // adapter name
+    char how[12];       // how the adapter was matched
+    char src[64];       // which sources answered, e.g. "dxgi+budget+counters"
+    int  uma;           // an integrated chip (draws from system RAM)
+    int  scaleMB;       // the bar's 100 %, 0 = unknown (no bar)
+    int  limitMB;       // the Windows budget, 0 = unknown
+    int  gameMB, pendMB, otherMB; // otherMB -1 = unknown
+    int  openMs, pollMs;
+} hzmVramView_t;
 
-static void R_HzmVramPublish(void)
-{
-    hzmVram_t v;
-    int       cardMB, budgetMB, procMB, adapterMB, oursMB, pendMB, otherMB = -1, afterMB, limitMB, total;
-    const char *source = "none";
+static hzmVramView_t s_view;
 
-    R_HzmVramCount(&v);
-    R_HzmVramOsRead(&cardMB, &budgetMB, &procMB, &adapterMB);
-    oursMB = (int)((v.tex + v.rt + v.rb + v.vao) >> 20);
-    pendMB = (int)(R_HzmVramPendingBytes(&v) / 1048576.0);
-    if (pendMB > -16 && pendMB < 16) {
-        pendMB = 0; // not worth a hatched sliver
+static void R_HzmVramResolve(hzmVramView_t *v)
+{
+    hzmVram_t        count;
+    hzmVramOsState_t os;
+    cvar_t          *dbgNo   = ri.Cvar_Get("r_vramDebugNo", "0", 0);
+    cvar_t          *dbgCard = ri.Cvar_Get("r_vramDebugCardMB", "0", 0);
+    int              no      = dbgNo ? dbgNo->integer : 0;
+    int              nvxTotalMB = -1, nvxAvailMB = -1, atiFreeMB = -1, procMB;
+    const hzmAdapter_t *a = NULL;
+
+    memset(v, 0, sizeof(*v));
+    v->otherMB = -1;
+    R_HzmVramCount(&count);
+    R_HzmVramOsSnapshot(&os);
+    v->gameMB = (int)((count.tex + count.rt + count.rb + count.vao) >> 20);
+    v->pendMB = (int)(R_HzmVramPendingBytes(&count) / 1048576.0);
+    if (v->pendMB > -16 && v->pendMB < 16) {
+        v->pendMB = 0; // not worth a lamp
     }
-    if (adapterMB >= 0 && procMB >= 0) {
-        otherMB = adapterMB - procMB;
-        source  = "counters";
-    } else if (glRefConfig.memInfo == MI_NVX) {
+    v->openMs = os.openMs;
+    v->pollMs = os.pollMs;
+
+    // the two vendor extensions: cheap GL queries, made here on the render thread
+    if (glRefConfig.memInfo == MI_NVX && !(no & 16)) {
         int totalKb = 0, availKb = 0;
 
         qglGetIntegerv(GL_GPU_MEMORY_INFO_DEDICATED_VIDMEM_NVX, &totalKb);
         qglGetIntegerv(GL_GPU_MEMORY_INFO_CURRENT_AVAILABLE_VIDMEM_NVX, &availKb);
         if (totalKb > 0) {
-            otherMB = totalKb / 1024 - availKb / 1024 - oursMB;
-            source  = "nvx";
-            if (cardMB <= 0) {
-                cardMB = totalKb / 1024;
-            }
+            nvxTotalMB = totalKb / 1024;
+            nvxAvailMB = availKb / 1024;
+        }
+    } else if (glRefConfig.memInfo == MI_ATI && !(no & 32)) {
+        int freeKb[4] = {0, 0, 0, 0};
+
+        qglGetIntegerv(GL_TEXTURE_FREE_MEMORY_ATI, freeKb);
+        if (freeKb[0] > 0) {
+            atiFreeMB = freeKb[0] / 1024;
         }
     }
-    if (otherMB < 0 && strcmp(source, "none")) {
-        otherMB = 0;
-    }
-    // test hook (flags 0, never saved): pretend the card and the Windows limit are this many MB, to see the
-    // near-the-limit state on a card that is nowhere near it
-    {
-        cvar_t *dbg = ri.Cvar_Get("r_vramDebugCardMB", "0", 0);
 
-        if (dbg && dbg->integer > 0) {
-            cardMB   = dbg->integer;
-            budgetMB = (int)(dbg->integer * 0.94f);
-            if (otherMB > cardMB / 6) {
-                otherMB = cardMB / 6; // keep the pretend card's picture coherent
-            }
+    // ---- adapter, name ----------------------------------------------------------------------------------
+    if (os.ready && os.pick >= 0 && os.pick < os.nAdapters) {
+        a = &os.adapters[os.pick];
+        Q_strncpyz(v->name, a->name, sizeof(v->name));
+        Q_strncpyz(v->how, os.how, sizeof(v->how));
+        Q_strcat(v->src, sizeof(v->src), "dxgi");
+        v->uma = (a->dedicatedMB < VRAM_UMA_MB) ? 1 : 0;
+    } else {
+        char *slash;
+
+        Q_strncpyz(v->name, glConfig.renderer_string, sizeof(v->name));
+        slash = strchr(v->name, '/');
+        if (slash) {
+            *slash = 0; // NVIDIA appends "/PCIe/SSE2"
+        }
+        Q_strncpyz(v->how, os.ready ? "gl-name" : "pending", sizeof(v->how));
+    }
+    // ---- the limit -----------------------------------------------------------------------------------------
+    if (a && os.budgetMB > 0 && !os.guess && !os.dup) {
+        v->limitMB = os.budgetMB;
+        Q_strcat(v->src, sizeof(v->src), "+budget");
+    }
+    // ---- the scale -------------------------------------------------------------------------------------------
+    if (a && !v->uma) {
+        v->scaleMB = (int)a->dedicatedMB;
+    } else if (a && v->uma && !os.guess) {
+        v->scaleMB = (v->limitMB > 0) ? v->limitMB : (int)(a->dedicatedMB + a->sharedMB);
+    } else if (!a && nvxTotalMB > 0) {
+        v->scaleMB = nvxTotalMB;
+        Q_strcat(v->src, sizeof(v->src), v->src[0] ? "+nvx-total" : "nvx-total");
+    } else if (!a && os.regMB > 0) {
+        v->scaleMB = os.regMB;
+        Q_strcat(v->src, sizeof(v->src), v->src[0] ? "+registry" : "registry");
+    }
+    // ---- other programs ----------------------------------------------------------------------------------------
+    procMB = (os.procMB >= 0 && !os.dup) ? os.procMB : v->gameMB;
+    if (a && os.adapterUseMB >= 0 && !os.guess && !os.dup) {
+        v->otherMB = os.adapterUseMB - procMB;
+        Q_strcat(v->src, sizeof(v->src), "+counters");
+    } else if (nvxTotalMB > 0 && nvxAvailMB >= 0) {
+        v->otherMB = nvxTotalMB - nvxAvailMB - v->gameMB;
+        Q_strcat(v->src, sizeof(v->src), v->src[0] ? "+nvx" : "nvx");
+    } else if (atiFreeMB >= 0 && v->scaleMB > 0 && !v->uma) {
+        v->otherMB = v->scaleMB - atiFreeMB - v->gameMB;
+        Q_strcat(v->src, sizeof(v->src), v->src[0] ? "+ati" : "ati");
+    }
+    if (v->otherMB < -1) {
+        v->otherMB = 0; // the two readings are taken a moment apart
+    }
+    if (!v->src[0]) {
+        Q_strncpyz(v->src, "count-only", sizeof(v->src));
+    }
+    // test hook: pretend the scale and the limit are this small
+    if (dbgCard && dbgCard->integer > 0) {
+        v->scaleMB = dbgCard->integer;
+        v->limitMB = (int)(dbgCard->integer * 0.94f);
+        if (v->otherMB > v->scaleMB / 6) {
+            v->otherMB = v->scaleMB / 6;
         }
     }
-    if (cardMB <= 0) {
-        // nothing to measure against: one line of text, no bar (the block's bar is gated on r_vramCardMB > 0)
-        R_VramSet("r_vramCardMB", "0");
-        R_VramSet("r_vramGameMB", va("%d", oursMB));
-        R_VramSet("r_vramTextGame", va("This game: about %s", R_VramGB(oursMB)));
-        return;
-    }
-    afterMB = oursMB + (pendMB > 0 ? pendMB : 0);
-    limitMB = (budgetMB > 0) ? budgetMB : cardMB;
-    total   = afterMB + (otherMB > 0 ? otherMB : 0);
+}
 
-    R_VramSet("r_vramCardMB", va("%d", cardMB));
-    R_VramSet("r_vramBudgetMB", va("%d", budgetMB > 0 ? budgetMB : 0));
-    R_VramSet("r_vramGameMB", va("%d", oursMB));
-    R_VramSet("r_vramPendingMB", va("%d", pendMB));
-    R_VramSet("r_vramOtherMB", va("%d", otherMB));
-    R_VramSet("r_vramSource", source);
-#define VRAM_PCT(mb) va("%d", (int)Com_Clamp(0.0f, 100.0f, (float)(mb) * 100.0f / (float)cardMB + 0.5f))
-    R_VramSet("r_vramBarGame", VRAM_PCT(oursMB));
-    R_VramSet("r_vramBarPending", pendMB > 0 ? VRAM_PCT(afterMB) : "0");
-    R_VramSet("r_vramBarAll", otherMB > 0 ? VRAM_PCT(total) : "0");
-    R_VramSet("r_vramBarBudget", budgetMB > 0 ? VRAM_PCT(budgetMB) : "0");
+static const char *R_VramShortGB(int mb)
+{
+    // one decimal below 10 GB, none above: the lines sit in fixed, narrow places on the panel
+    double gb = (double)mb / 1024.0;
+
+    return (gb < 9.95) ? va("%.1f GB", gb) : va("%.0f GB", gb);
+}
+
+static void R_HzmVramPublish(void)
+{
+    hzmVramView_t *v = &s_view;
+    int            afterMB, total, hot = 0, publishUs = 0;
+#ifdef _WIN32
+    LARGE_INTEGER q0, q1, qf;
+
+    QueryPerformanceCounter(&q0);
+#endif
+
+    R_HzmVramResolve(v);
+    s_vramLastPublish = ri.Milliseconds();
+    afterMB = v->gameMB + (v->pendMB > 0 ? v->pendMB : 0);
+    total   = afterMB + (v->otherMB > 0 ? v->otherMB : 0);
+
+    R_VramSet("r_vramShow", "1");
+    R_VramSet("r_vramAdapter", v->name);
+    R_VramSet("r_vramHow", v->how);
+    R_VramSet("r_vramSource", v->src);
+    R_VramSet("r_vramCardMB", va("%d", v->scaleMB));
+    R_VramSet("r_vramBudgetMB", va("%d", v->limitMB));
+    R_VramSet("r_vramGameMB", va("%d", v->gameMB));
+    R_VramSet("r_vramPendingMB", va("%d", v->pendMB));
+    R_VramSet("r_vramOtherMB", va("%d", v->otherMB));
+    if (v->scaleMB > 0) {
+#define VRAM_PCT(mb) va("%d", (int)Com_Clamp(0.0f, 100.0f, (float)(mb) * 100.0f / (float)v->scaleMB + 0.5f))
+        // at least 1: the first lamp is lit for any game share at all
+        R_VramSet("r_vramBarGame", va("%d", (int)Com_Clamp(1.0f, 100.0f, (float)v->gameMB * 100.0f / (float)v->scaleMB + 0.5f)));
+        R_VramSet("r_vramBarPending", v->pendMB > 0 ? VRAM_PCT(afterMB) : "0");
+        R_VramSet("r_vramBarAll", v->otherMB > 0 ? VRAM_PCT(total) : "0");
+        R_VramSet("r_vramBarBudget", (v->limitMB > 0 && v->limitMB < v->scaleMB) ? VRAM_PCT(v->limitMB) : "0");
 #undef VRAM_PCT
-    R_VramSet("r_vramHot", ((double)afterMB >= 0.9 * (double)limitMB) ? "1" : "0");
-    if (pendMB) {
-        R_VramSet("r_vramTextGame", va("After Apply: about %s", R_VramGB(oursMB + pendMB)));
+        hot = ((double)afterMB >= 0.9 * (double)(v->limitMB > 0 ? v->limitMB : v->scaleMB)) ? 1 : 0;
     } else {
-        R_VramSet("r_vramTextGame", va("This game: about %s", R_VramGB(oursMB)));
+        R_VramSet("r_vramBarGame", "0");
+        R_VramSet("r_vramBarPending", "0");
+        R_VramSet("r_vramBarAll", "0");
+        R_VramSet("r_vramBarBudget", "0");
     }
-    R_VramSet("r_vramTextOther", otherMB >= 0 ? va("Other programs: %s", R_VramGB(otherMB)) : "");
-    if (budgetMB > 0) {
-        R_VramSet("r_vramTextLimit", va("Windows limit: about %s", R_VramGB(budgetMB)));
+    R_VramSet("r_vramHot", hot ? "1" : "0");
+    // the three lines. What is not known is said in a word or left empty - never filled in.
+    if (v->pendMB) {
+        R_VramSet("r_vramShortGame", va("APPLY %s", R_VramShortGB(v->gameMB + v->pendMB)));
     } else {
-        R_VramSet("r_vramTextLimit", va("Your card: %d GB", (cardMB + 512) / 1024));
+        R_VramSet("r_vramShortGame", va("GAME %s", R_VramShortGB(v->gameMB)));
     }
-    // the two biggest levers this build has a menu row for
+    R_VramSet("r_vramShortOther", v->otherMB >= 0 ? va("OTHER %s", R_VramShortGB(v->otherMB)) : "OTHER n/a");
+    if (v->limitMB > 0) {
+        R_VramSet("r_vramShortLimit", va("LIMIT %s", R_VramShortGB(v->limitMB)));
+    } else if (v->scaleMB > 0) {
+        R_VramSet("r_vramShortLimit", va(v->uma ? "RAM %s" : "CARD %s", R_VramShortGB(v->scaleMB)));
+    } else {
+        R_VramSet("r_vramShortLimit", "");
+    }
+#ifdef _WIN32
+    QueryPerformanceCounter(&q1);
+    QueryPerformanceFrequency(&qf);
+    publishUs = (int)((q1.QuadPart - q0.QuadPart) * 1000000 / (qf.QuadPart ? qf.QuadPart : 1));
+#endif
     if (r_hzmVramBar && r_hzmVramBar->integer >= 2) {
-        // 2 = on + one line per publish, so a test can count them (none while the menu is closed)
+        // 2 = on + one line per publish, so a test can count them (none while the menu is closed). publish_us = what
+        // this publish cost the render thread; open_ms / poll_ms = what the worker spent, off it.
         ri.Printf(
-            PRINT_ALL, "^~^~^ VRAMPOLL frame=%d game=%d pending=%d other=%d budget=%d card=%d src=%s\n",
-            tr.frameCount, oursMB, pendMB, otherMB, budgetMB, cardMB, source
+            PRINT_ALL,
+            "^~^~^ VRAMPOLL frame=%d game=%d pending=%d other=%d limit=%d scale=%d uma=%d src=%s how=%s open_ms=%d "
+            "poll_ms=%d publish_us=%d adapter=%s\n",
+            tr.frameCount, v->gameMB, v->pendMB, v->otherMB, v->limitMB, v->scaleMB, v->uma, v->src, v->how, v->openMs,
+            v->pollMs, publishUs, v->name
         );
     }
-    R_VramSet(
-        "r_vramTextWarn",
-        (tr.msaaNewPath && tr.msaaSamples > 1)
-            ? "Close to the limit - lower Anti-Aliasing or Texture Quality."
-            : "Close to the limit - lower Texture Quality or Quality."
-    );
 }
 
 /*
-R_HzmVramRegister - every R_Init (R_Register). The ROM cvars exist from the first launch so the menu's wire audit
-and its enabledcvar gates always find them; dormant, they stay at these values.
+R_HzmVramRegister - every R_Init (R_Register). The cvars exist from the first launch so the menu's gates and the
+bug report always find them; dormant, they keep these values.
 */
 void R_HzmVramRegister(void)
 {
-    r_hzmVramBar = ri.Cvar_Get("r_hzmVramBar", "-1", 0);
-    // one literal call each: the menu generator's wire gate and the generated cvar docs find registrations by text
+    r_hzmVramBar = ri.Cvar_Get("r_hzmVramBar", "-1", CVAR_ARCHIVE);
+    // one literal call each: the menu generators' wire gates and the generated cvar docs find registrations by text
+    ri.Cvar_Get("r_vramShow", "0", CVAR_ROM);
+    ri.Cvar_Get("r_vramAdapter", "", CVAR_ROM);
+    ri.Cvar_Get("r_vramHow", "", CVAR_ROM);
+    ri.Cvar_Get("r_vramSource", "", CVAR_ROM);
     ri.Cvar_Get("r_vramCardMB", "0", CVAR_ROM);
     ri.Cvar_Get("r_vramBudgetMB", "0", CVAR_ROM);
     ri.Cvar_Get("r_vramGameMB", "0", CVAR_ROM);
     ri.Cvar_Get("r_vramPendingMB", "0", CVAR_ROM);
     ri.Cvar_Get("r_vramOtherMB", "-1", CVAR_ROM);
-    ri.Cvar_Get("r_vramSource", "", CVAR_ROM);
     ri.Cvar_Get("r_vramBarGame", "0", CVAR_ROM);
     ri.Cvar_Get("r_vramBarPending", "0", CVAR_ROM);
     ri.Cvar_Get("r_vramBarAll", "0", CVAR_ROM);
     ri.Cvar_Get("r_vramBarBudget", "0", CVAR_ROM);
     ri.Cvar_Get("r_vramHot", "0", CVAR_ROM);
-    ri.Cvar_Get("r_vramTextGame", "", CVAR_ROM);
-    ri.Cvar_Get("r_vramTextOther", "", CVAR_ROM);
-    ri.Cvar_Get("r_vramTextLimit", "", CVAR_ROM);
-    ri.Cvar_Get("r_vramTextWarn", "", CVAR_ROM);
+    ri.Cvar_Get("r_vramShortGame", "", CVAR_ROM);
+    ri.Cvar_Get("r_vramShortOther", "", CVAR_ROM);
+    ri.Cvar_Get("r_vramShortLimit", "", CVAR_ROM);
+    ri.Cvar_Get("r_vramDebugNo", "0", 0);
+    ri.Cvar_Get("r_vramDebugAdapter", "0", 0);
+    ri.Cvar_Get("r_vramDebugCardMB", "0", 0);
 }
 
 /*
-R_HzmVramInit - end of every R_Init (the image table is new). Decides on / dormant for this renderer lifetime and
-looks the mark texture up; without the texture (an older pk3) the block cannot be on screen and nothing is published.
+R_HzmVramInit - end of every R_Init (the image table is new). Decides on / dormant for this renderer lifetime,
+starts the worker, and looks the mark texture up.
 */
 void R_HzmVramInit(void)
 {
     int want = r_hzmVramBar ? r_hzmVramBar->integer : -1;
 
-    s_vramMark     = NULL;
-    s_vramLastPoll = -100000;
-    s_vramOn       = (want < 0 ? HZM_VRAMBAR_AUTO : want) ? qtrue : qfalse;
+    s_vramMark            = NULL;
+    s_vramLastPoll        = -100000;
+    s_vramSerialPublished = -1;
+    s_vramOn              = (want < 0 ? HZM_VRAMBAR_AUTO : want) ? qtrue : qfalse;
     if (!s_vramOn) {
-        R_VramSet("r_vramCardMB", "0"); // the block hides
+        R_VramSet("r_vramShow", "0"); // the block draws nothing
         return;
     }
+    Q_strncpyz(s_osIn.glVendor, glConfig.vendor_string, sizeof(s_osIn.glVendor));
+    Q_strncpyz(s_osIn.glRenderer, glConfig.renderer_string, sizeof(s_osIn.glRenderer));
+    R_HzmVramGlLuid(&s_osIn);
+    s_osIn.debugNo      = ri.Cvar_Get("r_vramDebugNo", "0", 0)->integer;
+    s_osIn.debugAdapter = ri.Cvar_Get("r_vramDebugAdapter", "0", 0)->integer;
+    R_HzmVramOsStart();
     s_vramMark = R_FindImageFile(VRAM_MARK_IMAGE, IMGTYPE_COLORALPHA, IMGFLAG_NONE);
-    R_HzmVramPublish(); // so the block is populated the first time it is opened
+    R_HzmVramPublish(); // the game's own number at once; the worker's answer follows (R_HzmVramEndFrame)
     s_vramLastPoll = ri.Milliseconds();
 }
 
 /*
-R_HzmVramEndFrame - RE_EndFrame. Off: one test. On, menu closed: two more. See the header of this part.
+R_HzmVramEndFrame - RE_EndFrame. Off: one test. On, menu closed: a compare for the worker's first answer and one
+for the mark texture. See the header of this part.
 */
 void R_HzmVramEndFrame(void)
 {
     int now;
 
     if (!s_vramOn) {
+        return;
+    }
+    // the worker answered since the last publish (its open, or a poll we asked for): show it. s_os.serial is read
+    // without the lock on purpose - a torn read only delays this by a frame.
+    if (s_os.serial != s_vramSerialPublished) {
+        s_vramSerialPublished = s_os.serial;
+        R_HzmVramPublish();
         return;
     }
     // frameUsed starts at 0 and so does tr.frameCount: the first frames of a renderer lifetime are not "drawn"
@@ -875,12 +1229,42 @@ void R_HzmVramEndFrame(void)
         return;
     }
     s_vramLastPoll = now;
-    R_HzmVramPublish();
+    R_HzmVramOsRequest(); // fresh Windows numbers; returns at once, and the publish follows when they arrive (above)
+    if (!s_os.ready || now - s_vramLastPublish > 3 * VRAM_POLL_MS) {
+        // no worker (not Windows), or one that has stopped answering: the game's own number must not go stale
+        R_HzmVramPublish();
+    }
 }
 
 void R_HzmVramShutdown(void)
 {
-    R_HzmVramOsClose();
+    R_HzmVramOsStop();
     s_vramMark = NULL;
     s_vramOn   = qfalse;
+}
+
+/*
+vramsrc - console command: the whole chain as the worker and the render thread see it, one line per adapter. For
+the per-path test table and for a tester who reports a wrong number.
+*/
+void R_HzmVramSrc_f(void)
+{
+    hzmVramOsState_t os;
+    int              i;
+
+    R_HzmVramOsSnapshot(&os);
+    ri.Printf(PRINT_ALL, "^~^~^ VRAMSRC on=%d ready=%d adapters=%d pick=%d how=%s guess=%d luid=%d:%08x_%08x budget=%d "
+              "proc=%d adapter_use=%d reg=%d open_ms=%d poll_ms=%d gl_vendor=\"%s\" gl_renderer=\"%s\"\n",
+              s_vramOn ? 1 : 0, os.ready, os.nAdapters, os.pick, os.how[0] ? os.how : "-", os.guess, s_osIn.haveLuid,
+              (unsigned int)s_osIn.luidHigh, s_osIn.luidLow, os.budgetMB, os.procMB, os.adapterUseMB, os.regMB,
+              os.openMs, os.pollMs, glConfig.vendor_string, glConfig.renderer_string);
+    for (i = 0; i < os.nAdapters; i++) {
+        ri.Printf(PRINT_ALL, "^~^~^ VRAMADP %d%s \"%s\" vendor=%04x device=%04x dedicated=%u shared=%u software=%d luid=%08x_%08x\n",
+                  i, i == os.pick ? "*" : "", os.adapters[i].name, os.adapters[i].vendorId, os.adapters[i].deviceId,
+                  os.adapters[i].dedicatedMB, os.adapters[i].sharedMB, os.adapters[i].software,
+                  (unsigned int)os.adapters[i].luidHigh, os.adapters[i].luidLow);
+    }
+    ri.Printf(PRINT_ALL, "^~^~^ VRAMVIEW name=\"%s\" how=%s src=%s uma=%d scale=%d limit=%d game=%d pending=%d other=%d\n",
+              s_view.name, s_view.how, s_view.src, s_view.uma, s_view.scaleMB, s_view.limitMB, s_view.gameMB,
+              s_view.pendMB, s_view.otherMB);
 }
