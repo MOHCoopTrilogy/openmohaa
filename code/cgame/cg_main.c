@@ -1034,6 +1034,8 @@ void CG_Init(clientGameImport_t *imported, int serverMessageNum, int serverComma
     cgi.Cvar_Set("coop_hudMed", ""); // [bug-3495] the item readout: same rule
     cgi.Cvar_Set("coop_hudCov", "");
     cgi.Cvar_Set("coop_hudAmmo", "");
+    cgi.Cvar_Set("coop_hudBinoc", ""); // [user 2026-10-12] the two officer rewards in the same row
+    cgi.Cvar_Set("coop_hudSmoke", "");
     // HZM-MP-END(mp_armory_session)
 
     // HZM-MP-BEGIN(mp_kit_userinfo)
