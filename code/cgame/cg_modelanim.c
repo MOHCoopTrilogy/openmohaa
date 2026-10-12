@@ -2046,11 +2046,13 @@ static void CG_AdsSightTrace(refEntity_t *model)
         rel = DotProduct(d, cam[0]);
         cgi.Printf("^~^~^ ADSFRAME t=%d ft=%d pose=%.4f w=%.4f gate=%.4f anim=%d pmf=0x%x lean=%.2f "
                    "F=(%.3f %.3f) R=(%.3f %.3f) G=(%.3f %.3f) wfov=%.3f sh=(%.4f %.4f) "
-                   "sight=(%.3f %.3f) bore=(%.3f %.3f) cant=%.3f relief=%.3f\n",
+                   "sight=(%.3f %.3f) bore=(%.3f %.3f) cant=%.3f relief=%.3f clip=%d ammo=%d\n",
                    cg.time, cg.frametime, CG_AdsPoseFactor(), CG_AdsRigWeight(), CG_AdsAnimGate(),
                    cg.snap ? cg.snap->ps.iViewModelAnim : -1, cg.predicted_player_state.pm_flags,
                    cg.predicted_player_state.fLeanAngle, px[0], py[0], px[1], py[1], px[2], py[2], cg_fAdsWeaponFov,
-                   shx, shy, sy, sp, by, bp, ct, rel);
+                   shx, shy, sy, sp, by, bp, ct, rel,
+                   // HZM coop [harness] rounds in the gun / in reserve as this client knows them (break-off runs count rounds)
+                   cg.snap ? cg.snap->ps.stats[STAT_CLIPAMMO] : -1, cg.snap ? cg.snap->ps.stats[STAT_AMMO] : -1);
     }
 }
 
