@@ -11680,28 +11680,11 @@ static bool HZM_CoopJoinSession(void)
 }
 
 // A genuinely new player: the event feed for a client whose cgame advertises cg_hzmFeed (cgame/cg_coopfeed.c),
-// the vanilla chat-white line for any other.
-static void HZM_CoopJoinAnnounce(const char *text)
+// the vanilla chat-white line for any other. [feed round 2] keyed by the client (was one shared "join" key, so two
+// players joining together replaced each other's line), through the shared helper in g_utils.cpp.
+static void HZM_CoopJoinAnnounce(int clientNum, const char *text)
 {
-    int  i;
-    char ui[MAX_INFO_STRING];
-
-    if (g_protocol < protocol_e::PROTOCOL_MOHTA_MIN) {
-        G_PrintToAllClients(va("%s\n", text), 2);
-        return;
-    }
-    for (i = 0; i < game.maxclients; i++) {
-        gentity_t *ent = &g_entities[i];
-        if (!ent->inuse || !ent->entity || !ent->client) {
-            continue;
-        }
-        gi.GetUserinfo(i, ui, sizeof(ui));
-        if (Info_ValueForKey(ui, "cg_hzmFeed")[0] == '1') {
-            gi.SendServerCommand(i, "print \"" HUD_MESSAGE_WHITE "~f1:join~%s\n\"", text);
-        } else {
-            gi.SendServerCommand(i, "print \"" HUD_MESSAGE_CHAT_WHITE "%s\n\"", text);
-        }
-    }
+    G_CoopFeedPrintAll(1, va("join%d", clientNum), text, 2);
 }
 
 void Player::Join_DM_Team(Event *ev)
@@ -11810,7 +11793,7 @@ void Player::Join_DM_Team(Event *ev)
         // to the event feed. Non-coop servers keep the vanilla line.
         if (HZM_CoopJoinSession()) {
             if (!g_hzmCarriedClient[edict - g_entities]) {
-                HZM_CoopJoinAnnounce(va("%s %s", client->pers.netname, join_message));
+                HZM_CoopJoinAnnounce((int)(edict - g_entities), va("%s %s", client->pers.netname, join_message));
             }
         } else {
             G_PrintToAllClients(va("%s %s\n", client->pers.netname, join_message), 2);
@@ -12339,7 +12322,15 @@ void Player::CallVote(Event *ev)
     }
 
     G_PrintfClient(edict, "called a vote (%s %s)\n", arg1.c_str(), arg2.c_str());
-    G_PrintToAllClients(va("%s %s.\n", client->pers.netname, gi.LV_ConvertString("called a vote")));
+    // HZM coop [user 2026-10-06, feed round 2] a coop mission: the vote lines are team lines in the event feed (the
+    // vote prompt itself is the client's own HUD and is untouched). Hardcore and non-coop keep the retail line.
+    if (G_CoopFeedSession()) {
+        G_CoopFeedPrintAll(
+            1, "vote", va("%s %s", client->pers.netname, gi.LV_ConvertString("called a vote")), 1, true
+        );
+    } else {
+        G_PrintToAllClients(va("%s %s.\n", client->pers.netname, gi.LV_ConvertString("called a vote")));
+    }
 
     level.m_voteTime = (level.svsFloatTime - level.svsStartFloatTime) * 1000;
     level.m_voteYes  = 1;

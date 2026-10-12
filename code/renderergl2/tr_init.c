@@ -37,6 +37,10 @@ glstate_t	glState;
 
 static void GfxInfo_f( void );
 static void GfxMemInfo_f( void );
+void R_HzmVramAcct_f( void );   // tr_hzm_vram.c
+void R_HzmVramRegister( void );
+void R_HzmVramInit( void );
+void R_HzmVramShutdown( void );
 
 #ifdef USE_RENDERER_DLOPEN
 cvar_t  *com_altivec;
@@ -2135,6 +2139,7 @@ void R_Register( void )
 	ri.Cmd_AddCommand( "gfxinfo", GfxInfo_f );
 	ri.Cmd_AddCommand( "minimize", GLimp_Minimize );
 	ri.Cmd_AddCommand( "gfxmeminfo", GfxMemInfo_f );
+	ri.Cmd_AddCommand( "vramacct", R_HzmVramAcct_f );   // HZM gl2: video-memory accounting line (tr_hzm_vram.c)
 	ri.Cmd_AddCommand( "exportCubemaps", R_ExportCubemaps_f );
 	// HZM gl2 graphics probes (tr_gfxprobe.c, MSAA/shadow plan P0): r_gfxProbe, r_glDebug, r_gfxLabel,
 	// r_shadowFitYaw/Offset, ROM r_displayHz/r_vsyncActive, and the gfxprobe/gfxwcrc/gfxresettiming commands.
@@ -2146,6 +2151,7 @@ void R_Register( void )
 	// ROM r_msaaActive/r_gpuVramMB/r_msaaForcedOff, and the V3-C1 archived-switch check.
 	R_Msaa_Register();
 	R_HZM_Clouds_Register();	// HZM gl2 volumetric clouds: r_hzmClouds* (flags 0, never archived)
+	R_HzmVramRegister();   // HZM gl2: the video-memory block's cvars (tr_hzm_vram.c)
 	ri.Cmd_AddCommand( "hzmtlprobe", R_HZM_TerrainLProbe_f ); // HZM [bug-3064] diagnostic, inert unless typed
 
 	//
@@ -2491,6 +2497,7 @@ void R_Init( void ) {
 	// HZM gl2: ^~^~^ GFXBUILD - which renderer build actually loaded (a failed renderer_<name>.dll load
 	// silently falls back to opengl1, so every test run checks for this line).
 	R_GfxProbe_AfterInit();
+	R_HzmVramInit();   // HZM gl2: video-memory block - on or dormant for this renderer lifetime (tr_hzm_vram.c)
 	ri.Printf( PRINT_ALL, "----- finished R_Init -----\n" );
 }
 
@@ -2509,6 +2516,7 @@ void RE_Shutdown( qboolean destroyWindow ) {
 	}
 	// HZM frame generation: so does the present thread, and it must stop before its textures and the window go
 	R_FG_Shutdown();
+	R_HzmVramShutdown();   // HZM gl2: the DXGI adapter and the counter query live in this DLL too
 
 	ri.Printf( PRINT_ALL, "RE_Shutdown( %i )\n", destroyWindow );
 
@@ -2529,6 +2537,7 @@ void RE_Shutdown( qboolean destroyWindow ) {
 	ri.Cmd_RemoveCommand( "gfxinfo" );
 	ri.Cmd_RemoveCommand( "minimize" );
 	ri.Cmd_RemoveCommand( "gfxmeminfo" );
+	ri.Cmd_RemoveCommand( "vramacct" );
 	ri.Cmd_RemoveCommand( "exportCubemaps" );
 	R_GfxProbe_Shutdown();
 	ri.Cmd_RemoveCommand( "hzmtlprobe" );

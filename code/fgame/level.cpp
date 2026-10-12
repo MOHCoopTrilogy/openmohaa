@@ -2049,6 +2049,17 @@ bool Level::GetVoteOptionSubName(int index, int listIndex, str *outName)
     return m_voteOptions.GetVoteOptionSubName(index, listIndex, outName);
 }
 
+// HZM coop [user 2026-10-06, feed round 2] "Vote Passed: ..." / "Vote Failed: ...": a team line in the event feed in
+// a coop mission (g_utils.cpp G_CoopFeedPrintAll), the retail bold line everywhere else and under Hardcore.
+static void HZM_CoopVoteResult(const char *text)
+{
+    if (G_CoopFeedSession()) {
+        G_CoopFeedPrintAll(1, "vote", text, 1, true);
+    } else {
+        G_PrintToAllClients(va("%s\n", text));
+    }
+}
+
 void Level::CheckVote(void)
 {
     gentity_t *ent;
@@ -2107,17 +2118,17 @@ void Level::CheckVote(void)
     level.m_numVoters = numVoters;
 
     if ((svsFloatTime - svsStartFloatTime) * 1000 - m_voteTime >= 30000) {
-        G_PrintToAllClients(va("%s: %s\n", gi.CL_LV_ConvertString("Vote Failed"), m_voteName.c_str()));
+        HZM_CoopVoteResult(va("%s: %s", gi.CL_LV_ConvertString("Vote Failed"), m_voteName.c_str()));
         m_voteTime = 0;
         gi.setConfigstring(CS_VOTE_TIME, "");
     } else if (m_voteYes > m_numVoters / 2) {
         // Pass arguments to console
-        G_PrintToAllClients(va("%s: %s\n", gi.CL_LV_ConvertString("Vote Passed"), m_voteName.c_str()));
+        HZM_CoopVoteResult(va("%s: %s", gi.CL_LV_ConvertString("Vote Passed"), m_voteName.c_str()));
         m_nextVoteTime = level.inttime + 3000;
         m_voteTime     = 0;
         gi.setConfigstring(CS_VOTE_TIME, "");
     } else if (m_voteNo >= m_numVoters / 2) {
-        G_PrintToAllClients(va("%s: %s\n", gi.CL_LV_ConvertString("Vote Failed"), m_voteName.c_str()));
+        HZM_CoopVoteResult(va("%s: %s", gi.CL_LV_ConvertString("Vote Failed"), m_voteName.c_str()));
         m_voteTime = 0;
         gi.setConfigstring(CS_VOTE_TIME, "");
     } else {

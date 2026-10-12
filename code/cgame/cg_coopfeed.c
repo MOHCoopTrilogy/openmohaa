@@ -6,7 +6,10 @@ Why (docs/proposals/hud_declutter_2026-10-05/PLAN.md): the gmbox holds 5 lines, 
 (cl_uigmbox.cpp PostDecayEvent), holds a bold line 10 s and beeps "objective_text" for every bold line
 (cl_ui.cpp UI_PrintConsole). A five-line officer burst stayed on screen for most of a minute. This feed:
   - max 3 lines, bottom-left above the health/stamina cluster, newest at the bottom;
-  - every line has its OWN timer (parallel fade, never a queue), no sound;
+  - every line has its OWN timer (parallel fade), no sound;
+  - a burst larger than the three rows is never dropped [user 2026-10-06, feed round 2]: a line that finds every
+    row taken by a line younger than FEED_MIN_SHOW waits its turn (s_pend, alerts first) and goes up as soon as
+    the oldest row has had that long, so four lines in one frame are four lines read, not three and a 200 ms flash;
   - a repeat of the same key restarts the hold and shows a counter ("x3") instead of a new line;
   - drawn procedurally like the stamina arc (no ihuddraw slot - the fade-exempt band is full - and no
     s_hudFadeAlpha, so a stationary player still sees it).
@@ -65,7 +68,24 @@ typedef struct {
     int       placed;
 } feedLine_t;
 
+// [user 2026-10-06, feed round 2] "No line may be lost when several arrive in one frame". Until now a 4th line pushed
+// the oldest out with the 200 ms fast fade whatever its age, so of four lines sent in one frame the first was on
+// screen for a fifth of a second, and of seven the first four were. Lines that find no row now wait here.
+#define FEED_PENDING  24   // lines waiting for a row; a longer burst than 3 + 24 shows its oldest waiting line early
+#define FEED_MIN_SHOW 1500 // ms a line is guaranteed on screen before a newer line may take its row
+
+typedef struct {
+    int  cat;
+    int  count;
+    int  at; // cg.time it arrived
+    char key[FEED_KEY];
+    char text[FEED_TEXT];
+    char icon[FEED_ICON];
+} feedPend_t;
+
 static feedLine_t    s_feed[FEED_SLOTS];
+static feedPend_t    s_pend[FEED_PENDING];
+static int           s_pendN      = 0;
 static fontheader_t *s_feedFont   = NULL;
 static int           s_feedInit   = 0;
 static int           s_feedLastT  = 0;
@@ -291,9 +311,12 @@ static qboolean CG_FeedLive(const feedLine_t *e, int now)
     return (e->active && !e->dieAt && now < e->refresh + e->hold) ? qtrue : qfalse;
 }
 
+static qboolean CG_FeedMakeRoom(int now, qboolean force);
+static void     CG_FeedPlace(int cat, const char *key, const char *icon, const char *text, int count, int now, int arrived);
+
 static void CG_FeedPush(int cat, const char *key, const char *icon, const char *text)
 {
-    int         i, now = cg.time, live = 0, slot = -1, oldest;
+    int         i, now = cg.time, slot;
     feedLine_t *e;
 
     if (!key[0]) {
@@ -317,23 +340,98 @@ static void CG_FeedPush(int cat, const char *key, const char *icon, const char *
             return;
         }
     }
-    // at most FEED_VISIBLE live lines: the oldest makes room with a fast fade
-    for (;;) {
-        live   = 0;
-        oldest = -1;
-        for (i = 0; i < FEED_SLOTS; i++) {
-            if (CG_FeedLive(&s_feed[i], now)) {
-                live++;
-                if (oldest < 0 || s_feed[i].born < s_feed[oldest].born) {
-                    oldest = i;
-                }
+    // the same key is already waiting for a row: one waiting line, newest wording, counted
+    for (i = 0; i < s_pendN; i++) {
+        if (!Q_stricmpn(s_pend[i].key, key, FEED_KEY - 1)) {
+            if (!Q_stricmp(s_pend[i].text, text)) {
+                s_pend[i].count++;
+            } else {
+                s_pend[i].count = 1;
+            }
+            Q_strncpyz(s_pend[i].text, text, sizeof(s_pend[i].text));
+            return;
+        }
+    }
+    // a row is free (or its line has had FEED_MIN_SHOW) and nobody is ahead: show it now
+    if (!s_pendN && CG_FeedMakeRoom(now, qfalse)) {
+        CG_FeedPlace(cat, key, icon, text, 1, now, now);
+        return;
+    }
+    // otherwise it waits. A full queue sends its head up early rather than drop anything.
+    if (s_pendN >= FEED_PENDING) {
+        CG_FeedMakeRoom(now, qtrue);
+        CG_FeedPlace(s_pend[0].cat, s_pend[0].key, s_pend[0].icon, s_pend[0].text, s_pend[0].count, now, s_pend[0].at);
+        s_pendN--;
+        memmove(&s_pend[0], &s_pend[1], sizeof(s_pend[0]) * s_pendN);
+    }
+    // an alert (a teammate down, an enemy wave) goes ahead of everything waiting that is not an alert
+    slot = s_pendN;
+    if (cat == 0) {
+        for (slot = 0; slot < s_pendN && s_pend[slot].cat == 0; slot++) {}
+        memmove(&s_pend[slot + 1], &s_pend[slot], sizeof(s_pend[0]) * (s_pendN - slot));
+    }
+    s_pendN++;
+    memset(&s_pend[slot], 0, sizeof(s_pend[slot]));
+    s_pend[slot].cat   = cat;
+    s_pend[slot].count = 1;
+    s_pend[slot].at    = now;
+    Q_strncpyz(s_pend[slot].key, key, sizeof(s_pend[slot].key));
+    Q_strncpyz(s_pend[slot].text, text, sizeof(s_pend[slot].text));
+    Q_strncpyz(s_pend[slot].icon, icon, sizeof(s_pend[slot].icon));
+    if (s_cvDebug && s_cvDebug->integer) {
+        cgi.Printf("^~^~^ FEEDQ t=%d waiting=%d cat=%d key=%s\n", now, s_pendN, cat, key);
+    }
+}
+
+/*
+The lines that waited: each goes up as soon as there is a row for it. Called every frame from CG_DrawCoopFeed,
+before anything is drawn and also while the HUD is hidden (lines age there too).
+*/
+static void CG_FeedDrain(int now)
+{
+    // cg.time ran backwards over a map load: what waited belongs to the previous map
+    if (s_pendN > 0 && s_pend[0].at > now + 1000) {
+        s_pendN = 0;
+    }
+    while (s_pendN > 0 && CG_FeedMakeRoom(now, qfalse)) {
+        CG_FeedPlace(s_pend[0].cat, s_pend[0].key, s_pend[0].icon, s_pend[0].text, s_pend[0].count, now, s_pend[0].at);
+        s_pendN--;
+        memmove(&s_pend[0], &s_pend[1], sizeof(s_pend[0]) * s_pendN);
+    }
+}
+
+/*
+Is there a row for one more line right now? Yes when fewer than FEED_VISIBLE lines are live, or when the oldest live
+line has been up for FEED_MIN_SHOW - it then leaves with the fast fade. force = take its row whatever its age.
+*/
+static qboolean CG_FeedMakeRoom(int now, qboolean force)
+{
+    int i, live = 0, oldest = -1;
+
+    for (i = 0; i < FEED_SLOTS; i++) {
+        if (CG_FeedLive(&s_feed[i], now)) {
+            live++;
+            if (oldest < 0 || s_feed[i].born < s_feed[oldest].born) {
+                oldest = i;
             }
         }
-        if (live < FEED_VISIBLE || oldest < 0) {
-            break;
-        }
-        s_feed[oldest].dieAt = now;
     }
+    if (live < FEED_VISIBLE || oldest < 0) {
+        return qtrue;
+    }
+    if (!force && now - s_feed[oldest].born < FEED_MIN_SHOW) {
+        return qfalse;
+    }
+    s_feed[oldest].dieAt = now;
+    return qtrue;
+}
+
+// put a line on screen now (the caller has made room)
+static void CG_FeedPlace(int cat, const char *key, const char *icon, const char *text, int count, int now, int arrived)
+{
+    int         i, slot = -1;
+    feedLine_t *e;
+
     for (i = 0; i < FEED_SLOTS; i++) {
         if (CG_FeedExpired(&s_feed[i], now)) {
             slot = i;
@@ -341,7 +439,15 @@ static void CG_FeedPush(int cat, const char *key, const char *icon, const char *
         }
     }
     if (slot < 0) {
-        // every slot still fading: take the oldest
+        // every slot still fading: take the oldest of those on their way out (never a live line - one that was
+        // bumped can be older than a line that is already fading)
+        for (i = 0; i < FEED_SLOTS; i++) {
+            if (!CG_FeedLive(&s_feed[i], now) && (slot < 0 || s_feed[i].born < s_feed[slot].born)) {
+                slot = i;
+            }
+        }
+    }
+    if (slot < 0) {
         slot = 0;
         for (i = 1; i < FEED_SLOTS; i++) {
             if (s_feed[i].born < s_feed[slot].born) {
@@ -349,11 +455,14 @@ static void CG_FeedPush(int cat, const char *key, const char *icon, const char *
             }
         }
     }
+    if (s_cvDebug && s_cvDebug->integer) {
+        cgi.Printf("^~^~^ FEEDSHOW t=%d waited=%d cat=%d key=%s\n", now, now - arrived, cat, key);
+    }
     e = &s_feed[slot];
     memset(e, 0, sizeof(*e));
     e->active  = 1;
     e->cat     = cat;
-    e->count   = 1;
+    e->count   = count > 0 ? count : 1;
     e->born    = now;
     e->refresh = now;
     e->hold    = CG_FeedHoldMs(cat);
@@ -511,6 +620,83 @@ it with "-"; CG_Init clears it on every connect and map load (cg_main.c), so a l
 the mission that set it.
 ====================
 */
+/*
+[bug-3522] The right edge the pinned line may use, in pixels. The line shares the top right corner with the script
+HUD: the retail mission-item icons (global/items.scr slots 21-26, 64 units square from 8 units down, stepping left
+from the edge) and the officer system's binoculars / paradrop icons. The line was always right-aligned 16 units from
+the edge, i.e. on top of the first icon's box; on a small screen its last characters sat on the icon art. It now ends
+left of the leftmost visible element that reaches into its row (elements in the right half of the screen only - a
+centred toast or a full-width overlay is not "an icon in the corner"). A faded icon still counts, so the line does
+not slide about as the HUD fades in and out.
+*/
+static float CG_CoopPinnedRightPx(float topPx, float bottomPx, float *lowPx)
+{
+    float W     = (float)cgs.glconfig.vidWidth, H = (float)cgs.glconfig.vidHeight;
+    float sx    = cgs.uiHiResScale[0], sy = cgs.uiHiResScale[1];
+    float right = W - 16.0f * sx;
+    int   i;
+
+    for (i = 0; i < MAX_HUDDRAW_ELEMENTS; i++) {
+        const hdelement_t *e = &cgi.HudDrawElements[i];
+        float              fX, fY, fW, fH, kx, ky;
+
+        if ((!e->hShader && !e->string[0]) || !e->vColor[3]) {
+            continue;
+        }
+        // the same placement maths as CG_HudDrawElements (cg_drawtools.cpp)
+        fX = (float)e->iX;
+        fY = (float)e->iY;
+        fW = (float)e->iWidth;
+        fH = (float)e->iHeight;
+        if (e->bVirtualScreen) {
+            kx = W / 640.0f;
+            ky = H / 480.0f;
+            if (e->iHorizontalAlign == HUD_ALIGN_X_CENTER) {
+                fX += 320.0f - fW * 0.5f;
+            } else if (e->iHorizontalAlign == HUD_ALIGN_X_RIGHT) {
+                fX += 640.0f;
+            }
+            if (e->iVerticalAlign == HUD_ALIGN_Y_CENTER) {
+                fY += 240.0f - fH * 0.5f;
+            } else if (e->iVerticalAlign == HUD_ALIGN_Y_BOTTOM) {
+                fY += 480.0f;
+            }
+            fX *= kx;
+            fY *= ky;
+            fW *= kx;
+            fH *= ky;
+        } else {
+            fX *= sx;
+            fY *= sy;
+            fW *= sx;
+            fH *= sy;
+            if (e->iHorizontalAlign == HUD_ALIGN_X_CENTER) {
+                fX += W * 0.5f - fW * 0.5f;
+            } else if (e->iHorizontalAlign == HUD_ALIGN_X_RIGHT) {
+                fX += W;
+            }
+            if (e->iVerticalAlign == HUD_ALIGN_Y_CENTER) {
+                fY += H * 0.5f - fH * 0.5f;
+            } else if (e->iVerticalAlign == HUD_ALIGN_Y_BOTTOM) {
+                fY += H;
+            }
+        }
+        if (fH < 14.0f * sy) {
+            fH = 14.0f * sy; // a text element has no height of its own
+        }
+        if (fX < W * 0.5f || fX >= W || fY >= bottomPx || fY + fH <= topPx) {
+            continue;
+        }
+        if (fX - 8.0f * sx < right) {
+            right = fX - 8.0f * sx;
+        }
+        if (lowPx && fY + fH > *lowPx) {
+            *lowPx = fY + fH; // the lowest edge of what is in the way
+        }
+    }
+    return right;
+}
+
 static void CG_DrawCoopPinned(void)
 {
     static cvar_t *cvLine = NULL;
@@ -534,8 +720,28 @@ static void CG_DrawCoopPinned(void)
     if (!text[0]) {
         return;
     }
-    x = (float)cgs.glconfig.vidWidth / cgs.uiHiResScale[0] - CG_FeedTextW(text, -1) - 16.0f;
-    y = 8.0f;
+    {
+        float sx = cgs.uiHiResScale[0], sy = cgs.uiHiResScale[1];
+        float W = (float)cgs.glconfig.vidWidth, H = (float)cgs.glconfig.vidHeight;
+        float tw = CG_FeedTextW(text, -1), low = 0.0f, right, compassRight;
+
+        y     = 8.0f;
+        right = CG_CoopPinnedRightPx((y - 2.0f) * sy, (y + 16.0f) * sy, &low);
+        x     = right / sx - tw;
+        // Beside the icons only when that keeps it off the compass bar, which ends at W/2 + half its width
+        // (cg_drawtools.cpp CG_CompassBarGeometry: min(0.42 W, 0.75 H)). Otherwise - 640x480 with two icons,
+        // any size with five or six - the line goes UNDER the icons, back at the right edge.
+        compassRight = W * 0.5f + 0.5f * ((0.42f * W < 0.75f * H) ? 0.42f * W : 0.75f * H) + 10.0f * sx;
+        if (low > 0.0f && x * sx < compassRight) {
+            y     = low / sy + 3.0f;
+            low   = 0.0f;
+            right = CG_CoopPinnedRightPx((y - 2.0f) * sy, (y + 16.0f) * sy, &low);
+            x     = right / sx - tw;
+        }
+        if (x < 4.0f) {
+            x = 4.0f;
+        }
+    }
     c[0] = c[1] = c[2] = 0.0f;
     c[3]                = 0.85f;
     cgi.R_SetColor(c);
@@ -638,13 +844,20 @@ static void CG_CoopItemKeyLabel(const char *nm, char *out, int outSize)
     out[n] = 0;
 }
 
-#define COOPITEM_FLOOR_U  48.0f // hi-res units above the bottom that stay clear: the retail team badge
-                                 // (cg_drawtools.cpp CG_DrawPlayerTeam) is 24 units tall and ends 46 up
+// [bug-3521, user 2026-10-11 "make sure it doesn't overlap with anything else on other resolutions"] hi-res units
+// above the bottom that stay clear. Was 48 = the retail team badge alone, and the row then sat INSIDE the health
+// cluster whenever that cluster was visible: the stamina arc (cg_drawtools.cpp CG_DrawStaminaArc) starts 95 units
+// up and the health cross of ui/hud_health.urc 92 up, both in hi-res units, x 32..288. The bug-3495 stills never
+// showed it because the cluster fades out on a calm player. The cluster does not scale below 1080p and the row
+// does, so the two met at every height under about 1070 px (covered icons and key labels at 1280x720, the whole
+// row at 640x480). 98 = the arc's top edge + 3.
+#define COOPITEM_FLOOR_U  98.0f
 
 /*
 The row's geometry in pixels, shared with the feed. The top follows the screen HEIGHT (66 virtual units up, where
-the old script icons were), unless that would put the key labels on the team badge, which is laid out in fixed
-hi-res units - below about 610 px of height it does, and then the row is lifted to clear it.
+the old script icons were), unless that would put the key labels on the retail health cluster, which is laid out in
+fixed hi-res units - below about 1070 px of height it does, and then the row is lifted to clear it (the feed sits
+on top of the row and rises with it).
 */
 static float CG_CoopItemsTopPx(float *iconPxOut)
 {
@@ -657,7 +870,7 @@ static float CG_CoopItemsTopPx(float *iconPxOut)
         iconPx = COOPITEM_MIN_ICON;
     }
     up   = COOPITEM_TOP_V * vs;                             // where it wants to be
-    need = COOPITEM_FLOOR_U * sy + 18.0f * sy + iconPx;     // badge + (gap and one line of label) + icon
+    need = COOPITEM_FLOOR_U * sy + 20.0f * sy + iconPx;     // cluster + (gap and one line of label) + icon
     if (up < need) {
         up = need;
     }
@@ -713,6 +926,10 @@ static void CG_DrawCoopItems(void)
     int           i, shown = 0;
 
     if (!font || sx <= 0.0f || sy <= 0.0f) {
+        return;
+    }
+    // a briefing map has no kit to show, and the ready gate's roster is drawn in this corner there
+    if (strstr(cgs.mapname, "briefing/")) {
         return;
     }
     CG_CoopItemKeys();
@@ -830,6 +1047,7 @@ void CG_DrawCoopFeed(qboolean cineHide)
         CG_DrawCoopPinned();        // [bug-3485] not part of the feed: coop_feed 0 does not hide it
     }
     now = cg.time;
+    CG_FeedDrain(now);
     dt  = now - s_feedLastT;
     if (dt < 0 || dt > 250) {
         dt = 16;

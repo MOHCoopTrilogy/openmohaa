@@ -982,7 +982,14 @@ const char *G_ClientConnect(int clientNum, qboolean firstTime, qboolean differen
     if (firstTime && g_gametype->integer != GT_SINGLE_PLAYER) {
         G_PrintfClient(ent, "is preparing for deployment\n");
 
-        G_PrintToAllClients(va("%s is preparing for deployment\n", client->pers.netname), 2);
+        // HZM coop [user 2026-10-06, feed round 2] a coop mission: one team line in the event feed, keyed by the
+        // client so "preparing" / "entered" / "joined the Allies" / "left" for one player replace each other
+        // instead of stacking up, and two players arriving together keep a line each
+        if (G_CoopFeedSession()) {
+            G_CoopFeedPrintAll(1, va("join%d", clientNum), va("%s is preparing for deployment", client->pers.netname), 2);
+        } else {
+            G_PrintToAllClients(va("%s is preparing for deployment\n", client->pers.netname), 2);
+        }
     }
     return NULL;
 }
@@ -1040,7 +1047,21 @@ void G_ClientBegin(gentity_t *ent, usercmd_t *cmd)
                 // send effect if in a multiplayer game
                 G_PrintfClient(ent, "has entered the battle\n");
 
-                G_PrintToAllClients(va("%s has entered the battle\n", ent->client->pers.netname), 2);
+                // HZM coop [feed round 2] every client "enters the battle" again on every map load. In a coop
+                // mission a player carried over from the previous map is not news (the rule the team-join line
+                // already follows, user 2026-10-05); a new one goes to the feed.
+                if (G_CoopFeedSession()) {
+                    if (!g_hzmCarriedClient[ent - g_entities]) {
+                        G_CoopFeedPrintAll(
+                            1,
+                            va("join%d", (int)(ent - g_entities)),
+                            va("%s has entered the battle", ent->client->pers.netname),
+                            2
+                        );
+                    }
+                } else {
+                    G_PrintToAllClients(va("%s has entered the battle\n", ent->client->pers.netname), 2);
+                }
             }
         }
 
@@ -1101,7 +1122,14 @@ void G_ClientDisconnect(gentity_t *ent)
 
         G_PrintfClient(ent, "has left the battle\n");
 
-        G_PrintToAllClients(va("%s has left the battle\n", ent->client->pers.netname), 2);
+        if (G_CoopFeedSession()) {
+            // HZM coop [feed round 2]
+            G_CoopFeedPrintAll(
+                1, va("join%d", (int)(ent - g_entities)), va("%s has left the battle", ent->client->pers.netname), 2
+            );
+        } else {
+            G_PrintToAllClients(va("%s has left the battle\n", ent->client->pers.netname), 2);
+        }
 
         assert(ent->entity->IsSubclassOfPlayer());
         ((Player *)ent->entity)->Disconnect();
