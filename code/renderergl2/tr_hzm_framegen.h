@@ -18,6 +18,7 @@ void     R_FG_VelocityDraw( void );         // RB_EndSurface while r_fgVelPass i
 void     R_FG_FlushPrev( void );            // model data freed: forget last frame's skinned vertices
 extern int r_fgVelPass;
 void     R_FG_Set2DWindow( float w, float h, int vpW, int vpH );   // Set2DWindow: extents of the 2D coordinate system and its viewport
+qboolean R_FG_NoteLayer( const void *shader, float w, float h, float s1, float t1, float s2, float t2 );   // Draw_StretchPic: a listed full-screen cosmetic layer of the mod - qtrue = it is not an overlay
 void     R_FG_Note2D( float w, float h, const char *what );          // every 2D quad: a big one after the scene = menu / console / overlay
 int      R_FG_Present( void );              // RB_SwapBuffers: 0 = not handled, 1 = handed to the present thread, 2 = back buffer filled, swap it
 void     R_FG_NotePresentOff( void );       // RB_SwapBuffers with the feature off: present-time statistics only

@@ -97,7 +97,8 @@ void Draw_StretchPic(float x, float y, float w, float h, float s1, float t1, flo
         w = shader->stages[0]->bundle[0].image[0]->width;
         h = shader->stages[0]->bundle[0].image[0]->height;
     }
-    R_FG_Note2D(w, h, shader->name);   // HZM frame generation: a big 2D quad over the scene = an overlay is up
+    if (!R_FG_NoteLayer(shader, w, h, s1, t1, s2, t2))   // HZM frame generation: the mod's cosmetic full-screen layers are not overlays
+        R_FG_Note2D(w, h, shader->name);   // HZM frame generation: a big 2D quad over the scene = an overlay is up
 
     // draw the pic
     RB_BeginSurface(shader, 0, 0);

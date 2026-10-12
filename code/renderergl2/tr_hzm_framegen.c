@@ -109,6 +109,10 @@ typedef struct {
 	qboolean	bypass;				// a big 2D overlay was drawn over the scene
 	double		V[16], P[16];		// world -> eye, eye -> clip (column-major)
 	float		fadeK, fadeB[3];	// full-screen translucent boxes drawn over the scene: final = scene * K + B
+	unsigned int	layerTex;		// a full-screen cosmetic layer (the aiming vignette): its texture, drawn again over
+	float		layerCol[4];		// the generated picture with this colour ...
+	float		layerST[4];			// ... and these texture coordinates (s1 t1 s2 t2, top left to bottom right)
+	qboolean	layerSeen;			// a cosmetic layer was drawn this frame (redrawn exactly or not)
 	void		*sync;
 	Uint64		tPub;
 } fgFrame_t;
@@ -162,7 +166,7 @@ typedef struct {
 	qboolean		ctxInit;
 	GLuint			prog, vao;
 	GLint			uMode, uTint, uRes, uGun, uCurFromOut, uOutFromCur, uPrvFromOut, uOutFromPrv, uFadeK, uFadeB, uHudThr;
-	GLint			uOutVP, uCurInvW, uPrvInvW, uCurK, uPrvK, uUseC, uEdge;
+	GLint			uOutVP, uCurInvW, uPrvInvW, uCurK, uPrvK, uUseC, uEdge, uLayer, uLayerCol, uLayerST;
 
 	// ---- shared, under mx
 	SDL_Thread		*thread;
@@ -187,7 +191,7 @@ static struct {
 	volatile int	nSyncWait, nGenTimed, nFade;
 	volatile double	genDelayMs, realDelayMs;	// from the main thread handing a frame over to its pictures being shown
 	volatile int	nGenDelay, nRealDelay;
-	volatile int	nVec, nVelPass, velDraws, velSkipped, velBrush;	// main thread: frames with vectors, passes run, batches drawn / left out
+	volatile int	nVec, nVelPass, velDraws, velSkipped, velBrush, nLayer, nLayerExact;	// main thread: frames with vectors, passes run, batches drawn / left out
 	char			lastOverlay[96];
 } fgs;
 
@@ -197,6 +201,7 @@ cvar_t *r_hzmFrameGenStats;
 cvar_t *r_hzmFrameGenVectors;
 cvar_t *r_hzmFrameGenShadows;
 cvar_t *r_hzmFrameGenEdge;
+cvar_t *r_hzmFrameGenLayers;
 int r_fgVelPass;		// the motion-vector pass is collecting surfaces: RB_EndSurface hands them to R_FG_VelocityDraw
 
 static const char *fg_vs =
@@ -211,6 +216,9 @@ static const char *fg_fs =
 	"uniform sampler2D uCurS, uCurD, uPrvS, uPrvD, uHudF, uHudS, uHudD, uCurM, uPrvM, uCurC;\n"
 	"uniform float uUseC;\n"
 	"uniform float uEdge;\n"
+	"uniform sampler2D uLayerT;\n"
+	"uniform float uLayer;\n"
+	"uniform vec4 uLayerCol, uLayerST;\n"
 	"uniform mat4 uCurFromOut, uOutFromCur, uPrvFromOut, uOutFromPrv, uOutVP;\n"
 	"uniform vec4 uCurInvW, uPrvInvW;\n"		// the row of ( view-projection )^-1 that gives a source pixel's world w
 	"uniform float uCurK, uPrvK;\n"			// the share of a frame's own displacement to take back (0 = no vectors)
@@ -293,7 +301,14 @@ static const char *fg_fs =
 	"	vec3 f = texelFetch( uHudF, ip, 0 ).rgb;\n"
 	"	if ( uMode == 0 ) { oColor = vec4( f, 1.0 ); return; }\n"
 	"	vec3 s = texelFetch( uHudS, ip, 0 ).rgb;\n"
-	"	vec3 df = abs( f - clamp( s * uFadeK + uFadeB.rgb, 0.0, 1.0 ) );\n"
+	// a full-screen cosmetic layer of the mod (the aiming vignette) is neither HUD nor scene: it is drawn again,
+	// exactly, over the generated picture - so it is not warped, and the picture under it is still generated
+	"	vec4 lay = vec4( 0.0 );\n"
+	"	if ( uLayer != 0.0 ) {\n"
+	"		vec4 lt = texture( uLayerT, mix( uLayerST.xy, uLayerST.zw, vec2( vUV.x, 1.0 - vUV.y ) ) ) * uLayerCol;\n"
+	"		lay = vec4( lt.rgb * lt.a, lt.a );\n"
+	"	}\n"
+	"	vec3 df = abs( f - ( clamp( s * uFadeK + uFadeB.rgb, 0.0, 1.0 ) * ( 1.0 - lay.a ) + lay.rgb ) );\n"
 	"	bool hud = max( df.r, max( df.g, df.b ) ) > uHudThr;\n"
 	"	bool gun = depthAt( uHudD, vUV ) < uGun;\n"
 	"	vec3 c;\n"
@@ -386,7 +401,7 @@ static const char *fg_fs =
 	"			}\n"
 	"		}\n"
 	"	}\n"
-	"	if ( !( hud || gun ) ) c = clamp( c * uFadeK + uFadeB.rgb, 0.0, 1.0 );\n"
+	"	if ( !( hud || gun ) ) c = clamp( c * uFadeK + uFadeB.rgb, 0.0, 1.0 ) * ( 1.0 - lay.a ) + lay.rgb;\n"
 	"	if ( uTint == 2 ) {\n"
 	// r_hzmFrameGenDebug 5: the newer frame's motion vectors (displacement in world units, grey = none, dark = not a mover)
 	"		vec4 m = texelFetch( uCurM, texel( uCurM, vUV ), 0 );\n"
@@ -672,7 +687,7 @@ static qboolean FG_CtxInit( void )
 	const char *header;
 	GLuint vs, fs;
 	GLint ok = 0;
-	static const char *samplers[10] = { "uCurS", "uCurD", "uPrvS", "uPrvD", "uHudF", "uHudS", "uHudD", "uCurM", "uPrvM", "uCurC" };
+	static const char *samplers[11] = { "uCurS", "uCurD", "uPrvS", "uPrvD", "uHudF", "uHudS", "uHudD", "uCurM", "uPrvM", "uCurC", "uLayerT" };
 	int i;
 
 	if ( fg.ctxInit ) {
@@ -697,7 +712,7 @@ static qboolean FG_CtxInit( void )
 	qglGenVertexArrays( 1, &fg.vao );
 	qglBindVertexArray( fg.vao );
 	qglUseProgram( fg.prog );
-	for ( i = 0; i < 10; i++ ) {
+	for ( i = 0; i < 11; i++ ) {
 		qglUniform1i( qglGetUniformLocation( fg.prog, samplers[i] ), i );
 	}
 	fg.uMode = qglGetUniformLocation( fg.prog, "uMode" );
@@ -718,6 +733,9 @@ static qboolean FG_CtxInit( void )
 	fg.uPrvK = qglGetUniformLocation( fg.prog, "uPrvK" );
 	fg.uUseC = qglGetUniformLocation( fg.prog, "uUseC" );
 	fg.uEdge = qglGetUniformLocation( fg.prog, "uEdge" );
+	fg.uLayer = qglGetUniformLocation( fg.prog, "uLayer" );
+	fg.uLayerCol = qglGetUniformLocation( fg.prog, "uLayerCol" );
+	fg.uLayerST = qglGetUniformLocation( fg.prog, "uLayerST" );
 	qglDisable( GL_DEPTH_TEST );
 	qglDisable( GL_BLEND );
 	qglDisable( GL_CULL_FACE );
@@ -815,8 +833,17 @@ static qboolean FG_DrawGenerated( const fgFrame_t *prv, const fgFrame_t *cur, co
 	qglUniform1f( fg.uGun, FG_GUN_DEPTH );
 	qglUniform1f( fg.uFadeK, hud->fadeK );
 	qglUniform4f( fg.uFadeB, hud->fadeB[0], hud->fadeB[1], hud->fadeB[2], 0.0f );
-	// with a fade in play the scene copy and the final picture differ by two roundings instead of none
-	qglUniform1f( fg.uHudThr, ( hud->fadeK != 1.0f || hud->fadeB[0] + hud->fadeB[1] + hud->fadeB[2] != 0.0f ) ? 0.009f : 0.0025f );
+	// with a fade in play the scene copy and the final picture differ by two roundings instead of none; with a
+	// layer drawn again here, by its filtering and one more rounding
+	qglUniform1f( fg.uHudThr, hud->layerTex ? 0.014f
+		: ( ( hud->fadeK != 1.0f || hud->fadeB[0] + hud->fadeB[1] + hud->fadeB[2] != 0.0f ) ? 0.009f : 0.0025f ) );
+	qglUniform1f( fg.uLayer, hud->layerTex ? 1.0f : 0.0f );
+	if ( hud->layerTex ) {
+		qglActiveTexture( GL_TEXTURE0 + 10 );
+		qglBindTexture( GL_TEXTURE_2D, hud->layerTex );
+		qglUniform4f( fg.uLayerCol, hud->layerCol[0], hud->layerCol[1], hud->layerCol[2], hud->layerCol[3] );
+		qglUniform4f( fg.uLayerST, hud->layerST[0], hud->layerST[1], hud->layerST[2], hud->layerST[3] );
+	}
 	FG_M4Mul( vpC, iO, m ); FG_SetMat( fg.uCurFromOut, m );
 	FG_M4Mul( vpO, iC, m ); FG_SetMat( fg.uOutFromCur, m );
 	FG_M4Mul( vpP, iO, m ); FG_SetMat( fg.uPrvFromOut, m );
@@ -1919,6 +1946,66 @@ void R_FG_Set2DWindow( float w, float h, int vpW, int vpH )
 	}
 }
 
+/*
+What pauses generation, and what does not. A 2D quad over a tenth of the screen after the scene used to mean "a
+menu is up" whatever it was - and the mod's aiming vignette is such a quad, so nothing was generated while the
+player aimed (found 2026-10-12). Now:
+  * full-screen UI (menus, console, loading, briefing and score panels, the scope picture): pauses, as before -
+    anything big that is not on the list below;
+  * the mod's full-screen COSMETIC layers, by shader name (the list below, plus r_hzmFrameGenLayers for more names):
+    never pause. One per frame that is a plain alpha-blended picture over the whole screen is drawn again, exactly,
+    over the generated picture (not warped, and what is under it is still generated); any other one is left to the
+    per-pixel HUD test (the pixels it changes come from the newer real frame);
+  * full-screen translucent boxes (damage flash, fades): carried over as K and B, as before.
+*/
+static const char *fg_cosmeticLayers[] = {
+	"textures/hud/coop_ads_vignette",		// cg_drawtools.cpp CG_DrawAdsVignette: black, radial alpha, while aiming
+	NULL
+};
+
+qboolean R_FG_NoteLayer( const void *shaderV, float w, float h, float s1, float t1, float s2, float t2 )
+{
+	const shader_t *shader = (const shader_t *)shaderV;
+	const shaderStage_t *st;
+	qboolean listed = qfalse;
+	float a;
+	int i;
+
+	if ( !fg.mode || !fg.build.scene || fg.orthoW <= 0.0f || fg.orthoH <= 0.0f || !shader ) {
+		return qfalse;
+	}
+	for ( i = 0; fg_cosmeticLayers[i]; i++ ) {
+		if ( !Q_stricmp( shader->name, fg_cosmeticLayers[i] ) ) {
+			listed = qtrue;
+		}
+	}
+	if ( !listed && r_hzmFrameGenLayers->string[0] && strstr( r_hzmFrameGenLayers->string, shader->name ) ) {
+		listed = qtrue;
+	}
+	if ( !listed ) {
+		return qfalse;
+	}
+	a = fabs( w * h ) / ( fg.orthoW * fg.orthoH ) * fg.vpShare;
+	if ( a < FG_BIG2D ) {
+		return qfalse;		// a small one is ordinary HUD
+	}
+	fg.build.layerSeen = qtrue;
+	st = shader->stages[0];
+	if ( a >= 0.98f && !fg.build.layerTex && st && st->active && st->bundle[0].image[0]
+		&& ( !shader->stages[1] || !shader->stages[1]->active )
+		&& ( st->stateBits & ( GLS_SRCBLEND_BITS | GLS_DSTBLEND_BITS ) ) == ( GLS_SRCBLEND_SRC_ALPHA | GLS_DSTBLEND_ONE_MINUS_SRC_ALPHA ) ) {
+		fg.build.layerTex = st->bundle[0].image[0]->texnum;
+		for ( i = 0; i < 4; i++ ) {
+			fg.build.layerCol[i] = backEnd.color2D[i] / 255.0f;
+		}
+		fg.build.layerST[0] = s1;
+		fg.build.layerST[1] = t1;
+		fg.build.layerST[2] = s2;
+		fg.build.layerST[3] = t2;
+	}
+	return qtrue;
+}
+
 void R_FG_Note2D( float w, float h, const char *what )
 {
 	float a;
@@ -2034,6 +2121,12 @@ int R_FG_Present( void )
 		fg.lastSeq = fg.build.seq;
 	}
 	fg.build.bypass = ( fg.max2D >= FG_BIG2D ) ? qtrue : qfalse;
+	if ( fg.build.layerSeen ) {
+		fgs.nLayer++;
+		if ( fg.build.layerTex ) {
+			fgs.nLayerExact++;
+		}
+	}
 	fg.lastBypass = fg.build.bypass;
 	if ( fg.build.fadeK != 1.0f || fg.build.fadeB[0] + fg.build.fadeB[1] + fg.build.fadeB[2] != 0.0f ) {
 		fgs.nFade++;
@@ -2161,8 +2254,8 @@ static void FG_Stats_f( void )
 	ri.Printf( PRINT_ALL, "FGSTAT2 noscene=%d overlay=%d fade=%d camjump=%d dropped=%d earlyskip=%d glerr=%d synctimeout=%d syncwait_ms=%.3f gen_ms=%.3f lastoverlay=[%s]\n",
 		fgs.nNoScene, fgs.nBypass, fgs.nFade, fgs.nJump, fgs.nDropped, fgs.nEarlySkip, fgs.nGLErr, fgs.nSyncTimeout,
 		fgs.nSyncWait ? fgs.syncWaitMs / fgs.nSyncWait : 0.0, fgs.nGenTimed ? fgs.genMs / fgs.nGenTimed : 0.0, fgs.lastOverlay );
-	ri.Printf( PRINT_ALL, "FGSTAT3 vectors=%d vecframes=%d velpasses=%d veldraws=%d velbrush=%d velskipped=%d prevskin_kb=%d gen_delay_ms=%.2f real_delay_ms=%.2f\n",
-		( fg.vecOK && r_hzmFrameGenVectors->integer ) ? 1 : 0, fgs.nVec, fgs.nVelPass, fgs.velDraws, fgs.velBrush, fgs.velSkipped, fgSkinBytes / 1024,
+	ri.Printf( PRINT_ALL, "FGSTAT3 layerframes=%d layerexact=%d vectors=%d vecframes=%d velpasses=%d veldraws=%d velbrush=%d velskipped=%d prevskin_kb=%d gen_delay_ms=%.2f real_delay_ms=%.2f\n",
+		fgs.nLayer, fgs.nLayerExact, ( fg.vecOK && r_hzmFrameGenVectors->integer ) ? 1 : 0, fgs.nVec, fgs.nVelPass, fgs.velDraws, fgs.velBrush, fgs.velSkipped, fgSkinBytes / 1024,
 		fgs.nGenDelay ? fgs.genDelayMs / fgs.nGenDelay : 0.0, fgs.nRealDelay ? fgs.realDelayMs / fgs.nRealDelay : 0.0 );
 	line[0] = 0;
 	for ( j = 0; j < 13; j++ ) {
@@ -2267,6 +2360,8 @@ void R_FG_Init( void )
 	// of the real one either way - mostly the softer edge of a resampled picture), but thin carried things (a
 	// rifle held overhead) are cut off less often with it. 0 = without.
 	r_hzmFrameGenEdge = ri.Cvar_Get( "r_hzmFrameGenEdge", "1", 0 );
+	// more shader names of full-screen cosmetic layers that must not pause generation (see R_FG_NoteLayer)
+	r_hzmFrameGenLayers = ri.Cvar_Get( "r_hzmFrameGenLayers", "", 0 );
 	fg.mx = SDL_CreateMutex();
 	fg.cv = SDL_CreateCond();
 	ri.Cmd_AddCommand( "fg_stats", FG_Stats_f );
