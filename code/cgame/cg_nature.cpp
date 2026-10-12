@@ -500,6 +500,31 @@ void CG_RainGlobal(void)
             }
         }
 
+        // HZM coop [bug-3529] END GATE. The sky gate above looks at the column over the drop's START. A slanted drop
+        // that starts under open sky next to a building and falls in through a doorway, a window or the open side of
+        // a barn ENDS under the roof - seen as stray drops inside rooms once a roof over the player stopped
+        // switching all rain off (coop_rainSeeOut). So the column over where the drop ends must reach sky as well.
+        // Tested 2 units back up the streak, so a drop that died on a surface is not tested from inside that surface.
+        {
+            static cvar_t *pEndGate = NULL;
+
+            if (!pEndGate) { pEndGate = cgi.Cvar_Get("coop_rainEndGate", "1", CVAR_ARCHIVE); }
+            if (pEndGate->integer) {
+                trace_t endTr;
+                vec3_t  vBack, vEndUp0, vEndUp1;
+
+                VectorSubtract(vStart, vEnd, vBack);
+                VectorNormalizeFast(vBack);
+                VectorMA(vEnd, 2.0f, vBack, vEndUp0);
+                VectorCopy(vEndUp0, vEndUp1);
+                vEndUp1[2] += 16384.0f;
+                cgi.CM_BoxTrace(&endTr, vEndUp0, vEndUp1, vZero, vZero, 0, MASK_SOLID, qfalse);
+                if (endTr.startsolid || (!(endTr.surfaceFlags & SURF_SKY) && endTr.fraction < 0.999f)) {
+                    continue; // lands under cover
+                }
+            }
+        }
+
         CG_CreateBeam(
             vStart, vec_zero, 0, 1, 1.0, cg.rain.width, BEAM_INVERTED_FAST, 1000.0, iLife, qtrue,
             vEnd, 0, 0, 0, 1, 0, shadername, fcolor, 0, 0.0, cg.rain.length, 1.0, 0, "raineffect"
