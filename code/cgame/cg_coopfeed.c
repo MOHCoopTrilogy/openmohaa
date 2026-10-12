@@ -6,7 +6,10 @@ Why (docs/proposals/hud_declutter_2026-10-05/PLAN.md): the gmbox holds 5 lines, 
 (cl_uigmbox.cpp PostDecayEvent), holds a bold line 10 s and beeps "objective_text" for every bold line
 (cl_ui.cpp UI_PrintConsole). A five-line officer burst stayed on screen for most of a minute. This feed:
   - max 3 lines, bottom-left above the health/stamina cluster, newest at the bottom;
-  - every line has its OWN timer (parallel fade, never a queue), no sound;
+  - every line has its OWN timer (parallel fade), no sound;
+  - a burst larger than the three rows is never dropped [user 2026-10-06, feed round 2]: a line that finds every
+    row taken by a line younger than FEED_MIN_SHOW waits its turn (s_pend, alerts first) and goes up as soon as
+    the oldest row has had that long, so four lines in one frame are four lines read, not three and a 200 ms flash;
   - a repeat of the same key restarts the hold and shows a counter ("x3") instead of a new line;
   - drawn procedurally like the stamina arc (no ihuddraw slot - the fade-exempt band is full - and no
     s_hudFadeAlpha, so a stationary player still sees it).
@@ -65,7 +68,24 @@ typedef struct {
     int       placed;
 } feedLine_t;
 
+// [user 2026-10-06, feed round 2] "No line may be lost when several arrive in one frame". Until now a 4th line pushed
+// the oldest out with the 200 ms fast fade whatever its age, so of four lines sent in one frame the first was on
+// screen for a fifth of a second, and of seven the first four were. Lines that find no row now wait here.
+#define FEED_PENDING  24   // lines waiting for a row; a longer burst than 3 + 24 shows its oldest waiting line early
+#define FEED_MIN_SHOW 1500 // ms a line is guaranteed on screen before a newer line may take its row
+
+typedef struct {
+    int  cat;
+    int  count;
+    int  at; // cg.time it arrived
+    char key[FEED_KEY];
+    char text[FEED_TEXT];
+    char icon[FEED_ICON];
+} feedPend_t;
+
 static feedLine_t    s_feed[FEED_SLOTS];
+static feedPend_t    s_pend[FEED_PENDING];
+static int           s_pendN      = 0;
 static fontheader_t *s_feedFont   = NULL;
 static int           s_feedInit   = 0;
 static int           s_feedLastT  = 0;
@@ -291,9 +311,12 @@ static qboolean CG_FeedLive(const feedLine_t *e, int now)
     return (e->active && !e->dieAt && now < e->refresh + e->hold) ? qtrue : qfalse;
 }
 
+static qboolean CG_FeedMakeRoom(int now, qboolean force);
+static void     CG_FeedPlace(int cat, const char *key, const char *icon, const char *text, int count, int now, int arrived);
+
 static void CG_FeedPush(int cat, const char *key, const char *icon, const char *text)
 {
-    int         i, now = cg.time, live = 0, slot = -1, oldest;
+    int         i, now = cg.time, slot;
     feedLine_t *e;
 
     if (!key[0]) {
@@ -317,23 +340,98 @@ static void CG_FeedPush(int cat, const char *key, const char *icon, const char *
             return;
         }
     }
-    // at most FEED_VISIBLE live lines: the oldest makes room with a fast fade
-    for (;;) {
-        live   = 0;
-        oldest = -1;
-        for (i = 0; i < FEED_SLOTS; i++) {
-            if (CG_FeedLive(&s_feed[i], now)) {
-                live++;
-                if (oldest < 0 || s_feed[i].born < s_feed[oldest].born) {
-                    oldest = i;
-                }
+    // the same key is already waiting for a row: one waiting line, newest wording, counted
+    for (i = 0; i < s_pendN; i++) {
+        if (!Q_stricmpn(s_pend[i].key, key, FEED_KEY - 1)) {
+            if (!Q_stricmp(s_pend[i].text, text)) {
+                s_pend[i].count++;
+            } else {
+                s_pend[i].count = 1;
+            }
+            Q_strncpyz(s_pend[i].text, text, sizeof(s_pend[i].text));
+            return;
+        }
+    }
+    // a row is free (or its line has had FEED_MIN_SHOW) and nobody is ahead: show it now
+    if (!s_pendN && CG_FeedMakeRoom(now, qfalse)) {
+        CG_FeedPlace(cat, key, icon, text, 1, now, now);
+        return;
+    }
+    // otherwise it waits. A full queue sends its head up early rather than drop anything.
+    if (s_pendN >= FEED_PENDING) {
+        CG_FeedMakeRoom(now, qtrue);
+        CG_FeedPlace(s_pend[0].cat, s_pend[0].key, s_pend[0].icon, s_pend[0].text, s_pend[0].count, now, s_pend[0].at);
+        s_pendN--;
+        memmove(&s_pend[0], &s_pend[1], sizeof(s_pend[0]) * s_pendN);
+    }
+    // an alert (a teammate down, an enemy wave) goes ahead of everything waiting that is not an alert
+    slot = s_pendN;
+    if (cat == 0) {
+        for (slot = 0; slot < s_pendN && s_pend[slot].cat == 0; slot++) {}
+        memmove(&s_pend[slot + 1], &s_pend[slot], sizeof(s_pend[0]) * (s_pendN - slot));
+    }
+    s_pendN++;
+    memset(&s_pend[slot], 0, sizeof(s_pend[slot]));
+    s_pend[slot].cat   = cat;
+    s_pend[slot].count = 1;
+    s_pend[slot].at    = now;
+    Q_strncpyz(s_pend[slot].key, key, sizeof(s_pend[slot].key));
+    Q_strncpyz(s_pend[slot].text, text, sizeof(s_pend[slot].text));
+    Q_strncpyz(s_pend[slot].icon, icon, sizeof(s_pend[slot].icon));
+    if (s_cvDebug && s_cvDebug->integer) {
+        cgi.Printf("^~^~^ FEEDQ t=%d waiting=%d cat=%d key=%s\n", now, s_pendN, cat, key);
+    }
+}
+
+/*
+The lines that waited: each goes up as soon as there is a row for it. Called every frame from CG_DrawCoopFeed,
+before anything is drawn and also while the HUD is hidden (lines age there too).
+*/
+static void CG_FeedDrain(int now)
+{
+    // cg.time ran backwards over a map load: what waited belongs to the previous map
+    if (s_pendN > 0 && s_pend[0].at > now + 1000) {
+        s_pendN = 0;
+    }
+    while (s_pendN > 0 && CG_FeedMakeRoom(now, qfalse)) {
+        CG_FeedPlace(s_pend[0].cat, s_pend[0].key, s_pend[0].icon, s_pend[0].text, s_pend[0].count, now, s_pend[0].at);
+        s_pendN--;
+        memmove(&s_pend[0], &s_pend[1], sizeof(s_pend[0]) * s_pendN);
+    }
+}
+
+/*
+Is there a row for one more line right now? Yes when fewer than FEED_VISIBLE lines are live, or when the oldest live
+line has been up for FEED_MIN_SHOW - it then leaves with the fast fade. force = take its row whatever its age.
+*/
+static qboolean CG_FeedMakeRoom(int now, qboolean force)
+{
+    int i, live = 0, oldest = -1;
+
+    for (i = 0; i < FEED_SLOTS; i++) {
+        if (CG_FeedLive(&s_feed[i], now)) {
+            live++;
+            if (oldest < 0 || s_feed[i].born < s_feed[oldest].born) {
+                oldest = i;
             }
         }
-        if (live < FEED_VISIBLE || oldest < 0) {
-            break;
-        }
-        s_feed[oldest].dieAt = now;
     }
+    if (live < FEED_VISIBLE || oldest < 0) {
+        return qtrue;
+    }
+    if (!force && now - s_feed[oldest].born < FEED_MIN_SHOW) {
+        return qfalse;
+    }
+    s_feed[oldest].dieAt = now;
+    return qtrue;
+}
+
+// put a line on screen now (the caller has made room)
+static void CG_FeedPlace(int cat, const char *key, const char *icon, const char *text, int count, int now, int arrived)
+{
+    int         i, slot = -1;
+    feedLine_t *e;
+
     for (i = 0; i < FEED_SLOTS; i++) {
         if (CG_FeedExpired(&s_feed[i], now)) {
             slot = i;
@@ -341,7 +439,15 @@ static void CG_FeedPush(int cat, const char *key, const char *icon, const char *
         }
     }
     if (slot < 0) {
-        // every slot still fading: take the oldest
+        // every slot still fading: take the oldest of those on their way out (never a live line - one that was
+        // bumped can be older than a line that is already fading)
+        for (i = 0; i < FEED_SLOTS; i++) {
+            if (!CG_FeedLive(&s_feed[i], now) && (slot < 0 || s_feed[i].born < s_feed[slot].born)) {
+                slot = i;
+            }
+        }
+    }
+    if (slot < 0) {
         slot = 0;
         for (i = 1; i < FEED_SLOTS; i++) {
             if (s_feed[i].born < s_feed[slot].born) {
@@ -349,11 +455,14 @@ static void CG_FeedPush(int cat, const char *key, const char *icon, const char *
             }
         }
     }
+    if (s_cvDebug && s_cvDebug->integer) {
+        cgi.Printf("^~^~^ FEEDSHOW t=%d waited=%d cat=%d key=%s\n", now, now - arrived, cat, key);
+    }
     e = &s_feed[slot];
     memset(e, 0, sizeof(*e));
     e->active  = 1;
     e->cat     = cat;
-    e->count   = 1;
+    e->count   = count > 0 ? count : 1;
     e->born    = now;
     e->refresh = now;
     e->hold    = CG_FeedHoldMs(cat);
@@ -830,6 +939,7 @@ void CG_DrawCoopFeed(qboolean cineHide)
         CG_DrawCoopPinned();        // [bug-3485] not part of the feed: coop_feed 0 does not hide it
     }
     now = cg.time;
+    CG_FeedDrain(now);
     dt  = now - s_feedLastT;
     if (dt < 0 || dt > 250) {
         dt = 16;

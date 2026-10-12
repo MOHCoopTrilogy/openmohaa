@@ -97,11 +97,15 @@ Item *AmmoEntity::ItemPickup(Entity *other, qboolean add_to_inventory)
     Unregister(STRING_PICKUP);
 
     // Tell the player about the ammo being picked
-    gi.SendServerCommand(
-        other->edict - g_entities,
-        "print \"" HUD_MESSAGE_YELLOW "%s\"",
-        gi.LV_ConvertString(va("Got %d %s Rounds", amount, GetCapitalized(item_name).c_str()))
-    );
+    // HZM coop [user 2026-10-06, feed round 2] a coop mission shows it as a quiet personal feed line (one per ammo
+    // type, the newest amount) instead of a line in the old message box
+    {
+        str sGot = gi.LV_ConvertString(va("Got %d %s Rounds", amount, GetCapitalized(item_name).c_str()));
+
+        if (!G_CoopFeedPrint(other->edict - g_entities, 2, va("am_%s", item_name.c_str()), sGot.c_str(), true)) {
+            gi.SendServerCommand(other->edict - g_entities, "print \"" HUD_MESSAGE_YELLOW "%s\"", sGot.c_str());
+        }
+    }
 
     // Give the ammo to the player
     player->GiveAmmo(item_name, amount);

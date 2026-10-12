@@ -4013,11 +4013,14 @@ void Weapon::PickupWeapon(Event *ev)
 
     if (!hasweapon && !hasclass) {
         if (other->IsSubclassOfPlayer()) {
-            gi.SendServerCommand(
-                other->edict - g_entities,
-                "print \"" HUD_MESSAGE_YELLOW "%s\n\"",
-                gi.LV_ConvertString(va("Picked Up %s", item_name.c_str()))
-            );
+            // HZM coop [user 2026-10-06, feed round 2] feed line in a coop mission (g_utils.cpp G_CoopFeedPrint)
+            str sPicked = gi.LV_ConvertString(va("Picked Up %s", item_name.c_str()));
+
+            if (!G_CoopFeedPrint(other->edict - g_entities, 2, "wpn", sPicked.c_str(), true)) {
+                gi.SendServerCommand(
+                    other->edict - g_entities, "print \"" HUD_MESSAGE_YELLOW "%s\n\"", sPicked.c_str()
+                );
+            }
         }
 
         if (!(spawnflags & DROPPED_PLAYER_ITEM) && !(spawnflags & DROPPED_ITEM)) {
@@ -4151,7 +4154,12 @@ void Weapon::PickupWeapon(Event *ev)
             sMessage = gi.LV_ConvertString(va("Got %i %s Rounds", iGiveAmmo, GetCapitalized(sAmmoType).c_str()));
         }
 
-        gi.SendServerCommand(other->edict - g_entities, "print \"" HUD_MESSAGE_YELLOW "%s\n\"", sMessage.c_str());
+        // HZM coop [feed round 2] one feed line per ammo type, so a gun's two ammo lines never replace each other
+        if (!G_CoopFeedPrint(other->edict - g_entities, 2, va("am_%s", sAmmoType.c_str()), sMessage.c_str(), true)) {
+            gi.SendServerCommand(
+                other->edict - g_entities, "print \"" HUD_MESSAGE_YELLOW "%s\n\"", sMessage.c_str()
+            );
+        }
     }
 
     if (ammo_type[FIRE_SECONDARY] != ammo_type[FIRE_PRIMARY] && str::icmp(ammo_type[FIRE_SECONDARY], "none")) {
@@ -4181,7 +4189,11 @@ void Weapon::PickupWeapon(Event *ev)
                 );
             }
 
-            gi.SendServerCommand(other->edict - g_entities, "print \"" HUD_MESSAGE_YELLOW "%s\n\"", sMessage.c_str());
+            if (!G_CoopFeedPrint(other->edict - g_entities, 2, va("am_%s", sAmmoType.c_str()), sMessage.c_str(), true)) {
+                gi.SendServerCommand(
+                    other->edict - g_entities, "print \"" HUD_MESSAGE_YELLOW "%s\n\"", sMessage.c_str()
+                );
+            }
         }
     }
 
@@ -4335,7 +4347,9 @@ int Weapon::CoopLootTakeAmmo(Sentient *pTaker)
     } else {
         sMessage = gi.LV_ConvertString(va("Got %i %s Rounds", iGot, GetCapitalized(sType).c_str()));
     }
-    gi.SendServerCommand(pTaker->edict - g_entities, "print \"" HUD_MESSAGE_YELLOW "%s\n\"", sMessage.c_str());
+    if (!G_CoopFeedPrint(pTaker->edict - g_entities, 2, va("am_%s", sType.c_str()), sMessage.c_str(), true)) {
+        gi.SendServerCommand(pTaker->edict - g_entities, "print \"" HUD_MESSAGE_YELLOW "%s\n\"", sMessage.c_str());
+    }
     // on the taker, not on this gun: it is removed before the next snapshot and its sound would go with it
     pTaker->Sound(m_sAmmoPickupSound, CHAN_ITEM);
 

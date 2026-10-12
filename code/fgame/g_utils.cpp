@@ -2195,6 +2195,96 @@ void G_PrintToAllClients(const char *pszString, int iType)
     }
 }
 
+/*
+HZM coop [user 2026-10-06, feed round 2] THE EVENT FEED FOR TEXT THE ENGINE PRINTS. The user likes the small feed
+(cgame/cg_coopfeed.c) and asked for more of the informative text in it; the script side is coop_mod/feed.scr, and
+these three do the same for the lines game.dll prints itself: ammo and weapon pickups, a player connecting,
+entering and leaving, and the vote lines. Wire: an ordinary reliable print whose text starts with the tag
+~f<cat>:<key>~ (cat 1 team, 2 self; the key is the stacking key - the same key while the line is up replaces it).
+
+G_CoopFeedSession - a coop mission is running: the level var coop_mainScriptLoaded, which coop_mod/main.scr sets
+and under which the multiplayer framework refuses to start, so it is never true in a PvP mode (the same test as
+HZM_CoopJoinSession in player.cpp and the use-to-loot gate in weapon.cpp).
+G_CoopFeedPrint - one line to one client. Returns false, HAVING SENT NOTHING, when this is not a coop session, the
+client's cgame does not advertise cg_hzmFeed in its userinfo (an older cgame, a bot), or vanillaInHardcore is set
+and the host runs Hardcore (there the feed draws only alerts, so a pickup line keeps its retail print - the rule
+coop_mod/loot.scr already follows). The caller then prints its vanilla line, byte for byte as before.
+G_CoopFeedPrintAll - the same for every client, each one getting the feed line or the vanilla line (pszVanilla
+semantics of G_PrintToAllClients: iVanillaType 0 yellow, 1 white, 2 chat) according to what its cgame can show.
+*/
+bool G_CoopFeedSession(void)
+{
+    ScriptVariable *pCoop;
+
+    if (g_gametype->integer == GT_SINGLE_PLAYER || !level.vars) {
+        return false;
+    }
+    pCoop = level.vars->GetVariable("coop_mainScriptLoaded");
+    return (pCoop && pCoop->GetType() != VARIABLE_NONE) ? true : false;
+}
+
+bool G_CoopFeedPrint(int clientNum, int cat, const char *key, const char *text, bool vanillaInHardcore)
+{
+    static cvar_t *s_hc = NULL;
+    char           ui[MAX_INFO_STRING];
+    char           line[256];
+    int            n = 0;
+
+    if (clientNum < 0 || clientNum >= game.maxclients || !text || !G_CoopFeedSession()) {
+        return false;
+    }
+    if (vanillaInHardcore) {
+        if (!s_hc) {
+            s_hc = gi.Cvar_Get("g_coopHardcore", "0", CVAR_SERVERINFO | CVAR_ROM);
+        }
+        if (s_hc->integer) {
+            return false;
+        }
+    }
+    // the text is copied first: callers pass va() / LV_ConvertString buffers
+    for (; *text && n < (int)sizeof(line) - 1; text++) {
+        if (*text == '\n' || *text == '\r') {
+            continue;
+        }
+        line[n++] = (*text == '"') ? '\'' : *text; // a quote would end the server command's argument
+    }
+    line[n] = 0;
+    gi.GetUserinfo(clientNum, ui, sizeof(ui));
+    if (Info_ValueForKey(ui, "cg_hzmFeed")[0] != '1') {
+        return false;
+    }
+    gi.SendServerCommand(clientNum, "print \"" HUD_MESSAGE_YELLOW "~f%d:%s~%s\n\"", cat, key, line);
+    return true;
+}
+
+void G_CoopFeedPrintAll(int cat, const char *key, const char *text, int iVanillaType, bool vanillaInHardcore)
+{
+    gentity_t *ent;
+    int        i;
+    char       sKey[40];
+    char       sText[256];
+
+    // copied first for the same reason: one va() buffer may be reused while the loop runs
+    Q_strncpyz(sKey, key ? key : "", sizeof(sKey));
+    Q_strncpyz(sText, text ? text : "", sizeof(sText));
+    for (i = 0; i < game.maxclients; i++) {
+        ent = &g_entities[i];
+        if (!ent->inuse || !ent->entity) {
+            continue;
+        }
+        if (G_CoopFeedPrint(i, cat, sKey, sText, vanillaInHardcore)) {
+            continue;
+        }
+        if (iVanillaType == 0) {
+            gi.SendServerCommand(i, "print \"" HUD_MESSAGE_YELLOW "%s\n\"", sText);
+        } else if (iVanillaType == 2 && g_protocol >= protocol_e::PROTOCOL_MOHTA_MIN) {
+            gi.SendServerCommand(i, "print \"" HUD_MESSAGE_CHAT_WHITE "%s\n\"", sText);
+        } else {
+            gi.SendServerCommand(i, "print \"" HUD_MESSAGE_WHITE "%s\n\"", sText);
+        }
+    }
+}
+
 void G_CenterPrintToAllClients(const char *pszString)
 {
     gentity_t *ent;

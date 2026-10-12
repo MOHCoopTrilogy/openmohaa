@@ -197,6 +197,10 @@ void G_TouchSolids(gentity_t *ent);
 
 void G_CenterPrintToAllClients(const char *pszString);
 void G_PrintToAllClients(const char *pszString, int iType = 1);
+// HZM coop [user 2026-10-06, feed round 2] the event feed for text the engine prints (g_utils.cpp)
+bool G_CoopFeedSession(void);
+bool G_CoopFeedPrint(int clientNum, int cat, const char *key, const char *text, bool vanillaInHardcore = false);
+void G_CoopFeedPrintAll(int cat, const char *key, const char *text, int iVanillaType, bool vanillaInHardcore = false);
 void G_PrintDeathMessage(
     const char *s1, const char *s2, const char *attackerName, const char *victimName, Player *victim, const char *type
 );
