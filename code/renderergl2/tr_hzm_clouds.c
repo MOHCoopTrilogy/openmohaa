@@ -58,7 +58,11 @@ void GLSL_DeleteGPUShader( shaderProgram_t *program );	// tr_glsl.c
 
 // Read by build.ps1 / publish_release.ps1 (plan 2.1 guards): a vcl-tree build must never ship under a fixed name.
 // The P4 flip commit removes this marker.
-const char hzmVclStateMarker[] = "HZM_VCL=test";
+// [2026-10-12] THE FLIP. The user judged the clouds from the in-engine captures ("Only for skies where they look
+// good. Keep on by default", "I think african night is fine to keep") and asked for the build on their own install to
+// test. The marker no longer says "test", so build.ps1 / publish_release.ps1 accept this renderer under its fixed name;
+// the string stays because the VCLBUILD log line prints it.
+const char hzmVclStateMarker[] = "HZM_VCL=on";
 
 hzmTexImage3D_t qglTexImage3D;
 hzmPixelStorei_t qglHzmPixelStorei;	// glPixelStorei is not in the qgl table either (tr_extensions.c loads both)
