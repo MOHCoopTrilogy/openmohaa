@@ -208,6 +208,10 @@ static struct {
 	volatile int	gunHeld, nFlash;
 	volatile int	nGun, nGunBad, nGunProj, gunDraws, nFovStep;	// frames with weapon vectors / without (a part not drawn, its projection stepped), weapon batches, fov steps
 	char			lastOverlay[96];
+	// the last camera steps worth a look (present thread writes, fg_stats reads): units moved, cosine of the turn,
+	// field-of-view factor, 1 = taken as a cut
+	struct { float d, dot, fov; int seqA, seqB, cut; } step[8];
+	volatile int	nStep;
 } fgs;
 
 cvar_t *r_hzmFrameGen;
@@ -821,16 +825,29 @@ static qboolean FG_CameraJumped( const fgFrame_t *a, const fgFrame_t *b )
 	d = ( oa[0] - ob[0] ) * ( oa[0] - ob[0] ) + ( oa[1] - ob[1] ) * ( oa[1] - ob[1] ) + ( oa[2] - ob[2] ) * ( oa[2] - ob[2] );
 	// the eye's z axis in world space is row 2 of the rotation
 	dot = a->V[2] * b->V[2] + a->V[6] * b->V[6] + a->V[10] * b->V[10];
-	if ( r_hzmFrameGenFovStep->value > 1.0f && a->P[0] > 0.0 && b->P[0] > 0.0 ) {
+	{
+		double r = ( a->P[0] > 0.0 && b->P[0] > 0.0 ) ? ( a->P[0] > b->P[0] ? a->P[0] / b->P[0] : b->P[0] / a->P[0] ) : 1.0;
+		qboolean fovCut = ( r_hzmFrameGenFovStep->value > 1.0f && r > (double)r_hzmFrameGenFovStep->value ) ? qtrue : qfalse;
+		qboolean cut = ( fovCut || d > 96.0 * 96.0 || dot < 0.90 ) ? qtrue : qfalse;
+
+		if ( cut || d > 24.0 * 24.0 || dot < 0.985 || r > 1.08 ) {
+			int k = fgs.nStep & 7;
+
+			fgs.step[k].d = (float)sqrt( d );
+			fgs.step[k].dot = (float)dot;
+			fgs.step[k].fov = (float)r;
+			fgs.step[k].seqA = a->seq;
+			fgs.step[k].seqB = b->seq;
+			fgs.step[k].cut = cut;
+			fgs.nStep++;
+		}
 		// the field of view stepped (binoculars, a scope snapping in or out): a picture at the fov in between was
 		// never part of the game. A smooth aim zoom changes it by 5-13 % a frame and is interpolated as before.
-		double r = a->P[0] > b->P[0] ? a->P[0] / b->P[0] : b->P[0] / a->P[0];
-		if ( r > (double)r_hzmFrameGenFovStep->value ) {
+		if ( fovCut ) {
 			fgs.nFovStep++;
-			return qtrue;
 		}
+		return cut;
 	}
-	return ( d > 96.0 * 96.0 || dot < 0.90 ) ? qtrue : qfalse;
 }
 
 /*
@@ -2662,6 +2679,11 @@ static void FG_Stats_f( void )
 		fgs.nGenDelay ? fgs.genDelayMs / fgs.nGenDelay : 0.0, fgs.nRealDelay ? fgs.realDelayMs / fgs.nRealDelay : 0.0 );
 	ri.Printf( PRINT_ALL, "FGSTAT4 gunframes=%d gunbad=%d gunproj=%d gundraws=%d gunheld=%d flashframes=%d fovstep=%d\n",
 		fgs.nGun, fgs.nGunBad, fgs.nGunProj, fgs.gunDraws, fgs.gunHeld, fgs.nFlash, fgs.nFovStep );
+	for ( j = 0; j < 8 && j < fgs.nStep; j++ ) {
+		int k = ( fgs.nStep - 1 - j ) & 7;
+		ri.Printf( PRINT_ALL, "FGSTEP frames %d -> %d: camera moved %.1f units, turned cos %.4f, fov factor %.3f: %s\n",
+			fgs.step[k].seqA, fgs.step[k].seqB, fgs.step[k].d, fgs.step[k].dot, fgs.step[k].fov, fgs.step[k].cut ? "a cut, nothing generated" : "generated across" );
+	}
 	line[0] = 0;
 	for ( j = 0; j < 13; j++ ) {
 		if ( j < 12 ) {
@@ -2764,7 +2786,12 @@ void R_FG_Init( void )
 	// Measured 2026-10-12: the lead goes from 4.6-5.1 px to 3.2 px, not to nothing - the strip the shadow has to
 	// cover behind itself is not filled (that needs the movers drawn from the sun at their HALFWAY pose and the
 	// generator asking that map; see docs/proposals/framegen_2026-10-11/2026-10-12_motion_vectors).
-	r_hzmFrameGenShadows = ri.Cvar_Get( "r_hzmFrameGenShadows", "1", 0 );
+	// Default 0 since 2026-10-12 (second look, close range and indoors): the rule knows only "a mover is between this
+	// pixel and the sun", not whether the sun reaches either of them - indoors the wall behind an opening door was
+	// slid along with the door in every generated picture (m2l2a: 0.4-0.6 % of the screen), and a running
+	// soldier's shadow was torn at its edges at close range (the search through M does not converge there). A
+	// shadow that leads its owner by half a real frame is whole; this one is not.
+	r_hzmFrameGenShadows = ri.Cvar_Get( "r_hzmFrameGenShadows", "0", 0 );
 	// with the vectors: 1 = a mover's outline point is also accepted when one of the four depth texels around it in
 	// the newer frame is the mover's. Measured 2026-10-12: no difference to a soldier's silhouette area (0.86-0.92
 	// of the real one either way - mostly the softer edge of a resampled picture), but thin carried things (a
