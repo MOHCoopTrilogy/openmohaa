@@ -244,6 +244,11 @@ void CG_Rain(centity_t *cent)
     }
 
     for (i = 0; i < iNumSpawn; ++i) {
+        {
+            extern int CG_HZMRainSeed(void);
+            int        iSeed = CG_HZMRainSeed(); // HZM coop [bug-3552] a fresh seed for every drop
+            if (iSeed >= 0) { iRandom = iSeed; }
+        }
         vStart[0] = (float)(iRandom % (int)(vOe[0] + 1.0)) + vOmins[0];
         iRandom   = ((214013 * iRandom + 2531011) >> 16) & 0x7FFF;
         vStart[1] = (float)(iRandom % (int)(vOe[1] + 1.0)) + vOmins[1];
@@ -313,6 +318,32 @@ void CG_Rain(centity_t *cent)
             "raineffect"
         );
     }
+}
+
+// HZM coop [bug-3552] A DIFFERENT DROP EVERY TIME. Both spawn loops draw every coordinate of every drop from one
+// 15-bit generator ((214013 * x + 2531011) >> 16 & 0x7FFF), seeded once a frame. That map runs into a loop of 135
+// states after about 300 steps, so one frame could produce only ~96 different drops however many were asked for -
+// the rest were exact copies on the same paths. Ordinary rain asks for ~50 a frame and never showed it; anything
+// denser (the downpour tier, snow) drew stacks of copies: dotted trails, a solid white blade by the eye, and a
+// visible density that followed the frame rate, not the count. Each drop now starts from a fresh seed of a 32-bit
+// xorshift; the loop's own arithmetic after that is untouched. coop_rainSeed 1 (default; 0 = one seed a frame).
+int CG_HZMRainSeed(void)
+{
+    static cvar_t      *pSeed = NULL;
+    static unsigned int uState = 0;
+
+    if (!pSeed) { pSeed = cgi.Cvar_Get("coop_rainSeed", "1", 0); }
+    if (!pSeed->integer) {
+        return -1;
+    }
+    if (!uState) {
+        uState = ((unsigned int)rand() << 16) ^ (unsigned int)rand() ^ (unsigned int)cg.time ^ 0x9E3779B9u;
+        if (!uState) { uState = 1u; }
+    }
+    uState ^= uState << 13;
+    uState ^= uState >> 17;
+    uState ^= uState << 5;
+    return (int)((uState >> 9) & 0x7FFF);
 }
 
 // HZM coop [bug-3558] SPAWN BY TIME. The spawn count was per FRAME (sqrt(area) * density / 200 every frame), so a
@@ -496,6 +527,10 @@ void CG_RainGlobal(void)
         trace_t skyTr;
         vec3_t  vSkyStart, vSkyEnd;
 
+        {
+            int iSeed = CG_HZMRainSeed(); // HZM coop [bug-3552] a fresh seed for every drop
+            if (iSeed >= 0) { iRandom = iSeed; }
+        }
         vStart[0] = (float)(iRandom % (int)(vOe[0] + 1.0f)) + vOmins[0];
         iRandom   = ((214013 * iRandom + 2531011) >> 16) & 0x7FFF;
         vStart[1] = (float)(iRandom % (int)(vOe[1] + 1.0f)) + vOmins[1];
