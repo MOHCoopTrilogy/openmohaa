@@ -2921,6 +2921,48 @@ void CG_ModelAnim(centity_t *cent, qboolean bDoShaderTime)
     cgi.TIKI_SetEyeTargetPos(model.tiki, model.entityNumber, s1->eyeVector);
 
     CG_InterpolateAnimParms(s1, sNext, &model);
+    // HZM coop [aimed reload 2026-10-12] THE GUN'S OWN ANIMATION IN AN AIMED RELOAD (user: "functioning slides,
+    // bolts"; "on a reload with a round chambered there is no slide action"). The retail gun clips snap the slide /
+    // bolt back on the first frame of EVERY reload. When the local player's held gun starts its `reload` while
+    // aiming, it shows `reload_ads_loaded` (rounds still in the gun: the action does not move) or
+    // `reload_ads_empty` (locked back from the first frame, runs forward when released) instead, if its tik has
+    // them. Decided HERE on the first frame `reload` shows, so that frame's entry commands (the sound) are already
+    // the shown animation's. Same length as `reload`; the server still runs `reload` (surface / ammo commands).
+    // Client-only, display only. Matches the view-model code's choice of the hands' `_ads` clip (same inputs).
+    if (model.tiki && cg.snap && s1->parent == cg.snap->ps.clientNum && s1->parent != ENTITYNUM_NONE) {
+        static cvar_t *pAimedGun  = NULL;
+        static int     s_lastEnt  = -1;
+        static int     s_lastSeen = 0;
+        static int     s_choice   = 0; // 0 none, 1 loaded, 2 empty
+        int            iRel, iSwap, k;
+        qboolean       bPlaying = qfalse;
+        if (!pAimedGun) {
+            pAimedGun = cgi.Cvar_Get("coop_vmAimedReloadGun", "1", 0);
+        }
+        iRel = pAimedGun->integer ? cgi.Anim_NumForName(model.tiki, "reload") : -1;
+        for (k = 0; k < MAX_FRAMEINFOS && iRel != -1; k++) {
+            if (model.frameInfo[k].weight && model.frameInfo[k].index == iRel) {
+                bPlaying = qtrue;
+            }
+        }
+        if (bPlaying) {
+            if (s_lastEnt != s1->number || cg.time - s_lastSeen > 250 || cg.time < s_lastSeen) {
+                // a new reload of this gun: choose once
+                s_choice = 0;
+                if (CG_AimingDownSights() && cg.snap->ps.stats[STAT_MAXCLIPAMMO] > 0) {
+                    s_choice = (cg.snap->ps.stats[STAT_CLIPAMMO] == 0) ? 2 : 1;
+                }
+            }
+            s_lastEnt  = s1->number;
+            s_lastSeen = cg.time;
+            iSwap      = s_choice ? cgi.Anim_NumForName(model.tiki, s_choice == 2 ? "reload_ads_empty" : "reload_ads_loaded") : -1;
+            for (k = 0; k < MAX_FRAMEINFOS && iSwap != -1; k++) {
+                if (model.frameInfo[k].weight && model.frameInfo[k].index == iRel) {
+                    model.frameInfo[k].index = iSwap;
+                }
+            }
+        }
+    }
 
     if (cent->currentState.parent != ENTITYNUM_NONE) {
         int          iTagNum;
