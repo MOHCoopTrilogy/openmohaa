@@ -620,6 +620,11 @@ void RE_EndFrame( int *frontEndMsec, int *backEndMsec ) {
 
 	// HZM gl2 graphics probes: per-frame drawsurf / static-surface / bone high-water (before the counters reset).
 	R_GfxProbe_EndFrame();
+	{
+		// HZM gl2: video-memory block (tr_hzm_vram.c). Dormant or menu closed: a test or two and out.
+		extern void R_HzmVramEndFrame( void );
+		R_HzmVramEndFrame();
+	}
 
 	// HZM coop - gore tier 4 (UV wounds): every skel surface of the frame has
 	// been CPU-skinned and ray-tested by now, so the globally best triangle
