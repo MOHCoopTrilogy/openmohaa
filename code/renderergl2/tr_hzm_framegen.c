@@ -105,6 +105,8 @@ typedef struct {
 	int			seq;
 	qboolean	scene;				// S, D and the matrices are valid
 	qboolean	vec;				// M and C are valid: something moved by itself in this frame
+	qboolean	gun;				// C also holds the first-person weapon and hands where they are halfway (a < 0)
+	qboolean	flash;				// a muzzle flash was drawn in this frame (a blended depth-hack effect)
 	int			midPrev;			// C was drawn for the camera halfway between the frame with this number and this one
 	qboolean	bypass;				// a big 2D overlay was drawn over the scene
 	double		V[16], P[16];		// world -> eye, eye -> clip (column-major)
@@ -160,13 +162,24 @@ typedef struct {
 	int				velDraws, velSkipped, velSurfs;
 	float			velModel[16], velPrevModel[16];
 	qboolean		velNewEntity;	// the two matrices above are not in the program yet
+	// the first-person weapon (r_hzmFrameGenGun): drawn into C only, positions in VIEW space
+	double			latWP[16], lastWP[16];	// the projection the depth-hack surfaces are drawn with, this frame / the last
+	float			gunMidP[16], gunCurP[16];
+	qboolean		gunOK;			// this frame: the weapon may be drawn (switch on, its projection did not step)
+	qboolean		velBatchGun;	// the batch being collected is the weapon's
+	qboolean		velBatchHold;	// ... a part of it that is held at the newer frame's place (no vectors)
+	qboolean		gunBad;			// a part of the weapon could not be drawn: the whole weapon stays unwarped this frame
+	int				gunDraws, gunOrdinal;
+	int				gunDump;		// fg_gundump: passes still to be printed
+	GLint			uVelGunF;
+	int				gunHeld;
 
 	// ---- the frame-gen context (whoever has it current)
 	void			*ctx;
 	qboolean		ctxInit;
 	GLuint			prog, vao;
 	GLint			uMode, uTint, uRes, uGun, uCurFromOut, uOutFromCur, uPrvFromOut, uOutFromPrv, uFadeK, uFadeB, uHudThr;
-	GLint			uOutVP, uCurInvW, uPrvInvW, uCurK, uPrvK, uUseC, uEdge, uLayer, uLayerCol, uLayerST;
+	GLint			uOutVP, uCurInvW, uPrvInvW, uCurK, uPrvK, uUseC, uEdge, uLayer, uLayerCol, uLayerST, uGunVec, uGunFlash;
 
 	// ---- shared, under mx
 	SDL_Thread		*thread;
@@ -192,6 +205,8 @@ static struct {
 	volatile double	genDelayMs, realDelayMs;	// from the main thread handing a frame over to its pictures being shown
 	volatile int	nGenDelay, nRealDelay;
 	volatile int	nVec, nVelPass, velDraws, velSkipped, velBrush, nLayer, nLayerExact;	// main thread: frames with vectors, passes run, batches drawn / left out
+	volatile int	gunHeld, nFlash;
+	volatile int	nGun, nGunBad, nGunProj, gunDraws, nFovStep;	// frames with weapon vectors / without (a part not drawn, its projection stepped), weapon batches, fov steps
 	char			lastOverlay[96];
 } fgs;
 
@@ -202,6 +217,9 @@ cvar_t *r_hzmFrameGenVectors;
 cvar_t *r_hzmFrameGenShadows;
 cvar_t *r_hzmFrameGenEdge;
 cvar_t *r_hzmFrameGenLayers;
+cvar_t *r_hzmFrameGenGun;
+cvar_t *r_hzmFrameGenGunMax;
+cvar_t *r_hzmFrameGenFovStep;
 int r_fgVelPass;		// the motion-vector pass is collecting surfaces: RB_EndSurface hands them to R_FG_VelocityDraw
 
 static const char *fg_vs =
@@ -216,6 +234,8 @@ static const char *fg_fs =
 	"uniform sampler2D uCurS, uCurD, uPrvS, uPrvD, uHudF, uHudS, uHudD, uCurM, uPrvM, uCurC;\n"
 	"uniform float uUseC;\n"
 	"uniform float uEdge;\n"
+	"uniform float uGunVec;\n"		// the newer frame's C also holds the first-person weapon where it is halfway (a < 0)
+	"uniform float uGunFlash;\n"		// a muzzle flash is in one of the two frames
 	"uniform sampler2D uLayerT;\n"
 	"uniform float uLayer;\n"
 	"uniform vec4 uLayerCol, uLayerST;\n"
@@ -296,6 +316,16 @@ static const char *fg_fs =
 	"bool moving( sampler2D mot, vec2 q ) {\n"
 	"	return texelFetch( mot, texel( mot, q ), 0 ).a > 0.5;\n"
 	"}\n"
+	// does the frame show the first-person weapon at q, or within a texel of it (its outline)?
+	"bool gunAt( sampler2D dep, vec2 q ) {\n"
+	"	if ( any( lessThan( q, vec2( 0.0 ) ) ) || any( greaterThan( q, vec2( 1.0 ) ) ) ) return false;\n"
+	"	ivec2 c = texel( dep, q );\n"
+	"	ivec2 m = textureSize( dep, 0 ) - ivec2( 1 );\n"
+	"	for ( int i = 0; i < 9; i++ ) {\n"
+	"		if ( texelFetch( dep, clamp( c + ivec2( i % 3 - 1, i / 3 - 1 ), ivec2( 0 ), m ), 0 ).r < uGun ) return true;\n"
+	"	}\n"
+	"	return false;\n"
+	"}\n"
 	"void main() {\n"
 	"	ivec2 ip = ivec2( gl_FragCoord.xy );\n"
 	"	vec3 f = texelFetch( uHudF, ip, 0 ).rgb;\n"
@@ -310,17 +340,71 @@ static const char *fg_fs =
 	"	}\n"
 	"	vec3 df = abs( f - ( clamp( s * uFadeK + uFadeB.rgb, 0.0, 1.0 ) * ( 1.0 - lay.a ) + lay.rgb ) );\n"
 	"	bool hud = max( df.r, max( df.g, df.b ) ) > uHudThr;\n"
-	"	bool gun = depthAt( uHudD, vUV ) < uGun;\n"
+	"	bool gunHere = depthAt( uHudD, vUV ) < uGun;\n"
+	"	bool gun = gunHere;\n"
+	"	int gsrc = 0;\n"
+	"	vec2 gq = vec2( 0.0 );\n"
+	"	bool gvec = false;\n"
+	"	vec2 grg = vec2( 0.0 );\n"
+	"	if ( uGunVec != 0.0 && !hud ) {\n"
+	// The first-person weapon and hands were drawn into C where they are HALFWAY between their two poses (in view
+	// space: the camera's own turn is not in it). A pixel they cover at this moment takes the weapon's colour from
+	// where that point of it is in the newer frame. Any other pixel shows the world, also where the newer frame
+	// has the weapon (it is not there yet at this moment).
+	"		ivec2 gc = texel( uCurC, vUV );\n"
+	"		vec4 gm = texelFetch( uCurC, gc, 0 );\n"
+	"		bool gcov = gm.a < 0.0;\n"
+	"		if ( !gcov ) {\n"
+	// C has one sample a pixel; the real frames' weapon reaches up to a pixel further out (their colour there is the
+	// blend of the multisamples). A pixel beside the weapon in C is its outline: it goes where its neighbour goes
+	// and takes the real frame's blended outline colour from there.
+	"			ivec2 gmax = textureSize( uCurC, 0 ) - ivec2( 1 );\n"
+	"			for ( int i = 0; i < 9 && gm.a >= 0.0; i++ ) {\n"
+	"				if ( i == 4 ) continue;\n"
+	"				vec4 gn = texelFetch( uCurC, clamp( gc + ivec2( i % 3 - 1, i / 3 - 1 ), ivec2( 0 ), gmax ), 0 );\n"
+	"				if ( gn.a < 0.0 ) gm = gn;\n"
+	"			}\n"
+	"		}\n"
+	"		gun = false;\n"
+	"		if ( gm.a < 0.0 ) {\n"
+	"			vec2 gd = gm.rg * uRes;\n"
+	"			vec2 q = vUV + gm.rg;\n"
+	"			bool qin = all( greaterThanEqual( q, vec2( 0.0 ) ) ) && all( lessThanEqual( q, vec2( 1.0 ) ) );\n"
+	"			gvec = true;\n"
+	"			grg = gm.rg;\n"
+	"			if ( dot( gd, gd ) < 0.0009 ) {\n"
+	// it stands still on the screen here: the real picture's pixel, exactly (its outline's blend included)
+	"				gun = gunHere || !gcov;\n"
+	"			} else if ( qin && gunAt( uCurD, q ) ) {\n"
+	"				gsrc = 1; gq = q;\n"
+	"			} else if ( !qin && gcov && gunAt( uPrvD, vUV - gm.rg ) ) {\n"
+	// that point of the weapon has left the screen in the newer frame (the weapon being lowered): the older one has it
+	"				gsrc = 2; gq = vUV - gm.rg;\n"
+	"			} else if ( gcov && gunHere ) {\n"
+	"				gun = true;\n"			// a cut-out part: as before
+	"			}\n"
+	"		}\n"
+	"	}\n"
 	"	vec3 c;\n"
 	"	vec3 tint = vec3( 1.0 );\n"
 	"	if ( hud || gun ) {\n"
 	"		c = f;\n"
 	"		tint = hud ? vec3( 1.0, 0.45, 1.0 ) : vec3( 0.45, 0.45, 1.0 );\n"
+	"	} else if ( gsrc == 1 ) {\n"
+	"		c = sharp( uCurS, gq );\n"
+	"		tint = vec3( 0.7, 0.35, 1.0 );\n"
+	"	} else if ( gsrc == 2 ) {\n"
+	"		c = sharp( uPrvS, gq );\n"
+	"		tint = vec3( 0.35, 0.2, 0.7 );\n"
 	"	} else {\n"
 	"		float d0 = depthAt( uCurD, vUV );\n"
 	"		if ( d0 < uGun ) d0 = 1.0;\n"
 	"		vec2 q0 = proj( uCurFromOut, vUV, d0 );\n"
 	"		vec4 a = find( uCurD, uCurM, uOutFromCur, uCurInvW, uCurK, vUV, q0 );\n"
+	// the weapon is in the way in the newer frame - or its outline is: that pixel's colour is part weapon, and the
+	// weapon is somewhere else at this moment
+	"		bool gfill = uGunVec != 0.0 && gunAt( uCurD, a.xy );\n"
+	"		if ( gfill ) a.z = 10000.0;\n"
 	"		bool dyn = false;\n"
 	"		bool lost = false;\n"
 	"		if ( uCurK != 0.0 && a.z <= 1.0 ) dyn = moving( uCurM, a.xy );\n"
@@ -369,10 +453,50 @@ static const char *fg_fs =
 	"			float d1 = depthAt( uPrvD, vUV );\n"
 	"			if ( d1 < uGun ) d1 = 1.0;\n"
 	"			vec4 b = find( uPrvD, uPrvM, uOutFromPrv, uPrvInvW, uPrvK, vUV, proj( uPrvFromOut, vUV, d1 ) );\n"
+	"			if ( uGunVec != 0.0 && b.z <= 1.0 && gunAt( uPrvD, b.xy ) ) b.z = 10000.0;\n"
 	"			bool done = false;\n"
+	"			vec2 gw = vec2( -1.0 );\n"
+	"			if ( gfill ) {\n"
+	// The world behind the weapon's place in the newer frame. If the older frame does not show it either: the world
+	// beside the weapon in the newer frame, stepping out of the weapon along its own motion (the nearest part of
+	// it in C says which way), else the nearest world pixel - never the weapon's own colour.
+	"				vec2 px = 1.0 / uRes;\n"
+	"				if ( !gvec ) {\n"
+	"					for ( int r = 1; r <= 8 && !gvec; r++ ) {\n"
+	"						for ( int k = 0; k < 8 && !gvec; k++ ) {\n"
+	"							float an = float( k ) * 0.7853982;\n"
+	"							vec2 qq = vUV + vec2( cos( an ), sin( an ) ) * ( float( r ) * 3.0 ) * px;\n"
+	"							vec4 gn = texelFetch( uCurC, texel( uCurC, qq ), 0 );\n"
+	"							if ( gn.a < 0.0 ) { gvec = true; grg = gn.rg; }\n"
+	"						}\n"
+	"					}\n"
+	"				}\n"
+	"				if ( gvec ) {\n"
+	"					vec2 qq = vUV + grg;\n"
+	"					if ( all( greaterThanEqual( qq, vec2( 0.0 ) ) ) && all( lessThanEqual( qq, vec2( 1.0 ) ) ) && !gunAt( uCurD, qq ) ) gw = qq;\n"
+	"				}\n"
+	"				for ( int r = 1; r <= 8 && gw.x < 0.0; r++ ) {\n"
+	"					for ( int k = 0; k < 8 && gw.x < 0.0; k++ ) {\n"
+	"						float an = float( k ) * 0.7853982;\n"
+	"						vec2 qq = vUV + vec2( cos( an ), sin( an ) ) * ( float( r ) * 3.0 ) * px;\n"
+	"						if ( all( greaterThanEqual( qq, vec2( 0.0 ) ) ) && all( lessThanEqual( qq, vec2( 1.0 ) ) ) && !gunAt( uCurD, qq ) ) gw = qq;\n"
+	"					}\n"
+	"				}\n"
+	"			}\n"
 	"			if ( b.z <= 1.0 ) {\n"
 	"				c = sharp( uPrvS, b.xy );\n"
 	"				tint = vec3( 0.45, 1.0, 0.45 );\n"
+	"				done = true;\n"
+	"				if ( gw.x >= 0.0 && uGunFlash != 0.0 ) {\n"
+	// the older frame shows the world here. But a muzzle flash (and its smoke) is in one of the two frames and not
+	// in the other: the older frame's colour would stand beside the weapon as a white or a dark rim - take the
+	// newer frame's world beside the weapon instead
+	"					c = texture( uCurS, gw ).rgb;\n"
+	"					tint = vec3( 1.0, 0.5, 0.8 );\n"
+	"				}\n"
+	"			} else if ( gw.x >= 0.0 ) {\n"
+	"				c = texture( uCurS, gw ).rgb;\n"
+	"				tint = vec3( 1.0, 0.5, 0.8 );\n"
 	"				done = true;\n"
 	"			} else if ( uCurK != 0.0 && all( greaterThanEqual( q0, vec2( 0.0 ) ) ) && all( lessThanEqual( q0, vec2( 1.0 ) ) ) && moving( uCurM, q0 ) ) {\n"
 	// uncovered by something that moved on, and hidden in the older frame as well: the background beside the mover
@@ -438,6 +562,7 @@ static const char *fg_vel_fs =
 	"uniform sampler2D uDepth;\n"
 	"uniform vec2 uSize;\n"
 	"uniform int uPass;\n"
+	"uniform float uGunF;\n"
 	"in vec3 vDelta;\n"
 	"in vec4 vCur;\n"
 	"out vec4 oColor;\n"
@@ -459,6 +584,8 @@ static const char *fg_vel_fs =
 	"		if ( vCur.w < 0.00001 ) discard;\n"
 	"		vec3 n = vCur.xyz / vCur.w * 0.5 + 0.5;\n"
 	"		oColor = vec4( n.xy - ( gl_FragCoord.xy - vec2( uSize.x, 0.0 ) ) / uSize, 1.0 - n.z, 1.0 / gl_FragCoord.w );\n"
+	// the first-person weapon: a negative distance marks it
+	"		if ( uGunF != 0.0 ) oColor.a = -oColor.a;\n"
 	"	}\n"
 	"}\n";
 
@@ -654,6 +781,15 @@ static qboolean FG_CameraJumped( const fgFrame_t *a, const fgFrame_t *b )
 	d = ( oa[0] - ob[0] ) * ( oa[0] - ob[0] ) + ( oa[1] - ob[1] ) * ( oa[1] - ob[1] ) + ( oa[2] - ob[2] ) * ( oa[2] - ob[2] );
 	// the eye's z axis in world space is row 2 of the rotation
 	dot = a->V[2] * b->V[2] + a->V[6] * b->V[6] + a->V[10] * b->V[10];
+	if ( r_hzmFrameGenFovStep->value > 1.0f && a->P[0] > 0.0 && b->P[0] > 0.0 ) {
+		// the field of view stepped (binoculars, a scope snapping in or out): a picture at the fov in between was
+		// never part of the game. A smooth aim zoom changes it by 5-13 % a frame and is interpolated as before.
+		double r = a->P[0] > b->P[0] ? a->P[0] / b->P[0] : b->P[0] / a->P[0];
+		if ( r > (double)r_hzmFrameGenFovStep->value ) {
+			fgs.nFovStep++;
+			return qtrue;
+		}
+	}
 	return ( d > 96.0 * 96.0 || dot < 0.90 ) ? qtrue : qfalse;
 }
 
@@ -736,6 +872,8 @@ static qboolean FG_CtxInit( void )
 	fg.uLayer = qglGetUniformLocation( fg.prog, "uLayer" );
 	fg.uLayerCol = qglGetUniformLocation( fg.prog, "uLayerCol" );
 	fg.uLayerST = qglGetUniformLocation( fg.prog, "uLayerST" );
+	fg.uGunVec = qglGetUniformLocation( fg.prog, "uGunVec" );
+	fg.uGunFlash = qglGetUniformLocation( fg.prog, "uGunFlash" );
 	qglDisable( GL_DEPTH_TEST );
 	qglDisable( GL_BLEND );
 	qglDisable( GL_CULL_FACE );
@@ -783,7 +921,7 @@ static qboolean FG_DrawGenerated( const fgFrame_t *prv, const fgFrame_t *cur, co
 	const double *outV, const double *outP, int tint, qboolean vectors )
 {
 	double vpO[16], vpC[16], vpP[16], iO[16], iC[16], iP[16], m[16];
-	float curK = 0.0f, prvK = 0.0f, useC = 0.0f;
+	float curK = 0.0f, prvK = 0.0f, useC = 0.0f, gunVec = 0.0f;
 
 	if ( vectors && r_hzmFrameGenVectors->integer ) {
 		// a dropped frame in between: cur's displacement is one frame's, the gap is n frames
@@ -794,6 +932,7 @@ static qboolean FG_DrawGenerated( const fgFrame_t *prv, const fgFrame_t *cur, co
 			// the movers were drawn for the camera halfway between cur and the frame before it: that is this
 			// picture's camera unless a frame was dropped in between
 			if ( cur->vec && cur->midPrev == prv->seq ) useC = 1.0f;
+			if ( useC != 0.0f && cur->gun && hud == cur ) gunVec = 1.0f;
 		}
 	}
 
@@ -818,6 +957,8 @@ static qboolean FG_DrawGenerated( const fgFrame_t *prv, const fgFrame_t *cur, co
 		FG_BindTex( 9, fg.sets[cur->set].C );
 	}
 	qglUniform1f( fg.uUseC, useC );
+	qglUniform1f( fg.uGunVec, gunVec );
+	qglUniform1f( fg.uGunFlash, ( cur->flash || prv->flash ) ? 1.0f : 0.0f );
 	qglUniform1f( fg.uEdge, r_hzmFrameGenEdge->integer ? 1.0f : 0.0f );
 	if ( prvK != 0.0f ) {
 		FG_BindTex( 8, fg.sets[prv->set].M );
@@ -1264,7 +1405,7 @@ static fgSkin_t *FG_SkinSlot( int ent, const void *sf, int frame )
 
 // the surface function has just put n vertices at tess.xyz[base]: write each one's displacement since the last frame
 // where the vertex shader reads it (texCoords = x y, lightCoords = z), and keep the positions for the next frame
-static void FG_FillPrev( const trRefEntity_t *ent, const surfaceType_t *surface, int base, int n, int frame )
+static void FG_FillPrev( int key, const surfaceType_t *surface, int base, int n, int frame )
 {
 	fgSkin_t *e;
 	int i, m = 0;
@@ -1272,7 +1413,7 @@ static void FG_FillPrev( const trRefEntity_t *ent, const surfaceType_t *surface,
 	if ( n <= 0 ) {
 		return;
 	}
-	if ( *surface == SF_TIKI_SKEL && ( e = FG_SkinSlot( ent->e.entityNumber, surface, frame ) ) != NULL ) {
+	if ( *surface == SF_TIKI_SKEL && ( e = FG_SkinSlot( key, surface, frame ) ) != NULL ) {
 		if ( e->seq == frame - 1 && e->xyz ) {
 			qboolean moved = qfalse;
 
@@ -1298,7 +1439,7 @@ static void FG_FillPrev( const trRefEntity_t *ent, const surfaceType_t *surface,
 			if ( e->cap < n ) {
 				if ( fgSkinBytes > FG_PSK_MAX ) {
 					R_FG_FlushPrev();
-					e = FG_SkinSlot( ent->e.entityNumber, surface, frame );
+					e = FG_SkinSlot( key, surface, frame );
 				}
 				if ( e ) {
 					free( e->xyz );
@@ -1331,7 +1472,11 @@ void R_FG_VelocityDraw( void )
 	if ( !tess.numIndexes || !tess.numVertexes ) {
 		return;
 	}
-	if ( ( !tess.useInternalVao && !tess.useCacheVao ) || !fg.velBatchMoves ) {
+	if ( fg.velBatchGun && ( !tess.useInternalVao || tess.useCacheVao ) ) {
+		fg.gunBad = qtrue;
+		return;
+	}
+	if ( !fg.velBatchGun && ( ( !tess.useInternalVao && !tess.useCacheVao ) || !fg.velBatchMoves ) ) {
 		// a surface drawn from buffers of its own is not handled; a batch in which nothing moved is the same as
 		// not being in M at all
 		fg.velSkipped++;
@@ -1353,6 +1498,7 @@ void R_FG_VelocityDraw( void )
 		if ( fg.velShadow ) {
 			qglUniformMatrix4fv( fg.uVelSunVP, 1, GL_FALSE, fg.sunVP );
 		}
+		qglUniform1f( fg.uVelGunF, 0.0f );
 		fg.velBound = qtrue;
 	}
 	if ( tess.useCacheVao ) {
@@ -1371,6 +1517,60 @@ void R_FG_VelocityDraw( void )
 		qglUniformMatrix4fv( fg.uVelModel, 1, GL_FALSE, fg.velModel );
 		qglUniformMatrix4fv( fg.uVelPrevModel, 1, GL_FALSE, fg.velPrevModel );
 		fg.velNewEntity = qfalse;
+	}
+	if ( fg.velBatchGun ) {
+		if ( fg.gunDump > 0 ) {
+			ri.Printf( PRINT_ALL, "FGGUN   batch shader %s sort %.0f verts %d indexes %d\n", tess.shader->name, tess.shader->sort, tess.numVertexes, tess.numIndexes );
+		}
+		// the first-person weapon: C only, with its own projection, in front of every world mover
+		qglUniformMatrix4fv( fg.uVelMidVP, 1, GL_FALSE, fg.gunMidP );
+		qglUniformMatrix4fv( fg.uVelCurVP, 1, GL_FALSE, fg.gunCurP );
+		qglUniform1f( fg.uVelGunF, 1.0f );
+		if ( !fg.velBatchHold ) {
+			// A part of the weapon that moves further than r_hzmFrameGenGunMax in one frame, in view space (the kick
+			// of a shot, a weapon switch, the swing of a reload), is not placed halfway: the whole batch keeps the
+			// newer frame's place. Per batch, not per vertex - a rigid weapon must not be bent.
+			float lim = r_hzmFrameGenGunMax->value, far2 = 0.0f;
+			const float *mc = fg.velModel, *mp = fg.velPrevModel;
+			int i;
+
+			for ( i = 0; i < tess.numVertexes; i++ ) {
+				const float *v = tess.xyz[i];
+				float px = v[0] - tess.texCoords[i][0], py = v[1] - tess.texCoords[i][1], pz = v[2] - tess.lightCoords[i][0];
+				float dx = ( mc[0] * v[0] + mc[4] * v[1] + mc[8] * v[2] + mc[12] ) - ( mp[0] * px + mp[4] * py + mp[8] * pz + mp[12] );
+				float dy = ( mc[1] * v[0] + mc[5] * v[1] + mc[9] * v[2] + mc[13] ) - ( mp[1] * px + mp[5] * py + mp[9] * pz + mp[13] );
+				float dz = ( mc[2] * v[0] + mc[6] * v[1] + mc[10] * v[2] + mc[14] ) - ( mp[2] * px + mp[6] * py + mp[10] * pz + mp[14] );
+				float d2 = dx * dx + dy * dy + dz * dz;
+
+				if ( d2 > far2 ) {
+					far2 = d2;
+				}
+			}
+			if ( far2 > lim * lim ) {
+				fg.velBatchHold = qtrue;
+				fg.gunHeld++;
+			}
+			if ( fg.gunDump > 0 ) {
+				ri.Printf( PRINT_ALL, "FGGUN     fastest vertex %.2f units%s\n", sqrt( far2 ), fg.velBatchHold ? " - held" : "" );
+			}
+		}
+		if ( fg.velBatchHold ) {
+			qglUniform1f( fg.uVelRigid, 0.0f );
+			qglUniformMatrix4fv( fg.uVelPrevModel, 1, GL_FALSE, fg.velModel );
+			fg.velNewEntity = qtrue;		// the next batch of this entity gets its own matrices back
+		}
+		qglDepthRange( 0, 0.3 );
+		qglViewport( w, 0, w, h );
+		qglScissor( w, 0, w, h );
+		GL_State( GLS_DEPTHMASK_TRUE );
+		qglUniform1i( fg.uVelPass, 1 );
+		R_DrawElements( tess.numIndexes, tess.firstIndex );
+		qglDepthRange( 0, 1 );
+		qglUniformMatrix4fv( fg.uVelMidVP, 1, GL_FALSE, fg.midVP );
+		qglUniformMatrix4fv( fg.uVelCurVP, 1, GL_FALSE, fg.curVP );
+		qglUniform1f( fg.uVelGunF, 0.0f );
+		fg.gunDraws++;
+		return;
 	}
 	// M: where it is in the frame, wherever it is what the scene shows there
 	qglViewport( 0, 0, w, h );
@@ -1422,7 +1622,8 @@ void R_FG_VelocityPass( void *drawSurfsV, int numDrawSurfs )
 	int				entityNum, oldEntityNum = -1;
 	int				fogNum, dlighted, pshadowed, i;
 	int				frame = fg.seq + 1;		// the frame being built (R_FG_Present numbers it)
-	qboolean		bStaticModel, use = qfalse;
+	qboolean		bStaticModel, use = qfalse, isGun = qfalse, gunHold = qfalse;
+	int				skinKey = 0;
 	trRefEntity_t	*ent = NULL;
 	double			originalTime = backEnd.refdef.floatTime;
 	fgSet_t			*s = &fg.sets[fg.w];
@@ -1489,6 +1690,26 @@ void R_FG_VelocityPass( void *drawSurfsV, int numDrawSurfs )
 			}
 		}
 	}
+	fg.gunOK = qfalse;
+	if ( r_hzmFrameGenGun->integer ) {
+		// the weapon's projection (its own while aiming): halfway, unless it stepped - then the weapon stays as it is
+		double r0 = fg.lastWP[0] != 0.0 ? fg.latWP[0] / fg.lastWP[0] : 0.0;
+		double r5 = fg.lastWP[5] != 0.0 ? fg.latWP[5] / fg.lastWP[5] : 0.0;
+
+		if ( r0 > 0.98 && r0 < 1.02 && r5 > 0.98 && r5 < 1.02
+			&& fabs( fg.latWP[8] - fg.lastWP[8] ) < 0.03 && fabs( fg.latWP[9] - fg.lastWP[9] ) < 0.03 ) {
+			for ( i = 0; i < 16; i++ ) {
+				fg.gunMidP[i] = (float)( ( fg.latWP[i] + fg.lastWP[i] ) * 0.5 );
+				fg.gunCurP[i] = (float)fg.latWP[i];
+			}
+			fg.gunOK = qtrue;
+		} else {
+			fgs.nGunProj++;
+		}
+	}
+	fg.gunBad = qfalse;
+	fg.velBatchGun = qfalse;
+	fg.gunDraws = fg.gunOrdinal = fg.gunHeld = 0;
 	fg.velOldFbo = glState.currentFBO;
 	fg.velBound = qfalse;
 	fg.velDraws = fg.velSkipped = fg.velSurfs = 0;
@@ -1498,6 +1719,9 @@ void R_FG_VelocityPass( void *drawSurfsV, int numDrawSurfs )
 	for ( i = 0, drawSurf = drawSurfs; i < numDrawSurfs; i++, drawSurf++ ) {
 		int base;
 
+		if ( *drawSurf->surface == SF_SPRITE && ( ( (refSprite_t *)drawSurf->surface )->renderfx & RF_DEPTHHACK ) ) {
+			fg.build.flash = qtrue;		// a muzzle flash sprite
+		}
 		if ( *drawSurf->surface == SF_SPRITE || *drawSurf->surface == SF_ENTITY || *drawSurf->surface == SF_FLARE
 			|| *drawSurf->surface == SF_MARK_FRAG || *drawSurf->surface == SF_POLY || *drawSurf->surface == SF_SWIPE
 			|| *drawSurf->surface == SF_BAD || *drawSurf->surface == SF_SKIP ) {
@@ -1519,10 +1743,76 @@ void R_FG_VelocityPass( void *drawSurfsV, int numDrawSurfs )
 				ent = &backEnd.refdef.entities[entityNum];
 				num = ent->e.entityNumber;
 				use = qfalse;
-				if ( num < 0 || num >= MAX_GENTITIES || num == ENTITYNUM_NONE
-					|| ( ent->e.renderfx & ( RF_DEPTHHACK | RF_FIRST_PERSON ) ) ) {
+				isGun = qfalse;
+				gunHold = qfalse;
+				fg.velBatchGun = qfalse;
+				if ( ent->e.renderfx & ( RF_DEPTHHACK | RF_FIRST_PERSON ) ) {
+					// the first-person weapon and hands (drawn with glDepthRange 0..0.3). Its records are in VIEW
+					// space - model -> eye then and now - so the camera's turn is not counted a second time.
+					const float *nm, *om;
+					float dx, dy, dz, xx, zz, lx, lz;
+
+					if ( !fg.gunOK || !( ent->e.renderfx & RF_DEPTHHACK ) ) {
+						continue;
+					}
+					if ( ent->e.renderfx & RF_CROSSHAIR ) {
+						fg.gunBad = qtrue;		// drawn with the world's projection and no vectors: the weapon stays unwarped this frame
+						continue;
+					}
+					if ( num < 0 || num >= MAX_GENTITIES || num == ENTITYNUM_NONE ) {
+						// a client-side part (a shell casing flying off): nothing tells one from the next, so it has
+						// no "before" - it is drawn where it is and keeps the newer frame's place, as it always did
+						num = MAX_GENTITIES + 1 + fg.gunOrdinal++;
+						gunHold = qtrue;
+					}
+					skinKey = num + 2 * MAX_GENTITIES + 64;
+					backEnd.currentEntity = ent;
+					backEnd.currentStaticModel = NULL;
+					backEnd.refdef.floatTime = originalTime - (double)ent->e.shaderTime;
+					R_RotateForEntity( ent, &backEnd.viewParms, &backEnd.or );
+					GL_SetModelviewMatrix( backEnd.or.modelMatrix );
+					rec = FG_EntSlot( skinKey, ent->e.hModel, frame );
+					if ( !rec || ( rec->seq == frame && memcmp( rec->cur, backEnd.or.modelMatrix, sizeof( rec->cur ) ) ) ) {
+						fg.gunBad = qtrue;
+						continue;
+					}
+					if ( rec->seq != frame ) {
+						nm = backEnd.or.modelMatrix;
+						om = rec->cur;
+						dx = nm[12] - om[12];
+						dy = nm[13] - om[13];
+						dz = nm[14] - om[14];
+						xx = nm[0] * om[0] + nm[1] * om[1] + nm[2] * om[2];
+						zz = nm[8] * om[8] + nm[9] * om[9] + nm[10] * om[10];
+						lx = ( nm[0] * nm[0] + nm[1] * nm[1] + nm[2] * nm[2] ) * ( om[0] * om[0] + om[1] * om[1] + om[2] * om[2] );
+						lz = ( nm[8] * nm[8] + nm[9] * nm[9] + nm[10] * nm[10] ) * ( om[8] * om[8] + om[9] * om[9] + om[10] * om[10] );
+						// not seen in the last frame, or it jumped (weapon switch): it has no "before" - it is
+						// drawn where it is, with no displacement, i.e. it keeps the newer frame's place
+						rec->havePrev = ( !gunHold && rec->seq == frame - 1 && dx * dx + dy * dy + dz * dz < 24.0f * 24.0f
+							&& xx > 0.0f && zz > 0.0f && xx * xx > 0.81f * lx && zz * zz > 0.81f * lz ) ? qtrue : qfalse;
+						memcpy( rec->prev, rec->havePrev ? rec->cur : nm, sizeof( rec->prev ) );
+						memcpy( rec->cur, nm, sizeof( rec->cur ) );
+						rec->seq = frame;
+						rec->use = qtrue;
+					}
+					if ( fg.gunDump > 0 ) {
+						model_t *mod = R_GetModelByHandle( ent->e.hModel );
+						ri.Printf( PRINT_ALL, "FGGUN frame %d ent %d key %d fx 0x%x model %s prev %d moved ( %.2f %.2f %.2f ) eye ( %.1f %.1f %.1f )\n",
+							frame, ent->e.entityNumber, skinKey, ent->e.renderfx, mod ? mod->name : "?", rec->havePrev,
+							rec->cur[12] - rec->prev[12], rec->cur[13] - rec->prev[13], rec->cur[14] - rec->prev[14],
+							rec->cur[12], rec->cur[13], rec->cur[14] );
+					}
+					use = qtrue;
+					isGun = qtrue;
+					memcpy( fg.velModel, rec->cur, sizeof( fg.velModel ) );
+					memcpy( fg.velPrevModel, rec->prev, sizeof( fg.velPrevModel ) );
+					fg.velNewEntity = qtrue;
+					goto entityDone;
+				}
+				if ( num < 0 || num >= MAX_GENTITIES || num == ENTITYNUM_NONE ) {
 					continue;
 				}
+				skinKey = num;
 				backEnd.currentEntity = ent;
 				backEnd.currentStaticModel = NULL;
 				backEnd.refdef.floatTime = originalTime - (double)ent->e.shaderTime;
@@ -1586,14 +1876,20 @@ void R_FG_VelocityPass( void *drawSurfsV, int numDrawSurfs )
 				memcpy( fg.velPrevModel, rec->prev, sizeof( fg.velPrevModel ) );
 				fg.velNewEntity = qtrue;
 			}
+entityDone:
 			if ( use ) {
 				// opaque and alpha-tested surfaces only: a blended one has no depth of its own in the scene
 				if ( shader->sort < SS_OPAQUE || shader->sort > SS_SEE_THROUGH ) {
+					if ( isGun && gunHold ) {
+						fg.build.flash = qtrue;		// a blended client-side part of the weapon: the muzzle flash model
+					}
 					oldShader = NULL;
 					continue;
 				}
 				RB_BeginSurface( shader, 0, 0 );
 				fg.velBatchMoves = memcmp( fg.velModel, fg.velPrevModel, sizeof( fg.velModel ) ) ? qtrue : qfalse;
+				fg.velBatchGun = isGun;
+				fg.velBatchHold = isGun && gunHold;
 			}
 		}
 		if ( !use || oldShader == NULL ) {
@@ -1605,13 +1901,18 @@ void R_FG_VelocityPass( void *drawSurfsV, int numDrawSurfs )
 			base = 0;		// the surface function had to flush first
 		}
 		if ( tess.useInternalVao && !tess.useCacheVao ) {
-			FG_FillPrev( ent, drawSurf->surface, base, tess.numVertexes - base, frame );
+			FG_FillPrev( skinKey, drawSurf->surface, base, tess.numVertexes - base, frame );
 		}
 		fg.velSurfs++;
 	}
 	RB_EndSurface();
 	tess.numIndexes = tess.numVertexes = 0;
 	r_fgVelPass = 0;
+	fg.velBatchGun = qfalse;
+	if ( fg.gunDump > 0 ) {
+		ri.Printf( PRINT_ALL, "FGGUN frame %d: %d weapon batches, bad %d\n", frame, fg.gunDraws, fg.gunBad );
+		fg.gunDump--;
+	}
 
 	backEnd.refdef.floatTime = originalTime;
 	backEnd.currentEntity = &tr.worldEntity;
@@ -1644,6 +1945,19 @@ void R_FG_VelocityPass( void *drawSurfsV, int numDrawSurfs )
 		fg.build.midPrev = frame - 1;
 		fg.build.vec = qtrue;
 		fgs.nVec++;
+		if ( fg.gunDraws ) {
+			if ( fg.gunBad ) {
+				fgs.nGunBad++;
+			} else {
+				fg.build.gun = qtrue;
+				fgs.nGun++;
+			}
+			fgs.gunDraws += fg.gunDraws;
+			fgs.gunHeld += fg.gunHeld;
+			if ( fg.build.flash ) {
+				fgs.nFlash++;
+			}
+		}
 	}
 	fgs.velDraws += fg.velDraws;
 	fgs.velSkipped += fg.velSkipped;
@@ -1749,6 +2063,7 @@ static qboolean FG_CreateVectorResources( void )
 	fg.uVelSize = qglGetUniformLocation( fg.velProg, "uSize" );
 	fg.uVelPass = qglGetUniformLocation( fg.velProg, "uPass" );
 	fg.uVelSunVP = qglGetUniformLocation( fg.velProg, "uSunVP" );
+	fg.uVelGunF = qglGetUniformLocation( fg.velProg, "uGunF" );
 	GL_UseProgram( 0 );
 	return qtrue;
 }
@@ -1904,6 +2219,7 @@ void R_FG_LatchView( const void *viewParms )
 	for ( i = 0; i < 16; i++ ) {
 		fg.latV[i] = vp->world.modelMatrix[i];
 		fg.latP[i] = vp->projectionMatrix[i];
+		fg.latWP[i] = vp->weaponFovActive ? vp->weaponProjectionMatrix[i] : vp->projectionMatrix[i];
 	}
 	fg.latched = qtrue;
 }
@@ -2118,6 +2434,7 @@ int R_FG_Present( void )
 	if ( fg.build.scene ) {
 		memcpy( fg.lastV, fg.build.V, sizeof( fg.lastV ) );
 		memcpy( fg.lastP, fg.build.P, sizeof( fg.lastP ) );
+		memcpy( fg.lastWP, fg.latWP, sizeof( fg.lastWP ) );
 		fg.lastSeq = fg.build.seq;
 	}
 	fg.build.bypass = ( fg.max2D >= FG_BIG2D ) ? qtrue : qfalse;
@@ -2257,6 +2574,8 @@ static void FG_Stats_f( void )
 	ri.Printf( PRINT_ALL, "FGSTAT3 layerframes=%d layerexact=%d vectors=%d vecframes=%d velpasses=%d veldraws=%d velbrush=%d velskipped=%d prevskin_kb=%d gen_delay_ms=%.2f real_delay_ms=%.2f\n",
 		fgs.nLayer, fgs.nLayerExact, ( fg.vecOK && r_hzmFrameGenVectors->integer ) ? 1 : 0, fgs.nVec, fgs.nVelPass, fgs.velDraws, fgs.velBrush, fgs.velSkipped, fgSkinBytes / 1024,
 		fgs.nGenDelay ? fgs.genDelayMs / fgs.nGenDelay : 0.0, fgs.nRealDelay ? fgs.realDelayMs / fgs.nRealDelay : 0.0 );
+	ri.Printf( PRINT_ALL, "FGSTAT4 gunframes=%d gunbad=%d gunproj=%d gundraws=%d gunheld=%d flashframes=%d fovstep=%d\n",
+		fgs.nGun, fgs.nGunBad, fgs.nGunProj, fgs.gunDraws, fgs.gunHeld, fgs.nFlash, fgs.nFovStep );
 	line[0] = 0;
 	for ( j = 0; j < 13; j++ ) {
 		if ( j < 12 ) {
@@ -2326,6 +2645,11 @@ static void FG_Rec_f( void )
 	fgRec.want = n > 0 ? n : 1;
 }
 
+static void FG_GunDump_f( void )
+{
+	fg.gunDump = ri.Cmd_Argc() > 1 ? atoi( ri.Cmd_Argv( 1 ) ) : 1;
+}
+
 static void FG_Capture_f( void )
 {
 	int n = ri.Cmd_Argc() > 1 ? atoi( ri.Cmd_Argv( 1 ) ) : -1;
@@ -2362,11 +2686,22 @@ void R_FG_Init( void )
 	r_hzmFrameGenEdge = ri.Cvar_Get( "r_hzmFrameGenEdge", "1", 0 );
 	// more shader names of full-screen cosmetic layers that must not pause generation (see R_FG_NoteLayer)
 	r_hzmFrameGenLayers = ri.Cvar_Get( "r_hzmFrameGenLayers", "", 0 );
+	// with the vectors: 1 = the first-person weapon and hands are placed halfway too (their own animation - recoil,
+	// reload, bob - is shown at the generated rate); 0 = they are taken unwarped from the newer real frame, as in
+	// every build before (their animation plays at the real frame rate).
+	r_hzmFrameGenGun = ri.Cvar_Get( "r_hzmFrameGenGun", "1", 0 );
+	// a part of the weapon (one batch: the gun, its magazine, a hand) with a vertex that moves further than this in
+	// one frame, in view space (game units), keeps the newer frame's place
+	r_hzmFrameGenGunMax = ri.Cvar_Get( "r_hzmFrameGenGunMax", "2.5", 0 );
+	// the field of view changing by more than this factor from one frame to the next is a cut: no picture in
+	// between (0 = interpolate any step, as before)
+	r_hzmFrameGenFovStep = ri.Cvar_Get( "r_hzmFrameGenFovStep", "1.25", 0 );
 	fg.mx = SDL_CreateMutex();
 	fg.cv = SDL_CreateCond();
 	ri.Cmd_AddCommand( "fg_stats", FG_Stats_f );
 	ri.Cmd_AddCommand( "fg_capture", FG_Capture_f );
 	ri.Cmd_AddCommand( "fg_record", FG_Rec_f );
+	ri.Cmd_AddCommand( "fg_gundump", FG_GunDump_f );
 }
 
 void R_FG_Shutdown( void )
