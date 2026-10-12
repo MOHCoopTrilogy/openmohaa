@@ -2933,7 +2933,7 @@ void CG_ModelAnim(centity_t *cent, qboolean bDoShaderTime)
         static cvar_t *pAimedGun  = NULL;
         static int     s_lastEnt  = -1;
         static int     s_lastSeen = 0;
-        static int     s_choice   = 0; // 0 none, 1 loaded, 2 empty
+        static int     s_choice   = 0; // 0 none, 1 aimed loaded, 2 aimed empty, 3 hip empty
         int            iRel, iSwap, k;
         qboolean       bPlaying = qfalse;
         if (!pAimedGun) {
@@ -2949,13 +2949,20 @@ void CG_ModelAnim(centity_t *cent, qboolean bDoShaderTime)
             if (s_lastEnt != s1->number || cg.time - s_lastSeen > 250 || cg.time < s_lastSeen) {
                 // a new reload of this gun: choose once
                 s_choice = 0;
-                if (CG_AimingDownSights() && cg.snap->ps.stats[STAT_MAXCLIPAMMO] > 0) {
-                    s_choice = (cg.snap->ps.stats[STAT_CLIPAMMO] == 0) ? 2 : 1;
+                if (cg.snap->ps.stats[STAT_MAXCLIPAMMO] > 0) {
+                    qboolean bEmpty = (cg.snap->ps.stats[STAT_CLIPAMMO] == 0) ? qtrue : qfalse;
+                    if (CG_AimingDownSights()) {
+                        s_choice = bEmpty ? 2 : 1;
+                    } else if (bEmpty) {
+                        s_choice = 3; // hip, empty: `reload_empty` (guns whose retail reload has no slide channel)
+                    }
                 }
             }
             s_lastEnt  = s1->number;
             s_lastSeen = cg.time;
-            iSwap      = s_choice ? cgi.Anim_NumForName(model.tiki, s_choice == 2 ? "reload_ads_empty" : "reload_ads_loaded") : -1;
+            iSwap      = s_choice ? cgi.Anim_NumForName(model.tiki, s_choice == 2 ? "reload_ads_empty"
+                                                                        : (s_choice == 3 ? "reload_empty" : "reload_ads_loaded"))
+                                  : -1;
             for (k = 0; k < MAX_FRAMEINFOS && iSwap != -1; k++) {
                 if (model.frameInfo[k].weight && model.frameInfo[k].index == iRel) {
                     model.frameInfo[k].index = iSwap;
