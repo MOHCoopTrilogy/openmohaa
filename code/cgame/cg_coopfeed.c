@@ -862,10 +862,19 @@ typedef struct {
     char        key[16];
 } coopItem_t;
 
-static coopItem_t s_coopItems[3] = {
-    {"coop_hudMed",  "append name ,8mk", "textures/hud/coop_medkit_icon",  NULL, 0, ""},
-    {"coop_hudCov",  "append name ,9cv", "textures/hud/coop_cover_icon",   NULL, 0, ""},
-    {"coop_hudAmmo", "append name ,abx", "textures/hud/coop_ammobox_icon", NULL, 0, ""},
+// [user 2026-10-12] "the new text on the left side also seems to overlap with the paradrop and airstrike icons when
+// you get those" / "those icons could also be made smaller and higher def like your new icons you just did with
+// hotkeys". The two officer rewards were script HUD pairs (officer.scr slots 50-53) in this same corner. They are
+// entries of this row now: coop_hudBinoc = bombing-run strikes left (the binoculars; selected with the pistol
+// key), coop_hudSmoke = "y" while the signal smoke is carried (no amount; thrown from the grenade key). Only the
+// carrier's client is sent a value, so the entry is absent for everyone else. Art: docs/tools/gen_reward_icons.py.
+#define COOPITEM_N 5
+static coopItem_t s_coopItems[COOPITEM_N] = {
+    {"coop_hudMed",   "append name ,8mk",       "textures/hud/coop_medkit_icon",     NULL, 0, ""},
+    {"coop_hudCov",   "append name ,9cv",       "textures/hud/coop_cover_icon",      NULL, 0, ""},
+    {"coop_hudAmmo",  "append name ,abx",       "textures/hud/coop_ammobox_icon",    NULL, 0, ""},
+    {"coop_hudBinoc", "useweaponclass pistol",  "textures/hud/coop_reward_strike",   NULL, 0, ""},
+    {"coop_hudSmoke", "useweaponclass grenade", "textures/hud/coop_reward_paradrop", NULL, 0, ""},
 };
 
 // A key name as it is shown under an icon: upper case, and the long ones shortened so that what tells two keys
@@ -957,7 +966,7 @@ static void CG_CoopItemKeys(void)
         return;
     }
     nextMs = cg.time + 1000; // bindings change in a menu, never mid-frame: once a second is plenty
-    for (i = 0; i < 3; i++) {
+    for (i = 0; i < COOPITEM_N; i++) {
         coopItem_t *it = &s_coopItems[i];
         const char *nm;
 
@@ -1011,14 +1020,14 @@ static void CG_DrawCoopItems(void)
     // the HUD - and it then eases down to the HUD's own value again.
     {
         static cvar_t *pHudA = NULL;
-        static char    last[3][8];
+        static char    last[COOPITEM_N][8];
         static int     wakeUntil = 0;
         float          wake = 0.0f;
 
         if (!pHudA) {
             pHudA = cgi.Cvar_Get("ui_hudAlpha", "1", 0);
         }
-        for (i = 0; i < 3; i++) {
+        for (i = 0; i < COOPITEM_N; i++) {
             coopItem_t *it = &s_coopItems[i];
 
             if (!it->cv) {
@@ -1060,7 +1069,7 @@ static void CG_DrawCoopItems(void)
     textH = 12.0f * sy;
     xPx   = COOPITEM_LEFT_V * vs;
 
-    for (i = 0; i < 3; i++) {
+    for (i = 0; i < COOPITEM_N; i++) {
         coopItem_t *it = &s_coopItems[i];
         const char *v;
         char        num[8], key[16];
