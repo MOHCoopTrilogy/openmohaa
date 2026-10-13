@@ -592,6 +592,13 @@ qboolean CG_VMAdsTagRight(void)
              : qfalse;
 }
 
+// HZM coop [ads rifles 2026-10-12] the hands play a `<gun>_rechamber_ads` clip (blending in or alone): the held gun
+// then shows its tik's `rechamber_ads` (cg_modelanim.c) - the hand rides THAT clip's bolt
+qboolean CG_VMAdsBoltClip(void)
+{
+    return (cgi.anim && s_coopAdsSlot >= 0 && s_coopAdsSlot == cgi.anim->g_iCurrentVMAnimSlot && s_coopAdsBolt) ? qtrue : qfalse;
+}
+
 // HZM coop [ads rifles 2026-10-12] an aimed bolt clip is the only clip on screen: both weapon tags hold the gun
 qboolean CG_VMAdsBoltSolo(void)
 {

@@ -2994,13 +2994,19 @@ void CG_ModelAnim(centity_t *cent, qboolean bDoShaderTime)
         // case thrown for the hip view would fly through the aim. Chosen when the animation (or a new loop of it)
         // starts; same length as the hip clip, the server still runs the hip row.
         {
-            static const char *const s_rows[2][2] = {
+            // HZM coop [ads rifles 2026-10-12] ...and `rechamber` -> `rechamber_ads` (a bolt rifle's between-shot cycle):
+            // with the rifle LOCKED on the sights the retail full stroke brings the bolt to 0.0-0.9 u from the eye (the
+            // cocking piece / the handle balloon over the lower middle of the picture); the aimed clip stops the bolt
+            // short of the eye. Shown exactly when the HANDS play the aimed bolt clip (CG_VMAdsBoltClip - the hand
+            // rides that clip's bolt), decided in the row's first 0.12 s (the bolt does not move before 0.2 s).
+            static const char *const s_rows[3][2] = {
                 {"reload_end",    "reload_end_ads"   },
-                {"reload_single", "reload_single_ads"}
+                {"reload_single", "reload_single_ads"},
+                {"rechamber",     "rechamber_ads"    }
             };
-            static int s_rowEnt[2] = {-1, -1}, s_rowSeen[2] = {0, 0}, s_rowChoice[2] = {0, 0};
+            static int s_rowEnt[3] = {-1, -1, -1}, s_rowSeen[3] = {0, 0, 0}, s_rowChoice[3] = {0, 0, 0};
             int        r;
-            for (r = 0; r < 2; r++) {
+            for (r = 0; r < 3; r++) {
                 int      iRow  = pAimedGun->integer ? cgi.Anim_NumForName(model.tiki, s_rows[r][0]) : -1;
                 qboolean bRow  = qfalse;
                 float    fRowT = 999.0f;
@@ -3017,7 +3023,10 @@ void CG_ModelAnim(centity_t *cent, qboolean bDoShaderTime)
                     continue;
                 }
                 if (s_rowEnt[r] != s1->number || cg.time - s_rowSeen[r] > 250 || cg.time < s_rowSeen[r] || fRowT < 0.05f) {
-                    s_rowChoice[r] = CG_AimingDownSights() ? 1 : 0;
+                    s_rowChoice[r] = (r != 2 && CG_AimingDownSights()) ? 1 : 0;
+                }
+                if (r == 2 && fRowT < 0.12f && CG_VMAdsBoltClip()) {
+                    s_rowChoice[r] = 1;
                 }
                 s_rowEnt[r]  = s1->number;
                 s_rowSeen[r] = cg.time;
