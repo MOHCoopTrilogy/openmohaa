@@ -310,7 +310,7 @@ static const adsSight_t s_adsSights[] = {
     {"models/weapons/shotgun_guanshotty.tik", "Shotgun (Guanshire)", {30.7989f, -1.3824f, -4.7204f}, {6.5813f, -1.4207f, -4.0041f}, 0.004000f, {-0.043f, -0.139f, -0.989f}, 0.000f}, // shotgun
     {"models/weapons/shotgun_hobbsshotty.tik", "Shotgun (Recoil)", {30.7989f, -1.3824f, -4.7204f}, {6.5813f, -1.4207f, -4.0041f}, 0.004000f, {-0.043f, -0.139f, -0.989f}, 0.000f}, // shotgun
     {"models/weapons/shotgun_lv_ttshotgun.tik", "Shotgun (Team Tactics)", {30.7989f, -1.3824f, -4.7204f}, {6.5813f, -1.4207f, -4.0041f}, 0.004000f, {-0.043f, -0.139f, -0.989f}, 0.000f}, // shotgun
-    {"models/weapons/coop_dbshotgun.tik", "Shotgun (Double Barrel)", {21.5216f, -1.0500f, -5.0974f}, {4.7933f, -1.0500f, -5.0074f}, 0.030000f, {0.000f, 0.000f, -1.000f}, 0.000f}, // coop_dbshotgun
+    {"models/weapons/coop_dbshotgun.tik", "Shotgun (Double Barrel)", {21.5216f, -1.0500f, -5.3041f}, {4.7933f, -1.0500f, -5.0074f}, 0.131000f, {0.000f, 0.000f, -1.000f}, 11.000f}, // coop_dbshotgun
     {"models/weapons/silencedpistol.tik", "Hi-Standard Silenced", {23.1712f, -0.4575f, -3.2698f}, {0.5516f, -0.4621f, -3.3157f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 0.000f}, // hi_standard_silenced
     {"models/weapons/silencedpistol_bloody.tik", "Hi-Standard Silenced (Bloody)", {23.1712f, -0.4575f, -3.2698f}, {0.5516f, -0.4621f, -3.3157f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 0.000f}, // hi_standard_silenced
     {"models/weapons/silencedpistol_blued.tik", "Hi-Standard Silenced (Blued)", {23.1712f, -0.4575f, -3.2698f}, {0.5516f, -0.4621f, -3.3157f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 0.000f}, // hi_standard_silenced
