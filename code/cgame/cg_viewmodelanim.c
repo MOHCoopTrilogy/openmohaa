@@ -1094,6 +1094,21 @@ void CG_ViewModelAnimation(refEntity_t *pModel)
                 CoopPerWeaponReloadAnim(pTiki, pszAnimSuffix, szAnimName, sizeof(szAnimName));
             }
         }
+        // HZM coop [dbshotgun 2026-10-12 b] the HANDS follow the held gun's empty-clip swap (cg_modelanim.c:
+        // `reload_single` -> `reload_single_first`): a per-weapon row `coopr_<weapon>_reload_single` that starts on an
+        // EMPTY clip plays `coopr_<weapon>_reload_single_l` when the hands tiki has it - the double barrel's first
+        // shell goes into the LEFT chamber, so the loading hand has a clip for each chamber. Only coopr_ rows are
+        // looked at and no other gun has a `_l` row: nothing else changes. The aimed `_ads` suffix below is
+        // appended to whichever name this leaves. (`_l`, not `_first`: a tiki alias holds 47 characters and
+        // `coopr_shotgun_double_barrel_reload_single_first_ads` is 51 - it was never found and the hip clip played.)
+        if (cgi.anim->g_iLastVMAnim == VM_ANIM_RELOAD_SINGLE && cg.snap && cg.snap->ps.stats[STAT_CLIPAMMO] == 0
+            && !Q_strncmp(szAnimName, "coopr_", 6)) {
+            char szFirst[MAX_QPATH];
+            Com_sprintf(szFirst, sizeof(szFirst), "%s_l", szAnimName);
+            if (cgi.Anim_NumForName(pTiki, szFirst) != -1) {
+                Q_strncpyz(szAnimName, szFirst, sizeof(szAnimName));
+            }
+        }
         // HZM coop [revolver reload 2026-10-12] EMPTY GUN: a reload that STARTS on an empty magazine / cylinder plays
         // `<row>_empty` when fps_anims defines it (user: "reloading could be as easy as dumping the entire rounds out
         // if they are all spent") - the row carries what only an empty gun shows, e.g. the cases falling as a
