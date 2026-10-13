@@ -54,18 +54,18 @@ static const adsSight_t s_adsSights[] = {
     {"models/weapons/colt45_guancolt.tik", "Colt 45 (Guanshire)", {10.4327f, -0.7252f, -3.4478f}, {0.5056f, -0.7574f, -3.1925f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 0.000f}, // colt_45
     {"models/weapons/colt45_lv_ttcolt.tik", "Colt 45 (Team Tactics)", {10.4327f, -0.7252f, -3.4478f}, {0.5056f, -0.7574f, -3.1925f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 0.000f}, // colt_45
     {"models/weapons/colt_silenced.tik", "Silenced Colt .45", {21.4745f, -0.5994f, -3.3279f}, {0.7817f, -0.6896f, -3.4430f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 0.000f}, // silenced_colt_45
-    {"models/weapons/coop_g43_irons.tik", "G 43 Irons", {41.9500f, -1.1565f, -4.3880f}, {12.0850f, -1.1565f, -5.2670f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 17.000f}, // g43_irons
-    {"models/weapons/coop_g43_irons_bloody.tik", "G 43 Irons (Bloody)", {41.9500f, -1.1565f, -4.3880f}, {12.0850f, -1.1565f, -5.2670f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 17.000f}, // g43_irons
-    {"models/weapons/coop_g43_irons_blued.tik", "G 43 Irons (Blued)", {41.9500f, -1.1565f, -4.3880f}, {12.0850f, -1.1565f, -5.2670f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 17.000f}, // g43_irons
-    {"models/weapons/coop_g43_irons_camo_desert.tik", "G 43 Irons (Desert)", {41.9500f, -1.1565f, -4.3880f}, {12.0850f, -1.1565f, -5.2670f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 17.000f}, // g43_irons
-    {"models/weapons/coop_g43_irons_camo_winter.tik", "G 43 Irons (Winter)", {41.9500f, -1.1565f, -4.3880f}, {12.0850f, -1.1565f, -5.2670f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 17.000f}, // g43_irons
-    {"models/weapons/coop_g43_irons_camo_woodland.tik", "G 43 Irons (Woodland)", {41.9500f, -1.1565f, -4.3880f}, {12.0850f, -1.1565f, -5.2670f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 17.000f}, // g43_irons
-    {"models/weapons/coop_g43_irons_chrome.tik", "G 43 Irons (Chrome)", {41.9500f, -1.1565f, -4.3880f}, {12.0850f, -1.1565f, -5.2670f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 17.000f}, // g43_irons
-    {"models/weapons/coop_g43_irons_dhg43fleck.tik", "G 43 Irons (Flecktarn)", {41.9500f, -1.1565f, -4.3880f}, {12.0850f, -1.1565f, -5.2670f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 17.000f}, // g43_irons
-    {"models/weapons/coop_g43_irons_gold.tik", "G 43 Irons (Gold)", {41.9500f, -1.1565f, -4.3880f}, {12.0850f, -1.1565f, -5.2670f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 17.000f}, // g43_irons
-    {"models/weapons/coop_g43_irons_hobbsg43urb.tik", "G 43 Irons (Urban Camo)", {41.9500f, -1.1565f, -4.3880f}, {12.0850f, -1.1565f, -5.2670f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 17.000f}, // g43_irons
-    {"models/weapons/coop_g43_irons_hobbsg43wood.tik", "G 43 Irons (Woodland Camo)", {41.9500f, -1.1565f, -4.3880f}, {12.0850f, -1.1565f, -5.2670f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 17.000f}, // g43_irons
-    {"models/weapons/coop_g43_irons_lv_ttg43.tik", "G 43 Irons (Team Tactics)", {41.9500f, -1.1565f, -4.3880f}, {12.0850f, -1.1565f, -5.2670f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 17.000f}, // g43_irons
+    {"models/weapons/coop_g43_irons.tik", "G 43 Irons", {41.9500f, -1.1565f, -4.3880f}, {12.0845f, -1.1565f, -5.3300f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 17.000f}, // g43_irons
+    {"models/weapons/coop_g43_irons_bloody.tik", "G 43 Irons (Bloody)", {41.9500f, -1.1565f, -4.3880f}, {12.0845f, -1.1565f, -5.3300f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 17.000f}, // g43_irons
+    {"models/weapons/coop_g43_irons_blued.tik", "G 43 Irons (Blued)", {41.9500f, -1.1565f, -4.3880f}, {12.0845f, -1.1565f, -5.3300f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 17.000f}, // g43_irons
+    {"models/weapons/coop_g43_irons_camo_desert.tik", "G 43 Irons (Desert)", {41.9500f, -1.1565f, -4.3880f}, {12.0845f, -1.1565f, -5.3300f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 17.000f}, // g43_irons
+    {"models/weapons/coop_g43_irons_camo_winter.tik", "G 43 Irons (Winter)", {41.9500f, -1.1565f, -4.3880f}, {12.0845f, -1.1565f, -5.3300f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 17.000f}, // g43_irons
+    {"models/weapons/coop_g43_irons_camo_woodland.tik", "G 43 Irons (Woodland)", {41.9500f, -1.1565f, -4.3880f}, {12.0845f, -1.1565f, -5.3300f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 17.000f}, // g43_irons
+    {"models/weapons/coop_g43_irons_chrome.tik", "G 43 Irons (Chrome)", {41.9500f, -1.1565f, -4.3880f}, {12.0845f, -1.1565f, -5.3300f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 17.000f}, // g43_irons
+    {"models/weapons/coop_g43_irons_dhg43fleck.tik", "G 43 Irons (Flecktarn)", {41.9500f, -1.1565f, -4.3880f}, {12.0845f, -1.1565f, -5.3300f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 17.000f}, // g43_irons
+    {"models/weapons/coop_g43_irons_gold.tik", "G 43 Irons (Gold)", {41.9500f, -1.1565f, -4.3880f}, {12.0845f, -1.1565f, -5.3300f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 17.000f}, // g43_irons
+    {"models/weapons/coop_g43_irons_hobbsg43urb.tik", "G 43 Irons (Urban Camo)", {41.9500f, -1.1565f, -4.3880f}, {12.0845f, -1.1565f, -5.3300f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 17.000f}, // g43_irons
+    {"models/weapons/coop_g43_irons_hobbsg43wood.tik", "G 43 Irons (Woodland Camo)", {41.9500f, -1.1565f, -4.3880f}, {12.0845f, -1.1565f, -5.3300f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 17.000f}, // g43_irons
+    {"models/weapons/coop_g43_irons_lv_ttg43.tik", "G 43 Irons (Team Tactics)", {41.9500f, -1.1565f, -4.3880f}, {12.0845f, -1.1565f, -5.3300f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 17.000f}, // g43_irons
     {"models/weapons/dbno_pistol.tik", "Colt 45", {10.4327f, -0.7252f, -3.4478f}, {0.5056f, -0.7574f, -3.1925f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 0.000f}, // colt_45
     {"models/weapons/dbno_pistol_bloody.tik", "Colt 45 (Bloody)", {10.4327f, -0.7252f, -3.4478f}, {0.5056f, -0.7574f, -3.1925f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 0.000f}, // colt_45
     {"models/weapons/dbno_pistol_blued.tik", "Colt 45 (Blued)", {10.4327f, -0.7252f, -3.4478f}, {0.5056f, -0.7574f, -3.1925f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 0.000f}, // colt_45
