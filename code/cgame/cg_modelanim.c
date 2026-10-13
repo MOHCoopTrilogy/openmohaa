@@ -2046,11 +2046,13 @@ static void CG_AdsSightTrace(refEntity_t *model)
         rel = DotProduct(d, cam[0]);
         cgi.Printf("^~^~^ ADSFRAME t=%d ft=%d pose=%.4f w=%.4f gate=%.4f anim=%d pmf=0x%x lean=%.2f "
                    "F=(%.3f %.3f) R=(%.3f %.3f) G=(%.3f %.3f) wfov=%.3f sh=(%.4f %.4f) "
-                   "sight=(%.3f %.3f) bore=(%.3f %.3f) cant=%.3f relief=%.3f\n",
+                   "sight=(%.3f %.3f) bore=(%.3f %.3f) cant=%.3f relief=%.3f clip=%d ammo=%d\n",
                    cg.time, cg.frametime, CG_AdsPoseFactor(), CG_AdsRigWeight(), CG_AdsAnimGate(),
                    cg.snap ? cg.snap->ps.iViewModelAnim : -1, cg.predicted_player_state.pm_flags,
                    cg.predicted_player_state.fLeanAngle, px[0], py[0], px[1], py[1], px[2], py[2], cg_fAdsWeaponFov,
-                   shx, shy, sy, sp, by, bp, ct, rel);
+                   shx, shy, sy, sp, by, bp, ct, rel,
+                   // HZM coop [harness] rounds in the gun / in reserve as this client knows them (break-off runs count rounds)
+                   cg.snap ? cg.snap->ps.stats[STAT_CLIPAMMO] : -1, cg.snap ? cg.snap->ps.stats[STAT_AMMO] : -1);
     }
 }
 
@@ -2921,6 +2923,134 @@ void CG_ModelAnim(centity_t *cent, qboolean bDoShaderTime)
     cgi.TIKI_SetEyeTargetPos(model.tiki, model.entityNumber, s1->eyeVector);
 
     CG_InterpolateAnimParms(s1, sNext, &model);
+    // HZM coop [aimed reload 2026-10-12] THE GUN'S OWN ANIMATION IN AN AIMED RELOAD (user: "functioning slides,
+    // bolts"; "on a reload with a round chambered there is no slide action"). The retail gun clips snap the slide /
+    // bolt back on the first frame of EVERY reload. When the local player's held gun starts its `reload` while
+    // aiming, it shows `reload_ads_loaded` (rounds still in the gun: the action does not move) or
+    // `reload_ads_empty` (locked back from the first frame, runs forward when released) instead, if its tik has
+    // them. Decided HERE on the first frame `reload` shows, so that frame's entry commands (the sound) are already
+    // the shown animation's. Same length as `reload`; the server still runs `reload` (surface / ammo commands).
+    // Client-only, display only. Matches the view-model code's choice of the hands' `_ads` clip (same inputs).
+    if (model.tiki && cg.snap && s1->parent == cg.snap->ps.clientNum && s1->parent != ENTITYNUM_NONE) {
+        static cvar_t *pAimedGun  = NULL;
+        static int     s_lastEnt  = -1;
+        static int     s_lastSeen = 0;
+        static int     s_choice   = 0; // 0 none, 1 aimed loaded, 2 aimed empty, 3 hip empty
+        int            iRel, iSwap, k;
+        qboolean       bPlaying = qfalse;
+        if (!pAimedGun) {
+            pAimedGun = cgi.Cvar_Get("coop_vmAimedReloadGun", "1", 0);
+        }
+        iRel = pAimedGun->integer ? cgi.Anim_NumForName(model.tiki, "reload") : -1;
+        for (k = 0; k < MAX_FRAMEINFOS && iRel != -1; k++) {
+            if (model.frameInfo[k].weight && model.frameInfo[k].index == iRel) {
+                bPlaying = qtrue;
+            }
+        }
+        // HZM coop [aimed per-shot cycle 2026-10-12] the same for `fire` -> `fire_ads` (a hand-cycled gun: the slide
+        // is racked after the shot) while aiming with rounds left; the last round leaves the slide to idle_empty
+        {
+            static int s_fireEnt = -1, s_fireSeen = 0, s_fireChoice = 0;
+            int        iFire = pAimedGun->integer ? cgi.Anim_NumForName(model.tiki, "fire") : -1;
+            qboolean   bFire  = qfalse;
+            float      fFireT = 999.0f; // the newest fire animation's time: small = a shot has just started
+            for (k = 0; k < MAX_FRAMEINFOS && iFire != -1; k++) {
+                if (model.frameInfo[k].weight && model.frameInfo[k].index == iFire) {
+                    bFire = qtrue;
+                    if (model.frameInfo[k].time < fFireT) {
+                        fFireT = model.frameInfo[k].time;
+                    }
+                }
+            }
+            if (bFire) {
+                int iFireAds;
+                if (s_fireEnt != s1->number || cg.time - s_fireSeen > 250 || cg.time < s_fireSeen || fFireT < 0.08f) {
+                    s_fireChoice = (CG_AimingDownSights() && cg.snap->ps.stats[STAT_CLIPAMMO] > 0) ? 1 : 0;
+                }
+                s_fireEnt  = s1->number;
+                s_fireSeen = cg.time;
+                iFireAds   = s_fireChoice ? cgi.Anim_NumForName(model.tiki, "fire_ads") : -1;
+                for (k = 0; k < MAX_FRAMEINFOS && iFireAds != -1; k++) {
+                    if (model.frameInfo[k].weight && model.frameInfo[k].index == iFire) {
+                        model.frameInfo[k].index = iFireAds;
+                    }
+                }
+            }
+        }
+        // HZM coop [aimed revolver close 2026-10-12] the same for `reload_end` -> `reload_end_ads` and `reload_single`
+        // -> `reload_single_ads`: an aimed revolver reload works the action LOW, under the centre of the screen, and
+        // then comes back up on the sights - the gun's own close has to be over earlier than in the hip clip, and a
+        // case thrown for the hip view would fly through the aim. Chosen when the animation (or a new loop of it)
+        // starts; same length as the hip clip, the server still runs the hip row.
+        {
+            static const char *const s_rows[2][2] = {
+                {"reload_end",    "reload_end_ads"   },
+                {"reload_single", "reload_single_ads"}
+            };
+            static int s_rowEnt[2] = {-1, -1}, s_rowSeen[2] = {0, 0}, s_rowChoice[2] = {0, 0};
+            int        r;
+            for (r = 0; r < 2; r++) {
+                int      iRow  = pAimedGun->integer ? cgi.Anim_NumForName(model.tiki, s_rows[r][0]) : -1;
+                qboolean bRow  = qfalse;
+                float    fRowT = 999.0f;
+                int      iRowAds;
+                for (k = 0; k < MAX_FRAMEINFOS && iRow != -1; k++) {
+                    if (model.frameInfo[k].weight && model.frameInfo[k].index == iRow) {
+                        bRow = qtrue;
+                        if (model.frameInfo[k].time < fRowT) {
+                            fRowT = model.frameInfo[k].time;
+                        }
+                    }
+                }
+                if (!bRow) {
+                    continue;
+                }
+                if (s_rowEnt[r] != s1->number || cg.time - s_rowSeen[r] > 250 || cg.time < s_rowSeen[r] || fRowT < 0.05f) {
+                    s_rowChoice[r] = CG_AimingDownSights() ? 1 : 0;
+                }
+                s_rowEnt[r]  = s1->number;
+                s_rowSeen[r] = cg.time;
+                iRowAds      = s_rowChoice[r] ? cgi.Anim_NumForName(model.tiki, s_rows[r][1]) : -1;
+                // HZM coop [heavy lane 2026-10-13, shotgun] rounds were left when the reload started: the gun's end
+                // row without the pump (and without its sound), hip and aimed alike, when the tik has it
+                if (r == 0 && !CG_CoopReloadFromEmpty()) {
+                    int iLoaded = cgi.Anim_NumForName(model.tiki, "reload_end_loaded");
+                    if (iLoaded != -1) {
+                        iRowAds = iLoaded;
+                    }
+                }
+                for (k = 0; k < MAX_FRAMEINFOS && iRowAds != -1; k++) {
+                    if (model.frameInfo[k].weight && model.frameInfo[k].index == iRow) {
+                        model.frameInfo[k].index = iRowAds;
+                    }
+                }
+            }
+        }
+        if (bPlaying) {
+            if (s_lastEnt != s1->number || cg.time - s_lastSeen > 250 || cg.time < s_lastSeen) {
+                // a new reload of this gun: choose once
+                s_choice = 0;
+                if (cg.snap->ps.stats[STAT_MAXCLIPAMMO] > 0) {
+                    qboolean bEmpty = (cg.snap->ps.stats[STAT_CLIPAMMO] == 0) ? qtrue : qfalse;
+                    if (CG_AimingDownSights()) {
+                        s_choice = bEmpty ? 2 : 1;
+                    } else if (bEmpty) {
+                        s_choice = 3; // hip, empty: `reload_empty` (guns whose retail reload has no slide channel)
+                    }
+                }
+            }
+            s_lastEnt  = s1->number;
+            s_lastSeen = cg.time;
+            iSwap      = s_choice ? cgi.Anim_NumForName(model.tiki, s_choice == 2 ? "reload_ads_empty"
+                                                                        : (s_choice == 3 ? "reload_empty" : "reload_ads_loaded"))
+                                  : -1;
+            for (k = 0; k < MAX_FRAMEINFOS && iSwap != -1; k++) {
+                if (model.frameInfo[k].weight && model.frameInfo[k].index == iRel) {
+                    model.frameInfo[k].index = iSwap;
+                }
+            }
+        }
+    }
 
     if (cent->currentState.parent != ENTITYNUM_NONE) {
         int          iTagNum;
