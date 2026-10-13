@@ -2108,6 +2108,11 @@ static void CG_VmTagHandoff(refEntity_t *model, const refEntity_t *pre, refEntit
         s_from[slot] = -1; // not drawn for a while: no history
     } else if (iTagNum != s_tag[slot] && cg.time - g_iCoopVmTagSnap >= 0 && cg.time - g_iCoopVmTagSnap < 60) {
         s_from[slot] = -1; // HZM coop [adsbolt] ADS released mid-bolt: both tags hold the gun, no fade needed
+    } else if (iTagNum != s_tag[slot] && CG_VMAdsBoltSolo()) {
+        // HZM coop [ads rifles 2026-10-12] a hand-over inside an aimed bolt clip that is alone on screen (the gun
+        // going to the off hand once the clip has blended in, CG_VMAdsTagRight): both tags hold the gun, no fade - a
+        // fade would keep 120 ms of the travelling hand's between-frame jitter in the gun.
+        s_from[slot] = -1;
     } else if (iTagNum != s_tag[slot] && CG_AdsPoseFactor() > 0.5f
                && iTagNum == cgi.Tag_NumForName(tiki, "tag_weapon_right")) {
         // HZM coop [ads rifles 2026-10-12] back on the MAIN hand while AIMING: no fade. The hand-over at the end of a
@@ -3498,7 +3503,9 @@ void CG_ModelAnim(centity_t *cent, qboolean bDoShaderTime)
                     }
                 }
 
-                if (!Q_stricmp(szTagName, "tag_weapon_right")) {
+                // HZM coop [ads rifles 2026-10-12] also for the held gun on the OFF hand tag (an aimed bolt cycle or
+                // reload rides it now): the probe went silent for the whole clip. The parked primary stays excluded.
+                if (!Q_stricmp(szTagName, "tag_weapon_right") || !CG_CoopQDrawIsParked(s1)) {
                     CG_AdsSightTrace(&model); // HZM coop [ironsights 2026-09-28] cg_adsSightDebug 2: per-frame drawn-sight trace
                 }
                 if (!CG_CoopQDrawIsParked(s1)) {

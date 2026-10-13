@@ -578,7 +578,27 @@ qboolean CG_VMAimedCycleActive(void)
 qboolean CG_VMAdsTagRight(void)
 {
     // HZM coop [adsreload] bolt clips only: a reload clip keeps the server's tag (its ammo prop rides the other hand)
-    return (s_coopAdsSlot >= 0 && s_coopAdsSlot == cgi.anim->g_iCurrentVMAnimSlot && s_coopAdsBolt) ? qtrue : qfalse;
+    // HZM coop [ads rifles 2026-10-12] ...and only while the aimed bolt clip is still BLENDING IN (that is what the
+    // override is for: the aim pose's tag_weapon_left sits ~16 u up the fore-end). Once the clip is alone on screen
+    // both of its tags hold the gun, and the gun must ride the server's tag - the OFF hand, which is still. Kept on
+    // tag_weapon_right for the whole clip it hung off the hand that travels to the bolt: the clip's tag keys undo that
+    // hand's motion only AT the clip's frames (40 fps), and between them lerp(arm) x lerp(tag) is not the gun's pose,
+    // so the rifle jittered 10-20 px (about 1 deg, single rendered frames up to 3 deg) for the 0.2 s of the reach and
+    // again on the hand's way back to the grip - the "3-8 % at the two ends of each clip" of runs ra5-ra7, and the
+    // same in the shipped hand-keyed clips (run rb3, VMH probe: tag R for all 69 frames, gun y -0.82..-1.11..-0.57).
+    return (s_coopAdsSlot >= 0 && s_coopAdsSlot == cgi.anim->g_iCurrentVMAnimSlot && s_coopAdsBolt
+            && s_fCoopVMCurW < 0.999f)
+             ? qtrue
+             : qfalse;
+}
+
+// HZM coop [ads rifles 2026-10-12] an aimed bolt clip is the only clip on screen: both weapon tags hold the gun
+qboolean CG_VMAdsBoltSolo(void)
+{
+    return (s_coopAdsSlot >= 0 && s_coopAdsSlot == cgi.anim->g_iCurrentVMAnimSlot && s_coopAdsBolt
+            && s_fCoopVMCurW >= 0.999f)
+             ? qtrue
+             : qfalse;
 }
 
 float CG_VMAimWeight(void)
