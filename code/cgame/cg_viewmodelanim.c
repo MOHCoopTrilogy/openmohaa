@@ -788,7 +788,11 @@ void CG_ViewModelAnimation(refEntity_t *pModel)
             && cgi.anim->g_iLastVMAnim == VM_ANIM_CHARGE && CG_AimingDownSights()) {
             char szCyc[MAX_QPATH];
             int  iCyc;
-            Com_sprintf(szCyc, sizeof(szCyc), "%s_cycle_ads", AnimPrefixList[iAnimPrefixIndex]);
+            // [pistol lane 2026-10-12] one gun of a shared prefix can have its own cycle (Welrod: a bolt-action
+            // pistol on the Colt rows): coopr_<weapon key>_cycle wins, as for the reload rows
+            Com_sprintf(szCyc, sizeof(szCyc), "%s_cycle", AnimPrefixList[iAnimPrefixIndex]);
+            CoopPerWeaponReloadAnim(pTiki, "cycle", szCyc, sizeof(szCyc));
+            Q_strcat(szCyc, sizeof(szCyc), "_ads");
             iCyc = cgi.Anim_NumForName(pTiki, szCyc);
             if (iCyc != -1) {
                 bAnimChanged            = qtrue;
@@ -987,8 +991,11 @@ void CG_ViewModelAnimation(refEntity_t *pModel)
         Com_sprintf(szAnimName, sizeof(szAnimName), "%s_%s", AnimPrefixList[iAnimPrefixIndex], pszAnimSuffix);
         // HZM coop [reload audit phase B] per-weapon reload clip (apply_reloadclips.py): coopr_<weapon key>_<suffix>
         // wins when the hands tiki has it - lets one gun of a shared prefix get the reload that fits ITS feed.
+        // [pistol lane 2026-10-12] also the aim pose (`charge`: the Luger sits differently in the hand than the Colt
+        // whose rows it borrows) and the client-only per-shot cycle (Welrod).
         if (cgi.anim->g_iLastVMAnim == VM_ANIM_RELOAD || cgi.anim->g_iLastVMAnim == VM_ANIM_RELOAD_SINGLE
-            || cgi.anim->g_iLastVMAnim == VM_ANIM_RELOAD_END) {
+            || cgi.anim->g_iLastVMAnim == VM_ANIM_RELOAD_END || cgi.anim->g_iLastVMAnim == VM_ANIM_CHARGE
+            || cgi.anim->g_iLastVMAnim == COOP_VM_ANIM_CYCLE) {
             CoopPerWeaponReloadAnim(pTiki, pszAnimSuffix, szAnimName, sizeof(szAnimName));
         }
         // HZM coop [revolver reload 2026-10-12] EMPTY GUN: a reload that STARTS on an empty magazine / cylinder plays
