@@ -98,7 +98,30 @@ protected:
        fixed gun cannot trivialise a five-minute hold, and the deployable ammo box tops it back up.
        Decremented per shot in the same firing branches the overheat model uses. */
     int               m_iCoopAmmo;
-    bool              m_bAiBurstAuto;   // HZM coop - this turret's burst cadence is auto-rolled for an AI gunner
+    /* [HZM coop 2026-10-12, left gun] PER-GUN belt / heat / rest settings, all off or at the MG42's
+       numbers unless a script (or a tik) sets them - so no gun that does not ask changes. Made for
+       the .30 cal a paratrooper leaves behind (coop_mod/parasquad.scr), which is a found weapon:
+       nothing refills it, it is air cooled, and it sits on a bipod.
+         coopnoresupply 1      the empty-belt line is "Belt empty" in the event feed (no "resupply")
+         coopdrysound <alias>  played once per trigger pull on an empty belt
+         coopaibelt 1          an AI gunner fires real rounds: at the gun's own firedelay (not one a
+                               server frame), off the belt; at 0 he stops firing
+         coopheatrates h b c l [hot]   heat/s firing, bleed/s between bursts, cool/s while cooked,
+                               seconds dead after a cook-off, heat/s firing while cooked (2.5 x h)
+         cooprestpitch <deg>   unmanned, the gun eases to this pitch instead of dropping its butt
+       Getters: .coopammo  .coopheat (0..100)  .coopoverheated (0/1) */
+    bool              m_bCoopNoResupply;
+    bool              m_bCoopAiBelt;
+    bool              m_bCoopDryLatch;  // the empty click / line was given for this trigger pull
+    str               m_sCoopDrySound;
+    float             m_fCoopHeatRate;
+    float             m_fCoopBleedRate;
+    float             m_fCoopCoolRate;
+    float             m_fCoopLockTime;
+    float             m_fCoopHotRate;
+    bool              m_bCoopRest;
+    float             m_fCoopRestPitch;
+    bool              m_bAiBurstAuto;  // HZM coop - this turret's burst cadence is auto-rolled for an AI gunner
     int               m_iAiAimOffTime;  // HZM coop - when the AI aim wander is next re-rolled
     Vector            m_vAiAimOff;      // HZM coop - current AI aim error, world units
     float             m_fOverheatRecoverTime;  // level.time at which the gun becomes usable again
@@ -188,6 +211,18 @@ public:
     void EventSetUsable(Event *ev); // added in 2.0
     void P_SetViewOffset(Event *ev);
     void EventCoopAmmo(Event *ev);   // HZM coop bug-1825
+    // HZM coop [2026-10-12, left gun]
+    void EventCoopGetAmmo(Event *ev);
+    void EventCoopGetHeat(Event *ev);
+    void EventCoopGetOverheated(Event *ev);
+    void EventCoopNoResupply(Event *ev);
+    void EventCoopDrySound(Event *ev);
+    void EventCoopAiBelt(Event *ev);
+    void EventCoopHeatRates(Event *ev);
+    void EventCoopRestPitch(Event *ev);
+    void CoopShoot(Event *ev);
+    void CoopDryPull();
+    bool CoopThinkRest();
     void EventMaxIdlePitch(Event *ev); // added in 2.0
     void EventMaxIdleYaw(Event *ev);   // added in 2.0
     void SetIdleCheckOffset(Event *ev);

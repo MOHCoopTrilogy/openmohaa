@@ -371,14 +371,237 @@ void TurretGun::EventCoopAmmo(Event *ev)
     m_iCoopAmmo = ev->GetInteger(1);
 }
 
+/*
+HZM coop [2026-10-12, left gun] the per-gun belt / heat / rest commands - see weapturret.h. Every one
+is an ordinary event, so it can be given from script (`local.gun coopheatrates 40 8 25 2`) or from the
+server block of a tik.
+*/
+Event EV_Turret_CoopGetAmmo
+(
+    "coopammo",
+    EV_DEFAULT,
+    NULL,
+    NULL,
+    "HZM coop: rounds left in the belt (-1 = unlimited)",
+    EV_GETTER
+);
+Event EV_Turret_CoopGetHeat
+(
+    "coopheat",
+    EV_DEFAULT,
+    NULL,
+    NULL,
+    "HZM coop: barrel heat, 0 (cold) to 100 (cooked)",
+    EV_GETTER
+);
+Event EV_Turret_CoopGetOverheated
+(
+    "coopoverheated",
+    EV_DEFAULT,
+    NULL,
+    NULL,
+    "HZM coop: 1 while the gun is cooked and cooling down",
+    EV_GETTER
+);
+Event EV_Turret_CoopNoResupply
+(
+    "coopnoresupply",
+    EV_DEFAULT,
+    "i",
+    "state",
+    "HZM coop: 1 = nothing refills this gun's belt; the empty line is 'Belt empty' in the event feed",
+    EV_NORMAL
+);
+Event EV_Turret_CoopDrySound
+(
+    "coopdrysound",
+    EV_DEFAULT,
+    "s",
+    "alias",
+    "HZM coop: sound alias played once per trigger pull on an empty belt",
+    EV_NORMAL
+);
+Event EV_Turret_CoopAiBelt
+(
+    "coopaibelt",
+    EV_DEFAULT,
+    "i",
+    "state",
+    "HZM coop: 1 = an AI gunner fires at the gun's own firedelay, his shots come off the belt and he stops firing at 0",
+    EV_NORMAL
+);
+Event EV_Turret_CoopHeatRates
+(
+    "coopheatrates",
+    EV_DEFAULT,
+    "ffffF",
+    "heat bleed cool lock hot",
+    "HZM coop: heat per second of fire, bleed per second between bursts, cooling per second while cooked, seconds "
+    "the gun is dead after a cook-off, heat per second of fire while cooked (default 2.5 x heat). "
+    "The MG42's are 50 8 25 2 125.",
+    EV_NORMAL
+);
+Event EV_Turret_CoopRestPitch
+(
+    "cooprestpitch",
+    EV_DEFAULT,
+    "f",
+    "pitch",
+    "HZM coop: unmanned, the gun eases to this pitch (0 level, positive muzzle down) instead of dropping its butt",
+    EV_NORMAL
+);
+
+void TurretGun::EventCoopGetAmmo(Event *ev)
+{
+    ev->AddInteger(m_iCoopAmmo);
+}
+
+void TurretGun::EventCoopGetHeat(Event *ev)
+{
+    ev->AddFloat(m_fHeat);
+}
+
+void TurretGun::EventCoopGetOverheated(Event *ev)
+{
+    ev->AddInteger(m_bOverheated ? 1 : 0);
+}
+
+void TurretGun::EventCoopNoResupply(Event *ev)
+{
+    m_bCoopNoResupply = ev->GetInteger(1) != 0;
+}
+
+void TurretGun::EventCoopDrySound(Event *ev)
+{
+    m_sCoopDrySound = ev->GetString(1);
+}
+
+void TurretGun::EventCoopAiBelt(Event *ev)
+{
+    m_bCoopAiBelt = ev->GetInteger(1) != 0;
+}
+
+void TurretGun::EventCoopHeatRates(Event *ev)
+{
+    float fHeat  = ev->GetFloat(1);
+    float fBleed = ev->GetFloat(2);
+    float fCool  = ev->GetFloat(3);
+    float fLock  = ev->GetFloat(4);
+
+    // a gun that cannot cool, or cooks in under a fifth of a second, is a typo
+    if (fHeat < 1.0f || fHeat > 500.0f || fBleed < 0.0f || fCool < 1.0f || fLock < 0.0f) {
+        ScriptError("coopheatrates: heat 1..500, bleed >= 0, cool >= 1, lock >= 0");
+        return;
+    }
+    m_fCoopHeatRate  = fHeat;
+    m_fCoopBleedRate = fBleed;
+    m_fCoopCoolRate  = fCool;
+    m_fCoopLockTime  = fLock;
+    m_fCoopHotRate   = (ev->NumArgs() > 4) ? ev->GetFloat(5) : fHeat * 2.5f;
+    if (m_fCoopHotRate < fHeat) {
+        m_fCoopHotRate = fHeat;
+    }
+}
+
+void TurretGun::EventCoopRestPitch(Event *ev)
+{
+    m_fCoopRestPitch = Q_clamp_float(ev->GetFloat(1), -80.0f, 80.0f);
+    m_bCoopRest      = true;
+}
+
+/*
+An AI gunner's shots come off the belt (coopaibelt 1). Counted at the shot itself: AI_DoFiring calls
+Fire() every frame it is in a burst, and the round leaves on the fire animation's `shoot` entry, so
+Fire() calls are not rounds. A player's rounds are counted where they always were (P_ThinkActive).
+*/
+void TurretGun::CoopShoot(Event *ev)
+{
+    float fBefore = m_fLastFireTime;
+
+    Weapon::Shoot(ev);
+
+    if (m_bCoopAiBelt && m_iCoopAmmo > 0 && owner && owner->IsSubclassOfActor() && m_fLastFireTime != fBefore) {
+        m_iCoopAmmo--;
+    }
+}
+
+/*
+The trigger on an empty belt, once per pull: the click, and the line. A gun nothing refills says so in
+the event feed ("Belt empty", the gunner's own line; a cgame without the feed, or Hardcore, gets it as
+the centre print it was); any other belted gun keeps its "resupply from an ammo box" line.
+*/
+void TurretGun::CoopDryPull()
+{
+    Player *pOwner;
+
+    if (m_bCoopDryLatch) {
+        return;
+    }
+    m_bCoopDryLatch = true;
+
+    if (m_sCoopDrySound.length()) {
+        Sound(m_sCoopDrySound, CHAN_WEAPON);
+    }
+    if (!owner || !owner->IsSubclassOfPlayer()) {
+        return;
+    }
+    pOwner = static_cast<Player *>(owner.Pointer());
+    if (!m_bCoopNoResupply) {
+        gi.centerprintf(pOwner->edict, "BELT EMPTY - resupply from an ammo box");
+    } else if (!G_CoopFeedPrint(pOwner->edict - g_entities, 2, "mgbelt", "Belt empty", true)) {
+        gi.centerprintf(pOwner->edict, "Belt empty");
+    }
+}
+
+/*
+cooprestpitch: nobody on the gun, it settles on its rest. Retail lets the butt drop until it meets
+the ground or 80 degrees (ThinkIdle below) - right for a pintle mount with a free butt, wrong for a
+gun standing on a bipod on a sandbag 40 u up, where the butt swings through to the trace and the
+barrel is left pointing at the sky. Eased from either side: fast while far, never under 12 degrees a
+second, so it arrives. Returns true when it has dealt with this frame.
+*/
+bool TurretGun::CoopThinkRest()
+{
+    float fDiff, fStep;
+
+    if (!m_bCoopRest) {
+        return false;
+    }
+    if (angles[0] > 180) {
+        angles[0] -= 360;
+    }
+    fDiff = m_fCoopRestPitch - angles[0];
+    if (fDiff == 0.0f) {
+        return true;
+    }
+    fStep = Q_max(fabs(fDiff) * 5.0f, 12.0f) * level.frametime;
+    if (fabs(fDiff) <= fStep) {
+        angles[0] = m_fCoopRestPitch;
+    } else {
+        angles[0] += (fDiff > 0.0f) ? fStep : -fStep;
+    }
+    m_fIdlePitchSpeed = 0;
+    m_iIdleHitCount   = 0;
+    setAngles(angles);
+    return true;
+}
+
 CLASS_DECLARATION(Weapon, TurretGun, NULL) {
     {&EV_Trigger_Effect,              NULL                                   },
     {&EV_Item_DropToFloor,            &TurretGun::PlaceTurret                },
     {&EV_Item_Pickup,                 NULL                                   },
-    {&EV_Weapon_Shoot,                &TurretGun::Shoot                      },
+    {&EV_Weapon_Shoot,                &TurretGun::CoopShoot                  },
     {&EV_Use,                         &TurretGun::TurretUsed                 },
     {&EV_Turret_P_SetPlayerUsable,    &TurretGun::P_SetPlayerUsable          },
     {&EV_Turret_CoopAmmo,             &TurretGun::EventCoopAmmo              },
+    {&EV_Turret_CoopGetAmmo,          &TurretGun::EventCoopGetAmmo           },
+    {&EV_Turret_CoopGetHeat,          &TurretGun::EventCoopGetHeat           },
+    {&EV_Turret_CoopGetOverheated,    &TurretGun::EventCoopGetOverheated     },
+    {&EV_Turret_CoopNoResupply,       &TurretGun::EventCoopNoResupply        },
+    {&EV_Turret_CoopDrySound,         &TurretGun::EventCoopDrySound          },
+    {&EV_Turret_CoopAiBelt,           &TurretGun::EventCoopAiBelt            },
+    {&EV_Turret_CoopHeatRates,        &TurretGun::EventCoopHeatRates         },
+    {&EV_Turret_CoopRestPitch,        &TurretGun::EventCoopRestPitch         },
     {&EV_Turret_SetUsable,            &TurretGun::EventSetUsable             },
     {&EV_Turret_IdleCheckOffset,      &TurretGun::SetIdleCheckOffset         },
     {&EV_Turret_P_ViewOffset,         &TurretGun::P_SetViewOffset            },
@@ -421,6 +644,20 @@ TurretGun::TurretGun()
     entflags |= ECF_TURRET;
 
     AddWaitTill(STRING_ONTARGET);
+
+    // HZM coop [2026-10-12, left gun] per-gun belt / heat / rest settings: off, and the MG42's
+    // numbers. Set before the savegame return - none of them is archived, and these defaults are
+    // the retail-equivalent behaviour.
+    m_bCoopNoResupply = false;
+    m_bCoopAiBelt     = false;
+    m_bCoopDryLatch   = false;
+    m_fCoopHeatRate   = 50.0f;
+    m_fCoopBleedRate  = 8.0f;
+    m_fCoopCoolRate   = 25.0f;
+    m_fCoopLockTime   = 2.0f;
+    m_fCoopHotRate    = 125.0f;
+    m_bCoopRest       = false;
+    m_fCoopRestPitch  = 0.0f;
 
     if (LoadingSavegame) {
         return;
@@ -588,6 +825,11 @@ void TurretGun::ThinkIdle(void)
     trace_t trace;
 
     if (!m_bRestable) {
+        return;
+    }
+
+    // HZM coop [2026-10-12, left gun] a gun with a rest pitch settles on it
+    if (CoopThinkRest()) {
         return;
     }
 
@@ -884,9 +1126,21 @@ void TurretGun::P_ThinkActive(void)
     // what the trigger says. Firing through the cooldown (below) only becomes available after that,
     // so overheating always costs a real beat instead of being something you can hold straight
     // through. Cooling still runs during the lock.
+    // [2026-10-12, left gun] The five rates are per gun (coopheatrates); the defaults are the
+    // numbers that stood here: 50 heat, 8 bleed, 25 cool, 2 s lock, 125 hot.
+    //
+    // A gun with a dry sound, or one nothing refills, takes the trigger on an empty belt here: one
+    // click and one line per pull, and the gun is simply not firing - so the barrel cools instead
+    // of heating to a cook-off with no round in it. Any other belted gun runs the branches below
+    // exactly as before.
+    if (m_iCoopAmmo == 0 && m_iFiring != TURRETFIRESTATE_NONE && (m_bCoopNoResupply || m_sCoopDrySound.length())) {
+        CoopDryPull();
+        m_iFiring = TURRETFIRESTATE_NONE;
+    }
+
     if (m_bOverheated && level.time < m_fOverheatLockUntil) {
         m_iFiring = TURRETFIRESTATE_NONE;
-        m_fHeat -= 25.0f * level.frametime;
+        m_fHeat -= m_fCoopCoolRate * level.frametime;
         if (m_fHeat < 0.0f) {
             m_fHeat = 0.0f;
         }
@@ -894,8 +1148,8 @@ void TurretGun::P_ThinkActive(void)
         // firing WHILE hot: cool at the normal rate but pour heat back in ~2.5x as fast, so a hot
         // gun re-pegs in well under a second of held trigger.
         m_iFiring = TURRETFIRESTATE_FIRING;
-        m_fHeat -= 25.0f * level.frametime;
-        m_fHeat += 125.0f * level.frametime;
+        m_fHeat -= m_fCoopCoolRate * level.frametime;
+        m_fHeat += m_fCoopHotRate * level.frametime;
 
         if (ReadyToFire(FIRE_PRIMARY)) {
             // [HZM coop bug-1825] finite belt. -1 keeps the retail unlimited behaviour.
@@ -921,7 +1175,7 @@ void TurretGun::P_ThinkActive(void)
     } else if (m_bOverheated) {
         // hot but off the trigger: the meter drops until the gun is cold again
         m_iFiring = TURRETFIRESTATE_NONE;
-        m_fHeat -= 25.0f * level.frametime;
+        m_fHeat -= m_fCoopCoolRate * level.frametime;
         if (m_fHeat <= 0.0f) {
             m_fHeat       = 0.0f;
             m_bOverheated = false;
@@ -929,7 +1183,7 @@ void TurretGun::P_ThinkActive(void)
         }
     } else if (m_iFiring != TURRETFIRESTATE_NONE) {
         m_iFiring = TURRETFIRESTATE_FIRING;
-        m_fHeat += 50.0f * level.frametime; // ~2.0s of sustained fire to reach full (overheats readily)
+        m_fHeat += m_fCoopHeatRate * level.frametime; // MG42: ~2.0s of sustained fire to reach full (overheats readily)
 
         if (ReadyToFire(FIRE_PRIMARY)) {
             // [HZM coop bug-1825] finite belt. -1 keeps the retail unlimited behaviour.
@@ -951,14 +1205,14 @@ void TurretGun::P_ThinkActive(void)
         if (m_fHeat >= 100.0f) {
             m_fHeat       = 100.0f;
             m_bOverheated = true;
-            m_fOverheatLockUntil = level.time + 2.0f;   // [user 2026-08-07] 2s dead-gun floor
+            m_fOverheatLockUntil = level.time + m_fCoopLockTime;   // [user 2026-08-07] 2s dead-gun floor
             m_iFiring     = TURRETFIRESTATE_NONE;
             Sound("coop_mg_overheat");
             // (no "OVERHEATED" centerprint - the red heat bar communicates the state)
         }
     } else {
         // bleed off heat when not firing (slow, so bursts still accumulate toward overheat)
-        m_fHeat -= 8.0f * level.frametime;
+        m_fHeat -= m_fCoopBleedRate * level.frametime;
         if (m_fHeat < 0.0f) {
             m_fHeat = 0.0f;
         }
@@ -1489,6 +1743,14 @@ void TurretGun::AI_DoFiring()
     float  fSavedDamage;
     Vector vSavedSpread;
 
+    // HZM coop [2026-10-12, left gun] coopaibelt: his rounds come off the belt (CoopShoot), and on
+    // an empty belt the gun does not fire whatever the tracker or a script startfiring asks. The
+    // heat below then only cools. The script reads .coopammo to decide what he does next.
+    if (m_bCoopAiBelt && m_iCoopAmmo == 0) {
+        m_iFiring               = TURRETFIRESTATE_NONE;
+        m_bFiringBeforeOverheat = false;
+    }
+
     // HZM coop: AI-manned turrets run the SAME heat cycle as player-manned ones (P_ThinkActive
     // above): ~2s of sustained fire cooks the barrel, then a lockout while it cools (25/s),
     // slow bleed (8/s) between bursts. The 3D steam sound doubles as the player's cue that the
@@ -1504,7 +1766,7 @@ void TurretGun::AI_DoFiring()
     } else
     if (m_bOverheated) {
         m_iFiring = TURRETFIRESTATE_NONE;
-        m_fHeat -= 25.0f * level.frametime;
+        m_fHeat -= m_fCoopCoolRate * level.frametime;
         // [user 2026-08-07] Resume at a RANDOM low heat rather than exactly 0. Gunners used to peg
         // to 100, wait out the identical cooldown and peg again - a metronome. Now each one comes
         // back on at his own point, so a nest of them drifts out of phase instead of firing in step.
@@ -1540,18 +1802,18 @@ void TurretGun::AI_DoFiring()
             m_fAiHeatCeiling = 55.0f + 40.0f * random();
             m_fAiResumeAt    = 35.0f * random();
         }
-        m_fHeat += 50.0f * level.frametime;
+        m_fHeat += m_fCoopHeatRate * level.frametime;
         if (m_fHeat >= m_fAiHeatCeiling) {
             m_fHeat       = 100.0f;
             m_bOverheated = true;
-            m_fOverheatLockUntil = level.time + 2.0f;   // [user 2026-08-07] 2s dead-gun floor
+            m_fOverheatLockUntil = level.time + m_fCoopLockTime;   // [user 2026-08-07] 2s dead-gun floor
             m_iFiring     = TURRETFIRESTATE_NONE;
             m_bFiringBeforeOverheat = true;   // HZM coop - remember to resume, see above
             Sound("coop_mg_overheat");
             return;
         }
     } else if (m_fHeat > 0.0f) {
-        m_fHeat -= 8.0f * level.frametime;
+        m_fHeat -= m_fCoopBleedRate * level.frametime;
         if (m_fHeat < 0.0f) {
             m_fHeat = 0.0f;
         }
@@ -1651,6 +1913,19 @@ void TurretGun::AI_DoFiring()
         }
         break;
     case TURRETFIRESTATE_FIRING:
+        // HZM coop [2026-10-12, left gun] This case calls Fire() EVERY SERVER FRAME of a burst, and
+        // Fire() has no fire-delay test - so an AI gunner's cyclic rate is sv_fps, 40 rounds a
+        // second on a live server whatever the tik's firedelay says (measured: 250 -> 172 in 2 s on
+        // the .30 cal, firedelay 0.09). The maps' MG42 nests were tuned at that rate and keep it. A
+        // gun whose AI rounds are counted (coopaibelt) fires them at its own firedelay, like the
+        // player on it does: a counted belt at four times the gun's rate is gone in six seconds.
+        if (m_bCoopAiBelt && !ReadyToFire(FIRE_PRIMARY, qfalse)) {
+            if (m_fMaxBurstTime > 0 && m_fFireToggleTime < level.time) {
+                m_iFiring         = TURRETFIRESTATE_BEGIN_FIRE;
+                m_fFireToggleTime = level.time + m_fMinBurstDelay + (m_fMaxBurstDelay - m_fMinBurstDelay) * random();
+            }
+            break;
+        }
         // HZM coop: AI damage scale for this shot only (see TG_MOH path above)
         fSavedDamage               = bulletdamage[FIRE_PRIMARY];
         bulletdamage[FIRE_PRIMARY] = fSavedDamage * HZM_AiTurretDamageScale();
@@ -1732,7 +2007,8 @@ void TurretGun::P_UserAim(usercmd_t *ucmd)
             m_iFiring = TURRETFIRESTATE_BEGIN_FIRE;
         }
     } else {
-        m_iFiring = TURRETFIRESTATE_NONE;
+        m_iFiring       = TURRETFIRESTATE_NONE;
+        m_bCoopDryLatch = false;   // HZM coop [left gun] trigger released: the next pull clicks again
     }
 
     flags |= FL_THINK;
@@ -1784,6 +2060,7 @@ void TurretGun::P_TurretBeginUsed(Player *pEnt)
 
     edict->r.ownerNum = pEnt->entnum;
     m_bHadOwner       = true;
+    m_bCoopDryLatch   = false;   // HZM coop [left gun]
 
     Sound(sPickupSound);
 
