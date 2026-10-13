@@ -3048,6 +3048,97 @@ void CG_ModelAnim(centity_t *cent, qboolean bDoShaderTime)
     cgi.TIKI_SetEyeTargetPos(model.tiki, model.entityNumber, s1->eyeVector);
 
     CG_InterpolateAnimParms(s1, sNext, &model);
+    // HZM coop [revolver chambers 2026-10-13] ANOTHER PLAYER'S GUN. Only the local player's held gun counted its
+    // coop_round<N> heads (below); every other one drew all six at all times, also through that player's whole
+    // one-by-one reload. Another client is not told the clip count, but it sees the rows the gun plays, so the count
+    // is taken from them: outside a reload all heads (as the local gun); in `reload` all until the cases are dumped
+    // (0.70 s), then none; in `reload_single` one more each time the loop restarts (latched like the local gun);
+    // in `reload_end` the loops that were played. A reload with rounds left reads low by those rounds while it
+    // lasts. coop_vmRoundOthers 0 = all six as before, 2 = print; coop_vmRoundSurfaces 2 = TEST, the local gun is
+    // driven by this estimate too (what another player sees of it). Inert without a coop_round1 surface.
+    if (model.tiki && cg.snap && s1->parent != ENTITYNUM_NONE) {
+        static cvar_t *pRnd = NULL, *pOth = NULL;
+        if (!pRnd) {
+            pRnd = cgi.Cvar_Get("coop_vmRoundSurfaces", "1", 0);
+            pOth = cgi.Cvar_Get("coop_vmRoundOthers", "1", 0);
+        }
+        if (pRnd->integer && pOth->integer && (s1->parent != cg.snap->ps.clientNum || pRnd->integer == 2)
+            && cgi.Surface_NameToNum(model.tiki, "coop_round1") >= 0) {
+            static struct {
+                int   ent, seen, est, shown, printed;
+                float loopT;
+            } s_o[4];
+            static const char *const s_oAnim[3] = {"reload", "reload_single", "reload_end"};
+            int      iA[3], n, q, slot = -1, oldest = 0, show;
+            float    tOpen = -1.0f, tLoop = -1.0f;
+            qboolean bEnd = qfalse;
+            for (q = 0; q < 3; q++) {
+                iA[q] = cgi.Anim_NumForName(model.tiki, s_oAnim[q]);
+            }
+            for (n = 0; n < MAX_FRAMEINFOS; n++) {
+                if (!model.frameInfo[n].weight || model.frameInfo[n].index < 0) {
+                    continue;
+                }
+                if (model.frameInfo[n].index == iA[0]) {
+                    tOpen = model.frameInfo[n].time;
+                } else if (model.frameInfo[n].index == iA[1]) {
+                    tLoop = model.frameInfo[n].time;
+                } else if (model.frameInfo[n].index == iA[2]) {
+                    bEnd = qtrue;
+                }
+            }
+            for (n = 0; n < 4; n++) {
+                if (s_o[n].ent == s1->number + 1) {
+                    slot = n;
+                }
+                if (s_o[n].seen < s_o[oldest].seen) {
+                    oldest = n;
+                }
+            }
+            if (slot < 0 || cg.time - s_o[slot].seen > 500 || cg.time < s_o[slot].seen) {
+                if (slot < 0) {
+                    slot = oldest;
+                }
+                s_o[slot].ent     = s1->number + 1;
+                s_o[slot].est     = 0;
+                s_o[slot].shown   = 0;
+                s_o[slot].loopT   = -1.0f;
+                s_o[slot].printed = -2;
+            }
+            s_o[slot].seen = cg.time;
+            if (tLoop >= 0.0f) {
+                if (s_o[slot].loopT < 0.0f) {
+                    s_o[slot].shown = s_o[slot].est; // the loop starts
+                } else if (tLoop < s_o[slot].loopT - 0.1f) {
+                    s_o[slot].est++; // it restarts: the round seated in the pass that just ended counts now
+                    s_o[slot].shown = s_o[slot].est;
+                }
+                s_o[slot].loopT = tLoop;
+                show            = s_o[slot].shown;
+            } else if (bEnd) {
+                if (s_o[slot].loopT >= 0.0f) {
+                    s_o[slot].est++; // the last pass's round
+                    s_o[slot].loopT = -1.0f;
+                }
+                show = s_o[slot].est;
+            } else if (tOpen >= 0.0f) {
+                s_o[slot].est   = 0;
+                s_o[slot].loopT = -1.0f;
+                show            = tOpen < 0.70f ? 99 : 0;
+            } else {
+                s_o[slot].est   = 0;
+                s_o[slot].loopT = -1.0f;
+                show            = 99;
+            }
+            if (pOth->integer == 2 && show != s_o[slot].printed) {
+                cgi.Printf("^~^~^ ROUNDOTHER ent %d parent %d show %d (open %.2f loop %.2f end %d) t %d\n", s1->number, s1->parent,
+                           show, tOpen, tLoop, (int)bEnd, cg.time);
+                s_o[slot].printed = show;
+            }
+            s_coopRoundShow = show;
+            s_coopRoundEnt  = s1->number;
+        }
+    }
     // HZM coop [aimed reload 2026-10-12] THE GUN'S OWN ANIMATION IN AN AIMED RELOAD (user: "functioning slides,
     // bolts"; "on a reload with a round chambered there is no slide action"). The retail gun clips snap the slide /
     // bolt back on the first frame of EVERY reload. When the local player's held gun starts its `reload` while
@@ -3141,7 +3232,8 @@ void CG_ModelAnim(centity_t *cent, qboolean bDoShaderTime)
             if (!pRounds) {
                 pRounds = cgi.Cvar_Get("coop_vmRoundSurfaces", "1", 0);
             }
-            sn1 = pRounds->integer ? cgi.Surface_NameToNum(model.tiki, "coop_round1") : -1;
+            // 2 = TEST: the local gun is driven by the other-player estimate above (pistol lane 2026-10-13)
+            sn1 = (pRounds->integer && pRounds->integer != 2) ? cgi.Surface_NameToNum(model.tiki, "coop_round1") : -1;
             if (sn1 >= 0) {
                 static const char *const s_rndAnim[7] = {"reload", "reload_ads_loaded", "reload_ads_empty", "reload_single",
                                                          "reload_single_ads", "reload_end", "reload_end_ads"};
@@ -3221,10 +3313,22 @@ void CG_ModelAnim(centity_t *cent, qboolean bDoShaderTime)
                 int iFireAds;
                 if (s_fireEnt != s1->number || cg.time - s_fireSeen > 250 || cg.time < s_fireSeen || fFireT < 0.08f) {
                     s_fireChoice = (CG_AimingDownSights() && cg.snap->ps.stats[STAT_CLIPAMMO] > 0) ? 1 : 0;
+                    // HZM coop [fire_last 2026-10-13] the shot that empties the gun: `fire_last` when the tik has it (the
+                    // action stays open - Luger toggle - instead of shutting until the server's idle_empty)
+                    {
+                        static cvar_t *pFireLast = NULL;
+                        if (!pFireLast) {
+                            pFireLast = cgi.Cvar_Get("coop_vmFireLast", "1", 0);
+                        }
+                        if (pFireLast->integer && cg.snap->ps.stats[STAT_MAXCLIPAMMO] > 0
+                            && cg.snap->ps.stats[STAT_CLIPAMMO] == 0 && cgi.Anim_NumForName(model.tiki, "fire_last") != -1) {
+                            s_fireChoice = 2;
+                        }
+                    }
                 }
                 s_fireEnt  = s1->number;
                 s_fireSeen = cg.time;
-                iFireAds   = s_fireChoice ? cgi.Anim_NumForName(model.tiki, "fire_ads") : -1;
+                iFireAds   = s_fireChoice ? cgi.Anim_NumForName(model.tiki, s_fireChoice == 2 ? "fire_last" : "fire_ads") : -1;
                 for (k = 0; k < MAX_FRAMEINFOS && iFireAds != -1; k++) {
                     if (model.frameInfo[k].weight && model.frameInfo[k].index == iFire) {
                         model.frameInfo[k].index = iFireAds;
