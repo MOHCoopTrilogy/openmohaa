@@ -381,7 +381,8 @@ int CG_GetVMAnimPrefixIndex()
         //
         // Team Assault and Team Tactics
         //
-        if (!Q_stricmp(szWeaponName, "FG 42")) {
+        // HZM coop [fg42 irons 2026-10-13] "FG 42 Irons" = the FG 42 without its scope (coop_fg42_irons*.tik): the same hands
+        if (!Q_stricmp(szWeaponName, "FG 42") || !Q_stricmp(szWeaponName, "FG 42 Irons")) {
             // HZM coop [user 2026-08-17] - was WPREFIX_MP44, which is why the FG42 kept using StG 44
             // hands: the engine asked for mp44_* aliases, so repointing the fg42_* ones in
             // fps_anims_mg.txt could never take effect. WPREFIX_FG42 was declared in the enum and the
@@ -1003,7 +1004,7 @@ void CG_ViewModelAnimation(refEntity_t *pModel)
         // HZM coop [reload audit phase B] per-weapon reload clip (apply_reloadclips.py): coopr_<weapon key>_<suffix>
         // wins when the hands tiki has it - lets one gun of a shared prefix get the reload that fits ITS feed.
         if (cgi.anim->g_iLastVMAnim == VM_ANIM_RELOAD || cgi.anim->g_iLastVMAnim == VM_ANIM_RELOAD_SINGLE
-            || cgi.anim->g_iLastVMAnim == VM_ANIM_RELOAD_END) {
+            || cgi.anim->g_iLastVMAnim == VM_ANIM_RELOAD_END || cgi.anim->g_iLastVMAnim == VM_ANIM_CHARGE) {
             CoopPerWeaponReloadAnim(pTiki, pszAnimSuffix, szAnimName, sizeof(szAnimName));
         }
         // HZM coop [revolver reload 2026-10-12] EMPTY GUN: a reload that STARTS on an empty magazine / cylinder plays
@@ -1070,6 +1071,19 @@ void CG_ViewModelAnimation(refEntity_t *pModel)
                     s_coopAdsClip = qtrue;
                     s_coopAdsBolt = (a == VM_ANIM_RECHAMBER) ? qtrue : qfalse;
                 }
+            }
+        }
+        {   // HZM coop [heavy lane 2026-10-13] harness trace of the row that starts now (apply_vmtrace.py)
+            static cvar_t *pTrace = NULL;
+            if (!pTrace) {
+                pTrace = cgi.Cvar_Get("coop_vmTrace", "0", 0);
+            }
+            if (pTrace->integer) {
+                const char *wpnName = (cg.snap && cg.snap->ps.activeItems[1] >= 0)
+                                          ? CG_ConfigString(CS_WEAPONS + cg.snap->ps.activeItems[1])
+                                          : "";
+                cgi.Printf("^~^~^ VMANIM t=%d id=%d row=%s ads=%d draw=%d wpn=%s\n", cg.time, cgi.anim->g_iLastVMAnim, szAnimName,
+                           s_coopAdsClip ? 1 : 0, cg_drawviewmodel ? cg_drawviewmodel->integer : -1, wpnName ? wpnName : "");
             }
         }
         if (!bWeaponChanged) {

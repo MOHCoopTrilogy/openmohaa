@@ -1384,6 +1384,7 @@ qboolean CoopStripSkinSuffix(const char *in, char *out, int outSize)
 static const char *const s_adsDonor[][2] = {
     {"DP-28",         "Vickers-Berthier"}, // top-magazine LMG, offset irons like the VB
     {"FG 42",         "StG 44"          }, // shoulder-fired automatic rifle
+    {"FG 42 Irons",   "StG 44"          }, // [fg42 irons 2026-10-13] the FG 42 without its scope: iron-sight aim
     {"G 43",          "M1 Garand"       }, // semi-auto battle rifle
     {"SVT 40",        "M1 Garand"       }, // semi-auto battle rifle
     {"Johnson M1941", "M1 Garand"       }, // semi-auto battle rifle
