@@ -16,6 +16,7 @@
     {"Enfield L42A1", "w_enfieldl42a1", "L42A1", 0.967f, 0.426f},
     {"FG 42", "w_fg42", "FG 42", 0.875f, 0.430f},
     {"G 43", "w_g43", "G43", 0.930f, 0.387f},
+    {"G 43 Irons", "w_g43irons", "G43 Irons", 0.930f, 0.332f},
     {"G43 Sniper", "w_g43sniper", "G43 Sniper", 0.938f, 0.367f},
     {"Gewehrgranate", "w_gewehrgranate", "Gewehrgranate", 0.967f, 0.387f},
     {"Hi-Standard Silenced", "w_histandardsilenced", "Hi-Standard", 0.494f, 0.566f},
