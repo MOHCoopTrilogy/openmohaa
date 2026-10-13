@@ -990,6 +990,19 @@ void CG_ViewModelAnimation(refEntity_t *pModel)
         if (cgi.anim->g_iLastVMAnim == VM_ANIM_RELOAD || cgi.anim->g_iLastVMAnim == VM_ANIM_RELOAD_SINGLE
             || cgi.anim->g_iLastVMAnim == VM_ANIM_RELOAD_END) {
             CoopPerWeaponReloadAnim(pTiki, pszAnimSuffix, szAnimName, sizeof(szAnimName));
+        } else {
+            // HZM coop [ads smg lane 2026-10-13] per-weapon HOLD: the same coopr_<weapon key>_<suffix> rule for every
+            // other view animation (idle, idle0-2, charge, fire, ...), so one gun of a shared prefix can be HELD the
+            // way its own mesh asks (user: the MP18 - prefix mp40, whose hands hold a magazine housing under the gun -
+            // is held by its side magazine like the Sten). No row = the prefix row, silently; looked up only when the
+            // animation changes. coop_vmPerWeaponRows 0 = off.
+            static cvar_t *pPerWeapon = NULL;
+            if (!pPerWeapon) {
+                pPerWeapon = cgi.Cvar_Get("coop_vmPerWeaponRows", "1", 0);
+            }
+            if (pPerWeapon->integer) {
+                CoopPerWeaponReloadAnim(pTiki, pszAnimSuffix, szAnimName, sizeof(szAnimName));
+            }
         }
         // HZM coop [revolver reload 2026-10-12] EMPTY GUN: a reload that STARTS on an empty magazine / cylinder plays
         // `<row>_empty` when fps_anims defines it (user: "reloading could be as easy as dumping the entire rounds out
