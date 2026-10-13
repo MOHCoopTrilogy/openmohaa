@@ -508,6 +508,13 @@ int CG_GetVMAnimPrefixIndex()
 #define COOP_VM_ANIM_CYCLE 16
 
 static int s_iCoopPrevVMAnim = -1;
+// HZM coop [heavy lane 2026-10-13, shotgun] the reload in progress STARTED on an empty gun (taken when its `reload` row
+// is chosen): the end of a start / single / end reload racks the action only then (apply_sgpump.py)
+static qboolean s_coopReloadFromEmpty = qtrue;
+qboolean        CG_CoopReloadFromEmpty(void)
+{
+    return s_coopReloadFromEmpty;
+}
 static qboolean s_coopAdsClip = qfalse; // HZM coop [adsanim] the clip being started is a <gun>_<anim>_ads variant
 static qboolean s_coopAdsBolt = qfalse; // HZM coop [adsreload] ...and it is a bolt (rechamber) clip
 static int      s_coopAdsSlot = -1;     // HZM coop [adsbolt] slot playing an _ads clip (-1 = none)
@@ -996,6 +1003,18 @@ void CG_ViewModelAnimation(refEntity_t *pModel)
         // if they are all spent") - the row carries what only an empty gun shows, e.g. the cases falling as a
         // top-break opens. No row = the normal reload row, silently. The `_ads` step below then looks for
         // `<row>_empty_ads`. Client-only; the clip ammo is the snapshot's, so every client that predicts it agrees.
+        if (cgi.anim->g_iLastVMAnim == VM_ANIM_RELOAD && cg.snap && cg.snap->ps.stats[STAT_MAXCLIPAMMO] > 0) {
+            s_coopReloadFromEmpty = (cg.snap->ps.stats[STAT_CLIPAMMO] == 0) ? qtrue : qfalse;
+        }
+        // HZM coop [heavy lane, shotgun] a reload that started with rounds in the gun ends WITHOUT the pump:
+        // `<row>_loaded` for the end row when fps_anims has it (the `_ads` step below then finds `<row>_loaded_ads`)
+        if (cgi.anim->g_iLastVMAnim == VM_ANIM_RELOAD_END && !s_coopReloadFromEmpty) {
+            char szLoaded[MAX_QPATH];
+            Com_sprintf(szLoaded, sizeof(szLoaded), "%s_loaded", szAnimName);
+            if (cgi.Cvar_Get("coop_vmEmptyReload", "1", 0)->integer && cgi.Anim_NumForName(pTiki, szLoaded) != -1) {
+                Q_strncpyz(szAnimName, szLoaded, sizeof(szAnimName));
+            }
+        }
         if (cgi.anim->g_iLastVMAnim == VM_ANIM_RELOAD && cg.snap && cg.snap->ps.stats[STAT_MAXCLIPAMMO] > 0
             && cg.snap->ps.stats[STAT_CLIPAMMO] == 0) {
             static cvar_t *pEmptyRows = NULL;

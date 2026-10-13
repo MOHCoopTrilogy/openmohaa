@@ -3011,6 +3011,14 @@ void CG_ModelAnim(centity_t *cent, qboolean bDoShaderTime)
                 s_rowEnt[r]  = s1->number;
                 s_rowSeen[r] = cg.time;
                 iRowAds      = s_rowChoice[r] ? cgi.Anim_NumForName(model.tiki, s_rows[r][1]) : -1;
+                // HZM coop [heavy lane 2026-10-13, shotgun] rounds were left when the reload started: the gun's end
+                // row without the pump (and without its sound), hip and aimed alike, when the tik has it
+                if (r == 0 && !CG_CoopReloadFromEmpty()) {
+                    int iLoaded = cgi.Anim_NumForName(model.tiki, "reload_end_loaded");
+                    if (iLoaded != -1) {
+                        iRowAds = iLoaded;
+                    }
+                }
                 for (k = 0; k < MAX_FRAMEINFOS && iRowAds != -1; k++) {
                     if (model.frameInfo[k].weight && model.frameInfo[k].index == iRow) {
                         model.frameInfo[k].index = iRowAds;

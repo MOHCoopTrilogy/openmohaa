@@ -701,6 +701,7 @@ const adsGunTune_t *CG_FindAdsTune(const char *wpn);
     void  CG_FeelStressAdvance(void); // HZM coop - advance the shared feel-context scalar; once per frame, before consumers
     float CoopWFeelStress(void);      // HZM coop - 0 = calm, 1 = maximally rattled. THE stress input; do not add a second one
     float CG_GetSuppression(void);    // HZM coop - under-fire intensity 0..1 (one frame stale before CG_CalcFov)
+    qboolean CG_CoopReloadFromEmpty(void); // HZM coop [heavy lane] the reload in progress started on an empty gun
     float CG_CoopBrace(void);         // HZM coop - 0..1 gun-brace envelope (mirrored from the server)
     qboolean CG_CoopBraceAvail(void); // HZM coop - a mount is offered (prompt only, never effects)
     float CG_CoopBraceKick(void);     // HZM coop - mount-settle impulse 1..0
