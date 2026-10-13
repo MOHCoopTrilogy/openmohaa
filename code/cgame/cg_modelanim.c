@@ -27,6 +27,9 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 #include "tiki.h"
 #include "../renderercommon/hzm_storm.h" // HZM coop [2026-09-28] storm darkness: the contact decal under cloud
 
+// HZM coop [revolver chambers 2026-10-12] how many coop_round<N> surfaces the held gun draws this frame (-1 = untouched)
+static int s_coopRoundShow = -1, s_coopRoundEnt = -1;
+
 static qboolean cg_forceModelAllowed = qfalse;
 
 // HZM coop [225] - set while dispatching frame commands for the draw-skipped 1P turret viewmodel
@@ -2941,6 +2944,75 @@ void CG_ModelAnim(centity_t *cent, qboolean bDoShaderTime)
         if (!pAimedGun) {
             pAimedGun = cgi.Cvar_Get("coop_vmAimedReloadGun", "1", 0);
         }
+        // HZM coop [revolver chambers 2026-10-12] ONE HEAD PER CHAMBER (S&W M10; any gun whose mesh has surfaces
+        // coop_round1..N): the local player's held gun draws coop_round<N> iff N <= rounds in the gun. Outside a
+        // reload every head is drawn (a fired case looks like a live round from behind). In the reload: an EMPTIED
+        // gun keeps all of them until its cases are dumped (0.70 s into the opening clip = the tik's dump frame),
+        // then the count is the clip's; in the one-round loop the count is LATCHED and taken again when the loop
+        // restarts - the gun's loop clip turns the cylinder one chamber over its last frames, so the new head
+        // appears once its chamber has left the feed position, and the pattern is continuous across the restart.
+        // Client-only, first-person and local third-person only. coop_vmRoundSurfaces 0 = draw them all.
+        {
+            static cvar_t *pRounds   = NULL;
+            static int     s_rndEnt  = -1, s_rndShown = 0, s_rndSeen = 0;
+            static float   s_rndLoopT = -1.0f;
+            int            sn1;
+            if (!pRounds) {
+                pRounds = cgi.Cvar_Get("coop_vmRoundSurfaces", "1", 0);
+            }
+            sn1 = pRounds->integer ? cgi.Surface_NameToNum(model.tiki, "coop_round1") : -1;
+            if (sn1 >= 0) {
+                static const char *const s_rndAnim[7] = {"reload", "reload_ads_loaded", "reload_ads_empty", "reload_single",
+                                                         "reload_single_ads", "reload_end", "reload_end_ads"};
+                int   iA[7], n, q, clip = cg.snap->ps.stats[STAT_CLIPAMMO], show;
+                float tOpen = -1.0f, tLoop = -1.0f;
+                qboolean bEnd = qfalse;
+                for (q = 0; q < 7; q++) {
+                    iA[q] = cgi.Anim_NumForName(model.tiki, s_rndAnim[q]);
+                }
+                for (n = 0; n < MAX_FRAMEINFOS; n++) {
+                    if (!model.frameInfo[n].weight || model.frameInfo[n].index < 0) {
+                        continue;
+                    }
+                    for (q = 0; q < 7; q++) {
+                        if (model.frameInfo[n].index != iA[q]) {
+                            continue;
+                        }
+                        if (q < 3) {
+                            tOpen = model.frameInfo[n].time;
+                        } else if (q < 5) {
+                            tLoop = model.frameInfo[n].time;
+                        } else {
+                            bEnd = qtrue;
+                        }
+                    }
+                }
+                if (s_rndEnt != s1->number || cg.time - s_rndSeen > 500 || cg.time < s_rndSeen) {
+                    s_rndShown = clip;
+                    s_rndLoopT = -1.0f;
+                }
+                s_rndEnt  = s1->number;
+                s_rndSeen = cg.time;
+                if (tLoop >= 0.0f) {
+                    if (s_rndLoopT < 0.0f || tLoop < s_rndLoopT - 0.1f) {
+                        s_rndShown = clip; // the loop starts / restarts: the round seated last time counts now
+                    }
+                    s_rndLoopT = tLoop;
+                    show       = s_rndShown;
+                } else {
+                    s_rndLoopT = -1.0f;
+                    s_rndShown = clip;
+                    if (tOpen >= 0.0f) {
+                        show = (clip == 0 && tOpen < 0.70f) ? 99 : clip;
+                    } else {
+                        show = bEnd ? clip : 99;
+                    }
+                }
+                // applied further down, AFTER model.surfaces is copied from the entity state (it would be overwritten here)
+                s_coopRoundShow = show;
+                s_coopRoundEnt  = s1->number;
+            }
+        }
         iRel = pAimedGun->integer ? cgi.Anim_NumForName(model.tiki, "reload") : -1;
         for (k = 0; k < MAX_FRAMEINFOS && iRel != -1; k++) {
             if (model.frameInfo[k].weight && model.frameInfo[k].index == iRel) {
@@ -3581,6 +3653,25 @@ void CG_ModelAnim(centity_t *cent, qboolean bDoShaderTime)
 
     // set surfaces
     memcpy(model.surfaces, s1->surfaces, MAX_MODEL_SURFACES);
+    // HZM coop [revolver chambers 2026-10-12] the held gun's coop_round<N> heads: the count decided above
+    if (s_coopRoundShow >= 0 && s_coopRoundEnt == s1->number && model.tiki) {
+        int n;
+        for (n = 1; n <= 12; n++) {
+            char nm[24];
+            int  sn;
+            Com_sprintf(nm, sizeof(nm), "coop_round%d", n);
+            sn = cgi.Surface_NameToNum(model.tiki, nm);
+            if (sn < 0) {
+                break;
+            }
+            if (n <= s_coopRoundShow) {
+                model.surfaces[sn] &= ~MDL_SURFACE_NODRAW;
+            } else {
+                model.surfaces[sn] |= MDL_SURFACE_NODRAW;
+            }
+        }
+    }
+    s_coopRoundShow = -1;
     // HZM coop [2026-09-25] vehicle headlights (Phase H): on a managed vehicle, hide the retail beam surface and the
     // retail corona on its lamp tags (cg_view.c CG_CoopHeadlights draws the replacement). Inert while
     // cg_hzmHeadlights is off - every entity is then submitted exactly as before.
