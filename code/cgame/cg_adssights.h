@@ -241,9 +241,9 @@ static const adsSight_t s_adsSights[] = {
     {"models/weapons/mp40_guanmp40.tik", "MP40 (Guanshire)", {28.4260f, -0.8863f, -5.8894f}, {6.9961f, -0.8850f, -5.8909f}, 0.016000f, {0.000f, 0.000f, -1.000f}, 0.000f}, // mp40
     {"models/weapons/mp40_guanmp40s.tik", "MP40 (Silver)", {28.4260f, -0.8863f, -5.8894f}, {6.9961f, -0.8850f, -5.8909f}, 0.016000f, {0.000f, 0.000f, -1.000f}, 0.000f}, // mp40
     {"models/weapons/mp40_lv_mp75.tik", "MP40 (MP 75 Ausf D)", {28.4260f, -0.8863f, -5.8894f}, {6.9961f, -0.8850f, -5.8909f}, 0.016000f, {0.000f, 0.000f, -1.000f}, 0.000f}, // mp40
-    {"models/weapons/mp40_mp18.tik", "MP40 (MP18)", {25.7280f, -2.2582f, -4.6120f}, {1.9786f, -2.3928f, -5.6721f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 0.000f}, // mp40_mp18
+    {"models/weapons/mp40_mp18.tik", "MP40 (MP18)", {25.7280f, -2.2582f, -4.9120f}, {1.9786f, -2.3928f, -5.9721f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 12.340f}, // mp40_mp18
     {"models/weapons/mp40_mp40r2.tik", "MP40 (Reactivated)", {28.1970f, -0.9201f, -6.0070f}, {6.9434f, -1.1789f, -6.0653f}, 0.000000f, {0.012f, -0.000f, -1.000f}, 0.000f}, // mp40_reactivated
-    {"models/weapons/mp40silenced.tik", "Silenced MP40", {28.2630f, -1.0820f, -5.5754f}, {6.7486f, -0.9251f, -5.8910f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 0.000f}, // silenced_mp40
+    {"models/weapons/mp40silenced.tik", "Silenced MP40", {28.2630f, -1.0820f, -6.0254f}, {6.7486f, -0.9251f, -6.3410f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 0.000f}, // silenced_mp40
     {"models/weapons/mp44.tik", "StG 44", {28.9093f, -0.8875f, -7.0093f}, {6.5820f, -0.8896f, -7.5520f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 0.000f}, // stg44
     {"models/weapons/mp44_bloody.tik", "StG 44 (Bloody)", {28.9093f, -0.8875f, -7.0093f}, {6.5820f, -0.8896f, -7.5520f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 0.000f}, // stg44
     {"models/weapons/mp44_blued.tik", "StG 44 (Blued)", {28.9093f, -0.8875f, -7.0093f}, {6.5820f, -0.8896f, -7.5520f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 0.000f}, // stg44
