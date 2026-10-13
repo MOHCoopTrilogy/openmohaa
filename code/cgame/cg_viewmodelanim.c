@@ -266,7 +266,9 @@ int CG_GetVMAnimPrefixIndex()
         if (!Q_stricmp(szWeaponName, "Mosin Nagant Rifle")) {
             return WPREFIX_MOSIN;
         }
-        if (!Q_stricmp(szWeaponName, "G 43")) {
+        // HZM coop [g43 irons 2026-10-12] "G 43 Irons" = the G43 without its scope (coop_g43_irons*.tik): the same
+        // hands. It is a base name of its own on purpose - the scope table (cg_hzmscope.c) lists "G 43".
+        if (!Q_stricmp(szWeaponName, "G 43") || !Q_stricmp(szWeaponName, "G 43 Irons")) {
             return WPREFIX_G43;
         }
         if (!Q_stricmp(szWeaponName, "Enfield L42A1")) {
@@ -588,7 +590,34 @@ qboolean CG_VMAimedCycleActive(void)
 qboolean CG_VMAdsTagRight(void)
 {
     // HZM coop [adsreload] bolt clips only: a reload clip keeps the server's tag (its ammo prop rides the other hand)
-    return (s_coopAdsSlot >= 0 && s_coopAdsSlot == cgi.anim->g_iCurrentVMAnimSlot && s_coopAdsBolt) ? qtrue : qfalse;
+    // HZM coop [ads rifles 2026-10-12] ...and only while the aimed bolt clip is still BLENDING IN (that is what the
+    // override is for: the aim pose's tag_weapon_left sits ~16 u up the fore-end). Once the clip is alone on screen
+    // both of its tags hold the gun, and the gun must ride the server's tag - the OFF hand, which is still. Kept on
+    // tag_weapon_right for the whole clip it hung off the hand that travels to the bolt: the clip's tag keys undo that
+    // hand's motion only AT the clip's frames (40 fps), and between them lerp(arm) x lerp(tag) is not the gun's pose,
+    // so the rifle jittered 10-20 px (about 1 deg, single rendered frames up to 3 deg) for the 0.2 s of the reach and
+    // again on the hand's way back to the grip - the "3-8 % at the two ends of each clip" of runs ra5-ra7, and the
+    // same in the shipped hand-keyed clips (run rb3, VMH probe: tag R for all 69 frames, gun y -0.82..-1.11..-0.57).
+    return (s_coopAdsSlot >= 0 && s_coopAdsSlot == cgi.anim->g_iCurrentVMAnimSlot && s_coopAdsBolt
+            && s_fCoopVMCurW < 0.999f)
+             ? qtrue
+             : qfalse;
+}
+
+// HZM coop [ads rifles 2026-10-12] the hands play a `<gun>_rechamber_ads` clip (blending in or alone): the held gun
+// then shows its tik's `rechamber_ads` (cg_modelanim.c) - the hand rides THAT clip's bolt
+qboolean CG_VMAdsBoltClip(void)
+{
+    return (cgi.anim && s_coopAdsSlot >= 0 && s_coopAdsSlot == cgi.anim->g_iCurrentVMAnimSlot && s_coopAdsBolt) ? qtrue : qfalse;
+}
+
+// HZM coop [ads rifles 2026-10-12] an aimed bolt clip is the only clip on screen: both weapon tags hold the gun
+qboolean CG_VMAdsBoltSolo(void)
+{
+    return (s_coopAdsSlot >= 0 && s_coopAdsSlot == cgi.anim->g_iCurrentVMAnimSlot && s_coopAdsBolt
+            && s_fCoopVMCurW >= 0.999f)
+             ? qtrue
+             : qfalse;
 }
 
 float CG_VMAimWeight(void)
@@ -1002,8 +1031,10 @@ void CG_ViewModelAnimation(refEntity_t *pModel)
         Com_sprintf(szAnimName, sizeof(szAnimName), "%s_%s", AnimPrefixList[iAnimPrefixIndex], pszAnimSuffix);
         // HZM coop [reload audit phase B] per-weapon reload clip (apply_reloadclips.py): coopr_<weapon key>_<suffix>
         // wins when the hands tiki has it - lets one gun of a shared prefix get the reload that fits ITS feed.
+        // [rifle lane 2026-10-12, same rule as the pistol lane's ads-next] also the aim pose (`charge`): the iron-sight
+        // G43 ("G 43 Irons") shares the g43 prefix but aims over its own sights - coopr_g_43_irons_charge.
         if (cgi.anim->g_iLastVMAnim == VM_ANIM_RELOAD || cgi.anim->g_iLastVMAnim == VM_ANIM_RELOAD_SINGLE
-            || cgi.anim->g_iLastVMAnim == VM_ANIM_RELOAD_END) {
+            || cgi.anim->g_iLastVMAnim == VM_ANIM_RELOAD_END || cgi.anim->g_iLastVMAnim == VM_ANIM_CHARGE) {
             CoopPerWeaponReloadAnim(pTiki, pszAnimSuffix, szAnimName, sizeof(szAnimName));
         } else {
             // HZM coop [ads smg lane 2026-10-13] per-weapon HOLD: the same coopr_<weapon key>_<suffix> rule for every

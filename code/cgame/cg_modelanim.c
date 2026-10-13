@@ -1385,6 +1385,7 @@ static const char *const s_adsDonor[][2] = {
     {"DP-28",         "Vickers-Berthier"}, // top-magazine LMG, offset irons like the VB
     {"FG 42",         "StG 44"          }, // shoulder-fired automatic rifle
     {"G 43",          "M1 Garand"       }, // semi-auto battle rifle
+    {"G 43 Irons",    "M1 Garand"       }, // [g43 irons 2026-10-12] the G43 without its scope: iron-sight aim
     {"SVT 40",        "M1 Garand"       }, // semi-auto battle rifle
     {"Johnson M1941", "M1 Garand"       }, // semi-auto battle rifle
     {"Gewehrgranate", "Mauser KAR 98K"  }, // kar98 body with a launcher cup
@@ -2110,6 +2111,19 @@ static void CG_VmTagHandoff(refEntity_t *model, const refEntity_t *pre, refEntit
         s_from[slot] = -1; // not drawn for a while: no history
     } else if (iTagNum != s_tag[slot] && cg.time - g_iCoopVmTagSnap >= 0 && cg.time - g_iCoopVmTagSnap < 60) {
         s_from[slot] = -1; // HZM coop [adsbolt] ADS released mid-bolt: both tags hold the gun, no fade needed
+    } else if (iTagNum != s_tag[slot] && CG_VMAdsBoltSolo()) {
+        // HZM coop [ads rifles 2026-10-12] a hand-over inside an aimed bolt clip that is alone on screen (the gun
+        // going to the off hand once the clip has blended in, CG_VMAdsTagRight): both tags hold the gun, no fade - a
+        // fade would keep 120 ms of the travelling hand's between-frame jitter in the gun.
+        s_from[slot] = -1;
+    } else if (iTagNum != s_tag[slot] && CG_AdsPoseFactor() > 0.5f
+               && iTagNum == cgi.Tag_NumForName(tiki, "tag_weapon_right")) {
+        // HZM coop [ads rifles 2026-10-12] back on the MAIN hand while AIMING: no fade. The hand-over at the end of a
+        // reload (`last weaponcommand mainhand attachtohand mainhand`) arrives while the view crossblends into the aim
+        // pose, whose tag_weapon_left sits ~16 u up the fore-end - fading from that tag swung the rifle out to the
+        // right and back for ~0.2 s after every aimed Kar98 reload (run ra2, capture frames 218-236). The right tag
+        // holds the gun in both poses of that blend (the clip's last frames and the aim pose), so the snap is exact.
+        s_from[slot] = -1;
     } else if (iTagNum != s_tag[slot]) {
         // a switch back while still fading reverses the fade from where the gun is now
         s_f0[slot]   = (s_from[slot] == iTagNum) ? 1.0f - s_f[slot] : 0.0f;
@@ -2983,13 +2997,19 @@ void CG_ModelAnim(centity_t *cent, qboolean bDoShaderTime)
         // case thrown for the hip view would fly through the aim. Chosen when the animation (or a new loop of it)
         // starts; same length as the hip clip, the server still runs the hip row.
         {
-            static const char *const s_rows[2][2] = {
+            // HZM coop [ads rifles 2026-10-12] ...and `rechamber` -> `rechamber_ads` (a bolt rifle's between-shot cycle):
+            // with the rifle LOCKED on the sights the retail full stroke brings the bolt to 0.0-0.9 u from the eye (the
+            // cocking piece / the handle balloon over the lower middle of the picture); the aimed clip stops the bolt
+            // short of the eye. Shown exactly when the HANDS play the aimed bolt clip (CG_VMAdsBoltClip - the hand
+            // rides that clip's bolt), decided in the row's first 0.12 s (the bolt does not move before 0.2 s).
+            static const char *const s_rows[3][2] = {
                 {"reload_end",    "reload_end_ads"   },
-                {"reload_single", "reload_single_ads"}
+                {"reload_single", "reload_single_ads"},
+                {"rechamber",     "rechamber_ads"    }
             };
-            static int s_rowEnt[2] = {-1, -1}, s_rowSeen[2] = {0, 0}, s_rowChoice[2] = {0, 0};
+            static int s_rowEnt[3] = {-1, -1, -1}, s_rowSeen[3] = {0, 0, 0}, s_rowChoice[3] = {0, 0, 0};
             int        r;
-            for (r = 0; r < 2; r++) {
+            for (r = 0; r < 3; r++) {
                 int      iRow  = pAimedGun->integer ? cgi.Anim_NumForName(model.tiki, s_rows[r][0]) : -1;
                 qboolean bRow  = qfalse;
                 float    fRowT = 999.0f;
@@ -3006,7 +3026,10 @@ void CG_ModelAnim(centity_t *cent, qboolean bDoShaderTime)
                     continue;
                 }
                 if (s_rowEnt[r] != s1->number || cg.time - s_rowSeen[r] > 250 || cg.time < s_rowSeen[r] || fRowT < 0.05f) {
-                    s_rowChoice[r] = CG_AimingDownSights() ? 1 : 0;
+                    s_rowChoice[r] = (r != 2 && CG_AimingDownSights()) ? 1 : 0;
+                }
+                if (r == 2 && fRowT < 0.12f && CG_VMAdsBoltClip()) {
+                    s_rowChoice[r] = 1;
                 }
                 s_rowEnt[r]  = s1->number;
                 s_rowSeen[r] = cg.time;
@@ -3500,7 +3523,9 @@ void CG_ModelAnim(centity_t *cent, qboolean bDoShaderTime)
                     }
                 }
 
-                if (!Q_stricmp(szTagName, "tag_weapon_right")) {
+                // HZM coop [ads rifles 2026-10-12] also for the held gun on the OFF hand tag (an aimed bolt cycle or
+                // reload rides it now): the probe went silent for the whole clip. The parked primary stays excluded.
+                if (!Q_stricmp(szTagName, "tag_weapon_right") || !CG_CoopQDrawIsParked(s1)) {
                     CG_AdsSightTrace(&model); // HZM coop [ironsights 2026-09-28] cg_adsSightDebug 2: per-frame drawn-sight trace
                 }
                 if (!CG_CoopQDrawIsParked(s1)) {
