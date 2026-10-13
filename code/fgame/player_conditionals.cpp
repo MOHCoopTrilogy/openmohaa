@@ -1196,6 +1196,13 @@ qboolean Player::CondCoopCoverOpenRight(Conditional& condition)
 // HZM coop [216] - manning a turret (ground MG42 or vehicle .30cal), weapon inventory irrelevant.
 // The vanilla TURRET_START edges require !HAS_WEAPON, which a coop player never satisfies - this
 // condition keys the COOP_TURRET_MAN pose off the ground truth instead.
+// HZM coop [2026-10-12, low gun] the ground turret he is on has its gun low enough that an AI gunner
+// would crouch at it (Player::EnterTurret decides, once per mount). Never true off a turret.
+qboolean Player::CondCoopTurretLow(Conditional& condition)
+{
+    return (m_pTurret != NULL && m_bCoopTurretLow) ? qtrue : qfalse;
+}
+
 qboolean Player::CondCoopOnTurret(Conditional& condition)
 {
     // ground turret (MG42 nest) OR a vehicle-mounted gun: the jeep .30cal gunner has
@@ -2322,6 +2329,7 @@ Condition<Player> Player::m_conditions[] = {
     {"COOP_COVER_PEEK",                 &Player::CondCoopCoverPeek           }, // HZM coop - take cover: RMB peek-aim active [215]
     {"COOP_SHOULDERAIM",                &Player::CondCoopShoulderAim         }, // HZM coop - 3P shoulder-aim stage live [231]
     {"COOP_COVER_OPENRIGHT",            &Player::CondCoopCoverOpenRight      }, // HZM coop - take cover: opening is on the RIGHT [215]
+    {"COOP_TURRET_LOW",                 &Player::CondCoopTurretLow           }, // HZM coop - the gun he mans is low: crouched pose
     {"COOP_ON_TURRET",                  &Player::CondCoopOnTurret            }, // HZM coop - manning any turret (m_pTurret set) [216]
     {"COOP_BLINDFIRE",                  &Player::CondCoopBlindfire           }, // HZM coop - take cover: blind-fire (covered + fire held) [214]
     {"CHECK_MOVEMENT_SPEED",            &Player::CondCheckMovementSpeed      },

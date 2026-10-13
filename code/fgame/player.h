@@ -589,6 +589,12 @@ public:
     int    m_iCoopCoverSideSent; // last side published to this client (change-only stufftext)
     bool   m_bCoopCoverPeek;     // RMB peek-aim from cover (real aiming, cover held) [215]
     float  m_fCoopVehTurretTime; // level.time stamp while manning a VEHICLE turret (jeep .30cal pose) [219]
+    // HZM coop [2026-10-12, low gun] on a ground turret whose gun is low he crouches behind it: the hull and
+    // the two view heights he had when he took the gun, put back exactly when he leaves it (ExitTurret)
+    bool   m_bCoopTurretLow;
+    float  m_fCoopTurretSaveMaxsZ;
+    int    m_iCoopTurretSaveView;
+    int    m_iCoopTurretSavePsView;
     float  m_fCoopProbeTime;     // GUNNERPROBE diagnostic throttle [221 - REMOVE after bug-309 closes]
     int    m_iCoopSpeedBase;     // SPEEDPROBE: ps.speed before the ADS/weapon mults [222 - REMOVE with probe]
     int    m_iCoopVarCoverLast;  // last coop_incover entity-var value pushed to script (change-gated) [235]
@@ -787,6 +793,7 @@ public:
     qboolean CondCoopCoverPeek(Conditional& condition);      // HZM coop - RMB peek-aim from cover [215]
     qboolean CondCoopShoulderAim(Conditional& condition);    // HZM coop - 3P shoulder-aim stage live [231]
     qboolean CondCoopCoverOpenRight(Conditional& condition); // HZM coop - opening is RIGHT of the wall pose [215]
+    qboolean CondCoopTurretLow(Conditional& condition);       // HZM coop - on a ground turret whose gun is low (crouched manning pose)
     qboolean CondCoopOnTurret(Conditional& condition);        // HZM coop - raw m_pTurret check (manning pose; vanilla edges need !HAS_WEAPON) [216]
     qboolean CondCoopBlindfire(Conditional& condition); // HZM coop - covered + fire held -> blind-fire states
 

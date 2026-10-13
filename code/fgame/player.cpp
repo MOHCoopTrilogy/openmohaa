@@ -2476,6 +2476,10 @@ Player::Player()
     m_iCoopCoverSideSent  = -99;   // impossible value: forces one send on first evaluation
     m_bCoopCoverPeek   = false;    // HZM coop - RMB peek-aim from cover [215]
     m_fCoopVehTurretTime = -10.0f; // HZM coop - vehicle-turret manning stamp [219]
+    m_bCoopTurretLow        = false; // HZM coop [low gun]
+    m_fCoopTurretSaveMaxsZ  = 94.0f;
+    m_iCoopTurretSaveView   = DEFAULT_VIEWHEIGHT;
+    m_iCoopTurretSavePsView = DEFAULT_VIEWHEIGHT;
     m_fCoopProbeTime   = -10.0f;   // HZM coop - GUNNERPROBE throttle [221]
     m_pCoopBotTarget   = NULL;     // HZM coop - bot combat drive (dev/test, coop_botInput) target cache
     m_iCoopBotRetarget = 0;        // HZM coop - bot combat drive next-rescan stamp
@@ -10104,6 +10108,33 @@ void Player::EnterTurret(TurretGun *ent)
     } else {
         // standard turret
         setMoveType(MOVETYPE_TURRET);
+
+        // HZM coop [2026-10-12, low gun] A gun low enough that an AI gunner would crouch at it (the .30 cal a
+        // paratrooper leaves on a sandbag rest is 40 u up): the player crouches behind it instead of standing
+        // over it - the crouched hull and view height here, the crouched manning clips from the legs state
+        // (COOP_TURRET_LOW), and the AI's crouched seat from TurretGun::P_ThinkActive. Nothing recomputes the
+        // hull on a turret (TurretMove runs no pmove), so what he had is kept and put back in ExitTurret.
+        // Coop missions only, ground turrets only; coop_turretCrouch 0 switches it off.
+        {
+            static cvar_t *pOn = NULL;
+            if (!pOn) { pOn = gi.Cvar_Get("coop_turretCrouch", "1", 0); }
+            m_bCoopTurretLow = false;
+            if (pOn->integer && G_CoopFeedSession() && !ent->IsSubclassOfVehicleTurretGun() && ent->CoopUserLow(this)) {
+                m_bCoopTurretLow        = true;
+                m_fCoopTurretSaveMaxsZ  = maxs.z;
+                m_iCoopTurretSaveView   = viewheight;
+                m_iCoopTurretSavePsView = client->ps.viewheight;
+                setSize(mins, Vector(maxs.x, maxs.y, 54.0f));
+                viewheight            = CROUCH_VIEWHEIGHT;
+                client->ps.viewheight = CROUCH_VIEWHEIGHT;
+            }
+            // developer 1: what was decided, for the harness
+            gi.DPrintf(
+                "^~^~^ TURRETSEAT enter low=%d crouch=%.2f gunz=%.1f feetz=%.1f maxsz=%.0f view=%d psview=%d\n",
+                m_bCoopTurretLow ? 1 : 0, ent->CoopUserCrouch(), ent->origin[2], origin[2], maxs.z, (int)viewheight,
+                (int)client->ps.viewheight
+            );
+        }
     }
 
     SafeHolster(true);
@@ -10130,6 +10161,17 @@ void Player::ExitTurret(void)
         StopPartAnimating(torso);
         SetPartAnim("mg42tripod_aim_straight_straight");
     }
+
+    // HZM coop [2026-10-12, low gun] off a low gun by any road (Use, killed, the gun removed under him - all of
+    // them come through here): the hull and the view heights he had when he took it
+    if (m_bCoopTurretLow) {
+        m_bCoopTurretLow = false;
+        setSize(mins, Vector(maxs.x, maxs.y, m_fCoopTurretSaveMaxsZ));
+        viewheight            = m_iCoopTurretSaveView;
+        client->ps.viewheight = m_iCoopTurretSavePsView;
+    }
+    gi.DPrintf("^~^~^ TURRETSEAT exit maxsz=%.0f view=%d psview=%d dead=%d\n", maxs.z, (int)viewheight,
+               (int)client->ps.viewheight, (int)deadflag);
 
     flags &= ~FL_PARTIAL_IMMOBILE;
     setMoveType(MOVETYPE_WALK);

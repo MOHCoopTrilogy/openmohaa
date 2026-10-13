@@ -119,6 +119,7 @@ protected:
     float             m_fCoopCoolRate;
     float             m_fCoopLockTime;
     float             m_fCoopHotRate;
+    float             m_fCoopUserCrouch; // [low gun] the AI crouch weight of the player's seat, set per mount
     bool              m_bCoopRest;
     float             m_fCoopRestPitch;
     bool              m_bAiBurstAuto;  // HZM coop - this turret's burst cadence is auto-rolled for an AI gunner
@@ -222,6 +223,8 @@ public:
     void EventCoopRestPitch(Event *ev);
     void CoopShoot(Event *ev);
     void CoopDryPull();
+    bool CoopUserLow(Entity *pUser);   // [low gun] would an AI gunner crouch at this gun?
+    float CoopUserCrouch() const { return m_fCoopUserCrouch; }
     bool CoopThinkRest();
     void EventMaxIdlePitch(Event *ev); // added in 2.0
     void EventMaxIdleYaw(Event *ev);   // added in 2.0

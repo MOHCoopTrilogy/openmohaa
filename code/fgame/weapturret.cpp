@@ -526,13 +526,23 @@ void TurretGun::CoopShoot(Event *ev)
 }
 
 /*
-The trigger on an empty belt, once per pull: the click, and the line. A gun nothing refills says so in
-the event feed ("Belt empty", the gunner's own line; a cgame without the feed, or Hardcore, gets it as
-the centre print it was); any other belted gun keeps its "resupply from an ammo box" line.
+The trigger on an empty belt. Once per pull: the click (a gun that has one), and for a gun nothing
+refills the line "Belt empty" in the event feed (the gunner's own line; a cgame without the feed, or
+Hardcore, gets it as a centre print). Any other belted gun keeps its "resupply from an ammo box"
+centre print.
 */
 void TurretGun::CoopDryPull()
 {
-    Player *pOwner;
+    Player *pOwner = NULL;
+
+    if (owner && owner->IsSubclassOfPlayer()) {
+        pOwner = static_cast<Player *>(owner.Pointer());
+    }
+    // a gun the ammo box refills keeps its line as it always was: the centre print, sent again on
+    // every frame the trigger is held, so it stays up for as long as he holds it (bug-1825)
+    if (pOwner && !m_bCoopNoResupply) {
+        gi.centerprintf(pOwner->edict, "BELT EMPTY - resupply from an ammo box");
+    }
 
     if (m_bCoopDryLatch) {
         return;
@@ -542,13 +552,7 @@ void TurretGun::CoopDryPull()
     if (m_sCoopDrySound.length()) {
         Sound(m_sCoopDrySound, CHAN_WEAPON);
     }
-    if (!owner || !owner->IsSubclassOfPlayer()) {
-        return;
-    }
-    pOwner = static_cast<Player *>(owner.Pointer());
-    if (!m_bCoopNoResupply) {
-        gi.centerprintf(pOwner->edict, "BELT EMPTY - resupply from an ammo box");
-    } else if (!G_CoopFeedPrint(pOwner->edict - g_entities, 2, "mgbelt", "Belt empty", true)) {
+    if (pOwner && m_bCoopNoResupply && !G_CoopFeedPrint(pOwner->edict - g_entities, 2, "mgbelt", "Belt empty", true)) {
         gi.centerprintf(pOwner->edict, "Belt empty");
     }
 }
@@ -560,6 +564,44 @@ gun standing on a bipod on a sandbag 40 u up, where the butt swings through to t
 barrel is left pointing at the sky. Eased from either side: fast while far, never under 12 degrees a
 second, so it arrives. Returns true when it has dealt with this frame.
 */
+/*
+HZM coop [2026-10-12, low gun] Is the gun low for the man behind it? The AI's own test: Actor::
+ThinkHoldGun_TurretGun gives a gunner whose feet are h under the gun the crouch weight (71.8 - h) /
+33.1 and crouches him at 0.5 and over - a gun under 55.25 u. The player's feet are on the ground he
+is held on (P_ThinkActive: m_fUserDistance behind the gun). The weight is kept for his seat.
+*/
+bool TurretGun::CoopUserLow(Entity *pUser)
+{
+    Vector  vForward, vPos, vEnd, vMins, vMaxs;
+    trace_t trace;
+
+    m_fCoopUserCrouch = 0.0f;
+    if (!pUser) {
+        return false;
+    }
+    Vector(0, angles[1], 0).AngleVectorsLeft(&vForward);
+    vPos    = origin - vForward * m_fUserDistance;
+    vEnd    = vPos;
+    vEnd[2] -= 80.0f;
+    vMins    = pUser->mins;
+    vMaxs    = pUser->maxs;
+    vMaxs[2] = pUser->mins[2] + 4.0f;
+
+    trace = G_Trace(vPos, vMins, vMaxs, vEnd, pUser, MASK_PLAYERSOLID, qtrue, "TurretGun::CoopUserLow");
+    if (trace.allsolid || trace.startsolid || trace.fraction == 1.0f) {
+        return false;
+    }
+    m_fCoopUserCrouch = (71.8f - (origin[2] - trace.endpos[2])) / 33.1f;
+    if (m_fCoopUserCrouch > 1.0f) {
+        m_fCoopUserCrouch = 1.0f;
+    }
+    if (m_fCoopUserCrouch < 0.5f) {
+        m_fCoopUserCrouch = 0.0f;
+        return false;
+    }
+    return true;
+}
+
 bool TurretGun::CoopThinkRest()
 {
     float fDiff, fStep;
@@ -657,6 +699,7 @@ TurretGun::TurretGun()
     m_fCoopLockTime   = 2.0f;
     m_fCoopHotRate    = 125.0f;
     m_bCoopRest       = false;
+    m_fCoopUserCrouch = 0.0f;
     m_fCoopRestPitch  = 0.0f;
 
     if (LoadingSavegame) {
@@ -1129,11 +1172,12 @@ void TurretGun::P_ThinkActive(void)
     // [2026-10-12, left gun] The five rates are per gun (coopheatrates); the defaults are the
     // numbers that stood here: 50 heat, 8 bleed, 25 cool, 2 s lock, 125 hot.
     //
-    // A gun with a dry sound, or one nothing refills, takes the trigger on an empty belt here: one
-    // click and one line per pull, and the gun is simply not firing - so the barrel cools instead
-    // of heating to a cook-off with no round in it. Any other belted gun runs the branches below
-    // exactly as before.
-    if (m_iCoopAmmo == 0 && m_iFiring != TURRETFIRESTATE_NONE && (m_bCoopNoResupply || m_sCoopDrySound.length())) {
+    // [bug-3639] The trigger on an EMPTY belt is taken here, before the heat branches, for every
+    // belted gun: the gun is simply not firing, so the barrel cools. It used to be tested inside
+    // the firing branches, after the frame's heat had been added - and P_UserAim raises m_iFiring
+    // again on every command while the button is down - so a held trigger heated an empty MG42 to
+    // a cook-off (measured: heat 98.75 with the belt at 0). CoopDryPull gives the line and the click.
+    if (m_iCoopAmmo == 0 && m_iFiring != TURRETFIRESTATE_NONE) {
         CoopDryPull();
         m_iFiring = TURRETFIRESTATE_NONE;
     }
@@ -1152,19 +1196,12 @@ void TurretGun::P_ThinkActive(void)
         m_fHeat += m_fCoopHotRate * level.frametime;
 
         if (ReadyToFire(FIRE_PRIMARY)) {
-            // [HZM coop bug-1825] finite belt. -1 keeps the retail unlimited behaviour.
-            if (m_iCoopAmmo == 0) {
-                m_iFiring = TURRETFIRESTATE_NONE;
-                if (owner && owner->IsSubclassOfPlayer()) {
-                    Player *pOwner = static_cast<Player *>(owner.Pointer());
-                    gi.centerprintf(pOwner->edict, "BELT EMPTY - resupply from an ammo box");
-                }
-            } else {
-                Fire(FIRE_PRIMARY);
-                m_fCurrViewJitter = m_fViewJitter;
-                if (m_iCoopAmmo > 0) {
-                    m_iCoopAmmo--;
-                }
+            // [HZM coop bug-1825] finite belt. -1 keeps the retail unlimited behaviour. (An empty
+            // belt never gets here: bug-3639, above.)
+            Fire(FIRE_PRIMARY);
+            m_fCurrViewJitter = m_fViewJitter;
+            if (m_iCoopAmmo > 0) {
+                m_iCoopAmmo--;
             }
         }
 
@@ -1186,19 +1223,12 @@ void TurretGun::P_ThinkActive(void)
         m_fHeat += m_fCoopHeatRate * level.frametime; // MG42: ~2.0s of sustained fire to reach full (overheats readily)
 
         if (ReadyToFire(FIRE_PRIMARY)) {
-            // [HZM coop bug-1825] finite belt. -1 keeps the retail unlimited behaviour.
-            if (m_iCoopAmmo == 0) {
-                m_iFiring = TURRETFIRESTATE_NONE;
-                if (owner && owner->IsSubclassOfPlayer()) {
-                    Player *pOwner = static_cast<Player *>(owner.Pointer());
-                    gi.centerprintf(pOwner->edict, "BELT EMPTY - resupply from an ammo box");
-                }
-            } else {
-                Fire(FIRE_PRIMARY);
-                m_fCurrViewJitter = m_fViewJitter;
-                if (m_iCoopAmmo > 0) {
-                    m_iCoopAmmo--;
-                }
+            // [HZM coop bug-1825] finite belt. -1 keeps the retail unlimited behaviour. (An empty
+            // belt never gets here: bug-3639, above.)
+            Fire(FIRE_PRIMARY);
+            m_fCurrViewJitter = m_fViewJitter;
+            if (m_iCoopAmmo > 0) {
+                m_iCoopAmmo--;
             }
         }
 
@@ -1294,6 +1324,16 @@ void TurretGun::P_ThinkActive(void)
     Vector(0, angles[1], 0).AngleVectorsLeft(&vForward);
 
     vPos = origin - vForward * m_fUserDistance;
+    // HZM coop [2026-10-12, low gun] crouched behind a low gun he is held on the AI gunner's crouched seat
+    // (Actor::ThinkHoldGun_TurretGun: 62.4 - 3.0 w back, 10.3 - 1.6 w to the left, for 64 u of user
+    // distance), which is where the crouched clips put the hands on the gun. Standing: as it was.
+    if (player->m_bCoopTurretLow) {
+        Vector vLeft;
+
+        Vector(0, angles[1], 0).AngleVectorsLeft(NULL, &vLeft);
+        vPos = origin - vForward * (m_fUserDistance - 1.6f - 3.0f * m_fCoopUserCrouch)
+             + vLeft * (10.3f - 1.6f * m_fCoopUserCrouch);
+    }
     vPos[2] -= 16.0f;
 
     vEnd = vPos;
