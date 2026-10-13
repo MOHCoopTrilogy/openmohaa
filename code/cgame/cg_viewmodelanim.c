@@ -769,7 +769,32 @@ void CG_ViewModelAnimation(refEntity_t *pModel)
         s_coopSlotAim[cgi.anim->g_iCurrentVMAnimSlot]                  = 1; // idle
     }
 
-    if (cg.snap->ps.iViewModelAnimChanged != cgi.anim->g_iLastVMAnimChanged) {
+    // HZM coop [heavy lane 2026-10-13] LONG RELOAD ROWS (apply_reloadfinish.py): the torso leaves its reload state
+    // (FG 42: 2.33 s) and the server sends idle / charge while the weapon's own `reload` row still holds
+    // WEAPON_RELOADING (3.0 s). A hands row that opted in (`coopr_*`, `fg42_reload*`) and has time left is played
+    // to its end before that idle / charge is taken; any other change replaces it at once. Display only.
+    qboolean bCoopHoldReload = qfalse;
+    {
+        static cvar_t *pFinish = NULL;
+        if (!pFinish) {
+            pFinish = cgi.Cvar_Get("coop_vmReloadFinish", "1", 0);
+        }
+        if (pFinish->integer && !bWeaponChanged && cg.snap->ps.iViewModelAnimChanged != cgi.anim->g_iLastVMAnimChanged
+            && cgi.anim->g_iLastVMAnim == VM_ANIM_RELOAD
+            && (cg.snap->ps.iViewModelAnim == VM_ANIM_IDLE || cg.snap->ps.iViewModelAnim == VM_ANIM_CHARGE)) {
+            int iSlot = cgi.anim->g_iCurrentVMAnimSlot;
+            int iRow  = cgi.anim->g_VMFrameInfo[iSlot].index;
+            if (iRow >= 0 && cgi.anim->g_VMFrameInfo[iSlot].weight > 0.0f) {
+                const char *pszRow = cgi.Anim_NameForNum(pTiki, iRow);
+                float       fLeft  = cgi.Anim_Time(pTiki, iRow) - cgi.anim->g_VMFrameInfo[iSlot].time;
+                if (pszRow && (!Q_stricmpn(pszRow, "coopr_", 6) || !Q_stricmpn(pszRow, "fg42_reload", 11))
+                    && fLeft > 0.05f && fLeft < 1.5f) {
+                    bCoopHoldReload = qtrue;
+                }
+            }
+        }
+    }
+    if (!bCoopHoldReload && cg.snap->ps.iViewModelAnimChanged != cgi.anim->g_iLastVMAnimChanged) {
         s_coopReloadBreak = (cg.snap->ps.iViewModelAnim == VM_ANIM_RELOAD_END
                              && ((cg.snap->ps.iViewModelAnimChanged - cgi.anim->g_iLastVMAnimChanged) & 3) == 2
                              && (cgi.anim->g_iLastVMAnim == VM_ANIM_RELOAD || cgi.anim->g_iLastVMAnim == VM_ANIM_RELOAD_SINGLE))
