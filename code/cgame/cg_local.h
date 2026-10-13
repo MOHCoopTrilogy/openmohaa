@@ -671,6 +671,7 @@ const adsGunTune_t *CG_FindAdsTune(const char *wpn);
     void  CG_AddLightShow();
     qboolean CG_FrustumCullSphere(const vec3_t vPos, float fRadius);
     void  CG_OffsetFirstPersonView(refEntity_t *pREnt, qboolean bUseWorldPosition);
+    qboolean CG_VMAimedCycleActive(void); // HZM coop - the client-only aimed per-shot cycle clip is playing
     qboolean CG_AimingDownSights(void); // HZM coop - RMB-held iron-sight ADS gate (zoom + 3rd->1st person)
     qboolean CG_CoopHardcoreActive(void); // HZM coop - Hardcore host rule active (serverinfo g_coopHardcore + coop session)
     void  CG_DrawCoopBleed(void); // HZM coop [user 2026-10-05] bleed-out ring + teammate medic icons (cg_coopbleed.c)
@@ -688,6 +689,8 @@ const adsGunTune_t *CG_FindAdsTune(const char *wpn);
     float    CG_VMAimWeight(void); // HZM coop [weaponview 2026-10-04] displayed weight of aim-pose view clips (0..1)
     float    CG_VMCurWeight(void); // HZM coop [weaponview 2026-10-04] displayed weight of the newest view clip
     qboolean CG_VMAdsTagRight(void); // HZM coop [adsbolt] an _ads clip leads: keep the view weapon on tag_weapon_right
+    qboolean CG_VMAdsBoltSolo(void); // HZM coop [ads rifles] an aimed bolt clip alone on screen: both tags hold the gun
+    qboolean CG_VMAdsBoltClip(void); // HZM coop [ads rifles] the view model's newest clip is an aimed bolt clip
     qboolean CG_VMAmmoPropEarly(dtiki_t *tiki); // HZM coop [adsprop] ammo prop attached before the reload clip leads
     extern int g_iCoopVmTagSnap;     // HZM coop [adsbolt] cg.time of an ADS-release swap to the hip clip
     qboolean CG_AdsSightSameMesh(const char *a, const char *b); // HZM coop [adsbolt] same iron-sight geometry
@@ -700,6 +703,7 @@ const adsGunTune_t *CG_FindAdsTune(const char *wpn);
     void  CG_FeelStressAdvance(void); // HZM coop - advance the shared feel-context scalar; once per frame, before consumers
     float CoopWFeelStress(void);      // HZM coop - 0 = calm, 1 = maximally rattled. THE stress input; do not add a second one
     float CG_GetSuppression(void);    // HZM coop - under-fire intensity 0..1 (one frame stale before CG_CalcFov)
+    qboolean CG_CoopReloadFromEmpty(void); // HZM coop [heavy lane] the reload in progress started on an empty gun
     float CG_CoopBrace(void);         // HZM coop - 0..1 gun-brace envelope (mirrored from the server)
     qboolean CG_CoopBraceAvail(void); // HZM coop - a mount is offered (prompt only, never effects)
     float CG_CoopBraceKick(void);     // HZM coop - mount-settle impulse 1..0

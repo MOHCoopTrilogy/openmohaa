@@ -54,6 +54,18 @@ static const adsSight_t s_adsSights[] = {
     {"models/weapons/colt45_guancolt.tik", "Colt 45 (Guanshire)", {10.4327f, -0.7252f, -3.4478f}, {0.5056f, -0.7574f, -3.1925f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 0.000f}, // colt_45
     {"models/weapons/colt45_lv_ttcolt.tik", "Colt 45 (Team Tactics)", {10.4327f, -0.7252f, -3.4478f}, {0.5056f, -0.7574f, -3.1925f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 0.000f}, // colt_45
     {"models/weapons/colt_silenced.tik", "Silenced Colt .45", {21.4745f, -0.5994f, -3.3279f}, {0.7817f, -0.6896f, -3.4430f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 0.000f}, // silenced_colt_45
+    {"models/weapons/coop_g43_irons.tik", "G 43 Irons", {41.9500f, -1.1565f, -4.3880f}, {12.0845f, -1.1565f, -5.3300f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 17.000f}, // g43_irons
+    {"models/weapons/coop_g43_irons_bloody.tik", "G 43 Irons (Bloody)", {41.9500f, -1.1565f, -4.3880f}, {12.0845f, -1.1565f, -5.3300f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 17.000f}, // g43_irons
+    {"models/weapons/coop_g43_irons_blued.tik", "G 43 Irons (Blued)", {41.9500f, -1.1565f, -4.3880f}, {12.0845f, -1.1565f, -5.3300f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 17.000f}, // g43_irons
+    {"models/weapons/coop_g43_irons_camo_desert.tik", "G 43 Irons (Desert)", {41.9500f, -1.1565f, -4.3880f}, {12.0845f, -1.1565f, -5.3300f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 17.000f}, // g43_irons
+    {"models/weapons/coop_g43_irons_camo_winter.tik", "G 43 Irons (Winter)", {41.9500f, -1.1565f, -4.3880f}, {12.0845f, -1.1565f, -5.3300f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 17.000f}, // g43_irons
+    {"models/weapons/coop_g43_irons_camo_woodland.tik", "G 43 Irons (Woodland)", {41.9500f, -1.1565f, -4.3880f}, {12.0845f, -1.1565f, -5.3300f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 17.000f}, // g43_irons
+    {"models/weapons/coop_g43_irons_chrome.tik", "G 43 Irons (Chrome)", {41.9500f, -1.1565f, -4.3880f}, {12.0845f, -1.1565f, -5.3300f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 17.000f}, // g43_irons
+    {"models/weapons/coop_g43_irons_dhg43fleck.tik", "G 43 Irons (Flecktarn)", {41.9500f, -1.1565f, -4.3880f}, {12.0845f, -1.1565f, -5.3300f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 17.000f}, // g43_irons
+    {"models/weapons/coop_g43_irons_gold.tik", "G 43 Irons (Gold)", {41.9500f, -1.1565f, -4.3880f}, {12.0845f, -1.1565f, -5.3300f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 17.000f}, // g43_irons
+    {"models/weapons/coop_g43_irons_hobbsg43urb.tik", "G 43 Irons (Urban Camo)", {41.9500f, -1.1565f, -4.3880f}, {12.0845f, -1.1565f, -5.3300f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 17.000f}, // g43_irons
+    {"models/weapons/coop_g43_irons_hobbsg43wood.tik", "G 43 Irons (Woodland Camo)", {41.9500f, -1.1565f, -4.3880f}, {12.0845f, -1.1565f, -5.3300f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 17.000f}, // g43_irons
+    {"models/weapons/coop_g43_irons_lv_ttg43.tik", "G 43 Irons (Team Tactics)", {41.9500f, -1.1565f, -4.3880f}, {12.0845f, -1.1565f, -5.3300f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 17.000f}, // g43_irons
     {"models/weapons/dbno_pistol.tik", "Colt 45", {10.4327f, -0.7252f, -3.4478f}, {0.5056f, -0.7574f, -3.1925f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 0.000f}, // colt_45
     {"models/weapons/dbno_pistol_bloody.tik", "Colt 45 (Bloody)", {10.4327f, -0.7252f, -3.4478f}, {0.5056f, -0.7574f, -3.1925f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 0.000f}, // colt_45
     {"models/weapons/dbno_pistol_blued.tik", "Colt 45 (Blued)", {10.4327f, -0.7252f, -3.4478f}, {0.5056f, -0.7574f, -3.1925f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 0.000f}, // colt_45
@@ -243,7 +255,7 @@ static const adsSight_t s_adsSights[] = {
     {"models/weapons/mp40_lv_mp75.tik", "MP40 (MP 75 Ausf D)", {28.4260f, -0.8863f, -5.8894f}, {6.9961f, -0.8850f, -5.8909f}, 0.016000f, {0.000f, 0.000f, -1.000f}, 0.000f}, // mp40
     {"models/weapons/mp40_mp18.tik", "MP40 (MP18)", {25.7280f, -2.2582f, -4.6120f}, {1.9786f, -2.3928f, -5.6721f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 0.000f}, // mp40_mp18
     {"models/weapons/mp40_mp40r2.tik", "MP40 (Reactivated)", {28.1970f, -0.9201f, -6.0070f}, {6.9434f, -1.1789f, -6.0653f}, 0.000000f, {0.012f, -0.000f, -1.000f}, 0.000f}, // mp40_reactivated
-    {"models/weapons/mp40silenced.tik", "Silenced MP40", {28.2630f, -1.0820f, -5.5754f}, {6.7486f, -0.9251f, -5.8910f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 0.000f}, // silenced_mp40
+    {"models/weapons/mp40silenced.tik", "Silenced MP40", {28.2630f, -1.0820f, -6.0254f}, {6.7486f, -0.9251f, -6.3410f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 0.000f}, // silenced_mp40
     {"models/weapons/mp44.tik", "StG 44", {28.9093f, -0.8875f, -7.0093f}, {6.5820f, -0.8896f, -7.5520f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 0.000f}, // stg44
     {"models/weapons/mp44_bloody.tik", "StG 44 (Bloody)", {28.9093f, -0.8875f, -7.0093f}, {6.5820f, -0.8896f, -7.5520f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 0.000f}, // stg44
     {"models/weapons/mp44_blued.tik", "StG 44 (Blued)", {28.9093f, -0.8875f, -7.0093f}, {6.5820f, -0.8896f, -7.5520f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 0.000f}, // stg44
@@ -296,20 +308,20 @@ static const adsSight_t s_adsSights[] = {
     {"models/weapons/ppsh_smg_camo_woodland.tik", "PPSH SMG (Woodland)", {20.3483f, 0.2231f, -5.8540f}, {2.7031f, 0.2195f, -5.5750f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 0.000f}, // ppsh_smg
     {"models/weapons/ppsh_smg_chrome.tik", "PPSH SMG (Chrome)", {20.3483f, 0.2231f, -5.8540f}, {2.7031f, 0.2195f, -5.5750f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 0.000f}, // ppsh_smg
     {"models/weapons/ppsh_smg_gold.tik", "PPSH SMG (Gold)", {20.3483f, 0.2231f, -5.8540f}, {2.7031f, 0.2195f, -5.5750f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 0.000f}, // ppsh_smg
-    {"models/weapons/shotgun.tik", "Shotgun", {30.7989f, -1.3824f, -4.7204f}, {6.5813f, -1.4207f, -4.0041f}, 0.004000f, {-0.043f, -0.139f, -0.989f}, 0.000f}, // shotgun
-    {"models/weapons/shotgun_authwinch.tik", "Shotgun (Authentic Wood)", {30.7989f, -1.3824f, -4.7204f}, {6.5813f, -1.4207f, -4.0041f}, 0.004000f, {-0.043f, -0.139f, -0.989f}, 0.000f}, // shotgun
-    {"models/weapons/shotgun_bloody.tik", "Shotgun (Bloody)", {30.7989f, -1.3824f, -4.7204f}, {6.5813f, -1.4207f, -4.0041f}, 0.004000f, {-0.043f, -0.139f, -0.989f}, 0.000f}, // shotgun
-    {"models/weapons/shotgun_blued.tik", "Shotgun (Blued)", {30.7989f, -1.3824f, -4.7204f}, {6.5813f, -1.4207f, -4.0041f}, 0.004000f, {-0.043f, -0.139f, -0.989f}, 0.000f}, // shotgun
-    {"models/weapons/shotgun_camo_desert.tik", "Shotgun (Desert)", {30.7989f, -1.3824f, -4.7204f}, {6.5813f, -1.4207f, -4.0041f}, 0.004000f, {-0.043f, -0.139f, -0.989f}, 0.000f}, // shotgun
-    {"models/weapons/shotgun_camo_winter.tik", "Shotgun (Winter)", {30.7989f, -1.3824f, -4.7204f}, {6.5813f, -1.4207f, -4.0041f}, 0.004000f, {-0.043f, -0.139f, -0.989f}, 0.000f}, // shotgun
-    {"models/weapons/shotgun_camo_woodland.tik", "Shotgun (Woodland)", {30.7989f, -1.3824f, -4.7204f}, {6.5813f, -1.4207f, -4.0041f}, 0.004000f, {-0.043f, -0.139f, -0.989f}, 0.000f}, // shotgun
-    {"models/weapons/shotgun_chrome.tik", "Shotgun (Chrome)", {30.7989f, -1.3824f, -4.7204f}, {6.5813f, -1.4207f, -4.0041f}, 0.004000f, {-0.043f, -0.139f, -0.989f}, 0.000f}, // shotgun
-    {"models/weapons/shotgun_dhshotblack.tik", "Shotgun (Black Tactical)", {30.7989f, -1.3824f, -4.7204f}, {6.5813f, -1.4207f, -4.0041f}, 0.004000f, {-0.043f, -0.139f, -0.989f}, 0.000f}, // shotgun
-    {"models/weapons/shotgun_dhshotchrome.tik", "Shotgun (Chrome Tactical)", {30.7989f, -1.3824f, -4.7204f}, {6.5813f, -1.4207f, -4.0041f}, 0.004000f, {-0.043f, -0.139f, -0.989f}, 0.000f}, // shotgun
-    {"models/weapons/shotgun_gold.tik", "Shotgun (Gold)", {30.7989f, -1.3824f, -4.7204f}, {6.5813f, -1.4207f, -4.0041f}, 0.004000f, {-0.043f, -0.139f, -0.989f}, 0.000f}, // shotgun
-    {"models/weapons/shotgun_guanshotty.tik", "Shotgun (Guanshire)", {30.7989f, -1.3824f, -4.7204f}, {6.5813f, -1.4207f, -4.0041f}, 0.004000f, {-0.043f, -0.139f, -0.989f}, 0.000f}, // shotgun
-    {"models/weapons/shotgun_hobbsshotty.tik", "Shotgun (Recoil)", {30.7989f, -1.3824f, -4.7204f}, {6.5813f, -1.4207f, -4.0041f}, 0.004000f, {-0.043f, -0.139f, -0.989f}, 0.000f}, // shotgun
-    {"models/weapons/shotgun_lv_ttshotgun.tik", "Shotgun (Team Tactics)", {30.7989f, -1.3824f, -4.7204f}, {6.5813f, -1.4207f, -4.0041f}, 0.004000f, {-0.043f, -0.139f, -0.989f}, 0.000f}, // shotgun
+    {"models/weapons/shotgun.tik", "Shotgun", {30.7989f, -1.3824f, -4.7204f}, {6.5813f, -1.4207f, -4.0041f}, 0.030000f, {-0.043f, -0.139f, -0.989f}, 14.110f}, // shotgun
+    {"models/weapons/shotgun_authwinch.tik", "Shotgun (Authentic Wood)", {30.7989f, -1.3824f, -4.7204f}, {6.5813f, -1.4207f, -4.0041f}, 0.030000f, {-0.043f, -0.139f, -0.989f}, 14.110f}, // shotgun
+    {"models/weapons/shotgun_bloody.tik", "Shotgun (Bloody)", {30.7989f, -1.3824f, -4.7204f}, {6.5813f, -1.4207f, -4.0041f}, 0.030000f, {-0.043f, -0.139f, -0.989f}, 14.110f}, // shotgun
+    {"models/weapons/shotgun_blued.tik", "Shotgun (Blued)", {30.7989f, -1.3824f, -4.7204f}, {6.5813f, -1.4207f, -4.0041f}, 0.030000f, {-0.043f, -0.139f, -0.989f}, 14.110f}, // shotgun
+    {"models/weapons/shotgun_camo_desert.tik", "Shotgun (Desert)", {30.7989f, -1.3824f, -4.7204f}, {6.5813f, -1.4207f, -4.0041f}, 0.030000f, {-0.043f, -0.139f, -0.989f}, 14.110f}, // shotgun
+    {"models/weapons/shotgun_camo_winter.tik", "Shotgun (Winter)", {30.7989f, -1.3824f, -4.7204f}, {6.5813f, -1.4207f, -4.0041f}, 0.030000f, {-0.043f, -0.139f, -0.989f}, 14.110f}, // shotgun
+    {"models/weapons/shotgun_camo_woodland.tik", "Shotgun (Woodland)", {30.7989f, -1.3824f, -4.7204f}, {6.5813f, -1.4207f, -4.0041f}, 0.030000f, {-0.043f, -0.139f, -0.989f}, 14.110f}, // shotgun
+    {"models/weapons/shotgun_chrome.tik", "Shotgun (Chrome)", {30.7989f, -1.3824f, -4.7204f}, {6.5813f, -1.4207f, -4.0041f}, 0.030000f, {-0.043f, -0.139f, -0.989f}, 14.110f}, // shotgun
+    {"models/weapons/shotgun_dhshotblack.tik", "Shotgun (Black Tactical)", {30.7989f, -1.3824f, -4.7204f}, {6.5813f, -1.4207f, -4.0041f}, 0.030000f, {-0.043f, -0.139f, -0.989f}, 14.110f}, // shotgun
+    {"models/weapons/shotgun_dhshotchrome.tik", "Shotgun (Chrome Tactical)", {30.7989f, -1.3824f, -4.7204f}, {6.5813f, -1.4207f, -4.0041f}, 0.030000f, {-0.043f, -0.139f, -0.989f}, 14.110f}, // shotgun
+    {"models/weapons/shotgun_gold.tik", "Shotgun (Gold)", {30.7989f, -1.3824f, -4.7204f}, {6.5813f, -1.4207f, -4.0041f}, 0.030000f, {-0.043f, -0.139f, -0.989f}, 14.110f}, // shotgun
+    {"models/weapons/shotgun_guanshotty.tik", "Shotgun (Guanshire)", {30.7989f, -1.3824f, -4.7204f}, {6.5813f, -1.4207f, -4.0041f}, 0.030000f, {-0.043f, -0.139f, -0.989f}, 14.110f}, // shotgun
+    {"models/weapons/shotgun_hobbsshotty.tik", "Shotgun (Recoil)", {30.7989f, -1.3824f, -4.7204f}, {6.5813f, -1.4207f, -4.0041f}, 0.030000f, {-0.043f, -0.139f, -0.989f}, 14.110f}, // shotgun
+    {"models/weapons/shotgun_lv_ttshotgun.tik", "Shotgun (Team Tactics)", {30.7989f, -1.3824f, -4.7204f}, {6.5813f, -1.4207f, -4.0041f}, 0.030000f, {-0.043f, -0.139f, -0.989f}, 14.110f}, // shotgun
     {"models/weapons/coop_dbshotgun.tik", "Shotgun (Double Barrel)", {21.5216f, -1.0500f, -5.3041f}, {4.7933f, -1.0500f, -5.0074f}, 0.131000f, {0.000f, 0.000f, -1.000f}, 11.000f}, // coop_dbshotgun
     {"models/weapons/silencedpistol.tik", "Hi-Standard Silenced", {23.1712f, -0.4575f, -3.2698f}, {0.5516f, -0.4621f, -3.3157f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 0.000f}, // hi_standard_silenced
     {"models/weapons/silencedpistol_bloody.tik", "Hi-Standard Silenced (Bloody)", {23.1712f, -0.4575f, -3.2698f}, {0.5516f, -0.4621f, -3.3157f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 0.000f}, // hi_standard_silenced
