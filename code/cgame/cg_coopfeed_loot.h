@@ -43,6 +43,7 @@
     {"S&W M10 .38", "w_swm1038", "M10", 0.457f, 0.590f},
     {"SVT 40", "w_svt40", "SVT-40", 0.969f, 0.391f},
     {"Shotgun", "w_shotgun", "Shotgun", 0.902f, 0.438f},
+    {"Shotgun (Double Barrel)", "w_dbshotgun", "Double Barrel", 0.801f, 0.469f}, // HZM coop [dbshotgun]: full-name row (cg_coopfeed.c tries the full name first)
     {"Silenced Beretta", "w_silencedberetta", "Beretta", 0.613f, 0.504f},
     {"Silenced Colt .45", "w_silencedcolt45", "Colt .45", 0.602f, 0.473f},
     {"Silenced Grease Gun", "w_silencedgreasegun", "Grease Gun", 0.852f, 0.707f},

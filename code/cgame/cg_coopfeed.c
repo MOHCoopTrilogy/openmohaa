@@ -1675,11 +1675,19 @@ void CG_DrawCoopLoot(void)
             artIdx = -1;
             artCls = (cls >= 0 && cls <= 2) ? cls : 0;
             Q_strncpyz(artName, cs ? cs : "", sizeof(artName));
-            p = strstr(artName, " (");
+            // HZM coop [dbshotgun 2026-10-13] the FULL name first: a gun that is its own weapon although its name
+            // carries a " (..)" part ("Shotgun (Double Barrel)") has its own picture row
+            for (i = 0; i < LOOT_ART_N; i++) {
+                if (!Q_stricmp(artName, s_lootArt[i].name)) {
+                    artIdx = i;
+                    break;
+                }
+            }
+            p = (artIdx < 0) ? strstr(artName, " (") : NULL;
             if (p) {
                 *p = 0; // "<Base Gun> (<Finish>)" is the same gun
             }
-            for (i = 0; i < LOOT_ART_N; i++) {
+            for (i = 0; i < LOOT_ART_N && artIdx < 0; i++) {
                 if (!Q_stricmp(artName, s_lootArt[i].name)) {
                     artIdx = i;
                     break;
