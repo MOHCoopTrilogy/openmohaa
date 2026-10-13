@@ -723,6 +723,41 @@ static void CoopPerWeaponReloadAnim(dtiki_t *pTiki, const char *suffix, char *an
     }
 }
 
+// HZM coop [heavy lane 2026-10-13, shotgun pump] the aimed per-shot cycle of ONE gun: `coopr_<weapon key>_<suffix>_ads`
+// (suffix "cycle" / "cyclelast"). Found by the exact weapon name, or by its "(Finish)"-stripped base when the held gun
+// is the same mesh as that base gun (a different gun whose name merely ends in "(...)" does not borrow the row).
+static qboolean s_coopCycleWpn  = qfalse; // the running cycle came from a per-weapon row
+static qboolean s_coopCycleLast = qfalse; // ... and it followed the last round
+
+static int CoopPerWeaponCycleRow(dtiki_t *pTiki, const char *suffix)
+{
+    char        anim[MAX_QPATH], ads[MAX_QPATH], base[64], key[64], exact[MAX_QPATH];
+    const char *wpn;
+    int         iAds;
+
+    if (!pTiki || !cg.snap || cg.snap->ps.activeItems[1] < 0) {
+        return -1;
+    }
+    anim[0] = 0;
+    CoopPerWeaponReloadAnim(pTiki, suffix, anim, sizeof(anim));
+    if (!anim[0]) {
+        return -1;
+    }
+    Com_sprintf(ads, sizeof(ads), "%s_ads", anim);
+    iAds = cgi.Anim_NumForName(pTiki, ads);
+    if (iAds == -1) {
+        return -1;
+    }
+    wpn = CG_ConfigString(CS_WEAPONS + cg.snap->ps.activeItems[1]);
+    CoopWeaponKey(wpn, key, sizeof(key));
+    Com_sprintf(exact, sizeof(exact), "coopr_%s_%s", key, suffix);
+    if (cgi.Anim_NumForName(pTiki, exact) == -1 && CoopStripSkinSuffix(wpn, base, sizeof(base))
+        && !CG_AdsSightSameMesh(wpn, base)) {
+        return -1;
+    }
+    return iAds;
+}
+
 void CG_ViewModelAnimation(refEntity_t *pModel)
 {
     int         i;
@@ -825,12 +860,18 @@ void CG_ViewModelAnimation(refEntity_t *pModel)
         if (cgi.anim->g_iLastVMAnim != COOP_VM_ANIM_CYCLE) {
             s_cycEnd = 0;
         }
-        if (iItem == s_cycItem && s_cycClip > 0 && iClip > 0 && iClip < s_cycClip && pCycle->integer
+        if (iItem == s_cycItem && s_cycClip > 0 && iClip >= 0 && iClip < s_cycClip && pCycle->integer
             && cgi.anim->g_iLastVMAnim == VM_ANIM_CHARGE && CG_AimingDownSights()) {
             char szCyc[MAX_QPATH];
             int  iCyc;
-            Com_sprintf(szCyc, sizeof(szCyc), "%s_cycle_ads", AnimPrefixList[iAnimPrefixIndex]);
-            iCyc = cgi.Anim_NumForName(pTiki, szCyc);
+            // [heavy lane, shotgun pump] the gun's own row first (and its last-round row); the prefix row as before
+            iCyc            = CoopPerWeaponCycleRow(pTiki, iClip > 0 ? "cycle" : "cyclelast");
+            s_coopCycleWpn  = (iCyc != -1) ? qtrue : qfalse;
+            s_coopCycleLast = (iCyc != -1 && iClip == 0) ? qtrue : qfalse;
+            if (iCyc == -1 && iClip > 0) {
+                Com_sprintf(szCyc, sizeof(szCyc), "%s_cycle_ads", AnimPrefixList[iAnimPrefixIndex]);
+                iCyc = cgi.Anim_NumForName(pTiki, szCyc);
+            }
             if (iCyc != -1) {
                 bAnimChanged            = qtrue;
                 s_iCoopPrevVMAnim       = cgi.anim->g_iLastVMAnim;
@@ -980,7 +1021,7 @@ void CG_ViewModelAnimation(refEntity_t *pModel)
             pszAnimSuffix = "rechamber";
             break;
         case COOP_VM_ANIM_CYCLE:
-            pszAnimSuffix = "cycle";
+            pszAnimSuffix = s_coopCycleLast ? "cyclelast" : "cycle";
             break;
         case COOP_VM_ANIM_IDLELOWER:
             // HZM coop [user 2026-08-21] the lower/raise idle gesture. CLIENT-ONLY: this value is
@@ -1029,7 +1070,8 @@ void CG_ViewModelAnimation(refEntity_t *pModel)
         // HZM coop [reload audit phase B] per-weapon reload clip (apply_reloadclips.py): coopr_<weapon key>_<suffix>
         // wins when the hands tiki has it - lets one gun of a shared prefix get the reload that fits ITS feed.
         if (cgi.anim->g_iLastVMAnim == VM_ANIM_RELOAD || cgi.anim->g_iLastVMAnim == VM_ANIM_RELOAD_SINGLE
-            || cgi.anim->g_iLastVMAnim == VM_ANIM_RELOAD_END || cgi.anim->g_iLastVMAnim == VM_ANIM_CHARGE) {
+            || cgi.anim->g_iLastVMAnim == VM_ANIM_RELOAD_END || cgi.anim->g_iLastVMAnim == VM_ANIM_CHARGE
+            || (cgi.anim->g_iLastVMAnim == COOP_VM_ANIM_CYCLE && s_coopCycleWpn)) {
             CoopPerWeaponReloadAnim(pTiki, pszAnimSuffix, szAnimName, sizeof(szAnimName));
         }
         // HZM coop [revolver reload 2026-10-12] EMPTY GUN: a reload that STARTS on an empty magazine / cylinder plays
