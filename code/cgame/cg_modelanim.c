@@ -2922,6 +2922,55 @@ void CG_ModelAnim(centity_t *cent, qboolean bDoShaderTime)
 
     CG_InterpolateAnimParms(s1, sNext, &model);
 
+    // HZM coop [dbshotgun 2026-10-12] the LOCAL player's held gun, rows that depend on an EMPTY clip: `reload` ->
+    // `reload_empty` and `reload_single` -> `reload_single_first` when the gun's tik has that row and the clip is
+    // empty as the row (or a new loop of it) starts. The double-barrel shotgun throws out one fired case or both
+    // (`reload_empty`) and loads the LEFT chamber first (`reload_single_first`), then the right. Same lengths as the
+    // rows they stand in for; the server and other players still see the plain row. No tik with these rows = no
+    // change. (The SMG lane's ads-smg-next swaps `reload` -> `reload_empty` the same way for its bolts: one block
+    // when the two branches meet.)
+    if (cg.snap && s1->parent == cg.snap->ps.clientNum && cg.snap->ps.stats[STAT_MAXCLIPAMMO] > 0) {
+        static const char *const s_dbsRows[2][2] = {
+            {"reload",        "reload_empty"       },
+            {"reload_single", "reload_single_first"}
+        };
+        static int s_dbsEnt[2] = {-1, -1}, s_dbsSeen[2] = {0, 0}, s_dbsChoice[2] = {0, 0};
+        int        r, k;
+
+        for (r = 0; r < 2; r++) {
+            int      iAlt = cgi.Anim_NumForName(model.tiki, s_dbsRows[r][1]);
+            int      iRow;
+            qboolean bRow = qfalse;
+            float    fT   = 999.0f;
+
+            if (iAlt == -1) {
+                continue;
+            }
+            iRow = cgi.Anim_NumForName(model.tiki, s_dbsRows[r][0]);
+            for (k = 0; k < MAX_FRAMEINFOS && iRow != -1; k++) {
+                if (model.frameInfo[k].weight && model.frameInfo[k].index == iRow) {
+                    bRow = qtrue;
+                    if (model.frameInfo[k].time < fT) {
+                        fT = model.frameInfo[k].time;
+                    }
+                }
+            }
+            if (!bRow) {
+                continue;
+            }
+            if (s_dbsEnt[r] != s1->number || cg.time - s_dbsSeen[r] > 250 || cg.time < s_dbsSeen[r] || fT < 0.05f) {
+                s_dbsChoice[r] = (cg.snap->ps.stats[STAT_CLIPAMMO] == 0) ? 1 : 0;
+            }
+            s_dbsEnt[r]  = s1->number;
+            s_dbsSeen[r] = cg.time;
+            for (k = 0; k < MAX_FRAMEINFOS && s_dbsChoice[r]; k++) {
+                if (model.frameInfo[k].weight && model.frameInfo[k].index == iRow) {
+                    model.frameInfo[k].index = iAlt;
+                }
+            }
+        }
+    }
+
     if (cent->currentState.parent != ENTITYNUM_NONE) {
         int          iTagNum;
         refEntity_t *parent;

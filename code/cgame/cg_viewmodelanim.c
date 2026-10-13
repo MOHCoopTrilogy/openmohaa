@@ -737,6 +737,7 @@ void CG_ViewModelAnimation(refEntity_t *pModel)
 
     if (cgi.anim->g_iLastVMAnim == -1) {
         Com_sprintf(szAnimName, sizeof(szAnimName), "%s_idle", AnimPrefixList[iAnimPrefixIndex]);
+        CoopPerWeaponReloadAnim(pTiki, "idle", szAnimName, sizeof(szAnimName)); // HZM coop [dbshotgun] own idle row
         cgi.anim->g_VMFrameInfo[cgi.anim->g_iCurrentVMAnimSlot].index = cgi.Anim_NumForName(pTiki, szAnimName);
 
         if (cgi.anim->g_VMFrameInfo[cgi.anim->g_iCurrentVMAnimSlot].index == -1) {
@@ -935,10 +936,12 @@ void CG_ViewModelAnimation(refEntity_t *pModel)
         Com_sprintf(szAnimName, sizeof(szAnimName), "%s_%s", AnimPrefixList[iAnimPrefixIndex], pszAnimSuffix);
         // HZM coop [reload audit phase B] per-weapon reload clip (apply_reloadclips.py): coopr_<weapon key>_<suffix>
         // wins when the hands tiki has it - lets one gun of a shared prefix get the reload that fits ITS feed.
-        if (cgi.anim->g_iLastVMAnim == VM_ANIM_RELOAD || cgi.anim->g_iLastVMAnim == VM_ANIM_RELOAD_SINGLE
-            || cgi.anim->g_iLastVMAnim == VM_ANIM_RELOAD_END) {
-            CoopPerWeaponReloadAnim(pTiki, pszAnimSuffix, szAnimName, sizeof(szAnimName));
-        }
+        // HZM coop [dbshotgun 2026-10-12] EVERY row, not only the reload family: a gun that shares a name prefix
+        // with another mesh ("Shotgun (Double Barrel)" -> the pump gun's `shotgun_*` rows) can now bring its own
+        // idle / fire / charge / pullout / putaway hands as well - on the pump rows its left hand would work a pump
+        // that is not there. No coopr_ row of that suffix = the shared row, as before (the fixes pak has coopr_
+        // rows for reload / reload_single / reload_end only, so no existing gun changes).
+        CoopPerWeaponReloadAnim(pTiki, pszAnimSuffix, szAnimName, sizeof(szAnimName));
         // HZM coop [adsanim 2026-10-04 / adsbolt] AIMED BOLT: a reload or bolt that starts while aiming plays the
         // gun's dedicated `<prefix>_<suffix>_ads` clip when fps_anims defines one (hand-keyed to start and end in
         // the `charge` aim pose with the cheek near the stock), and the slot is flagged as an aim pose below so the
