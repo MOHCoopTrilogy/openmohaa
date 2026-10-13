@@ -30,6 +30,128 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 // HZM coop [revolver chambers 2026-10-12] how many coop_round<N> surfaces the held gun draws this frame (-1 = untouched)
 static int s_coopRoundShow = -1, s_coopRoundEnt = -1;
 
+// HZM coop [client clip clock 2026-10-13] A GUN CLIP LONGER THAN THE SERVER'S ROW (bug-3736). The aimed-reload /
+// aimed-cycle swap below only replaces the animation INDEX in the slot where the server plays `reload` / `fire`,
+// so the shown clip ended with the server's row - and the pistol lane had padded the Welrod / TT-33 `reload`
+// (1 / 7 frames -> 73) and the Welrod `fire` (1 -> 26) to keep the picture, which held the SERVER's
+// WEAPON_RELOADING / DoneFiring for 2.4 s / 0.87 s. Now the tik rows the server reads stay as released and the
+// cgame keeps its own clock: when the swapped client clip is longer than the server's row it is latched (slot,
+// start time, length); once the server's row has ended the latched slot is kept on the client clip, on that
+// clock, until the clip is over. Dropped when any other weapon animation starts, when the first-person hands
+// leave the row that belongs to it (reload: VM_ANIM_RELOAD; fire: the client-only aimed cycle), or when the
+// weapon entity is no longer the held gun. Display only, local player only. Inert for every clip that is not
+// longer than the server's row (all other guns). coop_vmGunClipClock 0 = off, 2 = print start / end.
+typedef struct {
+    int      ent; // weapon entity number, -1 = none
+    dtiki_t *tiki;
+    int      kind; // 1 reload, 2 fire
+    int      slot;
+    int      anim; // the client clip
+    int      src; // the server's row
+    int      start; // cg.time of the clip's frame 0
+    int      lenMs;
+    int      seen;
+} coopGunLatch_t;
+static coopGunLatch_t s_coopGunLatch = {-1, NULL, 0, 0, 0, 0, 0, 0, 0};
+static cvar_t        *s_pCoopGunClock = NULL;
+
+static void CoopGunLatchEnd(const char *why)
+{
+    if (s_coopGunLatch.ent != -1 && s_pCoopGunClock && s_pCoopGunClock->integer > 1) {
+        cgi.Printf("GUNCLOCK end kind %d at %d ms of %d (%s)\n", s_coopGunLatch.kind, cg.time - s_coopGunLatch.start,
+                   s_coopGunLatch.lenMs, why);
+    }
+    s_coopGunLatch.ent = -1;
+}
+
+// the server's row `iSrc` is showing in `slot` at time `t` (s) and the cgame shows `iSwap` there (-1 = no swap)
+static void CoopGunLatchSee(int ent, dtiki_t *tiki, int kind, int slot, int iSrc, int iSwap, float t)
+{
+    float fSwap, fSrc;
+    if (!s_pCoopGunClock) {
+        s_pCoopGunClock = cgi.Cvar_Get("coop_vmGunClipClock", "1", 0);
+    }
+    if (!s_pCoopGunClock->integer || iSwap == -1 || iSrc == -1 || slot < 0) {
+        if (s_coopGunLatch.ent == ent && s_coopGunLatch.kind == kind) {
+            CoopGunLatchEnd("row shown unswapped");
+        }
+        return;
+    }
+    fSwap = cgi.Anim_Time(tiki, iSwap);
+    fSrc  = cgi.Anim_Time(tiki, iSrc);
+    if (fSwap <= fSrc + 0.05f) {
+        if (s_coopGunLatch.ent == ent && s_coopGunLatch.kind == kind) {
+            CoopGunLatchEnd("clip not longer");
+        }
+        return;
+    }
+    if (s_coopGunLatch.ent != ent || s_coopGunLatch.tiki != tiki || s_coopGunLatch.anim != iSwap
+        || s_coopGunLatch.slot != slot || abs((cg.time - (int)(t * 1000.0f)) - s_coopGunLatch.start) > 300) {
+        if (s_pCoopGunClock->integer > 1) {
+            cgi.Printf("GUNCLOCK start kind %d slot %d clip %.2f s (server row %.2f s)\n", kind, slot, fSwap, fSrc);
+        }
+    }
+    s_coopGunLatch.ent   = ent;
+    s_coopGunLatch.tiki  = tiki;
+    s_coopGunLatch.kind  = kind;
+    s_coopGunLatch.slot  = slot;
+    s_coopGunLatch.anim  = iSwap;
+    s_coopGunLatch.src   = iSrc;
+    s_coopGunLatch.start = cg.time - (int)(t * 1000.0f);
+    s_coopGunLatch.lenMs = (int)(fSwap * 1000.0f);
+    s_coopGunLatch.seen  = cg.time;
+}
+
+// after the swaps: the server's row is over but the client clip is not - keep showing it on the client clock
+static void CoopGunLatchApply(int ent, refEntity_t *model)
+{
+    int k, el, iIdle, iIdleEmpty;
+    if (s_coopGunLatch.ent == -1) {
+        return;
+    }
+    if (s_coopGunLatch.ent != ent || s_coopGunLatch.tiki != model->tiki) {
+        if (cg.time - s_coopGunLatch.seen > 250 || cg.time < s_coopGunLatch.seen) {
+            CoopGunLatchEnd("gun gone");
+        }
+        return;
+    }
+    s_coopGunLatch.seen = cg.time;
+    el                  = cg.time - s_coopGunLatch.start;
+    if (el < 0 || el >= s_coopGunLatch.lenMs) {
+        CoopGunLatchEnd("clip over");
+        return;
+    }
+    iIdle      = cgi.Anim_NumForName(model->tiki, "idle");
+    iIdleEmpty = cgi.Anim_NumForName(model->tiki, "idle_empty");
+    for (k = 0; k < MAX_FRAMEINFOS; k++) {
+        int idx = model->frameInfo[k].index;
+        if (!model->frameInfo[k].weight) {
+            continue;
+        }
+        if (idx == s_coopGunLatch.anim || idx == s_coopGunLatch.src) {
+            return; // the server's row is still showing (swapped above): its clock leads
+        }
+        if (idx != iIdle && idx != iIdleEmpty) {
+            CoopGunLatchEnd("another weapon animation");
+            return;
+        }
+    }
+    if (s_coopGunLatch.kind == 1 && el > 300 && cgi.anim && cgi.anim->g_iLastVMAnim != VM_ANIM_RELOAD) {
+        CoopGunLatchEnd("hands left the reload");
+        return;
+    }
+    if (s_coopGunLatch.kind == 2 && el > 150 && !CG_VMAimedCycleActive()) {
+        CoopGunLatchEnd("hands left the cycle");
+        return;
+    }
+    for (k = 0; k < MAX_FRAMEINFOS; k++) {
+        model->frameInfo[k].weight = 0.0f;
+    }
+    model->frameInfo[s_coopGunLatch.slot].index  = s_coopGunLatch.anim;
+    model->frameInfo[s_coopGunLatch.slot].time   = (float)el / 1000.0f;
+    model->frameInfo[s_coopGunLatch.slot].weight = 1.0f;
+}
+
 static qboolean cg_forceModelAllowed = qfalse;
 
 // HZM coop [225] - set while dispatching frame commands for the draw-skipped 1P turret viewmodel
@@ -2944,6 +3066,65 @@ void CG_ModelAnim(centity_t *cent, qboolean bDoShaderTime)
         if (!pAimedGun) {
             pAimedGun = cgi.Cvar_Get("coop_vmAimedReloadGun", "1", 0);
         }
+        // HZM coop [server probe 2026-10-13] coop_vmSrvProbe 1 (default 0, test harness only): what the SERVER says
+        // about the local player's guns, stamped with the snapshot's server time - one `ps` line per snapshot in
+        // which the clip / reserve ammo / hands' animation id changed, one `went` line per snapshot in which a weapon
+        // entity's own newest animation changed or restarted. Read from the snapshot before any client swap: the
+        // dedicated-server timing comparison (bug-3736).
+        {
+            static cvar_t *pProbe = NULL;
+            static int     s_pT = 0, s_pClip = -999, s_pAmmo = -999, s_pVma = -999, s_pChg = -999;
+            static int     s_wEnt[16], s_wAnim[16], s_wT[16], s_wNext = 0;
+            static float   s_wAnimT[16];
+            if (!pProbe) {
+                pProbe = cgi.Cvar_Get("coop_vmSrvProbe", "0", 0);
+            }
+            if (pProbe->integer) {
+                int   kk, w = -1, best = -1;
+                float bt = 9999.0f;
+                if (cg.snap->serverTime != s_pT) {
+                    if (cg.snap->ps.stats[STAT_CLIPAMMO] != s_pClip || cg.snap->ps.stats[STAT_AMMO] != s_pAmmo
+                        || cg.snap->ps.iViewModelAnim != s_pVma || cg.snap->ps.iViewModelAnimChanged != s_pChg) {
+                        cgi.Printf("SRVPROBE st %d ps clip %d ammo %d vma %d chg %d\n", cg.snap->serverTime,
+                                   cg.snap->ps.stats[STAT_CLIPAMMO], cg.snap->ps.stats[STAT_AMMO],
+                                   cg.snap->ps.iViewModelAnim, cg.snap->ps.iViewModelAnimChanged);
+                    }
+                    s_pT    = cg.snap->serverTime;
+                    s_pClip = cg.snap->ps.stats[STAT_CLIPAMMO];
+                    s_pAmmo = cg.snap->ps.stats[STAT_AMMO];
+                    s_pVma  = cg.snap->ps.iViewModelAnim;
+                    s_pChg  = cg.snap->ps.iViewModelAnimChanged;
+                }
+                for (kk = 0; kk < 16; kk++) {
+                    if (s_wEnt[kk] == s1->number) {
+                        w = kk;
+                    }
+                }
+                if (w < 0) {
+                    w           = s_wNext;
+                    s_wNext     = (s_wNext + 1) % 16;
+                    s_wEnt[w]   = s1->number;
+                    s_wAnim[w]  = -999;
+                    s_wT[w]     = 0;
+                    s_wAnimT[w] = 0.0f;
+                }
+                if (cg.snap->serverTime != s_wT[w]) {
+                    for (kk = 0; kk < MAX_FRAMEINFOS; kk++) {
+                        if (s1->frameInfo[kk].weight && s1->frameInfo[kk].time < bt) {
+                            bt   = s1->frameInfo[kk].time;
+                            best = s1->frameInfo[kk].index;
+                        }
+                    }
+                    if (best != s_wAnim[w] || bt < s_wAnimT[w]) {
+                        cgi.Printf("SRVPROBE st %d went %d wanim %s t %.3f\n", cg.snap->serverTime, s1->number,
+                                   best >= 0 ? cgi.Anim_NameForNum(model.tiki, best) : "-", bt);
+                    }
+                    s_wT[w]     = cg.snap->serverTime;
+                    s_wAnim[w]  = best;
+                    s_wAnimT[w] = bt;
+                }
+            }
+        }
         // HZM coop [revolver chambers 2026-10-12] ONE HEAD PER CHAMBER (S&W M10; any gun whose mesh has surfaces
         // coop_round1..N): the local player's held gun draws coop_round<N> iff N <= rounds in the gun. Outside a
         // reload every head is drawn (a fired case looks like a live round from behind). In the reload: an EMPTIED
@@ -3026,11 +3207,13 @@ void CG_ModelAnim(centity_t *cent, qboolean bDoShaderTime)
             int        iFire = pAimedGun->integer ? cgi.Anim_NumForName(model.tiki, "fire") : -1;
             qboolean   bFire  = qfalse;
             float      fFireT = 999.0f; // the newest fire animation's time: small = a shot has just started
+            int        iFireSlot = -1;
             for (k = 0; k < MAX_FRAMEINFOS && iFire != -1; k++) {
                 if (model.frameInfo[k].weight && model.frameInfo[k].index == iFire) {
                     bFire = qtrue;
                     if (model.frameInfo[k].time < fFireT) {
-                        fFireT = model.frameInfo[k].time;
+                        fFireT    = model.frameInfo[k].time;
+                        iFireSlot = k;
                     }
                 }
             }
@@ -3047,6 +3230,7 @@ void CG_ModelAnim(centity_t *cent, qboolean bDoShaderTime)
                         model.frameInfo[k].index = iFireAds;
                     }
                 }
+                CoopGunLatchSee(s1->number, model.tiki, 2, iFireSlot, iFire, iFireAds, fFireT);
             }
         }
         // HZM coop [aimed revolver close 2026-10-12] the same for `reload_end` -> `reload_end_ads` and `reload_single`
@@ -3108,12 +3292,71 @@ void CG_ModelAnim(centity_t *cent, qboolean bDoShaderTime)
             iSwap      = s_choice ? cgi.Anim_NumForName(model.tiki, s_choice == 2 ? "reload_ads_empty"
                                                                         : (s_choice == 3 ? "reload_empty" : "reload_ads_loaded"))
                                   : -1;
-            for (k = 0; k < MAX_FRAMEINFOS && iSwap != -1; k++) {
-                if (model.frameInfo[k].weight && model.frameInfo[k].index == iRel) {
-                    model.frameInfo[k].index = iSwap;
+            {
+                int   iRelSlot = -1;
+                float fRelT    = 999.0f;
+                for (k = 0; k < MAX_FRAMEINFOS; k++) {
+                    if (model.frameInfo[k].weight && model.frameInfo[k].index == iRel
+                        && model.frameInfo[k].time < fRelT) {
+                        fRelT    = model.frameInfo[k].time;
+                        iRelSlot = k;
+                    }
+                }
+                for (k = 0; k < MAX_FRAMEINFOS && iSwap != -1; k++) {
+                    if (model.frameInfo[k].weight && model.frameInfo[k].index == iRel) {
+                        model.frameInfo[k].index = iSwap;
+                    }
+                }
+                CoopGunLatchSee(s1->number, model.tiki, 1, iRelSlot, iRel, iSwap, fRelT);
+            }
+        }
+        // HZM coop [client clip clock 2026-10-13] SECOND START: a server `reload` row of one frame (Welrod: 0.03 s)
+        // can begin and end between two snapshots and then never shows here. The hands' reload does show (the
+        // player state holds VM_ANIM_RELOAD for the whole reload, and the torso animation starts the weapon's row
+        // on its first frame), so when the hands have been in a new reload for 60 ms and the held gun has no clock
+        // yet, the clip is started on the hands' start time - same choice rules, only for a clip longer than the
+        // server's row, only for the gun in the hand (tag_weapon_right / _left).
+        {
+            static int s_hT = 0, s_hVma = -1, s_hChg = -1, s_hClip = 0, s_hStart = 0, s_hChoice = 0;
+            int        vma = cg.snap->ps.iViewModelAnim;
+            if (cg.time != s_hT) { // once per frame, whichever of the player's guns comes through here first
+                if (vma == VM_ANIM_RELOAD && (s_hVma != VM_ANIM_RELOAD || cg.snap->ps.iViewModelAnimChanged != s_hChg)) {
+                    qboolean bEmpty = (cg.snap->ps.stats[STAT_CLIPAMMO] == 0 || s_hClip == 0) ? qtrue : qfalse;
+                    s_hStart  = cg.time;
+                    s_hChoice = 0;
+                    if (cg.snap->ps.stats[STAT_MAXCLIPAMMO] > 0) {
+                        if (CG_AimingDownSights()) {
+                            s_hChoice = bEmpty ? 2 : 1;
+                        } else if (bEmpty) {
+                            s_hChoice = 3;
+                        }
+                    }
+                }
+                s_hT    = cg.time;
+                s_hVma  = vma;
+                s_hChg  = cg.snap->ps.iViewModelAnimChanged;
+                s_hClip = cg.snap->ps.stats[STAT_CLIPAMMO];
+            }
+            if (iRel != -1 && !bPlaying && cg.pLastPlayerWorldModel && vma == VM_ANIM_RELOAD && s_hChoice
+                && cg.time - s_hStart >= 60 && cg.time - s_hStart < 400
+                && !(s_coopGunLatch.ent == s1->number && s_coopGunLatch.kind == 1
+                     && s_coopGunLatch.start >= s_hStart - 300)) {
+                const char *szTag = cgi.Tag_NameForNum(cg.pLastPlayerWorldModel, s1->tag_num & TAG_MASK);
+                int         iClip = cgi.Anim_NumForName(model.tiki, s_hChoice == 2 ? "reload_ads_empty"
+                                                                     : (s_hChoice == 3 ? "reload_empty" : "reload_ads_loaded"));
+                if (iClip != -1 && szTag && (!Q_stricmp(szTag, "tag_weapon_right") || !Q_stricmp(szTag, "tag_weapon_left"))) {
+                    int iSlot = 0;
+                    for (k = 0; k < MAX_FRAMEINFOS; k++) {
+                        if (model.frameInfo[k].weight) {
+                            iSlot = k;
+                            break;
+                        }
+                    }
+                    CoopGunLatchSee(s1->number, model.tiki, 1, iSlot, iRel, iClip, (float)(cg.time - s_hStart) / 1000.0f);
                 }
             }
         }
+        CoopGunLatchApply(s1->number, &model);
     }
 
     if (cent->currentState.parent != ENTITYNUM_NONE) {
