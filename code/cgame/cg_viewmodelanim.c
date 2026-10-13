@@ -1025,6 +1025,13 @@ void CG_ViewModelAnimation(refEntity_t *pModel)
                     || a == VM_ANIM_RECHAMBER || a == COOP_VM_ANIM_CYCLE)) {
                 char szAds[MAX_QPATH];
                 Com_sprintf(szAds, sizeof(szAds), "%s_ads", szAnimName);
+                if (CG_CoopBrace() > 0.5f) { // HZM coop [adsbrace] braced: the brace carries the weight
+                    char szAdsB[MAX_QPATH];
+                    Com_sprintf(szAdsB, sizeof(szAdsB), "%s_adsb", szAnimName);
+                    if (cgi.Anim_NumForName(pTiki, szAdsB) != -1) {
+                        Q_strncpyz(szAds, szAdsB, sizeof(szAds));
+                    }
+                }
                 if (cgi.Anim_NumForName(pTiki, szAds) != -1
                     && CoopAdsClipFitsHeldGun(AnimPrefixList[iAnimPrefixIndex])) {
                     Q_strncpyz(s_szCoopHipAnim, szAnimName, sizeof(s_szCoopHipAnim));
