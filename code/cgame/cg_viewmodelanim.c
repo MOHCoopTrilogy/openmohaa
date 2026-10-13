@@ -266,7 +266,9 @@ int CG_GetVMAnimPrefixIndex()
         if (!Q_stricmp(szWeaponName, "Mosin Nagant Rifle")) {
             return WPREFIX_MOSIN;
         }
-        if (!Q_stricmp(szWeaponName, "G 43")) {
+        // HZM coop [g43 irons 2026-10-12] "G 43 Irons" = the G43 without its scope (coop_g43_irons*.tik): the same
+        // hands. It is a base name of its own on purpose - the scope table (cg_hzmscope.c) lists "G 43".
+        if (!Q_stricmp(szWeaponName, "G 43") || !Q_stricmp(szWeaponName, "G 43 Irons")) {
             return WPREFIX_G43;
         }
         if (!Q_stricmp(szWeaponName, "Enfield L42A1")) {
