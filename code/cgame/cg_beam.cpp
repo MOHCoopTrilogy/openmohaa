@@ -94,6 +94,9 @@ beam_t::beam_t()
 beam_t  cl_beams[MAX_BEAMS];
 beam_t *cl_free_beams;
 beam_t *cl_active_beams;
+// HZM coop [bug-3881] live beams: counted by CG_AddBeams every frame, raised by CG_CreateBeam in between. Read by
+// the rain spawner (cg_nature.cpp), which keeps to its own share of the pool.
+int cg_hzmLiveBeams = 0;
 
 static int seed = 100;
 
@@ -965,6 +968,7 @@ void CG_CreateModelBeam(beam_t *b, vec3_t org, vec3_t dist, float total_length, 
 
 void CG_AddBeams(void)
 {
+    int     iLive = 0;
     int     i, ii;
     beam_t *b;
     beam_t *bNext;
@@ -1003,6 +1007,8 @@ void CG_AddBeams(void)
             cl_free_beams = b;
             continue;
         }
+
+        iLive++; // HZM coop [bug-3881]
 
         // Fade the beam based on it's life
         fade = (float)(b->endtime - cg.time) / (float)b->life;
@@ -1117,6 +1123,53 @@ void CG_AddBeams(void)
                     b->alphastep,
                     b->renderfx
                 );
+            } else if ((b->flags & BEAM_INVERTED_FAST) && (b->flags & BEAM_HZM_TAILRUN)) {
+                // HZM coop [bug-3881] a rain streak that runs INTO the point where the drop lands. The beam's life
+                // covers the path plus one streak length: the head travels start -> end and stops there, the tail
+                // (one streak length behind) goes on until it arrives too. The picture is cut, not squeezed: the
+                // part of the streak that has gone into the surface is left off the texture as well.
+                vec3_t     vCurrStart, vCurrEnd;
+                vec3_t     vDir;
+                polyVert_t points[4];
+                float      fLen, fHead, fS;
+                int        jj;
+
+                VectorSubtract(b->end, b->start, vDir);
+                fLen  = VectorNormalize(vDir);
+                fHead = (1.0f - fade) * (fLen + b->toggledelay); // how far the drop has fallen
+                fS    = 1.0f;
+                if (fHead > fLen) {
+                    if (b->toggledelay > 0.0f) {
+                        fS = 1.0f - (fHead - fLen) / b->toggledelay;
+                    }
+                    if (fS < 0.0f) {
+                        fS = 0.0f;
+                    }
+                    VectorCopy(b->end, vCurrEnd);
+                } else {
+                    VectorMA(b->start, fHead, vDir, vCurrEnd);
+                }
+                VectorMA(b->start, fHead - b->toggledelay, vDir, vCurrStart);
+
+                // the quad of CG_BuildRendererBeam_Fast, with the head's texture coordinate cut to what is left
+                VectorMA(vCurrEnd, b->scale, cg.refdef.viewaxis[1], points[0].xyz);
+                VectorMA(vCurrStart, b->scale, cg.refdef.viewaxis[1], points[1].xyz);
+                VectorMA(vCurrStart, -b->scale, cg.refdef.viewaxis[1], points[2].xyz);
+                VectorMA(vCurrEnd, -b->scale, cg.refdef.viewaxis[1], points[3].xyz);
+                points[0].st[0] = fS;
+                points[0].st[1] = 1.0f;
+                points[1].st[0] = 0.0f;
+                points[1].st[1] = 1.0f;
+                points[2].st[0] = 0.0f;
+                points[2].st[1] = 0.0f;
+                points[3].st[0] = fS;
+                points[3].st[1] = 0.0f;
+                for (ii = 0; ii < 4; ++ii) {
+                    for (jj = 0; jj < 4; ++jj) {
+                        points[ii].modulate[jj] = color[jj];
+                    }
+                }
+                cgi.R_AddPolyToScene(b->beamshader, 4, points, b->renderfx);
             } else if (b->flags & BEAM_INVERTED_FAST) {
                 vec3_t vCurrStart, vCurrEnd;
                 vec3_t vDir;
@@ -1168,6 +1221,7 @@ void CG_AddBeams(void)
             }
         }
     }
+    cg_hzmLiveBeams = iLive; // HZM coop [bug-3881]
 }
 
 void CG_CreateBeam(
@@ -1267,6 +1321,7 @@ void CG_CreateBeam(
         b->next         = cl_active_beams;
         b->prev         = 0;
         cl_active_beams = b;
+        cg_hzmLiveBeams++; // HZM coop [bug-3881]
 
         b->entity          = owner;
         b->endtime         = cg.time + life;

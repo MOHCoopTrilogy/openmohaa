@@ -143,9 +143,109 @@ static qboolean CG_RainBrushDropVisible(const vec3_t vStart, vec3_t vEnd, int *p
     return qtrue;
 }
 
+// HZM coop [bug-3881] RAIN TO THE GROUND. A streak is drawn from the drop (its head) back up its path for
+// rain_length units, and the whole streak was removed the moment the head reached the surface the drop lands on. So
+// over the last streak-length above the ground the rain thinned out to nothing: no streak ever covered the ground
+// itself, and at head height a standing player saw (82 / length) of the full density - 91 % with ordinary rain
+// (length 90), 32 % in the downpour tier (length 260): "the rain stays near the top of the screen". The drop now
+// lives one streak length longer and is drawn with BEAM_HZM_TAILRUN (cg_beam.cpp): the head stops at the surface,
+// the tail runs on into it. Nothing is drawn beyond the surface, so no streak can show under a roof or a floor.
+// coop_rainToGround 1 (default; 0 = as before). Returns the beam flags and stretches *piLife.
+static int CG_HZMRainTailRun(const vec3_t vStart, const vec3_t vEnd, int *piLife)
+{
+    static cvar_t *pOn = NULL;
+    vec3_t         vD;
+    float          fLen, fTail;
+
+    if (!pOn) { pOn = cgi.Cvar_Get("coop_rainToGround", "1", 0); }
+    fTail = (float)(int)cg.rain.length; // what CG_CreateBeam keeps (its streak-length parameter is an int)
+    if (!pOn->integer || fTail <= 0.0f || *piLife < 1) {
+        return BEAM_INVERTED_FAST;
+    }
+    VectorSubtract(vEnd, vStart, vD);
+    fLen = VectorLength(vD);
+    if (fLen < 1.0f) {
+        return BEAM_INVERTED_FAST;
+    }
+    *piLife = (int)((float)*piLife * (fLen + fTail) / fLen + 0.5f); // same speed, one streak length further
+    return BEAM_INVERTED_FAST | BEAM_HZM_TAILRUN;
+}
+
+// HZM coop [bug-3881] THE FLOOR. The brushless rain's drops fell to 256 units below the eye and were removed there
+// whatever was under them, so from a wall, a hill, a tower or an upstairs window the rain stopped in mid-air in a
+// flat sheet below the viewer. A drop that reaches that level with nothing solid under it now carries on along its
+// own line, at its own speed, down to the first solid or to coop_rainFloor units below the eye (default 1024;
+// 256 = as before). One extra trace, and only for a drop that found no ground - none on level ground. A drop that
+// found no ground and falls flatter than 60 degrees from the vertical is not drawn: it started just above the old
+// floor and was a short sideways dash there (level ground removes the same drops by itself). Snow has the same
+// floor and gets the same way down (a flake may live 20 s instead of 10 for it); a flat-flying flake is left as it
+// was. Returns qfalse for a drop that is not to be drawn.
+static qboolean CG_HZMRainFloor(const vec3_t vStart, vec3_t vEnd, int *piLife)
+{
+    static cvar_t *pFloor = NULL;
+    vec3_t         vZero = {0.0f, 0.0f, 0.0f};
+    vec3_t         vDir, vFar;
+    float          fFloor, fLen, fMore, fLife;
+    trace_t        tr;
+
+    if (!pFloor) { pFloor = cgi.Cvar_Get("coop_rainFloor", "1024", 0); }
+    fFloor = pFloor->value;
+    if (fFloor > 4096.0f) { fFloor = 4096.0f; }
+    if (fFloor <= 256.0f) {
+        return qtrue;
+    }
+    VectorSubtract(vEnd, vStart, vDir);
+    fLen = VectorNormalize(vDir);
+    if (fLen < 1.0f || *piLife < 1) {
+        return qfalse;
+    }
+    if (vDir[2] > -0.5f) {
+        // flatter than 60 degrees from the vertical. A rain streak is not drawn (see above); a snowflake (streak
+        // under 32 units: wind-driven flakes fly flat by design) is left exactly as it was
+        return (cg.rain.length >= 32.0f) ? qfalse : qtrue;
+    }
+    fMore = (fFloor - 256.0f) / -vDir[2];
+    VectorMA(vEnd, fMore, vDir, vFar);
+    cgi.CM_BoxTrace(&tr, vEnd, vFar, vZero, vZero, 0, MASK_SOLID, qfalse);
+    if (tr.startsolid) {
+        return qtrue;
+    }
+    fMore *= tr.fraction;
+    fLife = (float)*piLife * (fLen + fMore) / fLen;
+    if (fLife > 20000.0f) {
+        // a slow snowflake: the way down from the old floor may take up to 10 s more than the 10 s a drop was
+        // allowed before, at the flake's own speed; it stops where it gets to in that time
+        fMore = fLen * (20000.0f / (float)*piLife) - fLen;
+        fLife = 20000.0f;
+        if (fMore < 0.0f) {
+            return qtrue;
+        }
+    }
+    VectorMA(vEnd, fMore, vDir, vEnd);
+    *piLife = (int)fLife;
+    return qtrue;
+}
+
+// HZM coop [bug-3881] RAIN'S SHARE OF THE BEAM POOL. Rain and snow stop spawning while coop_rainMaxBeams beams
+// (default 4096 = the whole pool as it was) are alive; the pool itself is 8192 now (cg_commands.h). The spawn loops
+// leave at the first drop that finds the share full, so a pool-bound snowfall no longer traces thousands of flakes
+// a second that could never be created.
+static qboolean CG_HZMRainPoolFull(void)
+{
+    extern int     cg_hzmLiveBeams;
+    static cvar_t *pMax = NULL;
+    int            iMax;
+
+    if (!pMax) { pMax = cgi.Cvar_Get("coop_rainMaxBeams", "4096", 0); }
+    iMax = pMax->integer;
+    if (iMax < 256) { iMax = 256; } else if (iMax > MAX_BEAMS - 256) { iMax = MAX_BEAMS - 256; }
+    return (cg_hzmLiveBeams >= iMax) ? qtrue : qfalse;
+}
+
 void CG_Rain(centity_t *cent)
 {
     int         iLife;
+    int         iBeamFlags;
     vec3_t      mins, maxs;
 
     g_lastRainEntityTime = cg.time; // a rain brush exists on this map
@@ -244,6 +344,9 @@ void CG_Rain(centity_t *cent)
     }
 
     for (i = 0; i < iNumSpawn; ++i) {
+        if (CG_HZMRainPoolFull()) {
+            break; // HZM coop [bug-3881]
+        }
         {
             extern int CG_HZMRainSeed(void);
             int        iSeed = CG_HZMRainSeed(); // HZM coop [bug-3552] a fresh seed for every drop
@@ -290,6 +393,7 @@ void CG_Rain(centity_t *cent)
                 continue; // HZM coop [2026-10-12] near cull (see CG_HZMRainTooNear)
             }
         }
+        iBeamFlags = CG_HZMRainTailRun(vStart, vEnd, &iLife); // HZM coop [bug-3881] the streak runs into the surface
 
         CG_CreateBeam(
             vStart,
@@ -298,7 +402,7 @@ void CG_Rain(centity_t *cent)
             1,
             1.0,
             cg.rain.width,
-            BEAM_INVERTED_FAST,
+            iBeamFlags,
             1000.0,
             iLife,
             qtrue,
@@ -416,7 +520,7 @@ qboolean CG_HZMRainTooNearX(const vec3_t vStart, const vec3_t vEnd)
 void CG_RainGlobal(void)
 {
     static cvar_t *pGlobal = NULL;
-    int            iNumSpawn, i, iRandom, iLife, iSlant, iSpeedVary;
+    int            iNumSpawn, i, iRandom, iLife, iSlant, iSpeedVary, iBeamFlags;
     float          fDensity;
     float          fcolor[4];
     vec3_t         vOmins, vOmaxs, vOe, vStart, vEnd, vLength;
@@ -527,6 +631,10 @@ void CG_RainGlobal(void)
         trace_t skyTr;
         vec3_t  vSkyStart, vSkyEnd;
 
+        if (CG_HZMRainPoolFull()) {
+            break; // HZM coop [bug-3881]
+        }
+
         {
             int iSeed = CG_HZMRainSeed(); // HZM coop [bug-3552] a fresh seed for every drop
             if (iSeed >= 0) { iRandom = iSeed; }
@@ -609,6 +717,8 @@ void CG_RainGlobal(void)
                 if (iLife < 50) {
                     continue;
                 }
+            } else if (!CG_HZMRainFloor(vStart, vEnd, &iLife)) {
+                continue; // HZM coop [bug-3881] nothing solid above the old floor: see CG_HZMRainFloor
             }
         }
 
@@ -640,8 +750,9 @@ void CG_RainGlobal(void)
         if (CG_HZMRainTooNear(vStart, vEnd)) {
             continue; // HZM coop [2026-10-12] near cull
         }
+        iBeamFlags = CG_HZMRainTailRun(vStart, vEnd, &iLife); // HZM coop [bug-3881] the streak runs into the surface
         CG_CreateBeam(
-            vStart, vec_zero, 0, 1, 1.0, cg.rain.width, BEAM_INVERTED_FAST, 1000.0, iLife, qtrue,
+            vStart, vec_zero, 0, 1, 1.0, cg.rain.width, iBeamFlags, 1000.0, iLife, qtrue,
             vEnd, 0, 0, 0, 1, 0, shadername, fcolor, 0, 0.0, cg.rain.length, 1.0, 0, "raineffect"
         );
     }
