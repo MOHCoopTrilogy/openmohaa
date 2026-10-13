@@ -511,6 +511,9 @@ static int s_iCoopPrevVMAnim = -1;
 // HZM coop [heavy lane 2026-10-13, shotgun] the reload in progress STARTED on an empty gun (taken when its `reload` row
 // is chosen): the end of a start / single / end reload racks the action only then (apply_sgpump.py)
 static qboolean s_coopReloadFromEmpty = qtrue;
+// HZM coop [heavy lane 2026-10-13, shotgun] the end row now starting is a BREAK-OFF with a round chambered: the server
+// stepped the view-anim change counter by two (state RELOAD_SHOTGUN_BREAK_QUICK, apply_sgbreak.py)
+static qboolean s_coopReloadBreak = qfalse;
 qboolean        CG_CoopReloadFromEmpty(void)
 {
     return s_coopReloadFromEmpty;
@@ -766,6 +769,11 @@ void CG_ViewModelAnimation(refEntity_t *pModel)
     }
 
     if (cg.snap->ps.iViewModelAnimChanged != cgi.anim->g_iLastVMAnimChanged) {
+        s_coopReloadBreak = (cg.snap->ps.iViewModelAnim == VM_ANIM_RELOAD_END
+                             && ((cg.snap->ps.iViewModelAnimChanged - cgi.anim->g_iLastVMAnimChanged) & 3) == 2
+                             && (cgi.anim->g_iLastVMAnim == VM_ANIM_RELOAD || cgi.anim->g_iLastVMAnim == VM_ANIM_RELOAD_SINGLE))
+                                ? qtrue
+                                : qfalse;
         bAnimChanged                   = qtrue;
         s_iCoopPrevVMAnim              = cgi.anim->g_iLastVMAnim; // what we are blending FROM
         cgi.anim->g_iLastVMAnim        = cg.snap->ps.iViewModelAnim;
@@ -1010,7 +1018,11 @@ void CG_ViewModelAnimation(refEntity_t *pModel)
         // `<row>_loaded` for the end row when fps_anims has it (the `_ads` step below then finds `<row>_loaded_ads`)
         if (cgi.anim->g_iLastVMAnim == VM_ANIM_RELOAD_END && !s_coopReloadFromEmpty) {
             char szLoaded[MAX_QPATH];
-            Com_sprintf(szLoaded, sizeof(szLoaded), "%s_loaded", szAnimName);
+            Com_sprintf(szLoaded, sizeof(szLoaded), "%s_%s", szAnimName, s_coopReloadBreak ? "break" : "loaded");
+            if (cgi.Cvar_Get("coop_vmEmptyReload", "1", 0)->integer && cgi.Anim_NumForName(pTiki, szLoaded) == -1
+                && s_coopReloadBreak) {
+                Com_sprintf(szLoaded, sizeof(szLoaded), "%s_loaded", szAnimName); // no break row: the normal end
+            }
             if (cgi.Cvar_Get("coop_vmEmptyReload", "1", 0)->integer && cgi.Anim_NumForName(pTiki, szLoaded) != -1) {
                 Q_strncpyz(szAnimName, szLoaded, sizeof(szAnimName));
             }
