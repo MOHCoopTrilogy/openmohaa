@@ -1133,6 +1133,9 @@ void CG_Init(clientGameImport_t *imported, int serverMessageNum, int serverComma
     // HUD setup
     CG_RefreshHudDrawElements();
     cgi.Cmd_Execute(EXEC_NOW, "ui_hud 1\n");
+
+    // HZM coop [bug-3903] progression follows the player: send our own save records to a remote server
+    CG_CoopSync_Init();
 }
 
 /*
@@ -1144,6 +1147,9 @@ Called before every level change or subsystem restart
 */
 void CG_Shutdown(void)
 {
+    // HZM coop [bug-3903] fold the last XP total the server showed us into our own save record
+    CG_CoopSync_Shutdown();
+
     L_ShutdownEvents();
     // Shutdown radar
     cgi.CL_InitRadar(NULL, NULL, -1);

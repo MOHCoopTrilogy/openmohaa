@@ -583,6 +583,11 @@ const adsGunTune_t *CG_FindAdsTune(const char *wpn);
     int         CG_LastAttacker(void);
     void        CG_Init(clientGameImport_t *imported, int serverMessageNum, int serverCommandSequence, int clientNum);
     void        CG_Shutdown(void);
+
+    // HZM coop [bug-3903] progression follows the player - cg_coopsync.c
+    void CG_CoopSync_Init(void);
+    void CG_CoopSync_Command(void);
+    void CG_CoopSync_Shutdown(void);
     void        CG_ServerRestarted(void);
     void        CG_ParseFogInfo(const char *str);
 

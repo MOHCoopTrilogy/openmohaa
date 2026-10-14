@@ -286,9 +286,16 @@ qboolean G_ConsoleCommand(void)
     return result;
 }
 
+// HZM coop [bug-3903] progression sync upload (g_coopsync.cpp). Checked BEFORE G_ProcessClientCommand,
+// which refuses every command until the Player entity exists - and the upload arrives before that.
+qboolean G_CoopSync_Command(gentity_t *ent);
+
 void G_ClientCommand(gentity_t *ent)
 {
     try {
+        if (ent && G_CoopSync_Command(ent)) {
+            return;
+        }
         if (ent && !G_ProcessClientCommand(ent)) {
             // anything that doesn't match a command will be a chat
             //G_Say( ent, false, true );

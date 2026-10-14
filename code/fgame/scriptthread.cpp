@@ -7632,11 +7632,17 @@ void ScriptThread::FS_ReadContent(Event *ev) {
     gi.FS_FreeFile(buffer);
 }
 
+// HZM coop [bug-3903] progression sync - g_coopsync.cpp
+void G_CoopSync_OnWrite(const char *path, const char *content, int len);
+
 void ScriptThread::FS_WriteContent(Event *ev) {
     const str path = ev->GetString(1);
     const str content = ev->GetString(2);
 
     gi.FS_WriteFile(path, content, content.length());
+
+    // HZM coop [bug-3903] a player's own save record also goes back to that player's PC (if synced)
+    G_CoopSync_OnWrite(path.c_str(), content.c_str(), content.length());
 }
 
 // HZM 2026-08-05 - coverage sweep detector rank 1: real-parser compile census.

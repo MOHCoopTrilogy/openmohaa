@@ -28,6 +28,11 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 #include "g_spawn.h"
 #include "g_bot.h"
 
+// HZM coop [bug-3903] progression follows the player - g_coopsync.cpp
+void G_CoopSync_ClientConnect(int cn);
+void G_CoopSync_ClientDisconnect(int cn);
+void G_CoopSync_PushVar(gentity_t *ent);
+
 // g_client.c -- client functions that don't happen every frame
 
 static vec3_t playerMins = {-15, -15, -24};
@@ -816,6 +821,9 @@ void G_ClientUserinfoChanged(gentity_t *ent, const char *u)
             // userinfo getter, so the engine pushes it; re-runs on every userinfo change.
             s = Info_ValueForKey(u, "cl_guid");
             ent->entity->Vars()->SetVariable("coop_guid", (s && s[0]) ? s : "");
+
+            // HZM coop [bug-3903] progression sync state (g_coopsync.cpp) - xp.scr waits while it is 1
+            G_CoopSync_PushVar(ent);
         }
 
         s = Info_ValueForKey(u, "fov");
@@ -967,6 +975,9 @@ const char *G_ClientConnect(int clientNum, qboolean firstTime, qboolean differen
     // "carried over" - Player::Join_DM_Team does not re-announce it in a coop session.
     g_hzmCarriedClient[clientNum] = firstTime ? qfalse : qtrue;
 
+    // HZM coop [bug-3903] every (re)connect, map changes included, starts a fresh upload from the new cgame
+    G_CoopSync_ClientConnect(clientNum);
+
 #if 0
 	if( isBot )
 	{
@@ -1116,6 +1127,10 @@ server system housekeeping.
 void G_ClientDisconnect(gentity_t *ent)
 {
     try {
+        // HZM coop [bug-3903] stop routing this slot's save writes to a client that has gone
+        if (ent) {
+            G_CoopSync_ClientDisconnect(ent - g_entities);
+        }
         if (!ent || (!ent->client) || (!ent->entity)) {
             return;
         }
