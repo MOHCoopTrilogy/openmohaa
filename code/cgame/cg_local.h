@@ -588,6 +588,7 @@ const adsGunTune_t *CG_FindAdsTune(const char *wpn);
     void CG_CoopSync_Init(void);
     void CG_CoopSync_Command(void);
     void CG_CoopSync_Shutdown(void);
+    void CG_CoopSync_Frame(void);
     void        CG_ServerRestarted(void);
     void        CG_ParseFogInfo(const char *str);
 

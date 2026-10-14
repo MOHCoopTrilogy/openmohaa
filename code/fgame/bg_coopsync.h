@@ -26,11 +26,15 @@ A merge can only ever ADD progress, so a stale or hostile copy cannot take anyth
 #include <stdlib.h>
 #include <stdio.h>
 
-#define COOPSYNC_VERSION 1
+#define COOPSYNC_VERSION 2
 #define COOPSYNC_NTYPES  7
 #define COOPSYNC_MAXLEN  32768 // per record, decoded; real records are a few KB
 #define COOPSYNC_ARGLEN  240   // one wire argument (the server truncates client args at 255)
-#define COOPSYNC_ARGS    6     // wire arguments per command (well inside MAX_STRING_CHARS 2048)
+#define COOPSYNC_ARGS    6     // server -> client: wire arguments per command (inside MAX_STRING_CHARS 2048)
+#define COOPSYNC_UPARGS  2     // client -> server: 480 chars per chunk. The client exe never sends the 2nd
+                               // fragment of a packet >= ~1300 bytes (CL_Netchan_TransmitNextFragment is never
+                               // called) and every packet re-carries all unacked reliable commands, so one
+                               // small chunk is in flight at a time (harness run r3 stalled the connection).
 #define COOPSYNC_MAXID   64
 
 enum {
@@ -108,13 +112,18 @@ static int CoopSync_ValidContent(const char *s, int len)
     return 1;
 }
 
-// Wire encoding: everything outside a small safe set becomes %XX, so a token can never carry a
+// Wire encoding: everything outside a small safe set becomes !XX, so a token can never carry a
 // space, quote, ';', '/', '$' or line break through Cmd_TokenizeString / Cmd_Args_Sanitize.
+// The escape is '!' and NOT '%': every MSG_Read*String on both ends rewrites '%' to '.' ("translate all fmt
+// spec", qcommon/msg.cpp), which turned "models%2Fweapons" into "models.2Fweapons" in harness run r3.
 static int CoopSync_SafeChar(char c)
 {
     return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_' || c == '|'
         || c == ':' || c == '.' || c == '~' || c == ',' || c == '-';
 }
+
+// '/' (every unlock is a model path) travels raw unless the next character is also '/': "//" would start a
+// comment in Cmd_TokenizeString, and "/*" cannot happen because '*' is always escaped.
 
 // returns the encoded length; out must hold 3*len+1
 static int CoopSync_Encode(const char *in, int len, char *out)
@@ -123,10 +132,10 @@ static int CoopSync_Encode(const char *in, int len, char *out)
     int               i, o = 0;
     for (i = 0; i < len; i++) {
         unsigned char c = (unsigned char)in[i];
-        if (CoopSync_SafeChar((char)c)) {
+        if (CoopSync_SafeChar((char)c) || (c == '/' && (i + 1 >= len || in[i + 1] != '/'))) {
             out[o++] = (char)c;
         } else {
-            out[o++] = '%';
+            out[o++] = '!';
             out[o++] = hex[c >> 4];
             out[o++] = hex[c & 15];
         }
@@ -155,7 +164,7 @@ static int CoopSync_Decode(const char *in, char *out, int outSize)
     int o = 0;
     while (*in) {
         int c;
-        if (*in == '%') {
+        if (*in == '!') {
             int h = CoopSync_HexVal(in[1]);
             int l = (h >= 0) ? CoopSync_HexVal(in[2]) : -1;
             if (h < 0 || l < 0) {
@@ -311,6 +320,86 @@ static int CoopSync_Merge(int rule, const char *a, const char *b, char *out)
     }
     out[o] = 0;
     return o;
+}
+
+// ---- digest: "do the server and this PC already hold the same record?" ----------------------------------
+// CRC-32 of a CANONICAL form, so two copies that hold the same progress in a different order agree:
+// the number for xp; the sorted, de-duplicated token set for the list records; the raw text for pins/pend.
+
+static unsigned int CoopSync_Crc32(const char *s)
+{
+    unsigned int crc = 0xFFFFFFFFu;
+    while (*s) {
+        int k;
+        crc ^= (unsigned char)*s++;
+        for (k = 0; k < 8; k++) {
+            crc = (crc >> 1) ^ (0xEDB88320u & (0u - (crc & 1u)));
+        }
+    }
+    return ~crc;
+}
+
+static int CoopSync_TokCmp(const void *a, const void *b)
+{
+    return strcmp((const char *)a, (const char *)b);
+}
+
+// canonical form of record content into out (COOPSYNC_MAXLEN + 1); returns 0 if it does not fit
+static int CoopSync_Canon(int rule, const char *s, char *out)
+{
+    static coopSyncTokens_t t;
+    int                     i, o = 0;
+
+    out[0] = 0;
+    if (!s) {
+        s = "";
+    }
+    if (rule == COOPSYNC_MERGE_NEWEST) {
+        if ((int)strlen(s) > COOPSYNC_MAXLEN) {
+            return 0;
+        }
+        strcpy(out, s);
+        return 1;
+    }
+    if (rule == COOPSYNC_MERGE_MAX) {
+        if (s[0]) {
+            long v = atol(s);
+            sprintf(out, "%ld", v < 0 ? 0L : v);
+        }
+        return 1;
+    }
+    t.n = 0;
+    if (!CoopSync_Split(s, '|', &t)) {
+        return 0;
+    }
+    qsort(t.tok, t.n, sizeof(t.tok[0]), CoopSync_TokCmp);
+    for (i = 0; i < t.n; i++) {
+        int len = (int)strlen(t.tok[i]);
+        if (i > 0 && !strcmp(t.tok[i], t.tok[i - 1])) {
+            continue;
+        }
+        if (o + len + 1 > COOPSYNC_MAXLEN) {
+            return 0;
+        }
+        if (o) {
+            out[o++] = '|';
+        }
+        memcpy(out + o, t.tok[i], len);
+        o += len;
+    }
+    out[o] = 0;
+    return 1;
+}
+
+// 8 hex digits; "x" when the canonical form does not fit (never equal to anything, forces a transfer)
+static void CoopSync_DigestHex(int rule, const char *s, char *out9)
+{
+    static char canon[COOPSYNC_MAXLEN + 1];
+    if (!CoopSync_Canon(rule, s, canon)) {
+        strcpy(out9, "x");
+        return;
+    }
+    sprintf(out9, "%08X", CoopSync_Crc32(canon));
 }
 
 #endif

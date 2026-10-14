@@ -9632,6 +9632,8 @@ void CG_DrawActiveFrame(int serverTime, int frameTime, stereoFrame_t stereoView,
     cg.frametime    = frameTime;
     cg.demoPlayback = demoPlayback;
 
+    CG_CoopSync_Frame(); // HZM coop [bug-3903] pace the progression upload (cg_coopsync.c)
+
     // HZM coop bug-1502 - run every frame regardless of view/weapon state (see function banner).
     CG_AdsFactorAdvance(); // must precede every consumer - see the banner on the function
     CG_FeelStressAdvance(); // one shared "how rattled is the player" scalar, same rule

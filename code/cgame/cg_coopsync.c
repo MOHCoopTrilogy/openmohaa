@@ -6,26 +6,54 @@ The player's OWN save files (coop_mod/save/<type>_<own cl_guid>.dat in this PC's
 master copy of his progression. See fgame/g_coopsync.cpp for the server half and the whole design.
 
   CG_CoopSync_Init      (end of CG_Init, i.e. every map load) - when connected to a server this PC is
-                        NOT hosting, send our records up: coopsync begin / d / have / end.
-  CG_CoopSync_Command   (server command `coopsave`) - a record the server just saved for us: merge it
-                        into our own file (bg_coopsync.h rules: progress can only be ADDED) and write it.
+                        NOT hosting, send `coopsync begin 2 <7 digests>` (one CRC per own record).
+  CG_CoopSync_Command   (server command `coopsave`):
+                          want <types>  queue those records as small chunks (the server's copy differs)
+                          got <t> <seq> a chunk arrived: send the next one
+                          ack           the server merged; it will send records back from now on
+                          <type> <part> <nparts> <chunk..>  a record the server saved for us: merge it
+                                        into our own file (bg_coopsync.h: progress can only be ADDED)
+  CG_CoopSync_Frame     (every frame) - pace the upload: one chunk in flight, >= 1.2 s apart (a dedicated
+                        server drops a command that follows the previous one within 1 s), resent if not
+                        acknowledged within 3 s. Small chunks because this client exe cannot send a packet
+                        that needs fragmenting (see COOPSYNC_UPARGS).
   CG_CoopSync_Shutdown  (CG_Shutdown: disconnect / map change) - fold in the last XP total the server
                         showed us (coop_xp_totalOwn, pushed on every award), so the last minute counts.
 
 SECURITY: the server never names a file. It sends a record TYPE from a fixed list of seven; the path
 is built HERE from our own cl_guid. Content is length-capped and printable-only, and every record that
 carries progress is merged, never replaced, so a server cannot take progress away. A server that never
-answers our upload (old game.dll) is never listened to at all.
+answers our handshake (old game.dll) is never listened to at all.
 ===========================================================================
 */
 
 #include "cg_local.h"
 #include "../fgame/bg_coopsync.h"
 
-static int  s_coopSyncActive; // we uploaded to this server (a remote one) this cgame session
-static int  s_coopSyncAcked;  // the server merged it and will send records back
+#define COOPSYNC_QMAX       320
+#define COOPSYNC_GAP_MS     1200
+#define COOPSYNC_RESEND_MS  3000
+#define COOPSYNC_BEGIN_MS   6000
+
+static int  s_coopSyncActive; // we sent a handshake to this (remote) server this cgame session
+static int  s_coopSyncAcked;  // the server merged; it will send records back
 static char s_coopSyncId[COOPSYNC_MAXID + 1];
 static int  s_coopSyncXpMod;  // coop_xp_totalOwn modificationCount at init
+
+// upload queue: one command in flight
+typedef struct {
+    char cmd[COOPSYNC_ARGLEN * COOPSYNC_UPARGS + 80];
+    int  type; // -1 = the closing `end`
+    int  seq;
+} coopSyncQ_t;
+
+static coopSyncQ_t s_q[COOPSYNC_QMAX];
+static int         s_qHead, s_qTail;
+static int         s_qSentAt;    // when the head was last sent (0 = not yet)
+static int         s_lastSend;   // when ANY coopsync command was last sent
+static int         s_beginTries;
+static int         s_beginAt;
+static char        s_beginCmd[160];
 
 static int  s_rxType = -1;
 static int  s_rxNext;
@@ -55,6 +83,8 @@ static int CoopSync_ReadLocal(int t)
             s_local[len] = 0;
             ok           = (int)len;
         }
+    } else if (len == 0) {
+        ok = 0; // an empty file
     }
     if (buf) {
         cgi.FS_FreeFile(buf);
@@ -62,15 +92,23 @@ static int CoopSync_ReadLocal(int t)
     return ok;
 }
 
+static void CoopSync_Send(const char *cmd)
+{
+    cgi.SendClientCommand(cmd);
+    s_lastSend = cgi.Milliseconds();
+}
+
 void CG_CoopSync_Init(void)
 {
     cvar_t *sv, *guid, *xp;
-    int     t, sent = 0;
-    char    cmd[1800];
+    int     t, o;
 
     s_coopSyncActive = 0;
     s_coopSyncAcked  = 0;
     s_rxType         = -1;
+    s_qHead = s_qTail = 0;
+    s_qSentAt        = 0;
+    s_beginTries     = 0;
 
     sv = cgi.Cvar_Get("sv_running", "0", 0);
     if (sv && sv->integer) {
@@ -86,35 +124,88 @@ void CG_CoopSync_Init(void)
     xp              = cgi.Cvar_Get("coop_xp_totalOwn", "", 0);
     s_coopSyncXpMod = xp ? xp->modificationCount : 0;
 
-    cgi.SendClientCommand(va("coopsync begin %d", COOPSYNC_VERSION));
+    o = Com_sprintf(s_beginCmd, sizeof(s_beginCmd), "coopsync begin %d", COOPSYNC_VERSION);
     for (t = 0; t < COOPSYNC_NTYPES; t++) {
-        int len = CoopSync_ReadLocal(t);
-        int elen, pos = 0;
-        if (len < 0) {
-            continue;
-        }
-        elen = CoopSync_Encode(s_local, len, s_enc);
-        while (pos < elen) {
-            int a, o = Com_sprintf(cmd, sizeof(cmd), "coopsync d %s", coopSyncTypes[t]);
-            for (a = 0; a < COOPSYNC_ARGS && pos < elen; a++) {
-                int n = elen - pos;
-                if (n > COOPSYNC_ARGLEN) {
-                    n = COOPSYNC_ARGLEN;
-                }
-                cmd[o++] = ' ';
-                memcpy(cmd + o, s_enc + pos, n);
-                o += n;
-                pos += n;
-            }
-            cmd[o] = 0;
-            cgi.SendClientCommand(cmd);
-        }
-        cgi.SendClientCommand(va("coopsync have %s %d", coopSyncTypes[t], len));
-        sent++;
+        char dig[16];
+        int  len = CoopSync_ReadLocal(t);
+        CoopSync_DigestHex(coopSyncRule[t], len >= 0 ? s_local : "", dig);
+        o += Com_sprintf(s_beginCmd + o, sizeof(s_beginCmd) - o, " %s", dig);
     }
-    cgi.SendClientCommand("coopsync end");
+    CoopSync_Send(s_beginCmd);
+    s_beginAt        = cgi.Milliseconds();
+    s_beginTries     = 1;
     s_coopSyncActive = 1;
-    cgi.Printf("^~^~^ COOPSYNC client sent %d records id=%.8s\n", sent, s_coopSyncId);
+    cgi.Printf("^~^~^ COOPSYNC client handshake id=%.8s\n", s_coopSyncId);
+}
+
+static void CoopSync_QueueRecord(int t)
+{
+    int len = CoopSync_ReadLocal(t);
+    int elen, pos = 0, seq = 0;
+
+    if (len < 0) {
+        // no file here: say so, so the server sends its copy down
+        if (s_qTail < COOPSYNC_QMAX) {
+            coopSyncQ_t *q = &s_q[s_qTail++];
+            Com_sprintf(q->cmd, sizeof(q->cmd), "coopsync d %s 0 1 -1", coopSyncTypes[t]);
+            q->type = t;
+            q->seq  = 0;
+        }
+        return;
+    }
+    elen = CoopSync_Encode(s_local, len, s_enc);
+    if (s_qTail + elen / (COOPSYNC_ARGLEN * COOPSYNC_UPARGS) + 2 >= COOPSYNC_QMAX) {
+        cgi.Printf("^~^~^ COOPSYNC client skipped %s (too large to queue)\n", coopSyncTypes[t]);
+        return;
+    }
+    do {
+        coopSyncQ_t *q = &s_q[s_qTail++];
+        int          a, o, fin;
+        int          left = elen - pos;
+        fin               = left <= COOPSYNC_ARGLEN * COOPSYNC_UPARGS;
+        o = Com_sprintf(q->cmd, sizeof(q->cmd), "coopsync d %s %d %d %d", coopSyncTypes[t], seq, fin, fin ? len : 0);
+        for (a = 0; a < COOPSYNC_UPARGS && pos < elen; a++) {
+            int n = elen - pos;
+            if (n > COOPSYNC_ARGLEN) {
+                n = COOPSYNC_ARGLEN;
+            }
+            q->cmd[o++] = ' ';
+            memcpy(q->cmd + o, s_enc + pos, n);
+            o += n;
+            pos += n;
+        }
+        q->cmd[o] = 0;
+        q->type   = t;
+        q->seq    = seq++;
+    } while (pos < elen);
+}
+
+void CG_CoopSync_Frame(void)
+{
+    int now;
+
+    if (!s_coopSyncActive || s_coopSyncAcked) {
+        return;
+    }
+    now = cgi.Milliseconds();
+
+    if (s_qHead >= s_qTail) {
+        // waiting for the server's `want` (or `ack`): resend a lost / flood-dropped handshake twice
+        if (s_beginTries > 0 && s_beginTries < 3 && now - s_beginAt > COOPSYNC_BEGIN_MS && now - s_lastSend >= COOPSYNC_GAP_MS) {
+            CoopSync_Send(s_beginCmd);
+            s_beginAt = now;
+            s_beginTries++;
+        }
+        return;
+    }
+    if (now - s_lastSend < COOPSYNC_GAP_MS) {
+        return;
+    }
+    if (s_qSentAt && now - s_qSentAt < COOPSYNC_RESEND_MS) {
+        return; // in flight
+    }
+    CoopSync_Send(s_q[s_qHead].cmd);
+    s_qSentAt = now;
 }
 
 static void CoopSync_Apply(int t, const char *incoming, int inLen)
@@ -122,11 +213,7 @@ static void CoopSync_Apply(int t, const char *incoming, int inLen)
     int localLen = CoopSync_ReadLocal(t);
     int n;
 
-    if (coopSyncRule[t] == COOPSYNC_MERGE_NEWEST) {
-        n = CoopSync_Merge(COOPSYNC_MERGE_NEWEST, s_local, incoming, s_out);
-    } else {
-        n = CoopSync_Merge(coopSyncRule[t], s_local, incoming, s_out);
-    }
+    n = CoopSync_Merge(coopSyncRule[t], s_local, incoming, s_out);
     if (n < 0) {
         cgi.Printf("^~^~^ COOPSYNC client kept %s (merge overflow)\n", coopSyncTypes[t]);
         return;
@@ -138,20 +225,50 @@ static void CoopSync_Apply(int t, const char *incoming, int inLen)
     cgi.Printf("^~^~^ COOPSYNC client wrote %s (%d bytes, was %d)\n", coopSyncTypes[t], n, localLen);
 }
 
-// server command: coopsave ack <ver> | coopsave <type> <part> <nparts> <arg>...
 void CG_CoopSync_Command(void)
 {
     const char *sub = cgi.Argv(1);
     int         t, part, nparts, i;
 
     if (!s_coopSyncActive) {
-        return; // we never uploaded to this server - never take a record from it
+        return; // we never sent a handshake to this server - never take a record from it
     }
     if (!strcmp(sub, "ack")) {
         s_coopSyncAcked = 1;
+        s_qHead = s_qTail = 0;
         cgi.Printf("^~^~^ COOPSYNC client acked by server\n");
         return;
     }
+    if (!strcmp(sub, "want")) {
+        if (s_qTail > 0 || s_coopSyncAcked) {
+            return; // already uploading (a duplicate want)
+        }
+        for (i = 2; i < cgi.Argc(); i++) {
+            t = CoopSync_TypeIndex(cgi.Argv(i));
+            if (t >= 0) {
+                CoopSync_QueueRecord(t);
+            }
+        }
+        if (s_qTail < COOPSYNC_QMAX) {
+            coopSyncQ_t *q = &s_q[s_qTail++];
+            Q_strncpyz(q->cmd, "coopsync end", sizeof(q->cmd));
+            q->type = -1;
+            q->seq  = 0;
+        }
+        s_qSentAt = 0;
+        cgi.Printf("^~^~^ COOPSYNC client uploading %d chunks\n", s_qTail);
+        return;
+    }
+    if (!strcmp(sub, "got")) {
+        t = CoopSync_TypeIndex(cgi.Argv(2));
+        if (s_qHead < s_qTail && t >= 0 && s_q[s_qHead].type == t && s_q[s_qHead].seq == atoi(cgi.Argv(3))) {
+            s_qHead++;
+            s_qSentAt = 0;
+        }
+        return;
+    }
+
+    // a record: coopsave <type> <part> <nparts> <arg>...
     t = CoopSync_TypeIndex(sub);
     if (t < 0) {
         return;
@@ -210,4 +327,5 @@ void CG_CoopSync_Shutdown(void)
     s_coopSyncActive = 0;
     s_coopSyncAcked  = 0;
     s_rxType         = -1;
+    s_qHead = s_qTail = 0;
 }
