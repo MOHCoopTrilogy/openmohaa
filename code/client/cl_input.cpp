@@ -1240,6 +1240,29 @@ void CL_WritePacket( void ) {
 		MSG_WriteLong( &buf, i );
 		MSG_WriteScrambledString( &buf, clc.reliableCommands[ i & (MAX_RELIABLE_COMMANDS-1) ] );
 	}
+	// HZM [joinflood 2026-10-14] cl_netProbe: who fills a client packet
+	{
+		static cvar_t *cl_netProbe;
+		static int s_lastProbe;
+		int bytes = 0;
+		if ( !cl_netProbe ) {
+			cl_netProbe = Cvar_Get( "cl_netProbe", "0", 0 );
+		}
+		if ( cl_netProbe->integer ) {
+			for ( i = clc.reliableAcknowledge + 1 ; i <= clc.reliableSequence ; i++ ) {
+				bytes += (int)strlen( clc.reliableCommands[ i & (MAX_RELIABLE_COMMANDS-1) ] ) + 6;
+			}
+			if ( bytes >= 1000 && cls.realtime - s_lastProbe >= 1000 ) {
+				s_lastProbe = cls.realtime;
+				Com_Printf( "^~^~^ CLNET unacked=%d bytes=%d state=%d srvcmd=%d\n", clc.reliableSequence - clc.reliableAcknowledge,
+					bytes, (int)clc.state, clc.serverCommandSequence );
+				for ( i = clc.reliableAcknowledge + 1 ; i <= clc.reliableSequence ; i++ ) {
+					const char *c = clc.reliableCommands[ i & (MAX_RELIABLE_COMMANDS-1) ];
+					Com_Printf( "^~^~^ CLNET   #%d len=%d %.70s\n", i, (int)strlen( c ), c );
+				}
+			}
+		}
+	}
 
 	// we want to send all the usercmds that were generated in the last
 	// few packet, so even if a couple packets are dropped in a row,

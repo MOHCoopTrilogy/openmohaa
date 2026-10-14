@@ -1161,9 +1161,11 @@ void SV_Init (void)
 	sv_rconPassword = Cvar_Get ("rconPassword", "", CVAR_TEMP );
 	sv_privatePassword = Cvar_Get ("sv_privatePassword", "", CVAR_TEMP );
 	sv_fps = Cvar_Get ("sv_fps", "20", CVAR_SAVEGAME | CVAR_SERVERINFO | CVAR_NORESTART );
+	sv_netProbe = Cvar_Get ("sv_netProbe", "0", 0);	// HZM [joinflood]: per-client net probe
 	sv_lagProbe = Cvar_Get ("sv_lagProbe", "0", 0);	// HZM: report server frame overruns
 	sv_timeout = Cvar_Get ("sv_timeout", "120", CVAR_TEMP );
-	sv_cmdPark = Cvar_Get ("sv_cmdPark", "1", 0);		// HZM coop [bug-3480]
+	sv_cmdPark = Cvar_Get ("sv_cmdPark", "1", 0);
+	sv_cmdParkBytes = Cvar_Get ("sv_cmdParkBytes", "2400", 0);	// HZM coop [joinflood bug-3910] 0 = count window only		// HZM coop [bug-3480]
 	sv_zombietime = Cvar_Get ("sv_zombietime", "2", CVAR_TEMP );
 	Cvar_Get ("nextmap", "", CVAR_TEMP );
 

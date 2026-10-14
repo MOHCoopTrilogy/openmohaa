@@ -346,9 +346,14 @@ extern	server_t		sv;					// cleared each map
 extern	game_export_t	*ge;				// game exports
 
 extern	cvar_t	*sv_fps;
+extern	cvar_t	*sv_netProbe;	// HZM [joinflood 2026-10-14]: per-client reliable/snapshot/packet probe
+void SV_NetProbe_Snap( client_t *cl, int bytes );
+void SV_NetProbe_Skip( client_t *cl, int why );
+void SV_NetProbe_Userinfo( client_t *cl );
 extern	cvar_t	*sv_lagProbe;	// HZM [user 2026-08-10]: server frame-overrun probe
 extern	cvar_t	*sv_timeout;
 extern	cvar_t	*sv_cmdPark;
+extern	cvar_t	*sv_cmdParkBytes;
 extern	cvar_t	*sv_zombietime;
 extern	cvar_t	*sv_rconPassword;
 extern	cvar_t	*sv_privatePassword;
