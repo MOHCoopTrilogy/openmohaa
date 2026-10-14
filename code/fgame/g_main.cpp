@@ -663,6 +663,8 @@ G_RunFrame
 Advances the non-player objects in the world
 ================
 */
+void G_CoopSync_Frame(void); // HZM coop [bug-3903] g_coopsync.cpp
+
 void G_RunFrame(int levelTime, int frameTime)
 {
     gentity_t         *edict;
@@ -679,6 +681,9 @@ void G_RunFrame(int levelTime, int frameTime)
         if (g_showmem->integer) {
             DisplayMemoryUsage();
         }
+
+        // HZM coop [bug-3903] progression sync: send the records parked by fs_write_content this frame
+        G_CoopSync_Frame();
 
         // exit intermissions
         if (level.exitintermission) {

@@ -25,6 +25,7 @@ server share one homepath), so both keep today's behaviour exactly.
 
 #include "g_local.h"
 #include "game.h"
+#include "level.h"
 #include "entity.h"
 #include "scriptvariable.h"
 #include "bg_coopsync.h"
@@ -45,6 +46,17 @@ typedef struct {
 } coopSyncClient_t;
 
 static coopSyncClient_t s_coopSync[MAX_CLIENTS];
+
+// DOWNLOAD COALESCING. One game action can write the same record many times in a row - joining a server
+// for the first time re-grants every rank unlock (xp.scr::xp_rank_unlock -> chal_add_unlock), and each grant
+// rewrites unlocks_ AND pend_. Sending every write would put hundreds of reliable commands on a client that
+// is still loading (the bug-670 ring overflow). So a write only parks the newest content; G_CoopSync_Frame
+// sends it, at most once per COOPSYNC_SEND_MS per client and record. The first write after a quiet spell
+// goes out on the next frame, so a mission-end flush is not delayed.
+#define COOPSYNC_SEND_MS 1000
+static str s_dlPending[MAX_CLIENTS][COOPSYNC_NTYPES];
+static int s_dlDirty[MAX_CLIENTS][COOPSYNC_NTYPES];
+static int s_dlLast[MAX_CLIENTS][COOPSYNC_NTYPES];
 static char             s_mergeOut[COOPSYNC_MAXLEN + 1];
 static char             s_decode[COOPSYNC_MAXLEN + 1];
 static char             s_encode[COOPSYNC_MAXLEN * 3 + 1];
@@ -58,6 +70,9 @@ static void CoopSync_Reset(int cn)
         s_coopSync[cn].enc[i] = "";
         s_coopSync[cn].rec[i] = "";
         s_coopSync[cn].have[i] = 0;
+        s_dlPending[cn][i]      = "";
+        s_dlDirty[cn][i]        = 0;
+        s_dlLast[cn][i]         = -100000;
     }
 }
 
@@ -374,6 +389,35 @@ void G_CoopSync_OnWrite(const char *path, const char *content, int len)
         if (!g_entities[cn].inuse || !g_entities[cn].client) {
             continue;
         }
-        CoopSync_SendRecord(cn, t, content, len);
+        s_dlPending[cn][t] = content;
+        s_dlDirty[cn][t]   = 1;
+    }
+}
+
+// Every server frame (G_RunFrame): send each client's parked records, rate-limited per record.
+void G_CoopSync_Frame(void)
+{
+    int cn, t;
+    int now = level.inttime;
+
+    for (cn = 0; cn < game.maxclients && cn < MAX_CLIENTS; cn++) {
+        if (s_coopSync[cn].state != COOPSYNC_MERGED) {
+            continue;
+        }
+        for (t = 0; t < COOPSYNC_NTYPES; t++) {
+            if (!s_dlDirty[cn][t]) {
+                continue;
+            }
+            if (now - s_dlLast[cn][t] < COOPSYNC_SEND_MS && now >= s_dlLast[cn][t]) {
+                continue;
+            }
+            if (!g_entities[cn].inuse || !g_entities[cn].client) {
+                s_dlDirty[cn][t] = 0;
+                continue;
+            }
+            CoopSync_SendRecord(cn, t, s_dlPending[cn][t].c_str(), s_dlPending[cn][t].length());
+            s_dlDirty[cn][t] = 0;
+            s_dlLast[cn][t]  = now;
+        }
     }
 }
