@@ -2515,6 +2515,7 @@ void Com_Frame( void ) {
         static long long nextUs = 0;
         long long        nowUs  = Com_HzmMicros();
         long long        leftUs;
+        qboolean         polled = qfalse;
 
         nextUs += hzmIntervalUs;
         if (nextUs < nowUs - hzmIntervalUs || nextUs > nowUs + hzmIntervalUs * 2)
@@ -2526,7 +2527,19 @@ void Com_Frame( void ) {
 
             leftUs = nextUs - Com_HzmMicros();
             if (leftUs <= 0)
+            {
+                // HZM coop [joinflood stage 2, bug-3911] NET_Sleep is the ONLY place network packets are read
+                // (NET_Event; Com_EventLoop reads loopback only). A frame that already used up its interval - every
+                // frame, with vsync on or a cap above what the machine renders (com_maxfps 200 at 6-7 ms frames) -
+                // broke out here before the first NET_Sleep, so a remote server's snapshots sat unread in the
+                // socket for seconds and overflowed it: no acks, ping sawtooth, connection icon, a 15 cmds/s drain,
+                // even "Connect to server timed out". Read the network at least once every frame, like the old
+                // millisecond loop's do-while always did.
+                if (!polled)
+                    NET_Sleep(0);
                 break;
+            }
+            polled = qtrue;
 
             // sleep while there is room for the 1 ms timer to be late, then yield-spin the last stretch
             if (!com_busyWait->integer && leftUs > 2500 && timeValSV > 1)
