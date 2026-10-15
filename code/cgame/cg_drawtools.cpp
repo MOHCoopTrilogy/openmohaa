@@ -30,7 +30,13 @@ extern "C" void CG_DrawCoopIcons(void);
 // HZM coop - HUD FADE state (logic lives above CG_Draw2D; declared here because huddraw/
 // magazines drawing earlier in the file multiplies the same alpha)
 static int   s_hudTouchTime = -100000; // cg.time of the last HUD-relevant activity
-static float s_hudFadeAlpha = 1.0f;
+static float s_hudFadeAlpha = 1.0f; // the fade CLOCK (linear 0..1, one start time, one duration)
+// [bug-3950] the fade CURVE: ONE shaped value every consumer draws with. It was linear for the URC panels, the
+// huddraw layers, the team logo and the ammo text, but squared in the stamina arc and the compass bar, so at
+// the same instant a panel stood at 0.5 while the arc stood at 0.25 and the strip at 0.25: the arc and compass
+// went first and the panels lingered. Squared everywhere (a thin bright stroke outlives a dark panel at equal
+// alpha, bug-2555), published to the UI layer as ui_hudAlpha, and one cutoff (0.02) for all of them.
+static float s_hudFadeShown = 1.0f;
 
 /*
 ================
@@ -705,7 +711,7 @@ void CG_HudDrawElements()
             vec4_t vFadedCol;
             Vector4Copy(cgi.HudDrawElements[i].vColor, vFadedCol);
             if (i < 100) {
-                vFadedCol[3] *= s_hudFadeAlpha;
+                vFadedCol[3] *= s_hudFadeShown;
             }
             cgi.R_SetColor(vFadedCol);
         }
@@ -942,8 +948,11 @@ void CG_DrawPlayerTeam()
 
     if (handle) {
         // HZM coop - HUD fade: the team logo is persistent chrome, follow the fade
+        // The badge is a bright, high-contrast stroke on a dark scene: at the same alpha as the dark panels it was still
+        // plainly visible when they were gone (mid-fade frames, hudpolish hp9). Colour follows the fade too.
         vec4_t vTeamCol = {1.0f, 1.0f, 1.0f, 1.0f};
-        vTeamCol[3] = s_hudFadeAlpha;
+        vTeamCol[0] = vTeamCol[1] = vTeamCol[2] = s_hudFadeShown;
+        vTeamCol[3] = s_hudFadeShown;
         if (vTeamCol[3] <= 0.02f) {
             return;
         }
@@ -1910,14 +1919,14 @@ static void CG_DrawStaminaArc(void)
     // bright line on a dark background stays legible at an alpha where a dark HUD panel has already
     // gone. Squaring keeps 1.0 at 1.0 and collapses the tail - 0.3 becomes 0.09 - so the two vanish
     // together without desynchronising them.
-    fA = s_hudFadeAlpha * s_hudFadeAlpha;
+    fA = s_hudFadeShown; // [bug-3950] the shared curve (already squared)
 
     // [bug-2593] Hard cutoff to match the URC HUD widgets, which draw NOTHING once their fade
     // multiplier is essentially out (uiwidget.cpp: m_hudFadeMul <= 0.02 returns early). A thin
     // bright stroke stays perceptible at an alpha where the dark panels have already gone, so
     // stop drawing the arc at the same point the rest of the bottom-left cluster does, and the
     // whole cluster vanishes together instead of the frame lingering through the fade tail.
-    if (s_hudFadeAlpha <= 0.02f) {
+    if (s_hudFadeShown <= 0.02f) {
         return;
     }
 
@@ -2286,7 +2295,7 @@ static void CG_DrawMagazines(void)
     col[0] = 0.80f;
     col[1] = 0.72f;
     col[2] = 0.35f;
-    col[3] = 1.0f * s_hudFadeAlpha; // muted gold, matching the old ammo text; follows the HUD fade
+    col[3] = 1.0f * s_hudFadeShown; // muted gold, matching the old ammo text; follows the HUD fade
     if (CG_HardcoreHudActive()) {
         col[3] = 1.0f; // Hardcore shows it only around a reload (above) - the calm fade must not hide that too
     }
@@ -2479,6 +2488,9 @@ static void CG_UpdateHudFade(void)
         s_hudFadeAlpha -= step;
         if (s_hudFadeAlpha < 0.0f) { s_hudFadeAlpha = 0.0f; }
     }
+    // [bug-3950] one shaped value for every consumer; the UI layer (hud_health / hud_ammo / hud_items / hud_weapons /
+    // ui_addhud panels) and the item readout read it through ui_hudAlpha
+    s_hudFadeShown = s_hudFadeAlpha * s_hudFadeAlpha;
 
     // HZM coop - HARDCORE host rule hides ONLY the health bar, through the client's health-only alpha (cl_ui.cpp
     // UI_ApplyHudFadeAlpha reads ui_hudHealthAlpha). The shared ui_hudAlpha lever the MP branch below uses would also
@@ -2486,7 +2498,10 @@ static void CG_UpdateHudFade(void)
     // on change only; an old exe ignores it and keeps its health bar (fail-open).
     {
         static int s_lastHcHealth = -1;
-        const int  hcHealth       = CG_CoopHardcoreActive() ? 1 : 0;
+        // [bug-3954] a briefing map shows no health cluster either: it sat under the ready-up roster (the cross over the
+        // first name). ui_hudHealthAlpha touches ONLY hud_health, so the briefing's ui_addhud slides (which ride
+        // ui_hudAlpha) are untouched. Same map test as CG_DrawCoopItems.
+        const int  hcHealth       = (CG_CoopHardcoreActive() || strstr(cgs.mapname, "briefing/")) ? 1 : 0;
         if (hcHealth != s_lastHcHealth) {
             cgi.Cvar_Set("ui_hudHealthAlpha", hcHealth ? "0" : "1");
             s_lastHcHealth = hcHealth;
@@ -2510,10 +2525,10 @@ static void CG_UpdateHudFade(void)
     }
 
     // publish for the client UI layer - on change only (no per-frame cvar churn at rest)
-    if (s_hudFadeAlpha < lastPub - 0.002f || s_hudFadeAlpha > lastPub + 0.002f
-        || (s_hudFadeAlpha != lastPub && (s_hudFadeAlpha == 0.0f || s_hudFadeAlpha == 1.0f))) {
-        cgi.Cvar_Set("ui_hudAlpha", va("%.3f", s_hudFadeAlpha));
-        lastPub = s_hudFadeAlpha;
+    if (s_hudFadeShown < lastPub - 0.002f || s_hudFadeShown > lastPub + 0.002f
+        || (s_hudFadeShown != lastPub && (s_hudFadeShown == 0.0f || s_hudFadeShown == 1.0f))) {
+        cgi.Cvar_Set("ui_hudAlpha", va("%.3f", s_hudFadeShown));
+        lastPub = s_hudFadeShown;
     }
 }
 
@@ -3179,7 +3194,7 @@ static void CG_DrawCompassBar(void)
 
     // same clock as every other faded element, squared (bug-2555), hard early-out: nothing lingers
     opacity = CG_CompassBarClamp(s_cbOpacity->value, 0.3f, 1.0f);
-    fA2     = s_hudFadeAlpha * s_hudFadeAlpha;
+    fA2     = s_hudFadeShown; // [bug-3950] the shared curve (already squared)
     tickA   = opacity * fA2;
     markerA = opacity * ((fA2 > CB_MARKER_FLOOR) ? fA2 : CB_MARKER_FLOOR);
     if (tickA <= 0.02f && markerA <= 0.02f) {

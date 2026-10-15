@@ -848,7 +848,9 @@ can never run into its neighbour at any resolution; a longer name is cut to fit.
 */
 #define COOPITEM_ICON_V   14.0f // icon edge, virtual-480 units
 #define COOPITEM_TOP_V    66.0f // top of the icons above the bottom of the screen, virtual-480 units (feed: 70)
-#define COOPITEM_LEFT_V   6.0f
+// [bug-3953] the row's left edge is the health cluster's: the stamina arc's left edge (coop_staminaArcX, 32 hi-res
+// units), so the icons, the arc and the cross read as one group. It was 6 virtual-480 units (9 px at 720p), 23 px
+// short of the arc at 720p and 32 px at 1080p.
 #define COOPITEM_GAP_V    12.0f
 #define COOPITEM_MIN_ICON 14.0f // pixels
 #define COOPITEM_KEY_PX   48.0f // room a key label is guaranteed, in hi-res units
@@ -1009,7 +1011,8 @@ static void CG_DrawCoopItems(void)
         return;
     }
     // a briefing map has no kit to show, and the ready gate's roster is drawn in this corner there
-    if (strstr(cgs.mapname, "briefing/")) {
+    // [bug-3954] and the lobby maps (co_lobby*): the script side already publishes "-" there, this is the backstop
+    if (strstr(cgs.mapname, "briefing/") || strstr(cgs.mapname, "co_lobby")) {
         return;
     }
     CG_CoopItemKeys();
@@ -1067,7 +1070,14 @@ static void CG_DrawCoopItems(void)
         pitchPx = COOPITEM_KEY_PX * sx;
     }
     textH = 12.0f * sy;
-    xPx   = COOPITEM_LEFT_V * vs;
+    {
+        static cvar_t *pArcX = NULL;
+
+        if (!pArcX) {
+            pArcX = cgi.Cvar_Get("coop_staminaArcX", "32", CVAR_ARCHIVE);
+        }
+        xPx = pArcX->value * sx;
+    }
 
     for (i = 0; i < COOPITEM_N; i++) {
         coopItem_t *it = &s_coopItems[i];
