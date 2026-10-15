@@ -1054,6 +1054,9 @@ void CG_Init(clientGameImport_t *imported, int serverMessageNum, int serverComma
             cgi.Cvar_Get(kPickCvars[pi], "", CVAR_ARCHIVE | CVAR_USERINFO);
         }
     }
+    // capability flag: always "1" in the userinfo of a client that carries the lp_* state channel. The server then ignores that
+    // client's armory NAME-BUS tokens (the stale first token of a burst used to land AFTER the final state and win).
+    cgi.Cvar_Get("lp_v", "1", CVAR_USERINFO | CVAR_ROM);
     // HZM-LO-END(armory_pick_userinfo)
 
     // HZM-MP-BEGIN(mp_kit_userinfo)
