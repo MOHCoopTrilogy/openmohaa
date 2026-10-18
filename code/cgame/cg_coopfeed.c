@@ -1294,45 +1294,169 @@ screen height, so the same at 720p, 1080p, 4:3 and ultrawide (both are scaled by
 static float s_subLift   = 0.0f; // pixels the feed is standing above its normal floor
 static int   s_subLifted = 0;    // once lifted, stay lifted until the subtitles are gone (no flicker)
 
-static qboolean CG_FeedSubtitleBlock(float *topPx, float *botPx)
-{
-    static cvar_t       *cv[4];
-    static fontheader_t *f = NULL;
-    int                  i, lines = 0;
-    float                fh, maxX, w;
+/*
+[bug-4006, round 2] The exe's own subtitle block starts 10 text heights above the bottom, i.e. ON the item row and the health
+cluster, and the exe is not in this lineage. So in a coop session cgame DRAWS THE SUBTITLES ITSELF, above the whole
+bottom-left cluster, and zeroes the exe's `subAlpha` so its copy is invisible (its timers keep clearing subtitle0-3, which
+is what we read). Same wording, wrap (80 % of the width), timing and envelope as View3D::DrawSubtitleOverlay. The feed then
+stands above this block. Outside a coop session `subAlpha` is put back and nothing here draws.
+*/
+#define SUB_N        4
+#define SUB_MAXLINES 16
+static char   s_subOld[SUB_N][256];
+static float  s_subLeft[SUB_N], s_subLife[SUB_N];
+static char   s_subLine[SUB_MAXLINES][256];
+static float  s_subLineA[SUB_MAXLINES];
+static int    s_subNLines = 0, s_subLastT = 0, s_subActive = 0, s_subTaken = 0;
+static float  s_subTopPx = 0.0f, s_subBotPx = 0.0f;
 
+static void CG_SubWrap(const char *t, float a, float maxX, fontheader_t *f)
+{
+    int len = (int)strlen(t), pos = 0;
+
+    while (pos < len && s_subNLines < SUB_MAXLINES) {
+        int end = pos, lastSp = -1, n;
+
+        while (end < len) {
+            if (t[end] == ' ') {
+                lastSp = end;
+            }
+            if ((float)cgi.UI_FontStringWidth(f, t + pos, end - pos + 1) > maxX) {
+                break;
+            }
+            end++;
+        }
+        if (end >= len) {
+            end = len;
+        } else {
+            if (lastSp > pos) {
+                end = lastSp;
+            }
+            if (end <= pos) {
+                end = pos + 1;
+            }
+        }
+        n = end - pos;
+        if (n > 255) {
+            n = 255;
+        }
+        memcpy(s_subLine[s_subNLines], t + pos, n);
+        s_subLine[s_subNLines][n] = 0;
+        s_subLineA[s_subNLines]   = a;
+        s_subNLines++;
+        pos = end;
+        while (pos < len && t[pos] == ' ') {
+            pos++;
+        }
+    }
+}
+
+static void CG_CoopSubtitles(void)
+{
+    static cvar_t       *cv[SUB_N], *pSess = NULL, *pAlpha = NULL, *pOur = NULL;
+    static fontheader_t *f = NULL;
+    int                  i, dt, now = cg.time;
+    float                sx = cgs.uiHiResScale[0], sy = cgs.uiHiResScale[1], fh, maxX, a, fac;
+
+    s_subActive = 0;
+    s_subNLines = 0;
     if (!cv[0]) {
-        for (i = 0; i < 4; i++) {
+        for (i = 0; i < SUB_N; i++) {
             char nm[16];
             Com_sprintf(nm, sizeof(nm), "subtitle%d", i);
             cv[i] = cgi.Cvar_Get(nm, "", 0);
         }
+        pSess  = cgi.Cvar_Get("coop_isCoopSession", "0", 0);
+        pAlpha = cgi.Cvar_Get("subAlpha", "0.5", 0);
+        pOur   = cgi.Cvar_Get("coop_subAlpha", "0.65", CVAR_ARCHIVE);
     }
-    for (i = 0; i < 4; i++) {
-        if (cv[i] && cv[i]->string && cv[i]->string[0]) {
-            break;
+    if (!pSess->integer) {
+        if (s_subTaken) {
+            cgi.Cvar_Set("subAlpha", "0.5");
+            s_subTaken = 0;
         }
+        return;
     }
-    if (i == 4) {
-        return qfalse;
+    if (pAlpha->value != 0.0f) {
+        cgi.Cvar_Set("subAlpha", "0");
+        s_subTaken = 1;
     }
     if (!f) {
         f = cgi.R_LoadFont("facfont-20");
     }
-    if (!f || !f->sgl[0] || f->sgl[0]->height <= 0.0f) {
-        return qfalse;
+    dt = now - s_subLastT;
+    if (dt < 0 || dt > 1000) {
+        dt = 16;
     }
-    fh   = f->sgl[0]->height * cgs.uiHiResScale[1];
-    maxX = ((float)cgs.glconfig.vidWidth * 0.8f) / cgs.uiHiResScale[0];
-    for (i = 0; i < 4; i++) {
-        if (cv[i] && cv[i]->string && cv[i]->string[0]) {
-            w = (float)cgi.UI_FontStringWidth(f, cv[i]->string, -1);
-            // the engine breaks at word ends, so a wrapped block can need one more line than width / maxX
-            lines += (w > maxX) ? ((int)(w * 1.12f / maxX) + 1) : 1;
+    s_subLastT = now;
+    if (!f || !f->sgl[0] || f->sgl[0]->height <= 0.0f || sx <= 0.0f || sy <= 0.0f) {
+        return;
+    }
+    fh   = f->sgl[0]->height * sy;
+    maxX = ((float)cgs.glconfig.vidWidth * 0.8f) / sx;
+    fac  = pOur->value;
+    if (fac < 0.1f) {
+        fac = 0.1f;
+    }
+    if (fac > 1.0f) {
+        fac = 1.0f;
+    }
+    for (i = 0; i < SUB_N; i++) {
+        const char *str = cv[i]->string ? cv[i]->string : "";
+
+        if (!str[0]) {
+            s_subOld[i][0] = 0;
+            s_subLeft[i]   = 0.0f;
+            continue;
+        }
+        if (strcmp(s_subOld[i], str)) {
+            Q_strncpyz(s_subOld[i], str, sizeof(s_subOld[i]));
+            s_subLife[i] = 2500.0f * ((float)((int)strlen(str) / 68) + 1.0f) + 1500.0f;
+            s_subLeft[i] = s_subLife[i];
+        }
+        if (s_subLeft[i] <= 0.0f) {
+            continue;
+        }
+        if (s_subLeft[i] > s_subLife[i] - 750.0f) {
+            a = 1.0f - (s_subLeft[i] - (s_subLife[i] - 750.0f)) / 750.0f;
+        } else if (s_subLeft[i] < 750.0f) {
+            a = s_subLeft[i] / 750.0f;
+        } else {
+            a = 1.0f;
+        }
+        s_subLeft[i] -= (float)dt;
+        if (a > 0.0f) {
+            CG_SubWrap(str, a * fac, maxX, f);
         }
     }
-    *topPx = (float)cgs.glconfig.vidHeight - fh * 10.0f;
-    *botPx = *topPx + fh * (float)lines + fh * 0.35f;
+    if (!s_subNLines) {
+        return;
+    }
+    s_subBotPx  = CG_CoopItemsTopPx(NULL) - 6.0f; // clear of the item row, the health cluster and its labels
+    s_subTopPx  = s_subBotPx - fh * (float)s_subNLines;
+    s_subActive = 1;
+    for (i = 0; i < s_subNLines; i++) {
+        float  y = (s_subTopPx + fh * (float)i) / sy;
+        vec4_t c;
+
+        c[0] = c[1] = c[2] = 0.0f;
+        c[3] = s_subLineA[i];
+        cgi.R_SetColor(c);
+        cgi.R_DrawString(f, s_subLine[i], 18.0f, y + 1.0f, -1, cgs.uiHiResScale);
+        c[0] = c[1] = c[2] = 1.0f;
+        cgi.R_SetColor(c);
+        cgi.R_DrawString(f, s_subLine[i], 20.0f, y, -1, cgs.uiHiResScale);
+    }
+    cgi.R_SetColor(NULL);
+}
+
+static qboolean CG_FeedSubtitleBlock(float *topPx, float *botPx)
+{
+    if (!s_subActive) {
+        return qfalse;
+    }
+    *topPx = s_subTopPx;
+    *botPx = s_subBotPx;
     return qtrue;
 }
 
@@ -1352,6 +1476,7 @@ void CG_DrawCoopFeed(qboolean cineHide)
 
     CG_CoopFeedInit();
     CG_CoopScoreHudMirror();
+    CG_CoopSubtitles(); // [bug-4006] the subtitle block, above the bottom-left cluster; the feed stands above it
     if (!cineHide) {
         CG_DrawCoopItems();         // [bug-3495] medkit / sandbag / ammo box: icon, subscript amount, bound key
         CG_DrawCoopPinned();        // [bug-3485] not part of the feed: coop_feed 0 does not hide it
