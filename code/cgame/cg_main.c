@@ -978,6 +978,8 @@ void CG_Init(clientGameImport_t *imported, int serverMessageNum, int serverComma
             // [2026-10-12] use-to-loot prompt (cg_coopfeed.c CG_DrawCoopLoot): target and hold length. Server-set,
             // change-only - a value left over from the last map would show a prompt for nothing.
             "coop_lootT", "coop_lootH",
+            // [2026-10-18] icon action prompts (cg_coopfeed.c CG_DrawCoopAct): spec string + hold length, server-set, change-only
+            "coop_act", "coop_actH",
             // [2026-08-21] coop_vaultView is a COUNTER, so a stale value is not a stuck view -
             // but zeroing it on a fresh connect keeps the client edge-detector in step with a
             // server that starts its own counter at 0 again.

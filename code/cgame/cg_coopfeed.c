@@ -1823,3 +1823,301 @@ void CG_DrawCoopLoot(void)
     }
     cgi.R_SetColor(NULL);
 }
+
+/*
+====================
+CG_DrawCoopAct
+
+HZM coop [user 2026-10-18] ICON ACTION PROMPTS. Every "press USE to ..." line a script used to draw as text
+(heal, resupply, remove cover, convert, contain, distract, plant, truck ...) is now ONE icon + the bound key in
+exactly the slot, size, fade and key cap of the use-to-loot prompt above (CG_DrawCoopLoot): centred, centre line at
+63.5 % of the height, 52*s px icon, key cap 32*s below it, s = H/1080 floored at 0.75, hi-res units for the text.
+
+Wire (script -> client, change-only `set coop_*` stufftext, see coop_mod/actprompt.scr):
+    coop_act  = "<name>[:hold][:fire][:dim][:cap=Word_Word]"   "0" or "" = nothing
+                name  textures/hud/loot/coop_act_<name> (any name; a new prompt is one new tga, no code here)
+                hold  a track beside the key cap (this action is a HOLD)
+                fire  the key shown is +attackprimary instead of +use
+                dim   the icon at 45 % with no key: the action is not available (empty box, no medkits);
+                      cap= is the one word under it
+                cap=  with a key cap (no dim): a word beside the cap, like the gun prompt's name
+    coop_actH = length in ms of the hold now in progress (0 = none); the track fills on the CLIENT's own clock from
+                the moment it changes, as coop_lootH does. The shared HD progress ring (hdring-engine) can take the
+                track over later: it is drawn by CG_ActTrack() below, one place.
+CG_Init zeroes both (cg_main.c). The loot prompt wins the slot: while coop_lootT is set nothing is drawn here.
+====================
+*/
+#define ACT_ART_MAX 40
+static struct {
+    char      name[32];
+    qhandle_t sh;
+} s_actArt[ACT_ART_MAX];
+static int s_actArtN = 0;
+
+static qhandle_t CG_ActShader(const char *name)
+{
+    int i;
+
+    for (i = 0; i < s_actArtN; i++) {
+        if (!Q_stricmp(s_actArt[i].name, name)) {
+            return s_actArt[i].sh;
+        }
+    }
+    if (s_actArtN >= ACT_ART_MAX) {
+        return 0;
+    }
+    Q_strncpyz(s_actArt[s_actArtN].name, name, sizeof(s_actArt[0].name));
+    s_actArt[s_actArtN].sh = cgi.R_RegisterShader(va("textures/hud/loot/coop_act_%s", name));
+    return s_actArt[s_actArtN++].sh;
+}
+
+// the hold track: a dark slot with a thin cream rim that fills. ONE place, so the HD progress ring/bar can replace it.
+static void CG_ActTrack(float tx, float ty, float trackW, float trackH, float frac, float fillA, float alpha)
+{
+    CG_LootBox(tx - 2.0f, ty - 2.0f, trackW + 4.0f, trackH + 4.0f, 0.05f, 0.045f, 0.04f, 0.67f * alpha);
+    CG_LootBox(tx - 1.0f, ty - 1.0f, trackW + 2.0f, 1.0f, 0.94f, 0.91f, 0.84f, 0.58f * alpha);
+    CG_LootBox(tx - 1.0f, ty + trackH, trackW + 2.0f, 1.0f, 0.94f, 0.91f, 0.84f, 0.58f * alpha);
+    CG_LootBox(tx - 1.0f, ty, 1.0f, trackH, 0.94f, 0.91f, 0.84f, 0.58f * alpha);
+    CG_LootBox(tx + trackW, ty, 1.0f, trackH, 0.94f, 0.91f, 0.84f, 0.58f * alpha);
+    if (frac > 0.0f && fillA > 0.0f) {
+        CG_LootBox(tx, ty, (float)((int)(trackW * frac + 0.5f)), trackH, 0.94f, 0.91f, 0.84f, 0.94f * alpha * fillA);
+    }
+}
+
+void CG_DrawCoopAct(void)
+{
+    static cvar_t *cvA = NULL, *cvH = NULL, *cvL = NULL;
+    static char    shownSpec[64] = "";
+    static int     lastMs = 0, holdCv = 0, holdMs = 0, holdStart = 0, holdEnd = 0;
+    static float   alpha = 0.0f, holdFracEnd = 0.0f;
+    static char    keyLabel[2][16] = {"", ""};
+    static int     keyNextMs       = 0;
+    char           spec[64], *tok, *save;
+    char           name[32], caption[24];
+    int            dt, h, hold = 0, fire = 0, dim = 0, k;
+    float          s, W, H, yc, rowY, capH, capW, trackW, trackH, dw, r2, gw, x, rx, frac, fillA, textH, capTextW = 0.0f;
+    qhandle_t      sh;
+    fontheader_t  *font;
+    vec4_t         c;
+
+    if (!cvA) {
+        cvA = cgi.Cvar_Get("coop_act", "0", 0);
+        cvH = cgi.Cvar_Get("coop_actH", "0", 0);
+        cvL = cgi.Cvar_Get("coop_lootT", "0", 0);
+    }
+    if (!cg.snap || (cg.snap->ps.pm_flags & PMF_INTERMISSION)) {
+        return;
+    }
+    dt = cg.time - lastMs;
+    if (dt < 0 || dt > 250) {
+        dt = 16;
+    }
+    lastMs = cg.time;
+
+    // --- what to show, and the fade (120 ms in, 180 ms out; same curve as the loot prompt) ----------------------
+    if (cvA->string[0] && Q_stricmp(cvA->string, "0") && cvL->integer <= 0) {
+        Q_strncpyz(shownSpec, cvA->string, sizeof(shownSpec));
+        alpha += (float)dt / 120.0f;
+        if (alpha > 1.0f) {
+            alpha = 1.0f;
+        }
+    } else {
+        alpha -= (float)dt / 180.0f;
+        if (alpha <= 0.0f) {
+            alpha        = 0.0f;
+            shownSpec[0] = 0;
+        }
+    }
+
+    // --- the hold, on this client's clock -------------------------------------------------------------------
+    h = cvH->integer;
+    if (h != holdCv) {
+        if (h > 0) {
+            holdStart = cg.time;
+            holdMs    = h;
+        } else if (holdCv > 0) {
+            holdEnd     = cg.time;
+            holdFracEnd = (holdMs > 100) ? (float)(cg.time - holdStart - 100) / (float)(holdMs - 100) : 0.0f;
+            if (holdFracEnd < 0.0f) {
+                holdFracEnd = 0.0f;
+            } else if (holdFracEnd > 1.0f) {
+                holdFracEnd = 1.0f;
+            }
+        }
+        holdCv = h;
+    }
+    if (holdCv > 0 && (cg.time < holdStart || cg.time - holdStart > holdMs + 3000)) {
+        holdCv = 0; // map load ran cg.time backwards, or the "ended" message never came
+        cgi.Cvar_Set("coop_actH", "0");
+    }
+    if (holdCv > 0) {
+        frac  = (holdMs > 100) ? (float)(cg.time - holdStart - 100) / (float)(holdMs - 100) : 0.0f;
+        fillA = 1.0f;
+    } else {
+        frac  = holdFracEnd;
+        fillA = 1.0f - (float)(cg.time - holdEnd) / 150.0f;
+    }
+    if (frac < 0.0f) {
+        frac = 0.0f;
+    } else if (frac > 1.0f) {
+        frac = 1.0f;
+    }
+    if (fillA < 0.0f || cg.time < holdEnd) {
+        fillA = 0.0f;
+    }
+
+    if (!shownSpec[0] || alpha <= 0.0f) {
+        return;
+    }
+    font = CG_FeedFont();
+    if (!font || cgs.uiHiResScale[0] <= 0.0f || cgs.uiHiResScale[1] <= 0.0f) {
+        return;
+    }
+
+    // --- parse "<name>[:flag...]" -----------------------------------------------------------------------------
+    Q_strncpyz(spec, shownSpec, sizeof(spec));
+    name[0] = caption[0] = 0;
+    save                 = spec;
+    for (k = 0; (tok = strtok(save, ":")) != NULL; k++) {
+        save = NULL;
+        if (k == 0) {
+            Q_strncpyz(name, tok, sizeof(name));
+        } else if (!Q_stricmp(tok, "hold")) {
+            hold = 1;
+        } else if (!Q_stricmp(tok, "fire")) {
+            fire = 1;
+        } else if (!Q_stricmp(tok, "dim")) {
+            dim = 1;
+        } else if (!Q_stricmpn(tok, "cap=", 4)) {
+            char *p;
+
+            Q_strncpyz(caption, tok + 4, sizeof(caption));
+            for (p = caption; *p; p++) {
+                if (*p == '_') {
+                    *p = ' ';
+                }
+            }
+        }
+    }
+    if (!name[0]) {
+        return;
+    }
+    sh = CG_ActShader(name);
+    if (!sh) {
+        return;
+    }
+    if (!s_lootKeyShader) {
+        s_lootKeyShader    = cgi.R_RegisterShader("textures/hud/loot/coop_loot_key");
+        s_lootAmmoShader   = cgi.R_RegisterShader("textures/hud/loot/coop_loot_ammo");
+        s_lootSearchShader = cgi.R_RegisterShader("textures/hud/loot/coop_loot_search");
+    }
+    // the bound keys (Use / primary fire), as the loot prompt reads them; bindings change in a menu so once a second
+    if (cg.time >= keyNextMs || cg.time + 2000 < keyNextMs) {
+        static const char *cmds[2] = {"+use", "+attackprimary"};
+        static const char *dflt[2] = {"USE", "FIRE"};
+        int                j;
+
+        keyNextMs = cg.time + 1000;
+        for (j = 0; j < 2; j++) {
+            int         k1 = -1, k2 = -1;
+            const char *nm;
+
+            cgi.Key_GetKeysForCommand(cmds[j], &k1, &k2);
+            nm = (k1 >= 0) ? cgi.Key_KeynumToBindString(k1) : NULL;
+            if (nm && nm[0] && nm[0] != '?') {
+                CG_CoopItemKeyLabel(nm, keyLabel[j], sizeof(keyLabel[j]));
+                keyLabel[j][8] = 0;
+            } else {
+                Q_strncpyz(keyLabel[j], dflt[j], sizeof(keyLabel[j]));
+            }
+        }
+    }
+
+    // --- layout, in pixels (identical numbers to CG_DrawCoopLoot) ---------------------------------------------
+    W = (float)cgs.glconfig.vidWidth;
+    H = (float)cgs.glconfig.vidHeight;
+    s = H / 1080.0f;
+    if (s < 0.75f) {
+        s = 0.75f;
+    }
+    textH = 12.0f * cgs.uiHiResScale[1];
+    capH  = (float)((int)(26.0f * s + 0.5f));
+    if (capH < textH + 5.0f) {
+        capH = textH + 5.0f;
+    }
+    capW = CG_FeedTextW(keyLabel[fire], -1) * cgs.uiHiResScale[0] + capH * 0.62f;
+    if (capW < capH) {
+        capW = capH;
+    }
+    trackW = (float)((int)(48.0f * s + 0.5f));
+    trackH = (float)((int)(5.0f * s + 0.5f));
+    if (trackH < 4.0f) {
+        trackH = 4.0f;
+    }
+    dw = 52.0f * s;
+    if (caption[0]) {
+        capTextW = CG_FeedTextW(caption, -1) * cgs.uiHiResScale[0];
+    }
+    if (dim) {
+        r2 = capTextW;
+    } else if (hold) {
+        r2 = capW + 6.0f * s + trackW;
+    } else if (caption[0]) {
+        r2 = capW + 6.0f * s + capTextW;
+    } else {
+        r2 = capW;
+    }
+    gw   = (0.92f * dw > r2) ? 0.92f * dw : r2;
+    x    = (float)((int)(W * 0.5f - gw * 0.5f)) + gw * 0.5f;
+    yc   = (float)((int)(H * 0.635f));
+    rowY = yc + (float)((int)(32.0f * s));
+    // step clear of the event feed exactly as the loot prompt does (up where there is room, else to the right)
+    if (s_feedBoxMs >= 0 && cg.time - s_feedBoxMs >= 0 && cg.time - s_feedBoxMs < 250
+        && x - gw * 0.5f < s_feedBoxRightPx + 8.0f && rowY + capH > s_feedBoxTopPx - 6.0f) {
+        float lift = rowY + capH - (s_feedBoxTopPx - 6.0f);
+        float room = yc - (H * 0.5f + 84.0f * s);
+
+        if (lift <= room) {
+            yc   -= (float)((int)(lift + 0.5f));
+            rowY -= (float)((int)(lift + 0.5f));
+        } else {
+            float shift = s_feedBoxRightPx + 8.0f - (x - gw * 0.5f);
+
+            if (shift > W * 0.125f) {
+                shift = W * 0.125f;
+            }
+            x += (float)((int)(shift + 0.5f));
+        }
+    }
+
+    c[0] = c[1] = c[2] = 1.0f;
+    c[3]                = alpha * (dim ? 0.45f : 1.0f);
+    cgi.R_SetColor(c);
+    cgi.R_DrawStretchPic(
+        (float)((int)(x - dw * 0.5f)), (float)((int)(yc - dw * 0.5f)), dw, dw, 0.0f, 0.0f, 1.0f, 1.0f, sh
+    );
+    rx = (float)((int)(x - r2 * 0.5f));
+    if (dim) {
+        if (caption[0]) {
+            CG_LootText(
+                font, caption, rx, rowY + (capH - textH) * 0.5f - 1.0f * cgs.uiHiResScale[1], 0.94f, 0.91f, 0.84f,
+                alpha * 0.55f
+            );
+        }
+    } else {
+        float w = CG_LootKeycap(font, keyLabel[fire], rx, rowY, capH, alpha);
+
+        if (hold) {
+            CG_ActTrack(
+                (float)((int)(rx + w + 6.0f * s)), (float)((int)(rowY + (capH - trackH) * 0.5f)), trackW, trackH, frac,
+                fillA, alpha
+            );
+        } else if (caption[0]) {
+            CG_LootText(
+                font, caption, rx + w + 6.0f * s, rowY + (capH - textH) * 0.5f - 1.0f * cgs.uiHiResScale[1], 0.94f,
+                0.91f, 0.84f, alpha
+            );
+        }
+    }
+    cgi.R_SetColor(NULL);
+}
