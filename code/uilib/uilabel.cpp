@@ -23,6 +23,8 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 #include "ui_local.h"
 #include "../qcommon/localization.h"
 
+void UI_LoadCine_DrawWidget(void); // HZM coop: cl_ui.cpp
+
 Event EV_UILabel_LinkString
 (
     "linkstring",
@@ -237,6 +239,13 @@ void UILabel::Draw(void)
 {
     const char *string;
     str         val;
+
+    // HZM coop [user 2026-10-18] the loading screen's moving clip (cl_loadcine.cpp): ui/loadingbar.txt's hzm_loadcine
+    // Label is drawn by the engine, in file order, under the hint strip and bar
+    if (!str::cmp(m_name, "hzm_loadcine")) {
+        UI_LoadCine_DrawWidget();
+        return;
+    }
 
     ProcessSounds();
 
