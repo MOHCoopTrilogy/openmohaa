@@ -1679,6 +1679,7 @@ SV_UpdateUserinfo_f
 ==================
 */
 static void SV_UpdateUserinfo_f( client_t *cl ) {
+	SV_NetProbe_Userinfo( cl ); // HZM [joinflood] probe
 	Q_strncpyz( cl->userinfo, Cmd_Argv(1), sizeof(cl->userinfo) );
 
 	SV_UserinfoChanged( cl );
