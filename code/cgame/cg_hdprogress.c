@@ -88,7 +88,18 @@ int CG_HdFamilyFromShader(const char *name)
 static void HD_Tri(float x0, float y0, float s0, float x1, float y1, float s1, float x2, float y2, float s2)
 {
     vec2_t p[3], t[3];
+    float  cross = (x1 - x0) * (y2 - y0) - (y1 - y0) * (x2 - x0);
 
+    /*
+    The renderer culls back faces on this path (measured: a clockwise-on-screen triangle draws, the opposite vanishes - the
+    first build lost every arc and every cap that way). Winding is therefore normalised HERE, once, so no shape above has to
+    care which way round it walks its vertices.
+    */
+    if (cross < 0.0f) {
+        float tx = x1, ty = y1, ts = s1;
+        x1 = x2; y1 = y2; s1 = s2;
+        x2 = tx; y2 = ty; s2 = ts;
+    }
     p[0][0] = x0; p[0][1] = y0; t[0][0] = s0; t[0][1] = 0.5f;
     p[1][0] = x1; p[1][1] = y1; t[1][0] = s1; t[1][1] = 0.5f;
     p[2][0] = x2; p[2][1] = y2; t[2][0] = s2; t[2][1] = 0.5f;
