@@ -28,6 +28,7 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 #include "../fgame/bg_voteoptions.h"
 #include "cg_servercmds_filter.h"
 qboolean CG_CoopFeedIntercept(const char *msg); // HZM coop [user 2026-10-05] event feed (cg_coopfeed.c)
+qboolean CG_CoopFeedRouteUntagged(const char *msg); // HZM coop [bug-4005] every untagged yellow / bold print in a coop session
 
 /*
 ================
@@ -457,6 +458,10 @@ static void CG_ServerCommand(qboolean modelOnly)
         // HZM coop [user 2026-10-05] HUD declutter: a ~f-tagged coop print belongs to the event feed
         // (cg_coopfeed.c), which echoes it to the console itself - never to the old message box.
         if (CG_CoopFeedIntercept(cgi.Argv(1))) {
+            return;
+        }
+        // [bug-4005] nothing is left on the old top-left box unless it is rule-critical (mission failed)
+        if (CG_CoopFeedRouteUntagged(cgi.Argv(1))) {
             return;
         }
         cgi.Printf("%s", cgi.Argv(1));

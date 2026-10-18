@@ -34,8 +34,8 @@ coop_feedDebug 1 (one ^~^~^ FEED line per accepted message, for the harness).
 
 #define FEED_SLOTS     6
 #define FEED_VISIBLE   3
-#define FEED_MAXROWS   5   // hints (category 4) may use all 5 rows; everything else 3
-#define FEED_TEXT      200
+#define FEED_MAXROWS   6   // [bug-4005] every category may use all 6 rows (it was 3, 5 for hints: long text was cut with "...")
+#define FEED_TEXT      360 // [bug-4005] was 200: a long hint / objective line was cut off before it reached the wrap
 #define FEED_KEY       40
 #define FEED_ICON      64
 #define FEED_FADE_IN   150
@@ -95,7 +95,7 @@ static int           s_feedLastT  = 0;
 // (e3l3's "weapons are secured" fires during the mission title). While hidden, every clock stands still
 // (CG_DrawCoopFeed) and at most FEED_HELD_MAX lines are kept: a newer line pushes out the oldest that is NOT an
 // alert, and an alert is never pushed out (CG_FeedHeldCap). Not held: the intermission (the map is over).
-#define FEED_HELD_MAX 6
+#define FEED_HELD_MAX 10 // [bug-4005] was 6
 static int           s_feedHidden = 0;
 static int           s_feedSeq    = 0;
 static cvar_t       *s_cvFeed     = NULL;
@@ -179,6 +179,30 @@ static int CG_FeedHoldMs(int cat)
     }
 }
 
+/*
+[bug-4005] A line must stay up long enough to be READ. The fixed hold per category (3 s for a self line) is fine for
+"Recovered 5 Health" and far too short for a 120-character hint, which then faded half-read. Reading time:
+1.2 s + 55 ms per character, never below the category hold, never above 12 s.
+*/
+static int CG_FeedHoldFor(int cat, const char *text)
+{
+    int hold = CG_FeedHoldMs(cat);
+    int read = 1200 + 55 * (int)strlen(text);
+
+    if (read > 12000) {
+        read = 12000;
+    }
+    return (read > hold) ? read : hold;
+}
+
+// ms a line is guaranteed on screen before a newer line may take its row (longer for a longer line)
+static int CG_FeedMinShow(const char *text)
+{
+    int m = FEED_MIN_SHOW + 25 * (int)strlen(text);
+
+    return (m > 4500) ? 4500 : m;
+}
+
 static float CG_FeedTextW(const char *s, int len)
 {
     fontheader_t *f = CG_FeedFont();
@@ -196,7 +220,7 @@ static void CG_FeedWrap(feedLine_t *e)
     int         pos = 0;
     float       maxW;
 
-    int         maxRows = (e->cat == 4) ? FEED_MAXROWS : 3;
+    int         maxRows = FEED_MAXROWS;
 
     maxW      = FEED_WRAP_W - ((e->cat == 3) ? (FEED_ICON_SZ + 4.0f) : 0.0f);
     e->nrows  = 0;
@@ -240,6 +264,32 @@ static void CG_FeedWrap(feedLine_t *e)
         e->nrows       = 1;
         e->rowStart[0] = 0;
         e->rowLen[0]   = 0;
+    }
+}
+
+/*
+[bug-4005] Same key, different wording used to REPLACE the line ("newest wording"), so "Challenge complete: A" followed
+a second later by "Challenge complete: B" lost A - text that never reached the screen. Only a line that differs in
+its digits alone ("Recovered 5 Health" / "Recovered 7 Health", "Enemies remaining: 7" / "6") is the same line
+updating; anything else is a new line and gets its own row.
+*/
+static qboolean CG_FeedSameShape(const char *a, const char *b)
+{
+    for (;;) {
+        while (*a >= '0' && *a <= '9') {
+            a++;
+        }
+        while (*b >= '0' && *b <= '9') {
+            b++;
+        }
+        if (*a != *b) {
+            return qfalse;
+        }
+        if (!*a) {
+            return qtrue;
+        }
+        a++;
+        b++;
     }
 }
 
@@ -374,7 +424,8 @@ static void CG_FeedPush(int cat, const char *key, const char *icon, const char *
     // same key still on screen: restart its hold, bump the counter, show the newest wording
     for (i = 0; i < FEED_SLOTS; i++) {
         e = &s_feed[i];
-        if (e->active && !e->dieAt && !Q_stricmpn(e->key, key, FEED_KEY - 1) && !CG_FeedExpired(e, now)) {
+        if (e->active && !e->dieAt && !Q_stricmpn(e->key, key, FEED_KEY - 1) && !CG_FeedExpired(e, now)
+            && CG_FeedSameShape(e->text, text)) {
             if (!Q_stricmp(e->text, text)) {
                 e->count++;
             } else {
@@ -385,13 +436,14 @@ static void CG_FeedPush(int cat, const char *key, const char *icon, const char *
                 e->born = now - FEED_FADE_IN;
             }
             Q_strncpyz(e->text, text, sizeof(e->text));
+            e->hold = CG_FeedHoldFor(e->cat, e->text);
             CG_FeedWrap(e);
             return;
         }
     }
     // the same key is already waiting for a row: one waiting line, newest wording, counted
     for (i = 0; i < s_pendN; i++) {
-        if (!Q_stricmpn(s_pend[i].key, key, FEED_KEY - 1)) {
+        if (!Q_stricmpn(s_pend[i].key, key, FEED_KEY - 1) && CG_FeedSameShape(s_pend[i].text, text)) {
             if (!Q_stricmp(s_pend[i].text, text)) {
                 s_pend[i].count++;
             } else {
@@ -486,7 +538,7 @@ static qboolean CG_FeedMakeRoom(int now, qboolean force, int cat)
     } else if (cat != 0 && !force) {
         return qfalse;
     }
-    if (!force && now - s_feed[oldest].born < FEED_MIN_SHOW) {
+    if (!force && now - s_feed[oldest].born < CG_FeedMinShow(s_feed[oldest].text)) {
         return qfalse;
     }
     s_feed[oldest].dieAt = now;
@@ -533,7 +585,7 @@ static void CG_FeedPlace(int cat, const char *key, const char *icon, const char 
     e->count   = count > 0 ? count : 1;
     e->born    = now;
     e->refresh = now;
-    e->hold    = CG_FeedHoldMs(cat);
+    e->hold    = CG_FeedHoldFor(cat, text);
     Q_strncpyz(e->key, key, sizeof(e->key));
     Q_strncpyz(e->text, text, sizeof(e->text));
     Q_strncpyz(e->icon, icon, sizeof(e->icon));
@@ -629,13 +681,75 @@ qboolean CG_CoopFeedIntercept(const char *msg)
         return qtrue;
     }
     if (s_cvFeed->integer <= 0) {
-        // feed off: the threat alerts (a teammate down, an enemy wave) still reach the old box, non-bold
-        cgi.Printf((cat == 0) ? "\x01%s\n" : "%s\n", text);
+        // feed off (coop_feed 0): [bug-4005] EVERY line reaches the old box, non-bold - this used to keep only the threat
+        // alerts and print the rest to the console, i.e. the player who turned the feed off lost the text
+        cgi.Printf("\x01%s\n", text);
         return qtrue;
     }
     // no colour byte = console only, never the gmbox; coop_feed 2 = also mirror into the old box, non-bold, no beep
     cgi.Printf((s_cvFeed->integer == 2) ? "\x01%s\n" : "%s\n", text);
     CG_FeedPush(cat, key, icon, text);
+    return qtrue;
+}
+
+/*
+[bug-4005] CG_CoopFeedRouteUntagged - a "print" / "hudprint" that carries NO ~f tag. Until now it went to the old
+message box (top left) whatever it said: every map-script iprint / iprintln / iprintlnbold, every hint and every
+engine line that was not individually routed. Those are routed here, once, for ALL of them:
+
+  yellow (iprintln / iprint)         -> a self line (category 2)
+  bold   (iprintlnbold, white)       -> an amber alert (category 0), the old box beeped for these too
+  text that says the mission failed  -> stays on the OLD box, bold (rule-critical, round-3 decision)
+  chat, obituaries (other colours)   -> never touched
+  Hardcore, coop_feed 0, outside a coop session -> never touched (the old box shows it, nothing is dropped)
+
+The text is echoed to the console like a tagged line, and a line with no letter or digit in it (the "--" separators
+and the blank iprint "" that only scrolled the old box) is swallowed.
+Returns qtrue when the message has been handled.
+*/
+qboolean CG_CoopFeedRouteUntagged(const char *msg)
+{
+    static cvar_t *pSess = NULL;
+    char           text[FEED_TEXT];
+    int            i, bold, alnum = 0;
+    char           low[FEED_TEXT];
+
+    if (!msg || !*msg) {
+        return qfalse;
+    }
+    if ((unsigned char)*msg == 1) {
+        bold = 0;
+    } else if ((unsigned char)*msg == 3) {
+        bold = 1;
+    } else {
+        return qfalse; // chat, team chat, obituaries, console-only text
+    }
+    CG_CoopFeedInit();
+    if (!pSess) {
+        pSess = cgi.Cvar_Get("coop_isCoopSession", "0", 0);
+    }
+    if (!pSess || !pSess->integer || !s_cvFeed || s_cvFeed->integer <= 0 || CG_CoopHardcoreActive()) {
+        return qfalse;
+    }
+    CG_FeedClean(msg + 1, text, sizeof(text));
+    for (i = 0; text[i]; i++) {
+        low[i] = (text[i] >= 'A' && text[i] <= 'Z') ? (char)(text[i] + 32) : text[i];
+        if ((text[i] >= '0' && text[i] <= '9') || (text[i] >= 'a' && text[i] <= 'z') || (text[i] >= 'A' && text[i] <= 'Z')) {
+            alnum++;
+        }
+    }
+    low[i] = 0;
+    if (!alnum) {
+        return qtrue;
+    }
+    if (bold && (strstr(low, "fail") || strstr(low, "game over") || strstr(low, "defeat"))) {
+        return qfalse; // rule-critical: stays on the old box, bold
+    }
+    if (s_cvDebug && s_cvDebug->integer) {
+        cgi.Printf("^~^~^ FEEDUNTAGGED bold=%d t=%d %s\n", bold, cg.time, text);
+    }
+    cgi.Printf((s_cvFeed->integer == 2) ? "\x01%s\n" : "%s\n", text);
+    CG_FeedPush(bold ? 0 : 2, "", "", text);
     return qtrue;
 }
 
@@ -1163,6 +1277,60 @@ static int   s_feedBoxMs      = -1;
 static float s_feedBoxTopPx   = 0.0f;
 static float s_feedBoxRightPx = 0.0f;
 
+/*
+[bug-4005] SUBTITLES vs THE FEED. The engine draws the subtitle block (client/cl_uiview3d.cpp
+View3D::DrawSubtitleOverlay) at x = 20 hi-res units, starting 10 text heights above the bottom of the screen in
+facfont-20, one line per subtitleN cvar (wrapped at 80 % of the width), up to 4 subtitles. That block runs from about
+58 % to 75 % of the screen height - exactly where a full feed stands. The block lives in the exe and is not ours to
+move (the exe is not part of this lineage), so the feed makes way: it computes the block from the same cvars and the
+same formula, and when the two would meet it stands on top of the subtitles until they are gone. Fractions of the
+screen height, so the same at 720p, 1080p, 4:3 and ultrawide (both are scaled by vidHeight / 480).
+*/
+static float s_subLift   = 0.0f; // pixels the feed is standing above its normal floor
+static int   s_subLifted = 0;    // once lifted, stay lifted until the subtitles are gone (no flicker)
+
+static qboolean CG_FeedSubtitleBlock(float *topPx, float *botPx)
+{
+    static cvar_t       *cv[4];
+    static fontheader_t *f = NULL;
+    int                  i, lines = 0;
+    float                fh, maxX, w;
+
+    if (!cv[0]) {
+        for (i = 0; i < 4; i++) {
+            char nm[16];
+            Com_sprintf(nm, sizeof(nm), "subtitle%d", i);
+            cv[i] = cgi.Cvar_Get(nm, "", 0);
+        }
+    }
+    for (i = 0; i < 4; i++) {
+        if (cv[i] && cv[i]->string && cv[i]->string[0]) {
+            break;
+        }
+    }
+    if (i == 4) {
+        return qfalse;
+    }
+    if (!f) {
+        f = cgi.R_LoadFont("facfont-20");
+    }
+    if (!f || !f->sgl[0] || f->sgl[0]->height <= 0.0f) {
+        return qfalse;
+    }
+    fh   = f->sgl[0]->height * cgs.uiHiResScale[1];
+    maxX = ((float)cgs.glconfig.vidWidth * 0.8f) / cgs.uiHiResScale[0];
+    for (i = 0; i < 4; i++) {
+        if (cv[i] && cv[i]->string && cv[i]->string[0]) {
+            w = (float)cgi.UI_FontStringWidth(f, cv[i]->string, -1);
+            // the engine breaks at word ends, so a wrapped block can need one more line than width / maxX
+            lines += (w > maxX) ? ((int)(w * 1.12f / maxX) + 1) : 1;
+        }
+    }
+    *topPx = (float)cgs.glconfig.vidHeight - fh * 10.0f;
+    *botPx = *topPx + fh * (float)lines + fh * 0.35f;
+    return qtrue;
+}
+
 void CG_DrawCoopFeed(qboolean cineHide)
 {
     static const float tick[5][3] = {
@@ -1309,6 +1477,48 @@ void CG_DrawCoopFeed(qboolean cineHide)
         if (bottom > itemsTop) {
             bottom = itemsTop;
         }
+    }
+
+    // [bug-4005] make way for the subtitles (see CG_FeedSubtitleBlock)
+    {
+        float subTop, subBot, floorPx, feedH = 0.0f, wantLift = 0.0f, ff;
+
+        for (k = 0; k < n; k++) {
+            feedLine_t *q = &s_feed[order[k]];
+            float       rh = (float)q->nrows * FEED_ROW_H;
+
+            if (q->cat == 3 && rh < FEED_ICON_SZ) {
+                rh = FEED_ICON_SZ;
+            }
+            feedH += rh + FEED_GAP + 3.0f;
+        }
+        feedH = (feedH - FEED_GAP - 3.0f) * sy;
+        floorPx = bottom * sy;
+        if (CG_FeedSubtitleBlock(&subTop, &subBot)) {
+            if (s_subLifted || floorPx - feedH < subBot + 8.0f) {
+                float newFloor = subTop - 8.0f;
+
+                s_subLifted = 1;
+                if (newFloor - feedH < 4.0f) {
+                    newFloor = feedH + 4.0f; // never push the top of the feed off the screen
+                }
+                wantLift = floorPx - newFloor;
+                if (wantLift < 0.0f) {
+                    wantLift = 0.0f;
+                }
+            }
+        } else {
+            s_subLifted = 0;
+        }
+        ff = (float)dt / 110.0f;
+        if (ff > 1.0f) {
+            ff = 1.0f;
+        }
+        s_subLift += (wantLift - s_subLift) * ff;
+        if (s_subLift < 0.5f && wantLift == 0.0f) {
+            s_subLift = 0.0f;
+        }
+        bottom -= s_subLift / sy;
     }
 
     // newest at the bottom: walk newest -> oldest, stacking upward
