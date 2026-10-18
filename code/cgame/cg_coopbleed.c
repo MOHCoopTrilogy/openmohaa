@@ -206,7 +206,7 @@ static void CG_BleedDrawSelf(float dt)
         pNum = cgi.Cvar_Get("coop_bleedNumber", "0", CVAR_ARCHIVE);
     }
 
-    if (!CG_BleedSelf(&b)) {
+    if (!CG_BleedSelfOrTest(&b)) {
         s_selfAppear   = 0.0f;
         s_selfFlareBit = -1;
         s_selfShown    = 1.0f;
