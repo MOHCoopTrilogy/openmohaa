@@ -1845,8 +1845,16 @@ Wire (script -> client, change-only `set coop_*` stufftext, see coop_mod/actprom
                 the moment it changes, as coop_lootH does. The shared HD progress ring (hdring-engine) can take the
                 track over later: it is drawn by CG_ActTrack() below, one place.
 CG_Init zeroes both (cg_main.c). The loot prompt wins the slot: while coop_lootT is set nothing is drawn here.
+
+HOLD actions and the HD ring [user 2026-10-18]: with COOP_HDRING defined (the hdring-engine branch, cg_hdprogress.c) a HOLD
+action draws NO track of its own: the icon sits in the centre of the HD hold ring round the crosshair (the ring names it
+through the client cvar coop_holdIcon), the ring fills clockwise from coop_actH, and the row under it is just the key cap and
+the word "Hold", the same as the loot prompt's hold. A press-once action is unchanged (icon + key cap). Without COOP_HDRING
+(this branch alone, before hdring-engine is merged) a hold falls back to the icon + key cap + the small track, so the
+prompt still works; the merge is: #define COOP_HDRING 1 below, nothing else.
 ====================
 */
+// #define COOP_HDRING 1   // <- the ONE switch for the merge with hdring-engine (needs CG_HdHoldRing / HD_FAM_USE)
 #define ACT_ART_MAX 40
 static struct {
     char      name[32];
@@ -1871,7 +1879,23 @@ static qhandle_t CG_ActShader(const char *name)
     return s_actArt[s_actArtN++].sh;
 }
 
-// the hold track: a dark slot with a thin cream rim that fills. ONE place, so the HD progress ring/bar can replace it.
+#ifdef COOP_HDRING
+// the ring names its centre icon through coop_holdIcon; set only on change, cleared whenever this prompt is not showing a hold
+static void CG_ActHoldIcon(const char *shader)
+{
+    static char last[MAX_QPATH] = "";
+
+    if (!shader) {
+        shader = "";
+    }
+    if (strcmp(last, shader)) {
+        Q_strncpyz(last, shader, sizeof(last));
+        cgi.Cvar_Set("coop_holdIcon", last);
+    }
+}
+#endif
+
+// the hold track (the fallback when the HD ring is not built in): a dark slot with a thin cream rim that fills.
 static void CG_ActTrack(float tx, float ty, float trackW, float trackH, float frac, float fillA, float alpha)
 {
     CG_LootBox(tx - 2.0f, ty - 2.0f, trackW + 4.0f, trackH + 4.0f, 0.05f, 0.045f, 0.04f, 0.67f * alpha);
@@ -1894,7 +1918,7 @@ void CG_DrawCoopAct(void)
     static int     keyNextMs       = 0;
     char           spec[64], *tok, *save;
     char           name[32], caption[24];
-    int            dt, h, hold = 0, fire = 0, dim = 0, k;
+    int            dt, h, hold = 0, fire = 0, dim = 0, k, ringMode = 0;
     float          s, W, H, yc, rowY, capH, capW, trackW, trackH, dw, r2, gw, x, rx, frac, fillA, textH, capTextW = 0.0f;
     qhandle_t      sh;
     fontheader_t  *font;
@@ -1967,6 +1991,9 @@ void CG_DrawCoopAct(void)
     }
 
     if (!shownSpec[0] || alpha <= 0.0f) {
+#ifdef COOP_HDRING
+        CG_ActHoldIcon(NULL);
+#endif
         return;
     }
     font = CG_FeedFont();
@@ -2050,6 +2077,11 @@ void CG_DrawCoopAct(void)
         capW = capH;
     }
     trackW = (float)((int)(48.0f * s + 0.5f));
+#ifdef COOP_HDRING
+    trackW   = CG_FeedTextW("Hold", -1) * cgs.uiHiResScale[0]; // no track bar: the HD ring round the crosshair is the progress
+    ringMode = (hold && !dim);
+    CG_ActHoldIcon(ringMode ? va("textures/hud/loot/coop_act_%s", name) : NULL);
+#endif
     trackH = (float)((int)(5.0f * s + 0.5f));
     if (trackH < 4.0f) {
         trackH = 4.0f;
@@ -2071,6 +2103,9 @@ void CG_DrawCoopAct(void)
     x    = (float)((int)(W * 0.5f - gw * 0.5f)) + gw * 0.5f;
     yc   = (float)((int)(H * 0.635f));
     rowY = yc + (float)((int)(32.0f * s));
+    if (ringMode) {
+        rowY = yc - capH * 0.5f; // the icon is in the ring, so the key cap row takes the icon's place
+    }
     // step clear of the event feed exactly as the loot prompt does (up where there is room, else to the right)
     if (s_feedBoxMs >= 0 && cg.time - s_feedBoxMs >= 0 && cg.time - s_feedBoxMs < 250
         && x - gw * 0.5f < s_feedBoxRightPx + 8.0f && rowY + capH > s_feedBoxTopPx - 6.0f) {
@@ -2093,9 +2128,11 @@ void CG_DrawCoopAct(void)
     c[0] = c[1] = c[2] = 1.0f;
     c[3]                = alpha * (dim ? 0.45f : 1.0f);
     cgi.R_SetColor(c);
-    cgi.R_DrawStretchPic(
-        (float)((int)(x - dw * 0.5f)), (float)((int)(yc - dw * 0.5f)), dw, dw, 0.0f, 0.0f, 1.0f, 1.0f, sh
-    );
+    if (!ringMode) {
+        cgi.R_DrawStretchPic(
+            (float)((int)(x - dw * 0.5f)), (float)((int)(yc - dw * 0.5f)), dw, dw, 0.0f, 0.0f, 1.0f, 1.0f, sh
+        );
+    }
     rx = (float)((int)(x - r2 * 0.5f));
     if (dim) {
         if (caption[0]) {
@@ -2108,10 +2145,21 @@ void CG_DrawCoopAct(void)
         float w = CG_LootKeycap(font, keyLabel[fire], rx, rowY, capH, alpha);
 
         if (hold) {
+#ifdef COOP_HDRING
+            CG_LootText(
+                font, "Hold", rx + w + 6.0f * s, rowY + (capH - textH) * 0.5f - 1.0f * cgs.uiHiResScale[1], 0.94f, 0.91f,
+                0.84f, alpha * 0.85f
+            );
+            CG_HdHoldRing(frac, HD_FAM_USE, alpha, 1, 0);
+            if (fillA > 0.0f) {
+                CG_HdHoldRing(frac, HD_FAM_USE, alpha * fillA, 0, 1);
+            }
+#else
             CG_ActTrack(
                 (float)((int)(rx + w + 6.0f * s)), (float)((int)(rowY + (capH - trackH) * 0.5f)), trackW, trackH, frac,
                 fillA, alpha
             );
+#endif
         } else if (caption[0]) {
             CG_LootText(
                 font, caption, rx + w + 6.0f * s, rowY + (capH - textH) * 0.5f - 1.0f * cgs.uiHiResScale[1], 0.94f,
