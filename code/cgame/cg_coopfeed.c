@@ -1920,6 +1920,7 @@ void CG_DrawCoopAct(void)
     char           name[32], caption[24];
     int            dt, h, hold = 0, fire = 0, dim = 0, k, ringMode = 0;
     float          s, W, H, yc, rowY, capH, capW, trackW, trackH, dw, r2, gw, x, rx, frac, fillA, textH, capTextW = 0.0f;
+    float          ax, ay, ringR;
     qhandle_t      sh;
     fontheader_t  *font;
     vec4_t         c;
@@ -2099,13 +2100,24 @@ void CG_DrawCoopAct(void)
     } else {
         r2 = capW;
     }
-    gw   = (0.92f * dw > r2) ? 0.92f * dw : r2;
-    x    = (float)((int)(W * 0.5f - gw * 0.5f)) + gw * 0.5f;
-    yc   = (float)((int)(H * 0.635f));
-    rowY = yc + (float)((int)(32.0f * s));
-    if (ringMode) {
-        rowY = yc - capH * 0.5f; // the icon is in the ring, so the key cap row takes the icon's place
+    gw = (0.92f * dw > r2) ? 0.92f * dw : r2;
+    // [user 2026-10-18 QA] ONE placement for every action prompt, anchored on the crosshair's real aim point and the HD
+    // hold ring's footprint (radius 4.6 % of the height): a hold has its ring there with the icon in its centre; a press
+    // has the icon just below the crosshair with its bottom edge on the ring's bottom edge; in both cases the key cap row
+    // sits DIRECTLY under that (10 px gap), centred, so the cap reads as part of the prompt and every prompt appears in the
+    // same place.
+    ax = W * 0.5f;
+    ay = H * 0.5f;
+#ifdef COOP_HDRING
+    if (!CG_CoopAimPoint(&ax, &ay)) {
+        ax = W * 0.5f;
+        ay = H * 0.5f;
     }
+#endif
+    ringR = H * 0.046f;
+    x     = (float)((int)(ax));
+    yc    = (float)((int)(ay + ringR - dw * 0.5f));
+    rowY  = (float)((int)(ay + ringR + 1.7f + 10.0f));
     // step clear of the event feed exactly as the loot prompt does (up where there is room, else to the right)
     if (s_feedBoxMs >= 0 && cg.time - s_feedBoxMs >= 0 && cg.time - s_feedBoxMs < 250
         && x - gw * 0.5f < s_feedBoxRightPx + 8.0f && rowY + capH > s_feedBoxTopPx - 6.0f) {
