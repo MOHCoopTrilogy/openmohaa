@@ -1798,9 +1798,7 @@ void CG_DrawCoopLoot(void)
         return;
     }
     dt = cg.time - lastMs;
-    // [bug-4006] a slow frame (a low-fps or busy client) must still finish the slide: 250 ms used to become 16 ms, so at a
-    // few fps a line crawled to its row over seconds and drew on top of its neighbour. Only a stall (map load) is cut.
-    if (dt < 0 || dt > 1000) {
+    if (dt < 0 || dt > 250) {
         dt = 16;
     }
     lastMs = cg.time;
