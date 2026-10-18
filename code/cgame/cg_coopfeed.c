@@ -1736,7 +1736,8 @@ void CG_DrawCoopLoot(void)
         capW = capH;
     }
     gap    = 30.0f * s;
-    trackW = (float)((int)(48.0f * s + 0.5f));
+    // [2026-10-18 hdring] no track bar any more: a hold shows the word "Hold" beside its keycap and the progress is the HD ring round the crosshair
+    trackW = CG_FeedTextW("Hold", -1) * cgs.uiHiResScale[0];
     trackH = (float)((int)(5.0f * s + 0.5f));
     if (trackH < 4.0f) {
         trackH = 4.0f;
@@ -1825,10 +1826,11 @@ void CG_DrawCoopLoot(void)
         } else {
             float w  = CG_LootKeycap(font, keyLabel, rx, rowY, capH, alpha);
             float tx = (float)((int)(rx + w + 6.0f * s));
-            float ty = (float)((int)(rowY + (capH - trackH) * 0.5f));
-
-            // [2026-10-18 hdring] the HD hold family (cg_hdprogress.c): feathered pill track + eased fill, 'use' cream
-            CG_HdBar(tx - 1.0f, ty - 1.0f, trackW + 2.0f, trackH + 2.0f, (fillA > 0.0f) ? frac : 0.0f, HD_FAM_USE, alpha);
+            // the hold ring (cg_hdprogress.c) round the crosshair: shown only while a hold runs or is fading out
+            CG_LootText(font, "Hold", tx, rowY + (capH - textH) * 0.5f - 1.0f * cgs.uiHiResScale[1], 0.94f, 0.91f, 0.84f, alpha * 0.85f);
+            if (fillA > 0.0f) {
+                CG_HdHoldRing(frac, HD_FAM_USE, alpha * fillA, 1, 1);
+            }
         }
         x += g[i].gw + gap;
     }

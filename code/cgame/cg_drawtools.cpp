@@ -747,7 +747,7 @@ void CG_HudDrawElements()
                 int hdFam = CG_HdFamilyFromShader(cgi.HudDrawElements[i].shaderName);
                 if (hdFam >= 0) {
                     float hdA = cgi.HudDrawElements[i].vColor[3] * (i < 100 ? s_hudFadeAlpha : 1.0f);
-                    CG_HdHudElement(i, fX, fY, fWidth, fHeight, hdA, hdFam);
+                    CG_HdHudElement(i, hdA, hdFam);
                     continue;
                 }
             }

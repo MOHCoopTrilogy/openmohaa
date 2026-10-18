@@ -21,7 +21,8 @@ is and the look comes from here (one palette, one place):
     textures/hud/coop_hold_objective   plant / defuse / sabotage / capture                  pale blue
 A huddraw element with one of these names is drawn by CG_HdHudElement (called from CG_HudDrawElements); its ihuddraw_color
 is ignored (alpha and rect are honoured). The fill's width is eased so a 20 Hz script update looks continuous.
-The DBNO ring (cg_coopbleed.c) and the weapon pickup hold bar (cg_coopfeed.c) call CG_HdRing / CG_HdBar directly.
+The DBNO ring (cg_coopbleed.c) calls CG_HdRing; EVERY hold action (heal self / teammate, revive, sandbag, objective, weapon pickup)
+is the same ring round the crosshair (CG_HdHoldRing) - there are no bars any more.
 */
 #include "cg_local.h"
 
@@ -152,47 +153,6 @@ static void HD_Cap(float cx, float cy, float nx, float ny, float bx, float by, f
     }
 }
 
-/* ---- pill (horizontal bar with round ends) ----------------------------------------------------------------------- */
-
-/* outer bounds x,y,w,h; col is set by the caller's R_SetColor */
-static void HD_PillGeom(float x, float y, float w, float h)
-{
-    float R, f, xl, xr, cy, y0, y1, y2, y3;
-
-    if (h < 1.0f || w < 1.0f) {
-        return;
-    }
-    if (w < h) {      // narrower than tall: a disc of the width
-        float d = w;
-        y += (h - d) * 0.5f;
-        h = d;
-    }
-    R  = h * 0.5f;
-    f  = HD_Feather(h);
-    xl = x + R;
-    xr = x + w - R;
-    cy = y + R;
-    y0 = y - f * 0.5f; y1 = y + f * 0.5f; y2 = y + h - f * 0.5f; y3 = y + h + f * 0.5f;
-
-    if (xr > xl + 0.01f) {
-        HD_Quad(xl, y0, HD_S0, xr, y0, HD_S0, xr, y1, HD_S1, xl, y1, HD_S1);
-        HD_Quad(xl, y1, HD_S1, xr, y1, HD_S1, xr, y2, HD_S1, xl, y2, HD_S1);
-        HD_Quad(xl, y2, HD_S1, xr, y2, HD_S1, xr, y3, HD_S0, xl, y3, HD_S0);
-    }
-    HD_Cap(xl, cy, -1.0f, 0.0f, 0.0f, 1.0f, R, f);
-    HD_Cap(xr, cy, 1.0f, 0.0f, 0.0f, -1.0f, R, f);
-}
-
-void CG_HdPill(float x, float y, float w, float h, const vec4_t col)
-{
-    if (!CG_HdRampShader() || col[3] <= 0.003f) {
-        return;
-    }
-    cgi.R_SetColor(col);
-    HD_PillGeom(x, y, w, h);
-    cgi.R_SetColor(NULL);
-}
-
 /* ---- arc stroke -------------------------------------------------------------------------------------------------- */
 
 /* angles in radians, clockwise from 12 o'clock; rm = centre-line radius; th = stroke thickness */
@@ -300,129 +260,147 @@ void CG_HdRing(float cx, float cy, float r, float th, float rem, const vec4_t fi
     cgi.R_SetColor(NULL);
 }
 
-/* Track + fill bar. frac 0..1 across the track's width; the channel is inset so the dark rim shows round the fill. */
-void CG_HdBar(float x, float y, float w, float h, float frac, int fam, float alpha)
-{
-    vec4_t col;
-    float  inset, fx, fy, fw, fh;
+/* ---- the hold ring (every timed / hold-to-use action) ------------------------------------------------------------- */
 
-    if (!CG_HdRampShader() || alpha <= 0.003f || w < 2.0f || h < 2.0f) {
+/*
+[user 2026-10-18] ONE indicator for every hold action: the DBNO ring, centred on the crosshair's real aim point (the bleed ring
+uses the same point), filling CLOCKWISE from 12 o'clock as the hold progresses. A hold ring sits just outside the crosshair arms
+(radius 4.6 % of the screen height); when the player's OWN bleed-out ring is up (being revived) it moves out to 6.0 % so the two
+rings are concentric and never overdraw. The ring's centre is left EMPTY for an action icon: the client cvar coop_holdIcon names
+a shader (e.g. "textures/hud/icons/heal") and, when non-empty, it is drawn there at 60 % of the inner diameter, at the ring's alpha
+(another lane is building the icon prompts; nothing here depends on it).
+*/
+extern qboolean CG_BleedSelfActive(void);
+
+static void HD_HoldGeom(float *cx, float *cy, float *r, float *th)
+{
+    float H = (float)cgs.glconfig.vidHeight;
+
+    if (!CG_CoopAimPoint(cx, cy)) {
+        *cx = cgs.glconfig.vidWidth * 0.5f;
+        *cy = H * 0.5f;
+    }
+    *r  = H * (CG_BleedSelfActive() ? 0.060f : 0.046f);
+    *th = H * 0.0032f;
+    if (*th < 2.4f) {
+        *th = 2.4f;
+    }
+}
+
+static void HD_HoldIcon(float cx, float cy, float r, float th, float alpha)
+{
+    static cvar_t   *cv = NULL;
+    static char      shown[MAX_QPATH];
+    static qhandle_t h = 0;
+    vec4_t           col;
+    float            d;
+
+    if (!cv) {
+        cv = cgi.Cvar_Get("coop_holdIcon", "", 0);
+    }
+    if (!cv->string[0]) {
         return;
     }
-    if (frac < 0.0f) {
-        frac = 0.0f;
-    } else if (frac > 1.0f) {
-        frac = 1.0f;
+    if (strcmp(shown, cv->string)) {
+        Q_strncpyz(shown, cv->string, sizeof(shown));
+        h = cgi.R_RegisterShaderNoMip(shown);
     }
-
-    col[0] = col[1] = col[2] = 0.0f;
-    col[3] = 0.55f * alpha;
+    if (!h) {
+        return;
+    }
+    d      = (r - th * 0.5f) * 2.0f * 0.60f;
+    col[0] = col[1] = col[2] = 1.0f;
+    col[3] = alpha;
     cgi.R_SetColor(col);
-    HD_PillGeom(x - 1.5f, y - 1.5f, w + 3.0f, h + 3.0f);
-
-    col[0] = s_famRgb[HD_FAM_TRACK][0];
-    col[1] = s_famRgb[HD_FAM_TRACK][1];
-    col[2] = s_famRgb[HD_FAM_TRACK][2];
-    col[3] = 0.88f * alpha;
-    cgi.R_SetColor(col);
-    HD_PillGeom(x, y, w, h);
-
-    inset = h * 0.16f;
-    if (inset < 1.0f) {
-        inset = 1.0f;
-    }
-    fx = x + inset;
-    fy = y + inset;
-    fh = h - 2.0f * inset;
-    fw = (w - 2.0f * inset) * frac;
-    if (fw >= 1.0f && fh >= 1.0f) {
-        CG_HdFamilyColor(fam, alpha, col);
-        cgi.R_SetColor(col);
-        HD_PillGeom(fx, fy, fw, fh);
-        // a soft sheen on the top third (inside the fill only, so the silhouette is untouched)
-        if (fh >= 5.0f && fw > fh) {
-            col[0] = col[1] = col[2] = 1.0f;
-            col[3] = 0.16f * alpha;
-            cgi.R_SetColor(col);
-            HD_PillGeom(fx + fh * 0.30f, fy + fh * 0.14f, fw - fh * 0.60f, fh * 0.30f);
-        }
-    }
+    cgi.R_DrawStretchPic(cx - d * 0.5f, cy - d * 0.5f, d, d, 0.0f, 0.0f, 1.0f, 1.0f, h);
     cgi.R_SetColor(NULL);
+}
+
+/* track: halo + dim full circle + the icon; fill: the coloured arc, frac 0..1 clockwise from 12 o'clock */
+void CG_HdHoldRing(float frac, int fam, float alpha, int track, int fill)
+{
+    float  cx, cy, r, th, two = 2.0f * (float)M_PI;
+    vec4_t col;
+
+    if (!CG_HdRampShader() || alpha <= 0.003f) {
+        return;
+    }
+    HD_HoldGeom(&cx, &cy, &r, &th);
+    if (track) {
+        col[0] = col[1] = col[2] = 0.0f;
+        col[3] = 0.55f * alpha;
+        cgi.R_SetColor(col);
+        HD_ArcGeom(cx, cy, r, th + 3.0f, 0.0f, two, 0);
+        col[0] = s_famRgb[HD_FAM_TRACK][0];
+        col[1] = s_famRgb[HD_FAM_TRACK][1];
+        col[2] = s_famRgb[HD_FAM_TRACK][2];
+        col[3] = 0.62f * alpha;
+        cgi.R_SetColor(col);
+        HD_ArcGeom(cx, cy, r, th, 0.0f, two, 0);
+        cgi.R_SetColor(NULL);
+        HD_HoldIcon(cx, cy, r, th, alpha);
+    }
+    if (fill && frac > 0.003f) {
+        CG_HdFamilyColor(fam, 0.96f * alpha, col);
+        cgi.R_SetColor(col);
+        if (frac > 0.985f) {
+            HD_ArcGeom(cx, cy, r, th, 0.0f, two, 0);
+        } else {
+            HD_ArcGeom(cx, cy, r, th, 0.0f, frac * two, 1);
+        }
+        cgi.R_SetColor(NULL);
+    }
 }
 
 /* ---- huddraw hook ------------------------------------------------------------------------------------------------ */
 
 #define HD_MAXEL 256
-static float s_easeW[HD_MAXEL];
+static float s_easeF[HD_MAXEL];
 static int   s_easeAt[HD_MAXEL];
 
 void CG_HdHoldReset(int i)
 {
     if (i >= 0 && i < HD_MAXEL) {
-        s_easeW[i] = -1.0f;
+        s_easeF[i] = -1.0f;
     }
 }
 
-/* One scripted element. x,y,w,h in screen pixels (after align / virtual-screen scaling), alpha already faded. */
-void CG_HdHudElement(int i, float x, float y, float w, float h, float alpha, int fam)
+/*
+One scripted element. The scripts keep their old rect pairs (track = slot, fill = slot + 1, the fill's width a fraction of the
+track's), so the ring's fraction is the ratio of the two raw widths. A fill with no track in front of it is read against 100.
+*/
+void CG_HdHudElement(int i, float alpha, int fam)
 {
+    float frac, tw = 100.0f, fw;
+
     if (!CG_HdRampShader() || alpha <= 0.003f) {
         return;
     }
     if (fam == HD_FAM_TRACK) {
-        // the track element carries the whole bar: halo + channel, no fill (the fill is its own element)
-        vec4_t col;
-
-        col[0] = col[1] = col[2] = 0.0f;
-        col[3] = 0.55f * alpha;
-        cgi.R_SetColor(col);
-        HD_PillGeom(x - 1.5f, y - 1.5f, w + 3.0f, h + 3.0f);
-        col[0] = s_famRgb[HD_FAM_TRACK][0];
-        col[1] = s_famRgb[HD_FAM_TRACK][1];
-        col[2] = s_famRgb[HD_FAM_TRACK][2];
-        col[3] = 0.88f * alpha;
-        cgi.R_SetColor(col);
-        HD_PillGeom(x, y, w, h);
-        cgi.R_SetColor(NULL);
+        CG_HdHoldRing(0.0f, fam, alpha, 1, 0);
         return;
     }
-    // a fill: eased on the way up (a 20 Hz script update reads as continuous), instant on the way down / a restart
+    if (i > 0 && CG_HdFamilyFromShader(cgi.HudDrawElements[i - 1].shaderName) == HD_FAM_TRACK
+        && cgi.HudDrawElements[i - 1].iWidth > 0) {
+        tw = (float)cgi.HudDrawElements[i - 1].iWidth;
+    }
+    fw   = (float)cgi.HudDrawElements[i].iWidth;
+    frac = fw / tw;
+    if (frac > 1.0f) {
+        frac = 1.0f;
+    }
+    // eased on the way up (a 20 Hz script update reads as continuous), instant on the way down / a restart
     if (i >= 0 && i < HD_MAXEL) {
         float dt = (s_easeAt[i] && cg.time > s_easeAt[i]) ? (float)(cg.time - s_easeAt[i]) * 0.001f : 0.0f;
 
         s_easeAt[i] = cg.time ? cg.time : 1;
-        if (s_easeW[i] < 0.0f || w < s_easeW[i] - 0.5f || dt > 0.25f) {
-            s_easeW[i] = w;
+        if (s_easeF[i] < 0.0f || frac < s_easeF[i] - 0.004f || dt > 0.25f) {
+            s_easeF[i] = frac;
         } else {
             float k = dt * 24.0f;
-            s_easeW[i] += (w - s_easeW[i]) * (k > 1.0f ? 1.0f : k);
+            s_easeF[i] += (frac - s_easeF[i]) * (k > 1.0f ? 1.0f : k);
         }
-        w = s_easeW[i];
+        frac = s_easeF[i];
     }
-    {
-        // the script draws the fill on the SAME rect as the track: inset it so the dark rim shows round it (as CG_HdBar)
-        vec4_t col;
-        float  inset = h * 0.16f, fx, fy, fw, fh;
-
-        if (inset < 1.0f) {
-            inset = 1.0f;
-        }
-        fx = x + inset;
-        fy = y + inset;
-        fw = w - 2.0f * inset;
-        fh = h - 2.0f * inset;
-        if (fw < 1.0f || fh < 1.0f) {
-            return;
-        }
-        CG_HdFamilyColor(fam, alpha, col);
-        cgi.R_SetColor(col);
-        HD_PillGeom(fx, fy, fw, fh);
-        if (fh >= 5.0f && fw > fh) {
-            col[0] = col[1] = col[2] = 1.0f;
-            col[3] = 0.16f * alpha;
-            cgi.R_SetColor(col);
-            HD_PillGeom(fx + fh * 0.30f, fy + fh * 0.14f, fw - fh * 0.60f, fh * 0.30f);
-        }
-        cgi.R_SetColor(NULL);
-    }
+    CG_HdHoldRing(frac, fam, alpha, 0, 1);
 }

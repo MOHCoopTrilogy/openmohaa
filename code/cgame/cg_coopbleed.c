@@ -88,6 +88,13 @@ static qboolean CG_BleedSelf(coopBleedEnt_t *out)
     return qfalse;
 }
 
+/* [2026-10-18 hdring] the hold ring moves out while this is true (see cg_hdprogress.c) */
+qboolean CG_BleedSelfActive(void)
+{
+    coopBleedEnt_t b;
+    return CG_BleedSelf(&b);
+}
+
 /*
 Called from cg_view.c where the two post-FX signals are published. pHealthFrac: only touched while bleeding
 (the caller has already forced its DBNO value); pSuppress: raised to the bleed tunnel, never lowered.
