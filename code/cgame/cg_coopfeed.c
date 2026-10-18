@@ -1413,7 +1413,9 @@ void CG_DrawCoopFeed(qboolean cineHide)
     }
     s_feedHidden = i;
     CG_FeedDrain(now);
-    if (dt < 0 || dt > 250) {
+    // [bug-4006] a slow frame (a low-fps or busy client) must still finish the slide: 250 ms used to become 16 ms, so at a
+    // few fps a line crawled to its row over seconds and drew on top of its neighbour. Only a stall (map load) is cut.
+    if (dt < 0 || dt > 1000) {
         dt = 16;
     }
     s_feedLastT = now;
