@@ -731,6 +731,11 @@ qboolean CG_CoopFeedRouteUntagged(const char *msg)
     if (!pSess || !pSess->integer || !s_cvFeed || s_cvFeed->integer <= 0 || CG_CoopHardcoreActive()) {
         return qfalse;
     }
+    // HUD hidden (cinematic, lobby, briefing, intermission): the feed would HOLD the line unseen (bug-3543), the old
+    // box shows it at once - nothing that was readable may become invisible
+    if (s_feedHidden || !cg.snap || (cg.snap->ps.pm_flags & (PMF_NO_HUD | PMF_INTERMISSION))) {
+        return qfalse;
+    }
     CG_FeedClean(msg + 1, text, sizeof(text));
     for (i = 0; text[i]; i++) {
         low[i] = (text[i] >= 'A' && text[i] <= 'Z') ? (char)(text[i] + 32) : text[i];
