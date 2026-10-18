@@ -1827,15 +1827,8 @@ void CG_DrawCoopLoot(void)
             float tx = (float)((int)(rx + w + 6.0f * s));
             float ty = (float)((int)(rowY + (capH - trackH) * 0.5f));
 
-            // the track: a dark slot with a thin cream rim, so an EMPTY track already says "hold"
-            CG_LootBox(tx - 2.0f, ty - 2.0f, trackW + 4.0f, trackH + 4.0f, 0.05f, 0.045f, 0.04f, 0.67f * alpha);
-            CG_LootBox(tx - 1.0f, ty - 1.0f, trackW + 2.0f, 1.0f, 0.94f, 0.91f, 0.84f, 0.58f * alpha);
-            CG_LootBox(tx - 1.0f, ty + trackH, trackW + 2.0f, 1.0f, 0.94f, 0.91f, 0.84f, 0.58f * alpha);
-            CG_LootBox(tx - 1.0f, ty, 1.0f, trackH, 0.94f, 0.91f, 0.84f, 0.58f * alpha);
-            CG_LootBox(tx + trackW, ty, 1.0f, trackH, 0.94f, 0.91f, 0.84f, 0.58f * alpha);
-            if (frac > 0.0f && fillA > 0.0f) {
-                CG_LootBox(tx, ty, (float)((int)(trackW * frac + 0.5f)), trackH, 0.94f, 0.91f, 0.84f, 0.94f * alpha * fillA);
-            }
+            // [2026-10-18 hdring] the HD hold family (cg_hdprogress.c): feathered pill track + eased fill, 'use' cream
+            CG_HdBar(tx - 1.0f, ty - 1.0f, trackW + 2.0f, trackH + 2.0f, (fillA > 0.0f) ? frac : 0.0f, HD_FAM_USE, alpha);
         }
         x += g[i].gw + gap;
     }

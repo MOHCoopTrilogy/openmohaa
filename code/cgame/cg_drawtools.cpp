@@ -616,7 +616,10 @@ void CG_DrawZoomOverlay()
 
 void CG_HudDrawShader(int iInfo)
 {
-    if (cgi.HudDrawElements[iInfo].shaderName[0]) {
+    if (CG_HdFamilyFromShader(cgi.HudDrawElements[iInfo].shaderName) >= 0) {
+        // HZM coop hdring: a hold-progress element is drawn procedurally; its handle only marks it visible
+        cgi.HudDrawElements[iInfo].hShader = CG_HdRampShader();
+    } else if (cgi.HudDrawElements[iInfo].shaderName[0]) {
         cgi.HudDrawElements[iInfo].hShader = cgi.R_RegisterShaderNoMip(cgi.HudDrawElements[iInfo].shaderName);
     } else {
         cgi.HudDrawElements[iInfo].hShader = 0;
@@ -660,6 +663,7 @@ void CG_HudDrawElements()
         if ((!cgi.HudDrawElements[i].hShader && !cgi.HudDrawElements[i].string[0])
             || !cgi.HudDrawElements[i].vColor[3]) {
             // skip invisible elements
+            CG_HdHoldReset(i);   // HZM coop hdring: a hidden hold bar restarts its fill ease
             continue;
         }
 
@@ -738,6 +742,15 @@ void CG_HudDrawElements()
                 CG_AdjustFrom640(&fX, &fY, &fWidth, &fHeight);
             }
 
+            {
+                // HZM coop hdring: hold-progress ring/bar family (cg_hdprogress.c) - same fade as the other scripted chrome
+                int hdFam = CG_HdFamilyFromShader(cgi.HudDrawElements[i].shaderName);
+                if (hdFam >= 0) {
+                    float hdA = cgi.HudDrawElements[i].vColor[3] * (i < 100 ? s_hudFadeAlpha : 1.0f);
+                    CG_HdHudElement(i, fX, fY, fWidth, fHeight, hdA, hdFam);
+                    continue;
+                }
+            }
             cgi.R_DrawStretchPic(fX, fY, fWidth, fHeight, 0.0, 0.0, 1.0, 1.0, cgi.HudDrawElements[i].hShader);
         }
     }

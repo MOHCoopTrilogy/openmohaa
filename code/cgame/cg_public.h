@@ -334,6 +334,7 @@ functions exported to the main executable
         int (*R_GetShaderWidth)(qhandle_t shader);
         int (*R_GetShaderHeight)(qhandle_t shader);
         void (*R_DrawBox)(float x, float y, float w, float h);
+        void (*R_DrawTrianglePic)(const vec2_t vPoints[3], const vec2_t vTexCoords[3], qhandle_t hShader); // HZM coop hdring
 
         // =========== data shared with the client =============
         void (*GetGameState)(gameState_t *gamestate);

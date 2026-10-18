@@ -680,6 +680,16 @@ const adsGunTune_t *CG_FindAdsTune(const char *wpn);
     qboolean CG_VMAimedCycleActive(void); // HZM coop - the client-only aimed per-shot cycle clip is playing
     qboolean CG_AimingDownSights(void); // HZM coop - RMB-held iron-sight ADS gate (zoom + 3rd->1st person)
     qboolean CG_CoopHardcoreActive(void); // HZM coop - Hardcore host rule active (serverinfo g_coopHardcore + coop session)
+    // HZM coop [user 2026-10-18] HD hold-progress family (cg_hdprogress.c)
+    enum { HD_FAM_TRACK, HD_FAM_REVIVE, HD_FAM_HEAL, HD_FAM_PLACE, HD_FAM_USE, HD_FAM_OBJECTIVE, HD_FAM_COUNT };
+    qhandle_t CG_HdRampShader(void);
+    int   CG_HdFamilyFromShader(const char *name);
+    void  CG_HdFamilyColor(int fam, float alpha, vec4_t out);
+    void  CG_HdPill(float x, float y, float w, float h, const vec4_t col);
+    void  CG_HdRing(float cx, float cy, float r, float th, float rem, const vec4_t fill, float trackA, float haloA);
+    void  CG_HdBar(float x, float y, float w, float h, float frac, int fam, float alpha);
+    void  CG_HdHoldReset(int i);
+    void  CG_HdHudElement(int i, float x, float y, float w, float h, float alpha, int fam);
     void  CG_DrawCoopBleed(void); // HZM coop [user 2026-10-05] bleed-out ring + teammate medic icons (cg_coopbleed.c)
     void  CG_CoopBleedPostFx(float *pHealthFrac, float *pSuppress); // HZM coop - bleed-out drives the low-health/tunnel post-FX
     qboolean CG_CoopAimPoint(float *pX, float *pY); // HZM coop - the crosshair's real screen point this frame (cg_drawtools.cpp)
