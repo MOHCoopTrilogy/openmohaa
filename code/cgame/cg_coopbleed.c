@@ -88,6 +88,27 @@ static qboolean CG_BleedSelf(coopBleedEnt_t *out)
     return qfalse;
 }
 
+/*
+[2026-10-18 hdring] TEST INSTRUMENT (default off, not archived): coop_hdRingTest <0..1> draws the OWN bleed ring at that remaining
+fraction without a real DBNO (harness proof of the ring's look; the post-FX senses are untouched, they read CG_BleedSelf).
+*/
+static qboolean CG_BleedSelfOrTest(coopBleedEnt_t *out)
+{
+    static cvar_t *pT = NULL;
+
+    if (!pT) {
+        pT = cgi.Cvar_Get("coop_hdRingTest", "0", 0);
+    }
+    if (pT->value > 0.0f && cg.snap) {
+        out->num   = cg.snap->ps.clientNum;
+        out->rem   = pT->value > 1.0f ? 1.0f : pT->value;
+        out->total = 60;
+        out->flare = 0;
+        return qtrue;
+    }
+    return CG_BleedSelf(out);
+}
+
 /* [2026-10-18 hdring] the hold ring moves out while this is true (see cg_hdprogress.c) */
 qboolean CG_BleedSelfActive(void)
 {
@@ -104,7 +125,7 @@ void CG_CoopBleedPostFx(float *pHealthFrac, float *pSuppress)
     coopBleedEnt_t b;
     float          prog, t;
 
-    if (!CG_BleedSelf(&b)) {
+    if (!CG_BleedSelfOrTest(&b)) {
         return;
     }
     prog = 1.0f - b.rem;
