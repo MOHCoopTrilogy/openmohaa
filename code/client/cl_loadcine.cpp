@@ -235,7 +235,12 @@ int CL_LoadCine_TickMs(void)
 static void LC_RestoreSwap(void)
 {
     if (s_lcKeep.savedSwap >= 0) {
+        int during = IN_HZM_GetSwapInterval();
+
         IN_HZM_SetSwapInterval(s_lcKeep.savedSwap);
+        Com_Printf(
+            "^~^~^ LOADCINE swap during=%d restored=%d now=%d\n", during, s_lcKeep.savedSwap, IN_HZM_GetSwapInterval()
+        );
         s_lcKeep.savedSwap = -1;
     }
 }
@@ -446,6 +451,11 @@ qboolean CL_LoadCine_Begin(const char *mapname)
         (double)s_lc.fileLen / 1048576.0
     );
     return qtrue;
+}
+
+int CL_LoadCine_ElapsedMs(void)
+{
+    return s_lc.active ? Sys_Milliseconds() - s_lc.beginMs : 0;
 }
 
 void CL_LoadCine_SetFadeOut(float a)

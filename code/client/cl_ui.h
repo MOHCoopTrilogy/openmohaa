@@ -138,6 +138,7 @@ void     CL_LoadCine_End(const char *how);
 qboolean CL_LoadCine_Active(void);
 int      CL_LoadCine_TickMs(void);
 int      CL_LoadCine_FadeMs(void);
+int      CL_LoadCine_ElapsedMs(void);
 void     CL_LoadCine_PreDraw(void);
 void     CL_LoadCine_SetFadeOut(float a);
 void     CL_LoadCine_Draw(float sw, float sh);

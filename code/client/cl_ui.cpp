@@ -7594,11 +7594,12 @@ void UI_EndLoad(void)
     UI_LoadResource("*end");
 
     if (CL_LoadCine_Active()) {
-        // HZM coop [user 2026-10-18]: fade the clip to black over the last 250 ms of the load (the loading screen is
-        // still the one up, so these are ordinary draws), then drop it; the game's first frame follows.
-        int fadeMs = Q_min(CL_LoadCine_FadeMs() / 2 + 1, 250), t0 = Sys_Milliseconds(), el;
+        // HZM coop [user 2026-10-18]: fade the clip to black at the very end of the load (the loading screen is still
+        // the one up, so these are ordinary draws), then drop it; the game's first frame follows. The fade is 2% of the
+        // load, at most 250 ms and none under 30 ms, so it can never be a visible share of the load time (budget 5%).
+        int fadeMs = Q_min(CL_LoadCine_ElapsedMs() / 50, Q_min(CL_LoadCine_FadeMs() / 2, 250)), t0 = Sys_Milliseconds(), el;
 
-        if (cls.rendererReady && CL_LoadCine_FadeMs() > 0) {
+        if (cls.rendererReady && fadeMs >= 30) {
             while ((el = Sys_Milliseconds() - t0) < fadeMs) {
                 CL_LoadCine_SetFadeOut((float)el / (float)fadeMs);
                 CL_LoadCine_PreDraw();
