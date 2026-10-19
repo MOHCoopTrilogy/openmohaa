@@ -656,7 +656,8 @@ is drawn here by one rule instead of by edits to ~600 script lines:
  - ANCHOR: the string keeps the centre line (x for centred / right aligned text, y always) it had in its ORIGINAL
    font, so a script that centred "PROMOTED" by hand still looks centred.
  - LEGIBILITY: a 1 px black shadow at 0.8 of the string's own (faded) alpha.
-Not applied to the lobby and briefing maps (their layout was drawn for the original sizes) or outside a coop session.
+Not applied to the lobby and briefing maps (their layout was drawn for the original sizes), while the HUD is hidden by a
+cinematic / credits roll / intermission (titles keep their authored look), or outside a coop session.
 coop_hudTextStyle 0 turns the whole rule off.
 */
 static cvar_t       *s_cvTextStyle;
@@ -674,6 +675,10 @@ static qboolean CG_HudTextStyleOn(void)
         return qfalse;
     }
     if (strstr(cgs.mapname, "briefing/") || strstr(cgs.mapname, "co_lobby")) {
+        return qfalse;
+    }
+    // a cinematic / credits roll / intermission hides the HUD: the scripted text there IS the picture (titles), keep it as authored
+    if (!cg.snap || (cg.snap->ps.pm_flags & (PMF_NO_HUD | PMF_INTERMISSION))) {
         return qfalse;
     }
     return qtrue;
