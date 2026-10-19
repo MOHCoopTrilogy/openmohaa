@@ -44,7 +44,8 @@ extern "C" int  IN_HZM_GetSwapInterval(void);
 extern "C" void IN_HZM_SetSwapInterval(int interval);
 
 #define LC_MAGIC     0x434C5A48u // 'HZLC'
-#define LC_VERSION   1u
+#define LC_VERSION   2u // 1 = original header (28 bytes), 2 = + u32 flags at 28 (bit 0: play once, then hold + slow zoom)
+#define LC_FLAG_ONCE 1u
 #define LC_TOKLEN    64
 #define LC_TOKS      16
 #define LC_MAXDIM    2048
@@ -59,10 +60,11 @@ static struct {
     qboolean  active;
     byte     *file;
     int       fileLen;
-    unsigned  w, h, fps, frames, aspect1000;
+    unsigned  w, h, fps, frames, aspect1000, flags;
     unsigned *off;  // frames + 1 offsets (copied out of the file: it is not aligned)
     byte     *rgba; // w * h * 4
     int       cur;  // frame currently in rgba, -1 none
+    float     lastZoom; // zoom of the last drawn frame (play-once hold)
     char      name[LC_TOKLEN];
     char      map[MAX_QPATH];
     int       startMs; // Sys_Milliseconds at the first draw; 0 until then
@@ -268,6 +270,7 @@ void CL_LoadCine_End(const char *how)
         float avg = s_lc.decodes ? (float)s_lc.decodeMsTotal / (float)s_lc.decodes : 0.0f;
         float dav = s_lc.draws ? (float)s_lc.drawMsTotal / (float)s_lc.draws : 0.0f;
 
+        Com_Printf("^~^~^ LOADCINE once=%d lastframe=%d/%u zoom=%.4f\n", (s_lc.flags & LC_FLAG_ONCE) ? 1 : 0, s_lc.cur, s_lc.frames, s_lc.lastZoom);
         Com_Printf(
             "^~^~^ LOADCINE end=%s map=%s clip=%s ms=%d draws=%d distinct=%d/%u decode_avg=%.2f decode_max=%d "
             "draw_avg=%.2f draw_max=%d gapmax=%d gaps_over50=%d over100=%d over200=%d\n",
@@ -301,7 +304,7 @@ static qboolean LC_Open(const char *clip, const char *mapname)
     fileHandle_t f = 0;
     long         len;
     byte        *buf;
-    unsigned     i, hdr;
+    unsigned     i, hdr, hdrOff;
 
     Com_sprintf(path, sizeof(path), "loadclips/%s.hzlc", clip);
     len = FS_FOpenFileRead(path, &f, qtrue, qtrue);
@@ -326,9 +329,11 @@ static qboolean LC_Open(const char *clip, const char *mapname)
     memset(&s_lc, 0, sizeof(s_lc));
     s_lc.file    = buf;
     s_lc.fileLen = (int)len;
-    if (LC_U32(buf) != LC_MAGIC || LC_U32(buf + 4) != LC_VERSION) {
+    if (LC_U32(buf) != LC_MAGIC || (LC_U32(buf + 4) != 1u && LC_U32(buf + 4) != LC_VERSION)) {
         goto bad;
     }
+    hdrOff = LC_U32(buf + 4) == 1u ? 28 : 32;
+    s_lc.flags = hdrOff == 32 ? LC_U32(buf + 28) : 0;
     s_lc.w          = LC_U32(buf + 8);
     s_lc.h          = LC_U32(buf + 12);
     s_lc.fps        = LC_U32(buf + 16);
@@ -339,7 +344,7 @@ static qboolean LC_Open(const char *clip, const char *mapname)
         || s_lc.aspect1000 < 500 || s_lc.aspect1000 > 4000) {
         goto bad;
     }
-    hdr = 28 + 4 * (s_lc.frames + 1);
+    hdr = hdrOff + 4 * (s_lc.frames + 1);
     if ((unsigned)len < hdr) {
         goto bad;
     }
@@ -348,7 +353,7 @@ static qboolean LC_Open(const char *clip, const char *mapname)
         goto bad;
     }
     for (i = 0; i <= s_lc.frames; i++) {
-        s_lc.off[i] = LC_U32(buf + 28 + 4 * i);
+        s_lc.off[i] = LC_U32(buf + hdrOff + 4 * i);
         if (s_lc.off[i] > (unsigned)len || (i && s_lc.off[i] < s_lc.off[i - 1]) || s_lc.off[i] < hdr) {
             goto bad;
         }
@@ -387,11 +392,13 @@ qboolean CL_LoadCine_Begin(const char *mapname)
     Cvar_Set("ui_loadCineOn", "0");
     if (!cl_loadCinematic || !cl_loadCinematic->integer || !mapname || !*mapname || !cls.rendererReady
         || !re.DrawStretchRaw) {
+        Com_Printf("^~^~^ LOADCINE skip map=%s why=gate cvar=%d rendererReady=%d stretch=%d\n", mapname ? mapname : "", cl_loadCinematic ? cl_loadCinematic->integer : -1, (int)cls.rendererReady, re.DrawStretchRaw ? 1 : 0);
         return qfalse;
     }
 
     len = FS_ReadFile("ui/loadclips.txt", (void **)&buf);
     if (len <= 0 || !buf) {
+        Com_Printf("^~^~^ LOADCINE skip map=%s why=no ui/loadclips.txt\n", mapname);
         return qfalse;
     }
     p   = buf;
@@ -424,6 +431,7 @@ qboolean CL_LoadCine_Begin(const char *mapname)
     }
     FS_FreeFile(buf);
     if (nClips <= 0) {
+        Com_Printf("^~^~^ LOADCINE skip map=%s why=no rule (nClips=%d)\n", mapname, nClips);
         return qfalse;
     }
 
@@ -434,6 +442,7 @@ qboolean CL_LoadCine_Begin(const char *mapname)
         pick = (pick + 1) % nClips;
     }
     if (!LC_Open(clips[pick], mapname)) {
+        Com_Printf("^~^~^ LOADCINE skip map=%s why=clip %s did not open\n", mapname, clips[pick]);
         return qfalse;
     }
     Q_strncpyz(s_lcKeep.last, clips[pick], sizeof(s_lcKeep.last));
@@ -474,7 +483,7 @@ int CL_LoadCine_FadeMs(void)
 void CL_LoadCine_Draw(float sw, float sh)
 {
     int    now, t, frame, fadeMs, t1, dm;
-    float  aspect, dw, dh, a;
+    float  aspect, dw, dh, a, zoom = 1.0f;
     vec4_t c;
 
     if (!s_lc.active || sw < 1 || sh < 1) {
@@ -485,7 +494,22 @@ void CL_LoadCine_Draw(float sw, float sh)
         s_lc.startMs = now;
     }
     t     = now - s_lc.startMs;
-    frame = (int)(((long long)t * (long long)s_lc.fps / 1000) % (long long)s_lc.frames);
+    if (s_lc.flags & LC_FLAG_ONCE) {
+        // play once, then hold the last frame; the hold drifts in slowly (about 2% per 10 s) until the load ends
+        long long fr = (long long)t * (long long)s_lc.fps / 1000;
+
+        frame = fr >= (long long)s_lc.frames ? (int)s_lc.frames - 1 : (int)fr;
+        if (fr >= (long long)s_lc.frames) {
+            int holdMs = t - (int)((long long)s_lc.frames * 1000 / s_lc.fps);
+
+            zoom = 1.0f + 0.002f * (float)holdMs / 1000.0f;
+            if (zoom > 1.2f) {
+                zoom = 1.2f;
+            }
+        }
+    } else {
+        frame = (int)(((long long)t * (long long)s_lc.fps / 1000) % (long long)s_lc.frames);
+    }
 
     if (frame != s_lc.cur) {
         int t0 = Sys_Milliseconds(), dt;
@@ -517,6 +541,9 @@ void CL_LoadCine_Draw(float sw, float sh)
         dw = sh * aspect;
     }
 
+    s_lc.lastZoom = zoom;
+    dw *= zoom;
+    dh *= zoom;
     t1 = Sys_Milliseconds();
     re.SetColor(NULL);
     re.DrawStretchRaw((int)((sw - dw) * 0.5f), (int)((sh - dh) * 0.5f), (int)dw, (int)dh, (int)s_lc.w, (int)s_lc.h, 0, s_lc.rgba);
