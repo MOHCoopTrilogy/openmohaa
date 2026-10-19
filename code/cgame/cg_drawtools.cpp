@@ -645,6 +645,107 @@ void CG_RefreshHudDrawElements()
     }
 }
 
+/*
+HZM coop [text sweep 2026-10-19, bug-4093] STYLED SCRIPT TEXT. Every scripted huddraw / ihuddraw STRING in a coop session
+is drawn here by one rule instead of by edits to ~600 script lines:
+ - SIZE: a 640x480 "virtual" string was scaled by vid/480 (2.25x at 1080p) while the event feed is a fixed 12 px, so a
+   verdana-12 hint was 27 px tall at 1080p. Every string now uses the hi-res scale the feed uses, so the same font is the
+   same size on every screen.
+ - FONT: facfont / handle / delima (the 20-30 px display faces) become verdana-14 at 1.15x (headline, 1.35x the feed);
+   courier becomes verdana-12 (body). verdana-12 / -14 and the default stay. marlett (symbol font) is left alone.
+ - ANCHOR: the string keeps the centre line (x for centred / right aligned text, y always) it had in its ORIGINAL
+   font, so a script that centred "PROMOTED" by hand still looks centred.
+ - LEGIBILITY: a 1 px black shadow at 0.8 of the string's own (faded) alpha.
+Not applied to the lobby and briefing maps (their layout was drawn for the original sizes) or outside a coop session.
+coop_hudTextStyle 0 turns the whole rule off.
+*/
+static cvar_t       *s_cvTextStyle;
+static cvar_t       *s_cvTextSess;
+static fontheader_t *s_fHeadline;
+static fontheader_t *s_fBody;
+
+static qboolean CG_HudTextStyleOn(void)
+{
+    if (!s_cvTextStyle) {
+        s_cvTextStyle = cgi.Cvar_Get("coop_hudTextStyle", "1", CVAR_ARCHIVE);
+        s_cvTextSess  = cgi.Cvar_Get("coop_isCoopSession", "0", 0);
+    }
+    if (!s_cvTextStyle->integer || !s_cvTextSess->integer) {
+        return qfalse;
+    }
+    if (strstr(cgs.mapname, "briefing/") || strstr(cgs.mapname, "co_lobby")) {
+        return qfalse;
+    }
+    return qtrue;
+}
+
+// returns qfalse when the string should be drawn the old way (symbol font, unknown font metrics)
+static qboolean CG_HudDrawStyledString(int i, float fX, float fY, qboolean bVirtual, const float *vColor, const vec2_t virtualScale)
+{
+    const char   *fn   = cgi.HudDrawElements[i].fontName;
+    const char   *txt  = cgi.LV_ConvertString(cgi.HudDrawElements[i].string);
+    fontheader_t *of   = cgi.HudDrawElements[i].pFont ? cgi.HudDrawElements[i].pFont : cgs.media.hudDrawFont;
+    fontheader_t *nf   = of;
+    float         mult = 1.0f;
+    vec2_t        os, ns;
+    float         ow, oh, nw, nh, ox, oy, x, y, sh;
+    vec4_t        shadow;
+
+    if (!Q_stricmpn(fn, "marlett", 7)) {
+        return qfalse;
+    }
+    if (!s_fHeadline) {
+        s_fHeadline = cgi.R_LoadFont("verdana-14");
+        s_fBody     = cgi.R_LoadFont("verdana-12");
+    }
+    if (!Q_stricmpn(fn, "facfont", 7) || !Q_stricmpn(fn, "handle", 6) || !Q_stricmpn(fn, "delima", 6)) {
+        nf   = s_fHeadline;
+        mult = 1.15f;
+    } else if (!Q_stricmpn(fn, "courier", 7)) {
+        nf = s_fBody;
+    }
+    if (!of || !nf || !of->sgl[0] || !nf->sgl[0] || of->sgl[0]->height <= 0.0f || nf->sgl[0]->height <= 0.0f) {
+        return qfalse;
+    }
+    if (bVirtual) {
+        os[0] = virtualScale[0];
+        os[1] = virtualScale[1];
+        ox    = fX * virtualScale[0];
+        oy    = fY * virtualScale[1];
+    } else {
+        os[0] = cgs.uiHiResScale[0];
+        os[1] = cgs.uiHiResScale[1];
+        ox    = fX;
+        oy    = fY;
+    }
+    ns[0] = cgs.uiHiResScale[0] * mult;
+    ns[1] = cgs.uiHiResScale[1] * mult;
+
+    ow = (float)cgi.UI_FontStringWidth(of, txt, -1) * os[0];
+    oh = of->sgl[0]->height * os[1];
+    nw = (float)cgi.UI_FontStringWidth(nf, txt, -1) * ns[0];
+    nh = nf->sgl[0]->height * ns[1];
+
+    x = ox;
+    if (cgi.HudDrawElements[i].iHorizontalAlign == HUD_ALIGN_X_CENTER) {
+        x = ox + (ow - nw) * 0.5f;
+    } else if (cgi.HudDrawElements[i].iHorizontalAlign == HUD_ALIGN_X_RIGHT) {
+        x = ox + (ow - nw);
+    }
+    y = oy + (oh - nh) * 0.5f;
+    x = (float)(int)(x + 0.5f);
+    y = (float)(int)(y + 0.5f);
+
+    sh        = (cgs.uiHiResScale[1] > 1.0f) ? (float)(int)(cgs.uiHiResScale[1] + 0.5f) : 1.0f;
+    shadow[0] = shadow[1] = shadow[2] = 0.0f;
+    shadow[3] = vColor[3] * 0.8f;
+    cgi.R_SetColor(shadow);
+    cgi.R_DrawString(nf, txt, (x + sh) / ns[0], (y + sh) / ns[1], -1, ns);
+    cgi.R_SetColor(vColor);
+    cgi.R_DrawString(nf, txt, x / ns[0], y / ns[1], -1, ns);
+    return qtrue;
+}
+
 void CG_HudDrawElements()
 {
     int    i;
@@ -658,6 +759,7 @@ void CG_HudDrawElements()
 
     virtualScale[0] = cgs.glconfig.vidWidth / 640.0;
     virtualScale[1] = cgs.glconfig.vidHeight / 480.0;
+    qboolean bTextStyle = CG_HudTextStyleOn();
 
     for (i = 0; i < MAX_HUDDRAW_ELEMENTS; i++) {
         if ((!cgi.HudDrawElements[i].hShader && !cgi.HudDrawElements[i].string[0])
@@ -711,16 +813,19 @@ void CG_HudDrawElements()
         // same activity-driven fade as the health/ammo panels (compass exempt - it is not huddraw).
         // Slots >= 100 are PERSISTENT lobby UI (the bottom-left roster + the top-left control help) and
         // must stay fully visible - they are exempt from the fade.
-        {
-            vec4_t vFadedCol;
-            Vector4Copy(cgi.HudDrawElements[i].vColor, vFadedCol);
-            if (i < 100) {
-                vFadedCol[3] *= s_hudFadeShown;
-            }
-            cgi.R_SetColor(vFadedCol);
+        vec4_t vFadedCol;
+        Vector4Copy(cgi.HudDrawElements[i].vColor, vFadedCol);
+        if (i < 100) {
+            vFadedCol[3] *= s_hudFadeShown;
         }
+        cgi.R_SetColor(vFadedCol);
         if (cgi.HudDrawElements[i].string[0]) {
             fontheader_t *pFont = cgi.HudDrawElements[i].pFont;
+            if (bTextStyle
+                && CG_HudDrawStyledString(i, fX, fY, cgi.HudDrawElements[i].bVirtualScreen, vFadedCol, virtualScale)) {
+                cgi.R_SetColor(NULL);
+                continue;
+            }
             if (!pFont) {
                 pFont = cgs.media.hudDrawFont;
             }
