@@ -4393,7 +4393,7 @@ void CL_Init( void ) {
 	// [controller feel] analog LOOK tuning (see CL_JoystickMove). Neutral defaults reproduce the old linear
 	// feel; coop_defaults.cfg seeds nicer starting values that a Controls slider can then adjust.
 	joy_response       = Cvar_Get( "joy_response",       "1.0", CVAR_ARCHIVE );
-	joy_outerThreshold = Cvar_Get( "joy_outerThreshold", "0.02", CVAR_ARCHIVE );
+	joy_outerThreshold = Cvar_Get( "joy_outerThreshold", "0.05", CVAR_ARCHIVE );   // full speed is reached this close to the rim (5% = at 95% travel)
 	// [gamepad-next] handheld (ROG Ally) defaults; all archived = saved per player. joy_threshold (sdl_input.c) is the
 	// inner dead-zone, joy_outerThreshold the outer one.
 	joy_lookX    = Cvar_Get( "joy_lookX",    "1.0",  CVAR_ARCHIVE );

@@ -1343,9 +1343,9 @@ static void CG_DrawCoopItems(void)
 
         // bound key: centred under the icon, cut to the column so it can never touch the next one
         if (CG_IsPadLabel(it->key)) {
-            float gs = textH * 1.45f;
+            float gs = textH * 2.1f;
 
-            CG_DrawPadGlyph((float)((int)(xPx + iconPx * 0.5f - gs * 0.5f)), (float)((int)(topPx + iconPx + 1.0f * sy)), gs,
+            CG_DrawPadGlyph((float)((int)(xPx + iconPx * 0.5f - gs * 0.5f)), (float)((int)(topPx + iconPx + 0.5f * sy)), gs,
                             it->key[1] - 'a', 0.92f * fade);
             key[0] = 0;
             n      = 0;

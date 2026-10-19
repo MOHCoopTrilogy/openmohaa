@@ -928,11 +928,49 @@ Per client frame: deferred, off-thread SDL bring-up (see the comment at the top)
 after hot-plug, and the optional test driver.
 ===============
 */
+/*
+IN_PadMirrors
+
+Friendly text for the Options > Controls > AIM / SENSITIVITY value labels (a label shows a cvar's raw string, "1.000000").
+in_padV_<name> = percent for the sensitivities and deadzones, seconds / multiplier for the acceleration.
+*/
+static void IN_PadMirrors( void )
+{
+	static const struct {
+		const char *cv, *mirror, *fmt;
+	} m[] = {
+		{"joy_lookX", "in_padV_lookX", "pct"},         {"joy_lookY", "in_padV_lookY", "pct"},
+		{"joy_adsScale", "in_padV_adsScale", "pct"},   {"joy_threshold", "in_padV_inner", "pct"},
+		{"joy_outerThreshold", "in_padV_outer", "pct"}, {"joy_response", "in_padV_response", "x1"},
+		{"joy_accelTime", "in_padV_accelTime", "sec"}, {"joy_accelMax", "in_padV_accelMax", "x1"},
+	};
+	int i;
+
+	for ( i = 0; i < (int)( sizeof( m ) / sizeof( m[0] ) ); i++ ) {
+		float v = Cvar_VariableValue( m[i].cv );
+		char  buf[24];
+
+		if ( !strcmp( m[i].fmt, "pct" ) ) {
+			Com_sprintf( buf, sizeof( buf ), "%d%%", (int)( v * 100.0f + 0.5f ) );
+		} else if ( !strcmp( m[i].fmt, "sec" ) ) {
+			Com_sprintf( buf, sizeof( buf ), "%.1f s", v );
+		} else {
+			Com_sprintf( buf, sizeof( buf ), "%.1fx", v );
+		}
+		Cvar_Get( m[i].mirror, "", CVAR_TEMP );
+		if ( strcmp( Cvar_VariableString( m[i].mirror ), buf ) ) {
+			Cvar_Set( m[i].mirror, buf );
+		}
+	}
+}
+
 static void IN_PadService( void )
 {
 	static int nextOpenMs = 0;
 	int        now = Sys_Milliseconds();
 	qboolean   en  = IN_PadEnabled();
+
+	IN_PadMirrors();
 
 	padFramesSeen++;
 	if ( en != padWasEnabled ) {
