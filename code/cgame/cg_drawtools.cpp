@@ -679,6 +679,93 @@ static qboolean CG_HudTextStyleOn(void)
     return qtrue;
 }
 
+// A string that sits ON a panel (a baked card / service-record page drawn in the same 640x480 frame) must keep
+// scaling with that panel, or it shrinks to a stamp in the middle of a big card at 1080p. The pixel rects of the
+// visible panel-sized shader elements are collected once per frame (not full-screen curtains: those are backdrops).
+#define HUD_MAX_PANELS 8
+static float s_panelRect[HUD_MAX_PANELS][4];
+static int   s_nPanels;
+
+static qboolean CG_HudElemPixelRect(int i, float *px, float *py, float *pw, float *ph)
+{
+    float fX = cgi.HudDrawElements[i].iX, fY = cgi.HudDrawElements[i].iY;
+    float fW = cgi.HudDrawElements[i].iWidth, fH = cgi.HudDrawElements[i].iHeight;
+    float sx, sy;
+
+    if (cgi.HudDrawElements[i].bVirtualScreen) {
+        sx = cgs.glconfig.vidWidth / 640.0f;
+        sy = cgs.glconfig.vidHeight / 480.0f;
+        if (cgi.HudDrawElements[i].iHorizontalAlign == HUD_ALIGN_X_CENTER) {
+            fX += 320.0f - fW * 0.5f;
+        } else if (cgi.HudDrawElements[i].iHorizontalAlign == HUD_ALIGN_X_RIGHT) {
+            fX += 640.0f;
+        }
+        if (cgi.HudDrawElements[i].iVerticalAlign == HUD_ALIGN_Y_CENTER) {
+            fY += 240.0f - fH * 0.5f;
+        } else if (cgi.HudDrawElements[i].iVerticalAlign == HUD_ALIGN_Y_BOTTOM) {
+            fY += 480.0f;
+        }
+    } else {
+        sx = cgs.uiHiResScale[0];
+        sy = cgs.uiHiResScale[1];
+        fX *= sx;
+        fY *= sy;
+        fW *= sx;
+        fH *= sy;
+        if (cgi.HudDrawElements[i].iHorizontalAlign == HUD_ALIGN_X_CENTER) {
+            fX += cgs.glconfig.vidWidth * 0.5f - fW * 0.5f;
+        } else if (cgi.HudDrawElements[i].iHorizontalAlign == HUD_ALIGN_X_RIGHT) {
+            fX += cgs.glconfig.vidWidth;
+        }
+        if (cgi.HudDrawElements[i].iVerticalAlign == HUD_ALIGN_Y_CENTER) {
+            fY += cgs.glconfig.vidHeight * 0.5f - fH * 0.5f;
+        } else if (cgi.HudDrawElements[i].iVerticalAlign == HUD_ALIGN_Y_BOTTOM) {
+            fY += cgs.glconfig.vidHeight;
+        }
+        sx = sy = 1.0f;
+    }
+    *px = fX * sx;
+    *py = fY * sy;
+    *pw = fW * sx;
+    *ph = fH * sy;
+    return qtrue;
+}
+
+static void CG_HudCollectPanels(void)
+{
+    const float W = (float)cgs.glconfig.vidWidth, H = (float)cgs.glconfig.vidHeight;
+    int         i;
+    float       x, y, w, h;
+
+    s_nPanels = 0;
+    for (i = 0; i < MAX_HUDDRAW_ELEMENTS && s_nPanels < HUD_MAX_PANELS; i++) {
+        if (cgi.HudDrawElements[i].string[0] || !cgi.HudDrawElements[i].hShader || cgi.HudDrawElements[i].vColor[3] < 0.05f) {
+            continue;
+        }
+        CG_HudElemPixelRect(i, &x, &y, &w, &h);
+        if (w >= 0.31f * W && h >= 0.21f * H && w * h < 0.6f * W * H) {
+            s_panelRect[s_nPanels][0] = x;
+            s_panelRect[s_nPanels][1] = y;
+            s_panelRect[s_nPanels][2] = w;
+            s_panelRect[s_nPanels][3] = h;
+            s_nPanels++;
+        }
+    }
+}
+
+static qboolean CG_HudPointOnPanel(float x, float y)
+{
+    int k;
+
+    for (k = 0; k < s_nPanels; k++) {
+        if (x >= s_panelRect[k][0] && x <= s_panelRect[k][0] + s_panelRect[k][2] && y >= s_panelRect[k][1]
+            && y <= s_panelRect[k][1] + s_panelRect[k][3]) {
+            return qtrue;
+        }
+    }
+    return qfalse;
+}
+
 // returns qfalse when the string should be drawn the old way (symbol font, unknown font metrics)
 static qboolean CG_HudDrawStyledString(int i, float fX, float fY, qboolean bVirtual, const float *vColor, const vec2_t virtualScale)
 {
@@ -718,8 +805,14 @@ static qboolean CG_HudDrawStyledString(int i, float fX, float fY, qboolean bVirt
         ox    = fX;
         oy    = fY;
     }
-    ns[0] = cgs.uiHiResScale[0] * mult;
-    ns[1] = cgs.uiHiResScale[1] * mult;
+    if (CG_HudPointOnPanel(ox, oy)) {
+        // on a panel: keep the string's pixel height (it scales with the card), only the face changes
+        ns[0] = os[0] * of->sgl[0]->height / nf->sgl[0]->height;
+        ns[1] = os[1] * of->sgl[0]->height / nf->sgl[0]->height;
+    } else {
+        ns[0] = cgs.uiHiResScale[0] * mult;
+        ns[1] = cgs.uiHiResScale[1] * mult;
+    }
 
     ow = (float)cgi.UI_FontStringWidth(of, txt, -1) * os[0];
     oh = of->sgl[0]->height * os[1];
@@ -760,6 +853,9 @@ void CG_HudDrawElements()
     virtualScale[0] = cgs.glconfig.vidWidth / 640.0;
     virtualScale[1] = cgs.glconfig.vidHeight / 480.0;
     qboolean bTextStyle = CG_HudTextStyleOn();
+    if (bTextStyle) {
+        CG_HudCollectPanels();
+    }
 
     for (i = 0; i < MAX_HUDDRAW_ELEMENTS; i++) {
         if ((!cgi.HudDrawElements[i].hShader && !cgi.HudDrawElements[i].string[0])
