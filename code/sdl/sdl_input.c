@@ -810,6 +810,9 @@ static void IN_PadTestLoad( void )
 		} else if ( !strncmp( line, "@cursor", 7 ) ) {
 			st->kind = 4;      // test only: put the UI cursor somewhere known
 			if ( sscanf( line + 7, "%d %d %d", &st->t, &st->ax[0], &st->ax[1] ) == 3 ) padNumSteps++;
+		} else if ( !strncmp( line, "@kbm", 4 ) ) {
+			st->kind = 5;      // test only: act as if the keyboard / mouse was just used (key prompts switch to key names)
+			if ( sscanf( line + 4, "%d", &st->t ) == 1 ) padNumSteps++;
 		} else if ( !strncmp( line, "@cmd", 4 ) ) {
 			char *c = line + 4;
 
@@ -880,6 +883,8 @@ static void IN_PadTestDrive( void )
 			i          = SDL_JoystickAttachVirtualEx( &d );
 			Com_Printf( "^~^~^ PADTEST attach -> %d\n", i );
 			padWantOpen = qtrue;
+		} else if ( st->kind == 5 ) {
+			IN_PadNoteKbm();
 		} else if ( st->kind == 4 ) {
 			CL_SetMousePos( st->ax[0], st->ax[1] );
 		} else if ( st->kind == 3 ) {
@@ -989,6 +994,15 @@ static void IN_PadService( void )
 		Cvar_Get( "in_padGameLabel", "Auto", CVAR_TEMP );
 		if ( strcmp( Cvar_VariableString( "in_padGameLabel" ), lbl ) ) {
 			Cvar_Set( "in_padGameLabel", lbl );
+		}
+		{   // same for the response-curve choice
+			int         cv  = Cvar_VariableIntegerValue( "joy_curve" );
+			const char *cl  = cv == 0 ? "Linear" : ( cv == 2 ? "Dynamic" : "Exponential" );
+
+			Cvar_Get( "in_padCurveLabel", "Exponential", CVAR_TEMP );
+			if ( strcmp( Cvar_VariableString( "in_padCurveLabel" ), cl ) ) {
+				Cvar_Set( "in_padCurveLabel", cl );
+			}
 		}
 	}
 	IN_PadTestDrive();

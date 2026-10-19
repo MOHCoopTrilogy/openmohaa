@@ -115,6 +115,10 @@ const char *Key_KeynumToString( int keynum ) {
 	return NULL;
 }
 
+const char *CL_ExpandKeyTokens( const char *in ) {
+	return in;
+}
+
 const char *Key_KeynumToBindString( int keynum ) {
 	return NULL;
 }

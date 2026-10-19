@@ -56,10 +56,10 @@ const char *Sys_LV_ConvertString(const char *var)
 const char *Sys_LV_CL_ConvertString(const char *var)
 {
     if (!g_localization) {
-        return var;
+        return CL_ExpandKeyTokens(var);
     }
 
-    return g_localization->ConvertString(var);
+    return CL_ExpandKeyTokens(g_localization->ConvertString(var));
 }
 
 typedef char *charstar;

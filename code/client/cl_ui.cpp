@@ -6835,7 +6835,7 @@ static void UI_LoadHints_PlaceNav(void)
         sx = sy;
     }
 
-    tw    = font->getWidth(Cvar_VariableString("ui_loadhint"), -1) * sx;
+    tw    = font->getWidth(CL_ExpandKeyTokens(Cvar_VariableString("ui_loadhint")), -1) * sx;
     frame = label->getFrame();
     cx    = frame.pos.x + frame.size.width * 0.5f;
     cy    = frame.pos.y + frame.size.height * 0.5f;
