@@ -425,6 +425,25 @@ void CL_SetMousePos( int x, int y )
 {
 	cl.mousex = x;
 	cl.mousey = y;
+	IN_SetMousePosition( x, y );
+}
+
+/*
+=================
+CL_PadMoveCursor
+
+[gamepad-next] the gamepad's menu cursor: move the UI cursor by (dx, dy) pixels, clamped to the screen.
+=================
+*/
+void CL_PadMoveCursor( int dx, int dy )
+{
+	int x = cl.mousex + dx, y = cl.mousey + dy;
+
+	if ( x < 0 ) x = 0;
+	if ( y < 0 ) y = 0;
+	if ( x > cls.glconfig.vidWidth ) x = cls.glconfig.vidWidth;
+	if ( y > cls.glconfig.vidHeight ) y = cls.glconfig.vidHeight;
+	CL_SetMousePos( x, y );
 }
 
 /*

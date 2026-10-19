@@ -1032,14 +1032,14 @@ static void IN_GamepadUI( void )
 	accX -= dx;
 	accY -= dy;
 	if ( dx || dy ) {
-		Com_QueueEvent( in_eventTime, SE_MOUSE, dx, dy, 0, NULL );
+		CL_PadMoveCursor( dx, dy );
 		IN_PadSetActive( 1 );
 		if ( in_padDebug && in_padDebug->integer ) {
 			static int nextLogMs;
 
 			if ( now >= nextLogMs ) {
 				nextLogMs = now + 300;
-				Com_Printf( "^~^~^ PADUI cursor %d %d\n", cl.mousex, cl.mousey );
+				Com_Printf( "^~^~^ PADUI cursor %d %d (guimouse %d)\n", cl.mousex, cl.mousey, (int)in_guimouse );
 			}
 		}
 	}

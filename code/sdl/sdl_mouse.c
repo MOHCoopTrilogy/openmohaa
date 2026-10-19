@@ -64,6 +64,15 @@ void IN_FreeCursor() {
     }
 }
 
+// [gamepad-next] move the OS cursor too: in windowed menus CL_UpdateMouse re-reads it every frame, so a position set
+// only in cl.mousex (the pad's cursor, the D-pad focus jump) would be overwritten by the real mouse position.
+void IN_SetMousePosition(int x, int y)
+{
+    if (SDL_GetRelativeMouseMode() == SDL_FALSE) {
+        SDL_WarpMouseInWindow(NULL, x, y);
+    }
+}
+
 qboolean IN_IsCursorActive()
 {
     return SDL_GetRelativeMouseMode() == SDL_TRUE;
