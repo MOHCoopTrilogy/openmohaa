@@ -2229,7 +2229,7 @@ the word "Hold", the same as the loot prompt's hold. A press-once action is unch
 prompt still works; the merge is: #define COOP_HDRING 1 below, nothing else.
 ====================
 */
-// #define COOP_HDRING 1   // <- the ONE switch for the merge with hdring-engine (needs CG_HdHoldRing / HD_FAM_USE)
+#define COOP_HDRING 1   // <- the ONE switch for the merge with hdring-engine (needs CG_HdHoldRing / HD_FAM_USE)
 #define ACT_ART_MAX 40
 static struct {
     char      name[32];
