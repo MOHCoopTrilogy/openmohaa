@@ -53,6 +53,34 @@ static cvar_t *in_joystickThreshold = NULL;
 static cvar_t *in_joystickNo        = NULL;
 static cvar_t *in_joystickUseAnalog = NULL;
 
+// ---- [HZM gamepad-next] -------------------------------------------------------------------------------------
+// in_gamepad 1 (default) turns controller support on WITHOUT the old in_joystick/in_restart dance. The SDL
+// joystick/gamecontroller subsystems are NEVER initialised on the boot path (bug-2606: SDL_Init(JOYSTICK) hung
+// forever on a bad HID/Bluetooth device, black-screening the client). They are brought up on a WORKER thread,
+// started only after ~1 s of rendered frames, and the main thread never waits on it: if it has not finished in
+// 6 s the pad is declared HUNG and given up on, the game carries on with keyboard + mouse.
+// Only SDL GameController-class devices are opened (raw HID joysticks are ignored).
+static cvar_t *in_gamepad       = NULL;
+static cvar_t *in_padUiSpeed    = NULL;   // UI cursor speed, screen widths per second at full stick
+static cvar_t *in_padDebug      = NULL;   // 1 = log mapped pad keys as "^~^~^ PADKEY ..."
+static cvar_t *in_padTestScript = NULL;   // CVAR_INIT (command line only): drive a virtual pad from a script file
+static cvar_t *in_padActive     = NULL;   // 1 while the last input came from the pad, 0 for keyboard / mouse
+
+enum { PAD_IDLE, PAD_INITING, PAD_READY, PAD_HUNG, PAD_FAILED };
+static volatile int padState = PAD_IDLE;
+static volatile int padThreadDone = 0;
+static volatile int padThreadOk = 0;
+static volatile int padThreadQuit = 0;
+static SDL_Thread *padThread = NULL;
+static int padInitStartMs = 0;
+static int padFramesSeen = 0;
+static qboolean padWantOpen = qfalse;
+static qboolean padWasEnabled = qfalse;
+static int padLastActive = -1;
+static int padMode = 0;                    // 0 game, 1 ui (menu), 2 console
+static byte padHeldKey[MAX_KEYS];
+static void IN_PadSetStatus( const char *s );
+
 static int vidRestartTime = 0;
 
 static int in_eventTime = 0;
@@ -449,118 +477,190 @@ struct
 	unsigned int oldaxes;
 	int oldaaxes[MAX_JOYSTICK_AXIS];
 	unsigned int oldhats;
+	qboolean suppress[SDL_CONTROLLER_BUTTON_MAX + 1]; // held across a menu->game switch: ignore until released
 } stick_state;
 
 
 /*
 ===============
+IN_PadNoteActive / IN_PadNoteKbm
+
+in_padActive tells cgame and the menus which kind of key prompt to show.
+===============
+*/
+static void IN_PadSetActive( int v )
+{
+	if ( v == padLastActive ) {
+		return;
+	}
+	padLastActive = v;
+	Cvar_Set( "in_padActive", v ? "1" : "0" );
+}
+
+static void IN_PadNoteKbm( void )
+{
+	if ( padLastActive != 0 ) {
+		IN_PadSetActive( 0 );
+	}
+}
+
+/*
+===============
+IN_PadKey
+
+The one place a pad key reaches the game. Tracks what is held so a menu switch / unplug can release it.
+===============
+*/
+static void IN_PadKey( int key, qboolean down )
+{
+	Com_QueueEvent( in_eventTime, SE_KEY, key, down, 0, NULL );
+	if ( key >= 0 && key < MAX_KEYS ) {
+		padHeldKey[key] = down ? 1 : 0;
+	}
+	IN_PadSetActive( 1 );
+	if ( in_padDebug && in_padDebug->integer ) {
+		Com_Printf( "^~^~^ PADKEY %s %s mode=%d\n", Key_KeynumToString( key ), down ? "down" : "up", padMode );
+	}
+}
+
+static qboolean IN_PadEnabled( void )
+{
+	return ( in_gamepad && in_gamepad->integer ) || ( in_joystick && in_joystick->integer );
+}
+
+static void IN_PadSetStatus( const char *s )
+{
+	static char last[32];
+
+	if ( strcmp( last, s ) ) {
+		Q_strncpyz( last, s, sizeof( last ) );
+		Cvar_Set( "in_padStatus", s );
+	}
+}
+
+/*
+===============
+IN_PadReleaseAll
+
+Key-up for every pad key still held and zero for every analog axis, so nothing sticks when a menu opens, the
+pad is unplugged or support is switched off.
+===============
+*/
+static void IN_PadReleaseAll( void )
+{
+	int i;
+
+	for ( i = 0; i < MAX_KEYS; i++ ) {
+		if ( padHeldKey[i] ) {
+			IN_PadKey( i, qfalse );
+		}
+	}
+	if ( in_joystickUseAnalog && in_joystickUseAnalog->integer ) {
+		for ( i = 0; i < MAX_JOYSTICK_AXIS; i++ ) {
+			Com_QueueEvent( in_eventTime, SE_JOYSTICK_AXIS, i, 0, 0, NULL );
+		}
+	}
+	memset( &stick_state, '\0', sizeof( stick_state ) );
+}
+
+static void IN_PadClose( void )
+{
+	if ( gamepad ) {
+		IN_PadReleaseAll();
+		Com_Printf( "Gamepad closed.\n" );
+		SDL_GameControllerClose( gamepad );
+		gamepad = NULL;
+	}
+}
+
+/*
+===============
+IN_PadOpenFirst
+
+Opens the in_joystickNo-th GameController-class device (a virtual pad first when a test script is running).
+===============
+*/
+static void IN_PadOpenFirst( void )
+{
+	int  i, total, n = 0, want, cand = -1, first = -1, virt = -1;
+	char buf[1024] = "";
+
+	if ( gamepad || padState != PAD_READY ) {
+		return;
+	}
+	total = SDL_NumJoysticks();
+	want  = in_joystickNo ? in_joystickNo->integer : 0;
+	for ( i = 0; i < total; i++ ) {
+		if ( !SDL_IsGameController( i ) ) {
+			continue;
+		}
+		Q_strcat( buf, sizeof( buf ), SDL_JoystickNameForIndex( i ) );
+		Q_strcat( buf, sizeof( buf ), "\n" );
+		if ( first < 0 ) {
+			first = i;
+		}
+		if ( SDL_JoystickIsVirtual( i ) && virt < 0 ) {
+			virt = i;
+		}
+		if ( n == want ) {
+			cand = i;
+		}
+		n++;
+	}
+	Cvar_Set( "in_availableJoysticks", buf );
+	if ( in_padTestScript && in_padTestScript->string[0] && virt >= 0 ) {
+		cand = virt;
+	} else if ( cand < 0 ) {
+		cand = first;
+	}
+	if ( cand < 0 ) {
+		IN_PadSetStatus( "no pad" );
+		return;
+	}
+	gamepad = SDL_GameControllerOpen( cand );
+	if ( !gamepad ) {
+		Com_Printf( "Gamepad open failed: %s\n", SDL_GetError() );
+		IN_PadSetStatus( "open failed" );
+		return;
+	}
+	memset( &stick_state, '\0', sizeof( stick_state ) );
+	Com_Printf( "Gamepad opened: %s\n", SDL_GameControllerName( gamepad ) );
+	IN_PadSetStatus( "connected" );
+}
+
+/*
+===============
+IN_PadInitThread
+
+SDL_InitSubSystem can block forever on a bad HID device (bug-2606), so it runs here, off the main thread. The
+thread parks afterwards so any thread-affine driver state (COM, raw input) stays alive until shutdown.
+===============
+*/
+static int SDLCALL IN_PadInitThread( void *unused )
+{
+	(void)unused;
+	padThreadOk   = ( SDL_InitSubSystem( SDL_INIT_JOYSTICK | SDL_INIT_GAMECONTROLLER ) == 0 );
+	padThreadDone = 1;
+	while ( !padThreadQuit ) {
+		SDL_Delay( 100 );
+	}
+	return 0;
+}
+
+/*
+===============
 IN_InitJoystick
+
+Called from IN_Init / IN_Restart. Touches NO SDL joystick API: it only arms the deferred bring-up.
 ===============
 */
 static void IN_InitJoystick( void )
 {
-	int i = 0;
-	int total = 0;
-	char buf[16384] = "";
-
-	if (gamepad)
-		SDL_GameControllerClose(gamepad);
-
-	if (stick != NULL)
-		SDL_JoystickClose(stick);
-
-	stick = NULL;
-	gamepad = NULL;
-	memset(&stick_state, '\0', sizeof (stick_state));
-
-	// [HZM 2026-09-14, bug-2606] A misbehaving HID / Bluetooth controller (an Xbox or DualSense
-	// pad, a Steam virtual gamepad, a GameInput device) can hang SDL_Init(SDL_INIT_JOYSTICK)
-	// forever during device enumeration, which black-screens the entire client at boot (R_Init
-	// stops at "Calling SDL_Init(SDL_INIT_JOYSTICK)..."). The existing in_joystick gate ("Joystick
-	// is not active") sat AFTER that call, so it could not prevent the hang. in_joystick defaults
-	// to 0 and is registered in IN_Init before this runs, so honour it up front: when it is 0 the
-	// client never touches the SDL joystick/gamecontroller subsystems at all. Set in_joystick 1
-	// (CVAR_LATCH) to opt back into controller support.
-	if ( in_joystick && !in_joystick->integer ) {
-		Com_DPrintf( "Joystick disabled (in_joystick 0); skipping SDL joystick init.\n" );
-		Cvar_Get( "in_availableJoysticks", "", CVAR_ROM );
-		return;
-	}
-
-	// SDL 2.0.4 requires SDL_INIT_JOYSTICK to be initialized separately from
-	// SDL_INIT_GAMECONTROLLER for SDL_JoystickOpen() to work correctly,
-	// despite https://wiki.libsdl.org/SDL_Init (retrieved 2016-08-16)
-	// indicating SDL_INIT_JOYSTICK should be initialized automatically.
-	if (!SDL_WasInit(SDL_INIT_JOYSTICK))
-	{
-		Com_DPrintf("Calling SDL_Init(SDL_INIT_JOYSTICK)...\n");
-		if (SDL_Init(SDL_INIT_JOYSTICK) != 0)
-		{
-			Com_DPrintf("SDL_Init(SDL_INIT_JOYSTICK) failed: %s\n", SDL_GetError());
-			return;
-		}
-		Com_DPrintf("SDL_Init(SDL_INIT_JOYSTICK) passed.\n");
-	}
-
-	if (!SDL_WasInit(SDL_INIT_GAMECONTROLLER))
-	{
-		Com_DPrintf("Calling SDL_Init(SDL_INIT_GAMECONTROLLER)...\n");
-		if (SDL_Init(SDL_INIT_GAMECONTROLLER) != 0)
-		{
-			Com_DPrintf("SDL_Init(SDL_INIT_GAMECONTROLLER) failed: %s\n", SDL_GetError());
-			return;
-		}
-		Com_DPrintf("SDL_Init(SDL_INIT_GAMECONTROLLER) passed.\n");
-	}
-
-	total = SDL_NumJoysticks();
-	Com_DPrintf("%d possible joysticks\n", total);
-
-	// Print list and build cvar to allow ui to select joystick.
-	for (i = 0; i < total; i++)
-	{
-		Q_strcat(buf, sizeof(buf), SDL_JoystickNameForIndex(i));
-		Q_strcat(buf, sizeof(buf), "\n");
-	}
-
+	IN_PadClose();
+	memset( &stick_state, '\0', sizeof( stick_state ) );
 	Cvar_Get( "in_availableJoysticks", "", CVAR_ROM );
-
-	// Update cvar on in_restart or controller add/remove.
-	Cvar_Set( "in_availableJoysticks", buf );
-
-	if( !in_joystick->integer ) {
-		Com_DPrintf( "Joystick is not active.\n" );
-		SDL_QuitSubSystem(SDL_INIT_GAMECONTROLLER);
-		return;
-	}
-
-	in_joystickNo = Cvar_Get( "in_joystickNo", "0", CVAR_ARCHIVE );
-	if( in_joystickNo->integer < 0 || in_joystickNo->integer >= total )
-		Cvar_Set( "in_joystickNo", "0" );
-
-	in_joystickUseAnalog = Cvar_Get( "in_joystickUseAnalog", "0", CVAR_ARCHIVE );
-
-	stick = SDL_JoystickOpen( in_joystickNo->integer );
-
-	if (stick == NULL) {
-		Com_DPrintf( "No joystick opened: %s\n", SDL_GetError() );
-		return;
-	}
-
-	if (SDL_IsGameController(in_joystickNo->integer))
-		gamepad = SDL_GameControllerOpen(in_joystickNo->integer);
-
-	Com_DPrintf( "Joystick %d opened\n", in_joystickNo->integer );
-	Com_DPrintf( "Name:       %s\n", SDL_JoystickNameForIndex(in_joystickNo->integer) );
-	Com_DPrintf( "Axes:       %d\n", SDL_JoystickNumAxes(stick) );
-	Com_DPrintf( "Hats:       %d\n", SDL_JoystickNumHats(stick) );
-	Com_DPrintf( "Buttons:    %d\n", SDL_JoystickNumButtons(stick) );
-	Com_DPrintf( "Balls:      %d\n", SDL_JoystickNumBalls(stick) );
-	Com_DPrintf( "Use Analog: %s\n", in_joystickUseAnalog->integer ? "Yes" : "No" );
-	Com_DPrintf( "Is gamepad: %s\n", gamepad ? "Yes" : "No" );
-
-	SDL_JoystickEventState(SDL_QUERY);
-	SDL_GameControllerEventState(SDL_QUERY);
+	Cvar_Get( "in_padStatus", "off", CVAR_TEMP );
+	padWantOpen = IN_PadEnabled();
 }
 
 /*
@@ -570,28 +670,13 @@ IN_ShutdownJoystick
 */
 static void IN_ShutdownJoystick( void )
 {
-	if ( !SDL_WasInit( SDL_INIT_GAMECONTROLLER ) )
-		return;
-
-	if ( !SDL_WasInit( SDL_INIT_JOYSTICK ) )
-		return;
-
-	if (gamepad)
-	{
-		SDL_GameControllerClose(gamepad);
-		gamepad = NULL;
-	}
-
-	if (stick)
-	{
-		SDL_JoystickClose(stick);
+	IN_PadClose();
+	if ( stick ) {
+		SDL_JoystickClose( stick );
 		stick = NULL;
 	}
-
-	SDL_QuitSubSystem(SDL_INIT_GAMECONTROLLER);
-	SDL_QuitSubSystem(SDL_INIT_JOYSTICK);
+	// keep the subsystem + parked thread alive across in_restart; only a real exit tears it down
 }
-
 
 static qboolean KeyToAxisAndSign(int keynum, int *outAxis, int *outSign)
 {
@@ -663,6 +748,304 @@ static qboolean KeyToAxisAndSign(int keynum, int *outAxis, int *outSign)
 
 /*
 ===============
+Test driver: in_padTestScript <file> (command line only) attaches an SDL VIRTUAL joystick and plays a script on
+it, so movement / look / fire / menu navigation can be proven without a physical pad. Script lines:
+    @attach <ms>                                   plug the virtual pad in
+    @detach <ms>                                   unplug it (hot-plug test)
+    <ms> lx ly rx ry lt rt buttons                 sticks -32768..32767, triggers 0..32767, buttons = bit mask
+                                                   (SDL order: A0 B1 X2 Y3 BACK4 GUIDE5 START6 LS7 RS8 LB9 RB10
+                                                   DUP11 DDOWN12 DLEFT13 DRIGHT14), decimal or 0x hex
+===============
+*/
+typedef struct {
+	int t;
+	int kind;   // 0 state, 1 attach, 2 detach
+	int ax[6];
+	int btn;
+} padStep_t;
+
+#define PAD_MAX_STEPS 2048
+static padStep_t padSteps[PAD_MAX_STEPS];
+static int padNumSteps = -1;
+static int padNextStep = 0;
+static int padT0 = 0;
+
+static void IN_PadTestLoad( void )
+{
+	FILE *f;
+	char  line[256];
+
+	padNumSteps = 0;
+	f = fopen( in_padTestScript->string, "r" );
+	if ( !f ) {
+		Com_Printf( "^~^~^ PADTEST cannot open %s\n", in_padTestScript->string );
+		return;
+	}
+	while ( fgets( line, sizeof( line ), f ) && padNumSteps < PAD_MAX_STEPS ) {
+		padStep_t *st = &padSteps[padNumSteps];
+
+		memset( st, 0, sizeof( *st ) );
+		if ( line[0] == '#' || line[0] == '\n' || line[0] == '\r' ) {
+			continue;
+		}
+		if ( !strncmp( line, "@attach", 7 ) ) {
+			st->kind = 1;
+			if ( sscanf( line + 7, "%d", &st->t ) == 1 ) padNumSteps++;
+		} else if ( !strncmp( line, "@detach", 7 ) ) {
+			st->kind = 2;
+			if ( sscanf( line + 7, "%d", &st->t ) == 1 ) padNumSteps++;
+		} else if ( sscanf( line, "%d %d %d %d %d %d %d %i", &st->t, &st->ax[0], &st->ax[1], &st->ax[2], &st->ax[3],
+		                    &st->ax[4], &st->ax[5], &st->btn ) == 8 ) {
+			padNumSteps++;
+		}
+	}
+	fclose( f );
+	Com_Printf( "^~^~^ PADTEST loaded %d steps from %s\n", padNumSteps, in_padTestScript->string );
+}
+
+static void IN_PadTestDrive( void )
+{
+	int elapsed, i;
+
+	if ( !in_padTestScript || !in_padTestScript->string[0] || padState != PAD_READY ) {
+		return;
+	}
+	if ( padNumSteps < 0 ) {
+		IN_PadTestLoad();
+		padT0       = Sys_Milliseconds();
+		padNextStep = 0;
+	}
+	elapsed = Sys_Milliseconds() - padT0;
+	while ( padNextStep < padNumSteps && padSteps[padNextStep].t <= elapsed ) {
+		padStep_t *st = &padSteps[padNextStep];
+
+		if ( st->kind == 1 ) {
+			SDL_VirtualJoystickDesc d;
+
+			memset( &d, 0, sizeof( d ) );
+			d.version  = SDL_VIRTUAL_JOYSTICK_DESC_VERSION;
+			d.type     = SDL_JOYSTICK_TYPE_GAMECONTROLLER;
+			d.naxes    = 6;
+			d.nbuttons = 15;
+			d.name     = "HZM Virtual Pad";
+			i          = SDL_JoystickAttachVirtualEx( &d );
+			Com_Printf( "^~^~^ PADTEST attach -> %d\n", i );
+			padWantOpen = qtrue;
+		} else if ( st->kind == 2 ) {
+			int n = SDL_NumJoysticks();
+
+			for ( i = 0; i < n; i++ ) {
+				if ( SDL_JoystickIsVirtual( i ) ) {
+					SDL_JoystickDetachVirtual( i );
+					break;
+				}
+			}
+			Com_Printf( "^~^~^ PADTEST detach\n" );
+		} else if ( gamepad ) {
+			SDL_Joystick *j = SDL_GameControllerGetJoystick( gamepad );
+
+			for ( i = 0; i < 4; i++ ) {
+				SDL_JoystickSetVirtualAxis( j, i, (Sint16)st->ax[i] );
+			}
+			for ( i = 4; i < 6; i++ ) {
+				int raw = st->ax[i] * 2 - 32768;
+				if ( raw > 32767 ) raw = 32767;
+				if ( raw < -32768 ) raw = -32768;
+				SDL_JoystickSetVirtualAxis( j, i, (Sint16)raw );
+			}
+			for ( i = 0; i < 15; i++ ) {
+				SDL_JoystickSetVirtualButton( j, i, ( st->btn >> i ) & 1 );
+			}
+			Com_Printf( "^~^~^ PADTEST step t=%d btn=0x%x\n", st->t, st->btn );
+		}
+		padNextStep++;
+	}
+}
+
+/*
+===============
+IN_PadService
+
+Per client frame: deferred, off-thread SDL bring-up (see the comment at the top), open / re-open of the pad
+after hot-plug, and the optional test driver.
+===============
+*/
+static void IN_PadService( void )
+{
+	static int nextOpenMs = 0;
+	int        now = Sys_Milliseconds();
+	qboolean   en  = IN_PadEnabled();
+
+	padFramesSeen++;
+	if ( en != padWasEnabled ) {
+		padWasEnabled = en;
+		if ( en ) {
+			padWantOpen = qtrue;
+		} else {
+			IN_PadClose();
+			IN_PadSetStatus( "off" );
+		}
+	}
+	if ( !en ) {
+		return;
+	}
+	if ( padState == PAD_HUNG || padState == PAD_FAILED ) {
+		return;
+	}
+
+	if ( padState == PAD_IDLE ) {
+		if ( padFramesSeen < 60 || now < 1500 ) {
+			return;                       // let the first frames and the main menu come up untouched
+		}
+		SDL_SetHint( SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1" );
+		SDL_SetHint( SDL_HINT_JOYSTICK_THREAD, "1" );
+		padThread = SDL_CreateThread( IN_PadInitThread, "padinit", NULL );
+		if ( !padThread ) {
+			padState = PAD_FAILED;
+			IN_PadSetStatus( "failed" );
+			return;
+		}
+		padState       = PAD_INITING;
+		padInitStartMs = now;
+		IN_PadSetStatus( "starting" );
+		return;
+	}
+
+	if ( padState == PAD_INITING ) {
+		if ( padThreadDone ) {
+			if ( padThreadOk ) {
+				padState = PAD_READY;
+				Com_Printf( "Gamepad support ready (%d ms after start).\n", now - padInitStartMs );
+				IN_PadSetStatus( "no pad" );
+			} else {
+				padState = PAD_FAILED;
+				Com_Printf( "Gamepad init failed: %s\n", SDL_GetError() );
+				IN_PadSetStatus( "failed" );
+			}
+		} else if ( now - padInitStartMs > 6000 ) {
+			padState = PAD_HUNG;
+			Com_Printf( "^1Gamepad init did not finish in 6 s (bad HID device?) - gamepad disabled, keyboard and mouse unaffected.\n" );
+			IN_PadSetStatus( "hung" );
+		}
+		return;
+	}
+
+	IN_PadTestDrive();
+	if ( !gamepad && padWantOpen && now >= nextOpenMs ) {
+		nextOpenMs = now + 400;
+		IN_PadOpenFirst();
+		if ( gamepad ) {
+			padWantOpen = qfalse;
+		}
+	}
+}
+
+/*
+===============
+IN_PadMenuKey
+
+What a pad button does while a menu is up. Returns 0 for "nothing".
+===============
+*/
+static int IN_PadMenuKey( int button )
+{
+	switch ( button ) {
+	case SDL_CONTROLLER_BUTTON_A:          return K_MOUSE1;
+	case SDL_CONTROLLER_BUTTON_B:          return K_ESCAPE;
+	case SDL_CONTROLLER_BUTTON_START:      return K_ESCAPE;
+	case SDL_CONTROLLER_BUTTON_DPAD_UP:    return K_PAD0_DPAD_UP;
+	case SDL_CONTROLLER_BUTTON_DPAD_DOWN:  return K_PAD0_DPAD_DOWN;
+	case SDL_CONTROLLER_BUTTON_DPAD_LEFT:  return K_PAD0_DPAD_LEFT;
+	case SDL_CONTROLLER_BUTTON_DPAD_RIGHT: return K_PAD0_DPAD_RIGHT;
+	case SDL_CONTROLLER_BUTTON_LEFTSHOULDER:  return K_PGUP;
+	case SDL_CONTROLLER_BUTTON_RIGHTSHOULDER: return K_PGDN;
+	}
+	return 0;
+}
+
+static float IN_PadRamp( int raw )
+{
+	float f = (float)abs( raw ) / 32767.0f;
+	float t = in_joystickThreshold ? in_joystickThreshold->value : 0.15f;
+
+	f = ( f - t ) / ( 1.0f - t );
+	if ( f < 0.0f ) f = 0.0f;
+	if ( f > 1.0f ) f = 1.0f;
+	return raw < 0 ? -f : f;
+}
+
+/*
+===============
+IN_GamepadUI
+
+Menu mode: both sticks drive the UI cursor, A = left click, B / Start = back, D-pad = move focus to the next
+widget (uilib UIWindowManager::PadNavigate), Y = on-screen keyboard.
+===============
+*/
+static void IN_GamepadUI( void )
+{
+	static int   lastMs = 0;
+	static float accX = 0, accY = 0;
+	static int   repeatAt[4];
+	int          now = Sys_Milliseconds();
+	float        dt = ( now - lastMs ) * 0.001f, sx, sy, speed;
+	int          i, dx, dy;
+
+	if ( dt > 0.1f || dt < 0.0f ) dt = 0.1f;
+	lastMs = now;
+
+	sx = IN_PadRamp( SDL_GameControllerGetAxis( gamepad, SDL_CONTROLLER_AXIS_LEFTX ) ) +
+	     IN_PadRamp( SDL_GameControllerGetAxis( gamepad, SDL_CONTROLLER_AXIS_RIGHTX ) );
+	sy = IN_PadRamp( SDL_GameControllerGetAxis( gamepad, SDL_CONTROLLER_AXIS_LEFTY ) ) +
+	     IN_PadRamp( SDL_GameControllerGetAxis( gamepad, SDL_CONTROLLER_AXIS_RIGHTY ) );
+	if ( sx > 1.0f ) sx = 1.0f;
+	if ( sx < -1.0f ) sx = -1.0f;
+	if ( sy > 1.0f ) sy = 1.0f;
+	if ( sy < -1.0f ) sy = -1.0f;
+	sx *= fabsf( sx );   // square response: fine near the middle, fast at the rim
+	sy *= fabsf( sy );
+
+	speed = cls.glconfig.vidWidth * ( in_padUiSpeed ? in_padUiSpeed->value : 0.55f );
+	accX += sx * speed * dt;
+	accY += sy * speed * dt;
+	dx = (int)accX;
+	dy = (int)accY;
+	accX -= dx;
+	accY -= dy;
+	if ( dx || dy ) {
+		Com_QueueEvent( in_eventTime, SE_MOUSE, dx, dy, 0, NULL );
+		IN_PadSetActive( 1 );
+	}
+
+	for ( i = 0; i < SDL_CONTROLLER_BUTTON_MAX; i++ ) {
+		qboolean pressed = SDL_GameControllerGetButton( gamepad, SDL_CONTROLLER_BUTTON_A + i );
+		int      key     = IN_PadMenuKey( SDL_CONTROLLER_BUTTON_A + i );
+		int      dpad    = i - SDL_CONTROLLER_BUTTON_DPAD_UP;
+
+		if ( pressed != stick_state.buttons[i] ) {
+			stick_state.buttons[i] = pressed;
+			if ( key ) {
+				IN_PadKey( key, pressed );
+			}
+			if ( pressed && i == SDL_CONTROLLER_BUTTON_Y ) {
+#ifdef _WIN32
+				Sys_OpenOnScreenKeyboard();
+#endif
+			}
+			if ( dpad >= 0 && dpad < 4 && pressed ) {
+				repeatAt[dpad] = now + 380;
+			}
+		} else if ( pressed && dpad >= 0 && dpad < 4 && now >= repeatAt[dpad] ) {
+			// held D-pad auto-repeats, so a long list can be walked
+			repeatAt[dpad] = now + 140;
+			IN_PadKey( key, qfalse );
+			IN_PadKey( key, qtrue );
+		}
+	}
+}
+
+/*
+===============
 IN_GamepadMove
 ===============
 */
@@ -671,22 +1054,58 @@ static void IN_GamepadMove( void )
 	int i;
 	int translatedAxes[MAX_JOYSTICK_AXIS];
 	qboolean translatedAxesSet[MAX_JOYSTICK_AXIS];
+	int catcher, mode;
 
 	SDL_GameControllerUpdate();
+
+	// 0 = playing, 1 = a menu has the keyboard (pad drives the cursor), 2 = console (pad is dead)
+	catcher = Key_GetCatcher();
+	mode    = ( catcher & KEYCATCH_CONSOLE ) ? 2 : ( ( catcher & KEYCATCH_UI ) ? 1 : 0 );
+	if ( mode != padMode ) {
+		IN_PadReleaseAll();                       // nothing carries over from play into a menu or back
+		for ( i = 0; i < SDL_CONTROLLER_BUTTON_MAX; i++ ) {
+			// buttons already down at the switch are ignored until let go (A on "Apply" must not jump)
+			stick_state.buttons[i]  = qfalse;
+			stick_state.suppress[i] = SDL_GameControllerGetButton( gamepad, SDL_CONTROLLER_BUTTON_A + i ) ? qtrue : qfalse;
+		}
+		if ( in_padDebug && in_padDebug->integer ) {
+			Com_Printf( "^~^~^ PADMODE %d -> %d\n", padMode, mode );
+		}
+		padMode = mode;
+	}
+	if ( mode == 2 ) {
+		return;
+	}
+	if ( mode == 1 ) {
+		for ( i = 0; i < SDL_CONTROLLER_BUTTON_MAX; i++ ) {
+			if ( stick_state.suppress[i] && !SDL_GameControllerGetButton( gamepad, SDL_CONTROLLER_BUTTON_A + i ) ) {
+				stick_state.suppress[i] = qfalse;
+			}
+		}
+		IN_GamepadUI();
+		return;
+	}
 
 	// check buttons
 	for (i = 0; i < SDL_CONTROLLER_BUTTON_MAX; i++)
 	{
 		qboolean pressed = SDL_GameControllerGetButton(gamepad, SDL_CONTROLLER_BUTTON_A + i);
+
+		if ( stick_state.suppress[i] ) {
+			if ( !pressed ) {
+				stick_state.suppress[i] = qfalse;
+			}
+			pressed = qfalse;
+		}
 		if (pressed != stick_state.buttons[i])
 		{
 #if SDL_VERSION_ATLEAST( 2, 0, 14 )
 			if ( i >= SDL_CONTROLLER_BUTTON_MISC1 ) {
-				Com_QueueEvent(in_eventTime, SE_KEY, K_PAD0_MISC1 + i - SDL_CONTROLLER_BUTTON_MISC1, pressed, 0, NULL);
+				IN_PadKey(K_PAD0_MISC1 + i - SDL_CONTROLLER_BUTTON_MISC1, pressed);
 			} else
 #endif
 			{
-				Com_QueueEvent(in_eventTime, SE_KEY, K_PAD0_A + i, pressed, 0, NULL);
+				IN_PadKey(K_PAD0_A + i, pressed);
 			}
 			stick_state.buttons[i] = pressed;
 		}
@@ -767,19 +1186,19 @@ static void IN_GamepadMove( void )
 
 			// positive to negative/neutral -> keyup
 			if (!posAnalog && posKey && oldAxis > 0 && axis <= 0)
-				Com_QueueEvent(in_eventTime, SE_KEY, posKey, qfalse, 0, NULL);
+				IN_PadKey(posKey, qfalse);
 
 			// negative to positive/neutral -> keyup
 			if (!negAnalog && negKey && oldAxis < 0 && axis >= 0)
-				Com_QueueEvent(in_eventTime, SE_KEY, negKey, qfalse, 0, NULL);
+				IN_PadKey(negKey, qfalse);
 
 			// negative/neutral to positive -> keydown
 			if (!posAnalog && posKey && oldAxis <= 0 && axis > 0)
-				Com_QueueEvent(in_eventTime, SE_KEY, posKey, qtrue, 0, NULL);
+				IN_PadKey(posKey, qtrue);
 
 			// positive/neutral to negative -> keydown
 			if (!negAnalog && negKey && oldAxis >= 0 && axis < 0)
-				Com_QueueEvent(in_eventTime, SE_KEY, negKey, qtrue, 0, NULL);
+				IN_PadKey(negKey, qtrue);
 
 			stick_state.oldaaxes[i] = axis;
 		}
@@ -795,6 +1214,7 @@ static void IN_GamepadMove( void )
 		}
 	}
 }
+
 
 
 /*
@@ -1062,6 +1482,7 @@ static void IN_ProcessEvents( void )
 		switch( e.type )
 		{
 			case SDL_KEYDOWN:
+				IN_PadNoteKbm();
 				if ( e.key.repeat && Key_GetCatcher( ) == 0 )
 					break;
 
@@ -1140,6 +1561,8 @@ static void IN_ProcessEvents( void )
 				{
 					if( !e.motion.xrel && !e.motion.yrel )
 						break;
+					if( abs( e.motion.xrel ) + abs( e.motion.yrel ) >= 3 )
+						IN_PadNoteKbm();
 					Com_QueueEvent( in_eventTime, SE_MOUSE, e.motion.xrel, e.motion.yrel, 0, NULL );
 				}
 				break;
@@ -1148,6 +1571,8 @@ static void IN_ProcessEvents( void )
 			case SDL_MOUSEBUTTONUP:
 				{
 					int b;
+					if( e.type == SDL_MOUSEBUTTONDOWN )
+						IN_PadNoteKbm();
 					switch( e.button.button )
 					{
 						case SDL_BUTTON_LEFT:   b = K_MOUSE1;     break;
@@ -1176,9 +1601,20 @@ static void IN_ProcessEvents( void )
 				break;
 
 			case SDL_CONTROLLERDEVICEADDED:
+				// hot-plug: IN_PadService opens it on the next frame (rate limited)
+				if ( padState == PAD_READY && IN_PadEnabled() ) {
+					padWantOpen = qtrue;
+					Com_Printf( "Gamepad plugged in.\n" );
+				}
+				break;
+
 			case SDL_CONTROLLERDEVICEREMOVED:
-				if (in_joystick->integer)
-					IN_InitJoystick();
+				if ( gamepad && e.cdevice.which == SDL_JoystickInstanceID( SDL_GameControllerGetJoystick( gamepad ) ) ) {
+					IN_PadClose();
+					IN_PadSetStatus( "unplugged" );
+					padWantOpen = qtrue;     // another pad may still be there
+					Com_Printf( "Gamepad unplugged.\n" );
+				}
 				break;
 
 			case SDL_QUIT:
@@ -1263,6 +1699,7 @@ void IN_Frame( void )
 {
 	qboolean loading;
 
+	IN_PadService( );
 	IN_JoyMove( );
 
 	// If not DISCONNECTED (main menu) or ACTIVE (in game), we're loading
@@ -1329,6 +1766,13 @@ void IN_Init( void *windowData )
 
 	in_joystick = Cvar_Get( "in_joystick", "0", CVAR_ARCHIVE|CVAR_LATCH );
 	in_joystickThreshold = Cvar_Get( "joy_threshold", "0.15", CVAR_ARCHIVE );
+	in_joystickNo = Cvar_Get( "in_joystickNo", "0", CVAR_ARCHIVE );
+	in_joystickUseAnalog = Cvar_Get( "in_joystickUseAnalog", "1", CVAR_ARCHIVE );
+	in_gamepad = Cvar_Get( "in_gamepad", "1", CVAR_ARCHIVE );
+	in_padUiSpeed = Cvar_Get( "in_padUiSpeed", "0.55", CVAR_ARCHIVE );
+	in_padDebug = Cvar_Get( "in_padDebug", "0", 0 );
+	in_padTestScript = Cvar_Get( "in_padTestScript", "", CVAR_INIT );
+	in_padActive = Cvar_Get( "in_padActive", "0", CVAR_TEMP );
 
 #if defined(PROTOCOL_HANDLER) && defined(__APPLE__)
 	SDL_EventState( SDL_DROPFILE, SDL_ENABLE );
