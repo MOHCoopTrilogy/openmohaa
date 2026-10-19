@@ -665,6 +665,8 @@ static cvar_t       *s_cvTextSess;
 static fontheader_t *s_fHeadline;
 static fontheader_t *s_fBody;
 
+static qboolean CG_CoopCineHudActive(void); // defined with the cinematic hold below
+
 static qboolean CG_HudTextStyleOn(void)
 {
     if (!s_cvTextStyle) {
