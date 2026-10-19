@@ -651,7 +651,7 @@ is drawn here by one rule instead of by edits to ~600 script lines:
  - SIZE: a 640x480 "virtual" string was scaled by vid/480 (2.25x at 1080p) while the event feed is a fixed 12 px, so a
    verdana-12 hint was 27 px tall at 1080p. Every string now uses the hi-res scale the feed uses, so the same font is the
    same size on every screen.
- - FONT: facfont / handle / delima (the 20-30 px display faces) become verdana-14 at 1.15x (headline, 1.35x the feed);
+ - FONT: facfont / handle / delima (the 20-30 px display faces) become verdana-14 at 1.25x (headline, 1.46x the feed);
    courier becomes verdana-12 (body). verdana-12 / -14 and the default stay. marlett (symbol font) is left alone.
  - ANCHOR: the string keeps the centre line (x for centred / right aligned text, y always) it had in its ORIGINAL
    font, so a script that centred "PROMOTED" by hand still looks centred.
@@ -792,7 +792,7 @@ static qboolean CG_HudDrawStyledString(int i, float fX, float fY, qboolean bVirt
     }
     if (!Q_stricmpn(fn, "facfont", 7) || !Q_stricmpn(fn, "handle", 6) || !Q_stricmpn(fn, "delima", 6)) {
         nf   = s_fHeadline;
-        mult = 1.15f;
+        mult = 1.25f;
     } else if (!Q_stricmpn(fn, "courier", 7)) {
         nf = s_fBody;
     }
