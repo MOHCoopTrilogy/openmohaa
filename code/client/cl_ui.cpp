@@ -5904,6 +5904,7 @@ void CL_InitializeUI(void)
     ui_loadArt = Cvar_Get("ui_loadArt", "-1", 0);
     Cvar_Get("ui_loadArtOn", "0", 0);
     Cvar_Get("ui_loadArtShader", "", 0);
+    CL_LoadCine_Init(); // HZM coop [user 2026-10-18] cl_loadCinematic: a moving clip behind the tip strip and bar
     Cvar_Get("ui_loadIconScale", "1", 0);
     Cvar_Get("ui_signshader", "", 0);
     ui_compass             = Cvar_Get("ui_compass", "1", 0);
@@ -7055,6 +7056,7 @@ void UI_TestUpdateScreen(unsigned int timeout)
     // HZM loading-screen probe: mark this frame as a resource tick, and count a tick that the
     // SCR_UpdateScreen recursion guard swallows (it fired inside R_Init or a nested cgame init)
     probeDraws = s_loadProbe.draws;
+    CL_LoadCine_PreDraw(); // HZM coop: swap interval 0 while a loading clip plays (no-op otherwise)
     s_loadProbe.tickDepth++;
     SCR_UpdateScreen();
     s_loadProbe.tickDepth--;
@@ -7102,6 +7104,15 @@ void UI_LoadResource(const char *name)
     } else if (cls.loading == SS_LOADING2) {
         UI_RegisterLoadResource(name);
         Cvar_SetValue("loadingbar", (float)currentLoadTime / (float)totalLoadTime);
+    }
+
+    if (CL_LoadCine_Active()) {
+        // HZM coop [user 2026-10-18]: a clip plays - keep START-to-START draws at 1000/cl_loadCineFps ms. The gate in
+        // UI_TestUpdateScreen measures from the END of the last draw and adds its duration, so subtract it twice.
+        int to = CL_LoadCine_TickMs() - 2 * (int)updateTime;
+
+        UI_TestUpdateScreen((unsigned int)Q_max(to, 1));
+        return;
     }
 
     // HZM [2026-09-27] was a hard-coded 33 ms; ui_loadRedrawMs (default 100) - see CL_InitializeUI
@@ -7417,6 +7428,20 @@ static void UI_LoadArt_Begin(const char *mapname)
 
 /*
 ====================
+UI_LoadCine_DrawWidget
+
+The loading menu's hzm_loadcine Label (ui/loadingbar.txt) draws the clip through UILabel::Draw.
+====================
+*/
+void UI_LoadCine_DrawWidget(void)
+{
+    if (CL_LoadCine_Active()) {
+        CL_LoadCine_Draw((float)uid.vidWidth, (float)uid.vidHeight);
+    }
+}
+
+/*
+====================
 UI_BeginLoad
 ====================
 */
@@ -7449,6 +7474,13 @@ void UI_BeginLoad(const char *pszMapName)
     if (!ui_pLoadingMenu) {
         ui_sCurrentLoadingMenu = "loading_default";
         ui_pLoadingMenu        = menuManager.FindMenu(ui_sCurrentLoadingMenu);
+    }
+
+    // HZM coop [user 2026-10-18] LOADING CINEMATIC: only when the loading menu carries the hzm_loadcine widget
+    // (ui/loadingbar.txt of a pak that ships clips); otherwise nothing changes and the art pool above stands.
+    CL_LoadCine_End("begin");
+    if (ui_pLoadingMenu && ui_pLoadingMenu->GetNamedWidget("hzm_loadcine") && CL_LoadCine_Begin(pszMapName)) {
+        Cvar_Set("ui_loadArtOn", "0"); // the clip replaces the pool art
     }
 
     UI_ForceMenuOff(true);
@@ -7561,6 +7593,23 @@ void UI_EndLoad(void)
 
     UI_LoadResource("*end");
 
+    if (CL_LoadCine_Active()) {
+        // HZM coop [user 2026-10-18]: fade the clip to black at the very end of the load (the loading screen is still
+        // the one up, so these are ordinary draws), then drop it; the game's first frame follows. The fade is 2% of the
+        // load, at most 250 ms and none under 30 ms, so it can never be a visible share of the load time (budget 5%).
+        int fadeMs = Q_min(CL_LoadCine_ElapsedMs() / 50, Q_min(CL_LoadCine_FadeMs() / 2, 250)), t0 = Sys_Milliseconds(), el;
+
+        if (cls.rendererReady && fadeMs >= 30) {
+            while ((el = Sys_Milliseconds() - t0) < fadeMs) {
+                CL_LoadCine_SetFadeOut((float)el / (float)fadeMs);
+                CL_LoadCine_PreDraw();
+                Sys_PumpMessageLoop();
+                SCR_UpdateScreen();
+            }
+        }
+        CL_LoadCine_End("end");
+    }
+
     if (cls.loading == SS_GAME) {
         base = (LoadResourceInfo **)Z_Malloc(loadNumber * sizeof(LoadResourceInfo *));
 
@@ -7625,6 +7674,7 @@ UI_AbortLoad
 */
 void UI_AbortLoad(void)
 {
+    CL_LoadCine_End("abort"); // HZM coop [user 2026-10-18]
     s_loadHints.active = qfalse; // HZM loading-screen hints
     UI_LoadHints_NavStop();
     UI_LoadProbe_Report("abort"); // HZM loading-screen probe

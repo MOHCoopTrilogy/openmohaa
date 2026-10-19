@@ -19,6 +19,16 @@ target_compile_features(omohclient INTERFACE cxx_nullptr)
 target_compile_features(omohclient INTERFACE c_variadic_macros)
 target_link_libraries(omohclient INTERFACE omohsdl_client)
 target_link_libraries(omohclient INTERFACE gcd)
+# HZM coop [user 2026-10-18] loading-screen cinematic (cl_loadcine.cpp) decodes its flipbook frames with the bundled libjpeg
+# (the `jpeg` static library is defined in renderercommon; the exe gets its own copy, separate from the renderer DLLs')
+if(USE_INTERNAL_JPEG)
+	target_link_libraries(omohclient INTERFACE jpeg)
+	target_include_directories(omohclient INTERFACE "${CMAKE_SOURCE_DIR}/code/thirdparty/jpeg-9f")
+else()
+	find_package(JPEG REQUIRED)
+	target_include_directories(omohclient INTERFACE ${JPEG_INCLUDE_DIRS})
+	target_link_libraries(omohclient INTERFACE ${JPEG_LIBRARIES})
+endif()
 
 # Sound stuff
 target_compile_definitions(omohclient INTERFACE USE_CODEC_MP3)

@@ -131,6 +131,18 @@ void     UI_LoadScreenFramePreDraw(void);
 void     UI_LoadScreenFrameEnd(void);
 void     UI_LoadScreenPrimeMaterials(void); // HZM bug-3015: CL_StartHunkUsers, before CL_InitCGame
 qboolean UI_LoadHints_KeyNav(int key, qboolean down); // HZM hint arrows: CL_KeyEvent, qtrue = key taken
+// HZM coop [user 2026-10-18] loading-screen cinematic (cl_loadcine.cpp)
+void     CL_LoadCine_Init(void);
+qboolean CL_LoadCine_Begin(const char *mapname);
+void     CL_LoadCine_End(const char *how);
+qboolean CL_LoadCine_Active(void);
+int      CL_LoadCine_TickMs(void);
+int      CL_LoadCine_FadeMs(void);
+int      CL_LoadCine_ElapsedMs(void);
+void     CL_LoadCine_PreDraw(void);
+void     CL_LoadCine_SetFadeOut(float a);
+void     CL_LoadCine_Draw(float sw, float sh);
+void     UI_LoadCine_DrawWidget(void); // the loading menu's hzm_loadcine widget (UILabel::Draw)
 
 //
 // windows

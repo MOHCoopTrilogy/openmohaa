@@ -1374,3 +1374,20 @@ void IN_Restart( void )
 	IN_ShutdownJoystick( );
 	IN_Init( SDL_window );
 }
+
+/*
+===============
+HZM coop [user 2026-10-18] loading-screen cinematic (cl_loadcine.cpp): the swap interval is applied by the renderer only at
+window creation (latched r_swapInterval), so a clip that must not wait for the display on every load tick sets it here,
+on the main thread that owns the GL context, and puts it back when the load ends.
+===============
+*/
+int IN_HZM_GetSwapInterval( void )
+{
+	return SDL_GL_GetSwapInterval( );
+}
+
+void IN_HZM_SetSwapInterval( int interval )
+{
+	SDL_GL_SetSwapInterval( interval );
+}
