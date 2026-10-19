@@ -57,6 +57,20 @@ CLASS_DECLARATION(UIWidget, FakkItemList, NULL) {
     {NULL,              NULL                           }
 };
 
+// HZM armory: a weapon model carries its loose stripper / en-bloc clip as ordinary surfaces (shader m1clip) that the tik's server-side init hides; a menu
+// preview has no init, so the clips floated detached beside the gun (a gold fragment left of the KAR98K, and of the operator's hand). Hide them here.
+static void CL_InvHideLooseClips(refEntity_t &e)
+{
+    if (!e.tiki) {
+        return;
+    }
+    for (int s = 0; s < e.tiki->num_surfaces && s < MAX_MODEL_SURFACES; s++) {
+        if (Q_stristr(e.tiki->surfaces[s].shader[0], "m1clip")) {
+            e.surfaces[s] |= TIKI_SURF_NODRAW;
+        }
+    }
+}
+
 // HZM coop: composite an attached model onto a bone TAG of an already-set-up base entity, in the SAME
 // scene, tracking the base's current anim frame. Used for the armory operator to WEAR the chosen helmet
 // (tag "Bip01 Head") and HOLD the inspected weapon (tag "tag_weapon_right") - the placement is pulled
@@ -115,6 +129,7 @@ static void CL_CompositeAttachOnTag(refEntity_t &base, qhandle_t attachModel, co
     MatrixTransformVector(tagorg, base.axis, tworld);
     VectorAdd(base.origin, tworld, att.origin);
 
+    CL_InvHideLooseClips(att);
     re.AddRefEntityToScene(&att, ENTITYNUM_NONE);
 }
 
@@ -141,8 +156,21 @@ void CL_Draw3DModel(
     vec3_t      unprojoffset;
     vec3_t      entaxis[3];
 
-    inv_refdef.fov_x   = 30;
-    inv_refdef.fov_y   = 30;
+    // HZM armory (bug-4053): the retail 30 / 30 degree field of view made the picture fill the widget rectangle whatever its shape, i.e. every
+    // model was stretched by width / height (2.6x in a wide hero box, 0.5x in the tall operator column). The projection now has square pixels:
+    // the LONGER side of the rectangle keeps the 30 degrees (so a widget that was framed for its long side keeps that size), the shorter one
+    // gets the angle that matches its pixel count. A square widget is exactly what it was.
+    inv_refdef.fov_x = 30;
+    inv_refdef.fov_y = 30;
+    if (w > 1.0f && h > 1.0f) {
+        const double tanHalf = tan(30.0 * M_PI / 360.0);
+
+        if (w >= h) {
+            inv_refdef.fov_y = (float)(2.0 * atan(tanHalf * (double)h / (double)w) * 180.0 / M_PI);
+        } else {
+            inv_refdef.fov_x = (float)(2.0 * atan(tanHalf * (double)w / (double)h) * 180.0 / M_PI);
+        }
+    }
     inv_refdef.x       = x;
     inv_refdef.y       = y;
     inv_refdef.width   = w;
@@ -330,6 +358,7 @@ void CL_Draw3DModel(
         }
     }
 
+    CL_InvHideLooseClips(ent);
     re.AddRefEntityToScene(&ent, ENTITYNUM_NONE);
 
     // Drop the attached models onto their tags (after the base is in the scene). ForceUpdatePose inside the

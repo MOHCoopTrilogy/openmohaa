@@ -41,11 +41,12 @@ int			cvar_modifiedFlags;
 // Doubling buys headroom; it does not change the slope. The high-water warning below is
 // the part that makes the next approach visible BEFORE it is fatal - same lesson as
 // bug-1186, where a silent-discard branch hid a capacity wall for eight days.
-#define	MAX_CVARS	8192
+// HZM armory (bug-4052): 8192 -> 16384. A lobby client with the Armory + the challenge screen open sat at 7.9k and the next cvar was fatal.
+#define	MAX_CVARS	16384
 cvar_t		cvar_indexes[MAX_CVARS];
 int			cvar_numIndexes;
 
-#define FILE_HASH_SIZE		256
+#define FILE_HASH_SIZE		4096	// HZM armory: was 256 - 8k cvars made every chain ~32 long and every widget linkcvar looks one up per frame
 static	cvar_t	*hashTable[FILE_HASH_SIZE];
 
 qboolean cvar_global_force = qfalse;
