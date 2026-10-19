@@ -89,8 +89,54 @@ UIPulldownMenu::UIPulldownMenu()
     m_canactivate = true;
 }
 
+UIPulldownMenu *UIPulldownMenu::s_padOpen = NULL;
+
+extern void CL_SetMousePos(int x, int y);
+
+bool UIPulldownMenu::PadKey(int key)
+{
+    if (!s_padOpen) {
+        return false;
+    }
+    if (s_padOpen->m_submenu == -1 || !s_padOpen->m_submenuptr) {
+        s_padOpen = NULL;
+        return false;
+    }
+    if (key < K_PAD0_DPAD_UP || key > K_PAD0_DPAD_RIGHT) {
+        return false;
+    }
+    if (key == K_PAD0_DPAD_UP || key == K_PAD0_DPAD_DOWN) {
+        float x, y;
+
+        if (s_padOpen->m_submenuptr->PadStep(key == K_PAD0_DPAD_DOWN ? 1 : -1, &x, &y)) {
+            CL_SetMousePos((int)x, (int)y);
+        }
+    }
+    return true;
+}
+
+bool UIPulldownMenu::PadDismiss(void)
+{
+    UIPulldownMenu *p = s_padOpen;
+
+    if (!p) {
+        return false;
+    }
+    s_padOpen = NULL;
+    if (p->m_submenu != -1 && p->m_submenuptr) {
+        p->m_submenuptr->Disconnect(p, W_Destroyed);
+        delete p->m_submenuptr;
+        p->m_submenuptr = NULL;
+    }
+    p->m_submenu = -1;
+    return true;
+}
+
 UIPulldownMenu::~UIPulldownMenu()
 {
+    if (s_padOpen == this) {
+        s_padOpen = NULL;
+    }
     for (int i = m_desc.NumObjects(); i > 0; i--) {
         uipull_describe *updb = m_desc.ObjectAt(i);
         // FIXME: possible OG bug, memory leak? updb->desc is not cleared
@@ -286,13 +332,21 @@ void UIPulldownMenu::MouseDragged(Event *ev)
 
 void UIPulldownMenu::MouseReleased(Event *ev)
 {
+    bool keepOpen = false;
+
     if (uWinMan.getFirstResponder() == this) {
         uWinMan.setFirstResponder(NULL);
         UIPoint2D    point(ev->GetFloat(1), ev->GetFloat(2));
         UIPopupMenu *menu = MenuFromPoint(point);
         if (menu) {
             menu->MouseReleased(ev);
+        } else if (m_submenu != -1 && UI_GetCvarInt("in_padActive", 0)) {
+            keepOpen = true;    // a pad click released on the button itself: leave the list open for D-pad + A
         }
+    }
+    if (keepOpen) {
+        s_padOpen = this;
+        return;
     }
 
     if (m_submenu != -1) {
@@ -304,6 +358,9 @@ void UIPulldownMenu::MouseReleased(Event *ev)
 
 void UIPulldownMenu::ChildKilled(Event *ev)
 {
+    if (s_padOpen == this) {
+        s_padOpen = NULL;
+    }
     if (m_submenu != -1) {
         m_submenu = -1;
     }

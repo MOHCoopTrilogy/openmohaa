@@ -145,6 +145,7 @@ UIWindowManager::UIWindowManager()
 {
     m_amidead          = false;
     m_lastbuttons      = 0;
+    m_padClick         = 0;
     m_oldview          = NULL;
     m_firstResponder   = NULL;
     m_backgroundwidget = NULL;
@@ -266,7 +267,8 @@ void UIWindowManager::UpdateViews(void)
 
         // Added in OPM
         //  Draw the mouse if it has been grabbed
-        if (IN_IsCursorActive()) {
+        // [gamepad-next] also while the pad drives the menu in a window: the OS cursor is not in screenshots / capture
+        if (IN_IsCursorActive() || UI_GetCvarInt("in_padActive", 0)) {
             VectorSet4(col, 1, 1, 1, 1);
             uii.Rend_SetColor(col);
 
@@ -292,6 +294,13 @@ void UIWindowManager::ServiceEvents(void)
     pos.x   = uid.mouseX;
     pos.y   = uid.mouseY;
     buttons = uid.mouseFlags;
+    // [HZM gamepad-next] PadTab click: frame 3 hover, frame 2 button down, frame 1 button up
+    if (m_padClick > 0) {
+        if (m_padClick == 2) {
+            buttons |= 1;
+        }
+        m_padClick--;
+    }
 
     if (m_bindactive) {
         view = m_bindactive;
@@ -553,9 +562,317 @@ void UIWindowManager::CharEvent(int ch)
     }
 }
 
+extern void CL_SetMousePos(int x, int y);
+
+/*
+====================
+PadProbe
+
+A widget is reachable if SOME point of it hits the widget itself (a passive label laid over half of a button must not
+hide the button, e.g. coop_startHzmInfo over APPLY). Tries the centre, then points above / below / left / right of it.
+Returns the point in (outX, outY).
+====================
+*/
+bool UIWindowManager::PadProbe(UIWidget *w, float *outX, float *outY)
+{
+    UIRect2D& r = w->m_clippedframe;
+    static const float fx[9] = {0.5f, 0.5f, 0.5f, 0.25f, 0.75f, 0.5f, 0.15f, 0.85f, 0.5f};
+    static const float fy[9] = {0.5f, 0.25f, 0.75f, 0.5f, 0.5f, 0.1f, 0.5f, 0.5f, 0.9f};
+    int                k;
+
+    for (k = 0; k < 9; k++) {
+        UIPoint2D c(r.pos.x + r.size.width * fx[k], r.pos.y + r.size.height * fy[k]);
+
+        if (getResponder(c) == w) {
+            *outX = c.x;
+            *outY = c.y;
+            return true;
+        }
+    }
+    return false;
+}
+
+/*
+====================
+UIWindowManager::PadNavigate
+
+[HZM gamepad-next] D-pad focus move. Every widget that can be activated, is enabled and is really hit-testable at
+its own centre (getResponder(centre) == widget, so nothing hidden behind another widget) is a candidate. The
+cursor jumps to the centre of the best one in the pressed direction: nearest along the direction, with sideways
+offset weighted double. The normal hover / click path does the rest, so every menu, custom or vanilla, works.
+====================
+*/
+bool UIWindowManager::PadNavigate(int dx, int dy)
+{
+    struct Cand {
+        UIWidget *w;
+        float     x, y;
+    };
+    enum { MAXC = 512, MAXSTACK = 1024 };
+    static Cand       cand[MAXC];
+    static UIWidget  *stack[MAXSTACK];
+    int               ncand = 0, sp = 0, i;
+    float             px = (float)uid.mouseX, py = (float)uid.mouseY;
+    float             bestScore = 1e30f, bx = 0, by = 0;
+    bool              found = false;
+
+    stack[sp++] = this;
+    while (sp > 0) {
+        UIWidget *w = stack[--sp];
+
+        for (i = 1; i <= w->m_children.NumObjects(); i++) {
+            if (sp < MAXSTACK) {
+                stack[sp++] = w->m_children.ObjectAt(i);
+            }
+        }
+        if (w == this || w == m_backgroundwidget || ncand >= MAXC) {
+            continue;
+        }
+        if (UI_GetCvarInt("ui_clickdebug", 0) >= 3 && w->getName() && strstr(w->getName(), "apply")) {
+            UIPoint2D c3(w->m_clippedframe.pos.x + w->m_clippedframe.size.width * 0.5f,
+                         w->m_clippedframe.pos.y + w->m_clippedframe.size.height * 0.5f);
+            UIWidget *r3 = getResponder(c3);
+
+            uii.Sys_Printf("^~^~^ PADWHY %s activ=%d en=%d vis=%d show=%d w=%d at %d,%d resp='%s'\n", w->getName(),
+                           (int)w->CanActivate(), (int)w->isEnabled(), (int)w->IsVisible(), (int)w->getShow(),
+                           (int)w->m_clippedframe.size.width, (int)c3.x, (int)c3.y, r3 ? r3->getName() : "-");
+        }
+        // sliders and check boxes are not "activatable" in this UI (the mouse drags / toggles them) but the pad must reach them
+        if (!w->isEnabled() || !(w->CanActivate() || w->isSubclassOf(UISlider) || w->isSubclassOf(UICheckBox))) {
+            continue;
+        }
+        if (w->m_clippedframe.size.width < 2 || w->m_clippedframe.size.height < 2) {
+            continue;
+        }
+        {
+            float cx, cy;
+
+            if (!PadProbe(w, &cx, &cy)) {
+                continue;
+            }
+            cand[ncand].w = w;
+            cand[ncand].x = cx;
+            cand[ncand].y = cy;
+            ncand++;
+        }
+    }
+
+    // start from the centre of the widget under the cursor, if it is one of the candidates
+    {
+        UIPoint2D here((float)uid.mouseX, (float)uid.mouseY);
+        UIWidget *under = getResponder(here);
+
+        for (i = 0; i < ncand; i++) {
+            if (cand[i].w == under) {
+                px = cand[i].x;
+                py = cand[i].y;
+                break;
+            }
+        }
+    }
+
+    if (UI_GetCvarInt("ui_clickdebug", 0) >= 2) {
+        for (i = 0; i < ncand; i++) {
+            uii.Sys_Printf("^~^~^ PADCAND %s %d %d\n", cand[i].w->getName(), (int)cand[i].x, (int)cand[i].y);
+        }
+    }
+
+    for (i = 0; i < ncand; i++) {
+        float rx = cand[i].x - px, ry = cand[i].y - py;
+        float fwd = rx * dx + ry * dy;
+        float lat = fabsf(dx ? ry : rx);
+
+        if (fwd < 2.0f) {
+            continue;
+        }
+        if (fwd + lat * 2.0f < bestScore) {
+            bestScore = fwd + lat * 2.0f;
+            bx        = cand[i].x;
+            by        = cand[i].y;
+            found     = true;
+        }
+    }
+
+    if (found) {
+        CL_SetMousePos((int)bx, (int)by);
+    }
+    if (UI_GetCvarInt("ui_clickdebug", 0)) {
+        UIPoint2D at(bx, by);
+        UIWidget *w = found ? getResponder(at) : NULL;
+
+        uii.Sys_Printf("^~^~^ PADNAV dir %d,%d cands %d -> %s (%d,%d) widget '%s'\n", dx, dy, ncand, found ? "moved" : "none",
+                       (int)bx, (int)by, w ? w->getName() : "-");
+    }
+    return found;
+}
+
+/*
+====================
+UIWindowManager::PadTab
+
+[HZM gamepad-next] LB / RB. Tabs in this UI are plain buttons whose names start with "tab" or "foldertab" (Armory
+categories, loadout pages, options folders). The row is ordered by position; the current tab is the one under the
+cursor, else the one the pad last picked. The cursor jumps to the previous / next tab and a click is injected.
+====================
+*/
+bool UIWindowManager::PadTab(int dir)
+{
+    struct Cand {
+        UIWidget *w;
+        float     x, y;
+    };
+    enum { MAXC = 64, MAXSTACK = 1024 };
+    static Cand      cand[MAXC];
+    static UIWidget *stack[MAXSTACK];
+    static float     lastX = -1, lastY = -1;
+    int              n = 0, sp = 0, i, j, cur = -1;
+
+    stack[sp++] = this;
+    while (sp > 0) {
+        UIWidget *w = stack[--sp];
+
+        for (i = 1; i <= w->m_children.NumObjects(); i++) {
+            if (sp < MAXSTACK) {
+                stack[sp++] = w->m_children.ObjectAt(i);
+            }
+        }
+        if (w == this || n >= MAXC) {
+            continue;
+        }
+        {
+            const char *nm = w->getName();
+
+            if (!nm || (Q_stricmpn(nm, "tab", 3) && Q_stricmpn(nm, "foldertab", 9))) {
+                continue;
+            }
+        }
+        if (!w->CanActivate() || !w->isEnabled() || w->m_clippedframe.size.width < 2) {
+            continue;
+        }
+        {
+            float cx, cy;
+
+            if (!PadProbe(w, &cx, &cy)) {
+                continue;
+            }
+            cand[n].w = w;
+            cand[n].x = cx;
+            cand[n].y = cy;
+            n++;
+        }
+    }
+    if (n < 2) {
+        return false;
+    }
+
+    // order: rows (y bucketed to 24 px), then x
+    for (i = 1; i < n; i++) {
+        Cand t = cand[i];
+
+        for (j = i - 1; j >= 0; j--) {
+            long rj = (long)(cand[j].y / 24.0f), rt = (long)(t.y / 24.0f);
+
+            if (rj < rt || (rj == rt && cand[j].x <= t.x)) {
+                break;
+            }
+            cand[j + 1] = cand[j];
+        }
+        cand[j + 1] = t;
+    }
+
+    {
+        UIPoint2D here((float)uid.mouseX, (float)uid.mouseY);
+        UIWidget *under = getResponder(here);
+
+        for (i = 0; i < n; i++) {
+            if (cand[i].w == under) {
+                cur = i;
+                break;
+            }
+        }
+        if (cur < 0 && lastX >= 0) {
+            for (i = 0; i < n; i++) {
+                if (fabsf(cand[i].x - lastX) < 2 && fabsf(cand[i].y - lastY) < 2) {
+                    cur = i;
+                    break;
+                }
+            }
+        }
+    }
+    if (cur < 0) {
+        cur = (dir > 0) ? -1 : 0;
+    }
+    cur = (cur + dir + n) % n;
+    lastX = cand[cur].x;
+    lastY = cand[cur].y;
+    CL_SetMousePos((int)lastX, (int)lastY);
+    m_padClick = 3;       // ServiceEvents: hover frame, press frame, release frame
+    if (UI_GetCvarInt("ui_clickdebug", 0)) {
+        uii.Sys_Printf("^~^~^ PADTAB dir %d -> '%s' (%d of %d)\n", dir, cand[cur].w->getName(), cur + 1, n);
+    }
+    return true;
+}
+
 qboolean UIWindowManager::KeyEvent(int key, unsigned int time)
 {
     UIWidget *selwidget = NULL;
+
+    // [HZM gamepad-next] an open pad pull-down owns the D-pad (up / down = highlight, A = pick, B = cancel)
+    if (UIPulldownMenu::PadKey(key)) {
+        return true;
+    }
+
+    // [HZM gamepad-next] LB / RB = previous / next tab; with no tab row they page the focused list.
+    if ((key == K_PAD0_LEFTSHOULDER || key == K_PAD0_RIGHTSHOULDER) && !m_bindactive) {
+        if (!PadTab(key == K_PAD0_RIGHTSHOULDER ? 1 : -1) && m_activeControl && m_activeControl != this) {
+            m_activeControl->KeyEvent(key == K_PAD0_RIGHTSHOULDER ? K_PGDN : K_PGUP, time);
+        }
+        return true;
+    }
+
+    // [HZM gamepad-next] right-stick scroll arrives as wheel ticks: give them to the list UNDER the cursor, not
+    // only to the focused control (a list nobody clicked would never scroll). Pad input only.
+    if ((key == K_MWHEELUP || key == K_MWHEELDOWN) && !m_bindactive && UI_GetCvarInt("in_padActive", 0)) {
+        UIPoint2D here((float)uid.mouseX, (float)uid.mouseY);
+        UIWidget *w = getResponder(here);
+
+        for (; w && w != this; w = w->getParent()) {
+            if (w->KeyEvent(key, time)) {
+                return true;
+            }
+        }
+    }
+
+    // [HZM gamepad-next] D-pad: the focused widget gets the arrow first (lists, sliders), else focus moves.
+    if (key >= K_PAD0_DPAD_UP && key <= K_PAD0_DPAD_RIGHT && !m_bindactive) {
+        static const int arrow[4] = {K_UPARROW, K_DOWNARROW, K_LEFTARROW, K_RIGHTARROW};
+        static const int ddx[4]   = {0, 0, -1, 1};
+        static const int ddy[4]   = {-1, 1, 0, 0};
+        int              d        = key - K_PAD0_DPAD_UP;
+
+        // the widget UNDER the cursor gets the arrow first (a slider the D-pad just landed on: left / right = value)
+        {
+            UIPoint2D here((float)uid.mouseX, (float)uid.mouseY);
+            UIWidget *w = getResponder(here);
+
+            for (; w && w != this; w = w->getParent()) {
+                if (w->isSubclassOf(UISlider) && w->KeyEvent(arrow[d], time)) {
+                    if (UI_GetCvarInt("ui_clickdebug", 0)) {
+                        uii.Sys_Printf("^~^~^ PADNAV dpad %d -> slider '%s'\n", d, w->getName());
+                    }
+                    return true;
+                }
+            }
+        }
+        if (m_activeControl && m_activeControl != this && m_activeControl->KeyEvent(arrow[d], time)) {
+            if (UI_GetCvarInt("ui_clickdebug", 0)) {
+                uii.Sys_Printf("^~^~^ PADNAV dpad %d eaten by '%s'\n", d, m_activeControl->getName());
+            }
+            return true;
+        }
+        PadNavigate(ddx[d], ddy[d]);
+        return true;
+    }
 
     if (key == K_TAB && uii.Sys_IsKeyDown(K_CTRL)) {
         UIWidget *wid;

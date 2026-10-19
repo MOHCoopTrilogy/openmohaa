@@ -1063,3 +1063,16 @@ void Sys_SendReport( const char *webhook, const char *payloadFilePath )
 	(void)payloadFilePath;
 	Com_Printf( "Sys_SendReport: removed - use coop_sendreport\n" );
 }
+
+/*
+==============
+Sys_OpenOnScreenKeyboard
+
+[HZM gamepad-next] Y in a menu: launch the Windows on-screen keyboard so a pad-only player (ROG Ally, Steam Deck
+in Windows) can type a name or chat text. Best effort, fire and forget.
+==============
+*/
+void Sys_OpenOnScreenKeyboard( void )
+{
+	ShellExecuteA( NULL, "open", "osk.exe", NULL, NULL, SW_SHOWNORMAL );
+}

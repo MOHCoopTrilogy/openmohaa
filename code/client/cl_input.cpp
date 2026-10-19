@@ -425,6 +425,25 @@ void CL_SetMousePos( int x, int y )
 {
 	cl.mousex = x;
 	cl.mousey = y;
+	IN_SetMousePosition( x, y );
+}
+
+/*
+=================
+CL_PadMoveCursor
+
+[gamepad-next] the gamepad's menu cursor: move the UI cursor by (dx, dy) pixels, clamped to the screen.
+=================
+*/
+void CL_PadMoveCursor( int dx, int dy )
+{
+	int x = cl.mousex + dx, y = cl.mousey + dy;
+
+	if ( x < 0 ) x = 0;
+	if ( y < 0 ) y = 0;
+	if ( x > cls.glconfig.vidWidth ) x = cls.glconfig.vidWidth;
+	if ( y > cls.glconfig.vidHeight ) y = cls.glconfig.vidHeight;
+	CL_SetMousePos( x, y );
 }
 
 /*
@@ -1025,6 +1044,23 @@ usercmd_t CL_CreateCmd( void ) {
 
 	// store out the final values
 	CL_FinishMove( &cmd );
+
+	// [gamepad-next] in_padDebug 1: what the player actually sends this tick (move / look / buttons), 4 per second
+	{
+		static cvar_t *padDbg;
+		static int     padNextMs;
+
+		if ( !padDbg ) {
+			padDbg = Cvar_Get( "in_padDebug", "0", 0 );
+		}
+		if ( padDbg->integer && cls.realtime >= padNextMs &&
+		     ( cmd.forwardmove || cmd.rightmove || cmd.upmove || cmd.buttons ||
+		       fabsf( cl.viewangles[YAW] - oldAngles[YAW] ) > 0.01f || fabsf( cl.viewangles[PITCH] - oldAngles[PITCH] ) > 0.01f ) ) {
+			padNextMs = cls.realtime + 250;
+			Com_Printf( "^~^~^ PADCMD fwd %d right %d up %d buttons 0x%x dyaw %.2f dpitch %.2f\n", cmd.forwardmove, cmd.rightmove,
+			            cmd.upmove, cmd.buttons, cl.viewangles[YAW] - oldAngles[YAW], cl.viewangles[PITCH] - oldAngles[PITCH] );
+		}
+	}
 
 	// draw debug graphs of turning for mouse testing
 	if ( cl_debugMove->integer ) {

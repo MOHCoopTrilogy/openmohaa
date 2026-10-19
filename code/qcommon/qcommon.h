@@ -1345,6 +1345,7 @@ typedef void (*pCursorFree)(byte *pic);
 qboolean IN_SetCursorFromImage(const byte *pic, int width, int height, pCursorFree cursorFreeFn);
 void IN_FreeCursor();
 qboolean IN_IsCursorActive();
+void IN_SetMousePosition(int x, int y);
 
 void Com_Pause();
 void Com_Unpause();

@@ -148,6 +148,7 @@ void     UI_LoadCine_DrawWidget(void); // the loading menu's hzm_loadcine widget
 // windows
 //
 void UI_DeactiveFloatingWindows(void);
+qboolean UI_PadDismissPopup(void);
 
 //
 // console
