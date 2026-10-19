@@ -65,6 +65,8 @@ static cvar_t *in_padUiSpeed    = NULL;   // UI cursor speed, screen widths per 
 static cvar_t *in_padDebug      = NULL;   // 1 = log mapped pad keys as "^~^~^ PADKEY ..."
 static cvar_t *in_padTestScript = NULL;   // CVAR_INIT (command line only): drive a virtual pad from a script file
 static cvar_t *in_padActive     = NULL;   // 1 while the last input came from the pad, 0 for keyboard / mouse
+static cvar_t *in_padTestGo     = NULL;   // set to 1 (console) to restart the test script clock
+static cvar_t *in_padTestHang   = NULL;   // CVAR_INIT: seconds the init thread stalls (proves the hang guard)
 
 enum { PAD_IDLE, PAD_INITING, PAD_READY, PAD_HUNG, PAD_FAILED };
 static volatile int padState = PAD_IDLE;
@@ -639,6 +641,9 @@ thread parks afterwards so any thread-affine driver state (COM, raw input) stays
 static int SDLCALL IN_PadInitThread( void *unused )
 {
 	(void)unused;
+	if ( in_padTestHang && in_padTestHang->integer > 0 ) {
+		SDL_Delay( in_padTestHang->integer * 1000 );   // test only: simulate SDL_Init hanging on a bad HID device
+	}
 	padThreadOk   = ( SDL_InitSubSystem( SDL_INIT_JOYSTICK | SDL_INIT_GAMECONTROLLER ) == 0 );
 	padThreadDone = 1;
 	while ( !padThreadQuit ) {
@@ -815,13 +820,27 @@ static void IN_PadTestDrive( void )
 		padT0       = Sys_Milliseconds();
 		padNextStep = 0;
 	}
+	if ( in_padTestGo && in_padTestGo->integer ) {
+		Cvar_Set( "in_padTestGo", "0" );
+		padNextStep = 0;
+		padT0       = Sys_Milliseconds();
+		Com_Printf( "^~^~^ PADTEST restart\n" );
+	}
 	elapsed = Sys_Milliseconds() - padT0;
 	while ( padNextStep < padNumSteps && padSteps[padNextStep].t <= elapsed ) {
 		padStep_t *st = &padSteps[padNextStep];
 
 		if ( st->kind == 1 ) {
 			SDL_VirtualJoystickDesc d;
+			int                     nj = SDL_NumJoysticks(), haveVirt = 0;
 
+			for ( i = 0; i < nj; i++ ) {
+				if ( SDL_JoystickIsVirtual( i ) ) haveVirt = 1;
+			}
+			if ( haveVirt ) {
+				padNextStep++;
+				continue;
+			}
 			memset( &d, 0, sizeof( d ) );
 			d.version  = SDL_VIRTUAL_JOYSTICK_DESC_VERSION;
 			d.type     = SDL_JOYSTICK_TYPE_GAMECONTROLLER;
@@ -1781,6 +1800,8 @@ void IN_Init( void *windowData )
 	in_padDebug = Cvar_Get( "in_padDebug", "0", 0 );
 	in_padTestScript = Cvar_Get( "in_padTestScript", "", CVAR_INIT );
 	in_padActive = Cvar_Get( "in_padActive", "0", CVAR_TEMP );
+	in_padTestGo = Cvar_Get( "in_padTestGo", "0", CVAR_TEMP );
+	in_padTestHang = Cvar_Get( "in_padTestHang", "0", CVAR_INIT );
 
 #if defined(PROTOCOL_HANDLER) && defined(__APPLE__)
 	SDL_EventState( SDL_DROPFILE, SDL_ENABLE );
