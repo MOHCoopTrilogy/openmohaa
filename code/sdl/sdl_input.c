@@ -805,6 +805,9 @@ static void IN_PadTestLoad( void )
 		if ( !strncmp( line, "@attach", 7 ) ) {
 			st->kind = 1;
 			if ( sscanf( line + 7, "%d", &st->t ) == 1 ) padNumSteps++;
+		} else if ( !strncmp( line, "@cursor", 7 ) ) {
+			st->kind = 4;      // test only: put the UI cursor somewhere known
+			if ( sscanf( line + 7, "%d %d %d", &st->t, &st->ax[0], &st->ax[1] ) == 3 ) padNumSteps++;
 		} else if ( !strncmp( line, "@cmd", 4 ) ) {
 			char *c = line + 4;
 
@@ -875,6 +878,8 @@ static void IN_PadTestDrive( void )
 			i          = SDL_JoystickAttachVirtualEx( &d );
 			Com_Printf( "^~^~^ PADTEST attach -> %d\n", i );
 			padWantOpen = qtrue;
+		} else if ( st->kind == 4 ) {
+			CL_SetMousePos( st->ax[0], st->ax[1] );
 		} else if ( st->kind == 3 ) {
 			Cbuf_ExecuteText( EXEC_APPEND, va( "%s\n", st->cmd ) );
 		} else if ( st->kind == 2 ) {
@@ -1068,7 +1073,7 @@ static void IN_GamepadUI( void )
 		lx = ly = 0.0f;
 		held = 0.0f;
 	}
-	accel = 1.0f + ( in_padUiAccel ? in_padUiAccel->value : 1.5f ) * ( held / 0.8f );
+	accel = 1.0f + ( in_padUiAccel ? in_padUiAccel->value : 1.0f ) * ( held / 0.8f );
 	speed = cls.glconfig.vidWidth * ( in_padUiSpeed ? in_padUiSpeed->value : 0.55f ) * accel;
 	accX += lx * speed * dt;
 	accY += ly * speed * dt;
@@ -1876,7 +1881,7 @@ void IN_Init( void *windowData )
 	in_padTestScript = Cvar_Get( "in_padTestScript", "", CVAR_INIT );
 	in_padActive = Cvar_Get( "in_padActive", "0", CVAR_TEMP );
 	in_padGame = Cvar_Get( "in_padGame", "0", CVAR_ARCHIVE );
-	in_padUiAccel = Cvar_Get( "in_padUiAccel", "1.5", CVAR_ARCHIVE );
+	in_padUiAccel = Cvar_Get( "in_padUiAccel", "1.0", CVAR_ARCHIVE );
 	in_padUiDeadzone = Cvar_Get( "in_padUiDeadzone", "0.2", CVAR_ARCHIVE );
 	in_padTestGo = Cvar_Get( "in_padTestGo", "0", CVAR_TEMP );
 	in_padTestHang = Cvar_Get( "in_padTestHang", "0", CVAR_INIT );

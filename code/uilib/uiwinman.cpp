@@ -267,7 +267,8 @@ void UIWindowManager::UpdateViews(void)
 
         // Added in OPM
         //  Draw the mouse if it has been grabbed
-        if (IN_IsCursorActive()) {
+        // [gamepad-next] also while the pad drives the menu in a window: the OS cursor is not in screenshots / capture
+        if (IN_IsCursorActive() || UI_GetCvarInt("in_padActive", 0)) {
             VectorSet4(col, 1, 1, 1, 1);
             uii.Rend_SetColor(col);
 
@@ -565,6 +566,34 @@ extern void CL_SetMousePos(int x, int y);
 
 /*
 ====================
+PadProbe
+
+A widget is reachable if SOME point of it hits the widget itself (a passive label laid over half of a button must not
+hide the button, e.g. coop_startHzmInfo over APPLY). Tries the centre, then points above / below / left / right of it.
+Returns the point in (outX, outY).
+====================
+*/
+bool UIWindowManager::PadProbe(UIWidget *w, float *outX, float *outY)
+{
+    UIRect2D& r = w->m_clippedframe;
+    static const float fx[9] = {0.5f, 0.5f, 0.5f, 0.25f, 0.75f, 0.5f, 0.15f, 0.85f, 0.5f};
+    static const float fy[9] = {0.5f, 0.25f, 0.75f, 0.5f, 0.5f, 0.1f, 0.5f, 0.5f, 0.9f};
+    int                k;
+
+    for (k = 0; k < 9; k++) {
+        UIPoint2D c(r.pos.x + r.size.width * fx[k], r.pos.y + r.size.height * fy[k]);
+
+        if (getResponder(c) == w) {
+            *outX = c.x;
+            *outY = c.y;
+            return true;
+        }
+    }
+    return false;
+}
+
+/*
+====================
 UIWindowManager::PadNavigate
 
 [HZM gamepad-next] D-pad focus move. Every widget that can be activated, is enabled and is really hit-testable at
@@ -599,6 +628,15 @@ bool UIWindowManager::PadNavigate(int dx, int dy)
         if (w == this || w == m_backgroundwidget || ncand >= MAXC) {
             continue;
         }
+        if (UI_GetCvarInt("ui_clickdebug", 0) >= 3 && w->getName() && strstr(w->getName(), "apply")) {
+            UIPoint2D c3(w->m_clippedframe.pos.x + w->m_clippedframe.size.width * 0.5f,
+                         w->m_clippedframe.pos.y + w->m_clippedframe.size.height * 0.5f);
+            UIWidget *r3 = getResponder(c3);
+
+            uii.Sys_Printf("^~^~^ PADWHY %s activ=%d en=%d vis=%d show=%d w=%d at %d,%d resp='%s'\n", w->getName(),
+                           (int)w->CanActivate(), (int)w->isEnabled(), (int)w->IsVisible(), (int)w->getShow(),
+                           (int)w->m_clippedframe.size.width, (int)c3.x, (int)c3.y, r3 ? r3->getName() : "-");
+        }
         if (!w->CanActivate() || !w->isEnabled()) {
             continue;
         }
@@ -606,15 +644,14 @@ bool UIWindowManager::PadNavigate(int dx, int dy)
             continue;
         }
         {
-            UIPoint2D c(w->m_clippedframe.pos.x + w->m_clippedframe.size.width * 0.5f,
-                        w->m_clippedframe.pos.y + w->m_clippedframe.size.height * 0.5f);
+            float cx, cy;
 
-            if (getResponder(c) != w) {
+            if (!PadProbe(w, &cx, &cy)) {
                 continue;
             }
             cand[ncand].w = w;
-            cand[ncand].x = c.x;
-            cand[ncand].y = c.y;
+            cand[ncand].x = cx;
+            cand[ncand].y = cy;
             ncand++;
         }
     }
@@ -630,6 +667,12 @@ bool UIWindowManager::PadNavigate(int dx, int dy)
                 py = cand[i].y;
                 break;
             }
+        }
+    }
+
+    if (UI_GetCvarInt("ui_clickdebug", 0) >= 2) {
+        for (i = 0; i < ncand; i++) {
+            uii.Sys_Printf("^~^~^ PADCAND %s %d %d\n", cand[i].w->getName(), (int)cand[i].x, (int)cand[i].y);
         }
     }
 
@@ -706,15 +749,14 @@ bool UIWindowManager::PadTab(int dir)
             continue;
         }
         {
-            UIPoint2D c(w->m_clippedframe.pos.x + w->m_clippedframe.size.width * 0.5f,
-                        w->m_clippedframe.pos.y + w->m_clippedframe.size.height * 0.5f);
+            float cx, cy;
 
-            if (getResponder(c) != w) {
+            if (!PadProbe(w, &cx, &cy)) {
                 continue;
             }
             cand[n].w = w;
-            cand[n].x = c.x;
-            cand[n].y = c.y;
+            cand[n].x = cx;
+            cand[n].y = cy;
             n++;
         }
     }
@@ -803,6 +845,9 @@ qboolean UIWindowManager::KeyEvent(int key, unsigned int time)
         int              d        = key - K_PAD0_DPAD_UP;
 
         if (m_activeControl && m_activeControl != this && m_activeControl->KeyEvent(arrow[d], time)) {
+            if (UI_GetCvarInt("ui_clickdebug", 0)) {
+                uii.Sys_Printf("^~^~^ PADNAV dpad %d eaten by '%s'\n", d, m_activeControl->getName());
+            }
             return true;
         }
         PadNavigate(ddx[d], ddy[d]);

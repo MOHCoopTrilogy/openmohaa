@@ -610,6 +610,7 @@ const char *Key_KeynumToBindString( int keynum );
 void Key_GetKeysForCommand( const char *command, int *key1, int *key2 );
 int Key_GetCatcher( void );
 void CL_PadMoveCursor( int dx, int dy );
+void CL_SetMousePos( int x, int y );
 void Key_SetCatcher( int catcher );
 
 void CL_EyeInfo(usereyes_t *info);
