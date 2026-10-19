@@ -65,7 +65,11 @@ static void CL_InvHideLooseClips(refEntity_t &e)
         return;
     }
     for (int s = 0; s < e.tiki->num_surfaces && s < MAX_MODEL_SURFACES; s++) {
-        if (Q_stristr(e.tiki->surfaces[s].shader[0], "m1clip")) {
+        const char *shader = e.tiki->surfaces[s].shader[0];
+        const char *name   = e.tiki->surfaces[s].name;
+        // shader m1clip, or a KAR98 finish variant (coop_skin_kar98*_1 on material7 / material8: the finish tiks rename the clip's shader)
+        if (Q_stristr(shader, "m1clip")
+            || ((!Q_stricmp(name, "material7") || !Q_stricmp(name, "material8")) && Q_stristr(shader, "coop_skin_kar98") && Q_stristr(shader, "_1"))) {
             e.surfaces[s] |= TIKI_SURF_NODRAW;
         }
     }
