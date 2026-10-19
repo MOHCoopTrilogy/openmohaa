@@ -1722,12 +1722,12 @@ void CG_AddMuzzleHeat(float amount)
     // fast guns (Thompson) up to max while slow guns (handgun/BAR) barely registered. coop_heatGun = the
     // shared per-shot level for all guns.
     // HZM coop [ads shimmer 2026-10-19, user item 2] firing while AIMED: the barrel's shimmer stands out a bit more.
-    // The pose factor (0 hip .. 1 full sight alignment) scales the per-shot level by coop_heatGunAds (default 0.6 = 1.6x
-    // at full ADS; 0 = as before) and the decay below runs coop_heatGunAdsFade (default 0.5) longer. Hip fire unchanged.
+    // The pose factor (0 hip .. 1 full sight alignment) scales the per-shot level by coop_heatGunAds (default 0.5 = 1.5x
+    // at full ADS; 0 = as before) and the decay below runs coop_heatGunAdsFade (default 0.25) longer. Hip fire unchanged.
     {
         static cvar_t *pAdsGain = NULL;
         if (!pAdsGain) {
-            pAdsGain = cgi.Cvar_Get("coop_heatGunAds", "0.6", CVAR_ARCHIVE);
+            pAdsGain = cgi.Cvar_Get("coop_heatGunAds", "0.5", CVAR_ARCHIVE);
         }
         if (pAdsGain->value > 0.0f) {
             amount *= 1.0f + pAdsGain->value * CG_AdsPoseFactor();
@@ -7949,7 +7949,7 @@ static int CG_CalcFov(void)
             static cvar_t *pAdsFade = NULL;
             float          fMzFade = hfade;
             if (!pAdsFade) {
-                pAdsFade = cgi.Cvar_Get("coop_heatGunAdsFade", "0.5", CVAR_ARCHIVE);
+                pAdsFade = cgi.Cvar_Get("coop_heatGunAdsFade", "0.25", CVAR_ARCHIVE);
             }
             if (pAdsFade->value > 0.0f) {
                 fMzFade = hfade * (1.0f + pAdsFade->value * CG_AdsPoseFactor()); // [ads shimmer] lingers a little longer aimed
