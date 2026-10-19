@@ -13,6 +13,7 @@ typedef struct {
 } adsSight_t;
 
 static const adsSight_t s_adsSights[] = {
+    {"models/weapons/30calportable.tik", "M1919 30cal", {17.1100f, -0.0050f, -7.9000f}, {-0.5500f, -0.0050f, -7.9000f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 10.000f}, // m1919
     {"models/weapons/arisaka.tik", "Arisaka Type 99", {44.0557f, -0.9035f, -4.6376f}, {3.5564f, -0.9035f, -4.3424f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 0.000f}, // arisaka_type_99
     {"models/weapons/bar.tik", "BAR", {35.6267f, -0.7789f, -4.2493f}, {-0.3181f, -0.7833f, -4.3841f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 0.000f}, // bar
     {"models/weapons/bar_bar1918.tik", "Lewis Gun", {35.6064f, -1.2984f, -5.4866f}, {-0.7600f, -1.2984f, -5.1210f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 0.000f}, // bar_wwi
@@ -54,6 +55,14 @@ static const adsSight_t s_adsSights[] = {
     {"models/weapons/colt45_guancolt.tik", "Colt 45 (Guanshire)", {10.4327f, -0.7252f, -3.4478f}, {0.5056f, -0.7574f, -3.1925f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 0.000f}, // colt_45
     {"models/weapons/colt45_lv_ttcolt.tik", "Colt 45 (Team Tactics)", {10.4327f, -0.7252f, -3.4478f}, {0.5056f, -0.7574f, -3.1925f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 0.000f}, // colt_45
     {"models/weapons/colt_silenced.tik", "Silenced Colt .45", {21.4745f, -0.5994f, -3.3279f}, {0.7817f, -0.6896f, -3.4430f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 0.000f}, // silenced_colt_45
+    {"models/weapons/coop_fg42_irons.tik", "FG 42 Irons", {26.7700f, -0.8550f, -5.5000f}, {-6.2000f, -0.8550f, -5.4400f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 12.000f}, // fg42_irons
+    {"models/weapons/coop_fg42_irons_bloody.tik", "FG 42 Irons (Bloody)", {26.7700f, -0.8550f, -5.5000f}, {-6.2000f, -0.8550f, -5.4400f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 12.000f}, // fg42_irons
+    {"models/weapons/coop_fg42_irons_blued.tik", "FG 42 Irons (Blued)", {26.7700f, -0.8550f, -5.5000f}, {-6.2000f, -0.8550f, -5.4400f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 12.000f}, // fg42_irons
+    {"models/weapons/coop_fg42_irons_camo_desert.tik", "FG 42 Irons (Desert)", {26.7700f, -0.8550f, -5.5000f}, {-6.2000f, -0.8550f, -5.4400f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 12.000f}, // fg42_irons
+    {"models/weapons/coop_fg42_irons_camo_winter.tik", "FG 42 Irons (Winter)", {26.7700f, -0.8550f, -5.5000f}, {-6.2000f, -0.8550f, -5.4400f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 12.000f}, // fg42_irons
+    {"models/weapons/coop_fg42_irons_camo_woodland.tik", "FG 42 Irons (Woodland)", {26.7700f, -0.8550f, -5.5000f}, {-6.2000f, -0.8550f, -5.4400f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 12.000f}, // fg42_irons
+    {"models/weapons/coop_fg42_irons_chrome.tik", "FG 42 Irons (Chrome)", {26.7700f, -0.8550f, -5.5000f}, {-6.2000f, -0.8550f, -5.4400f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 12.000f}, // fg42_irons
+    {"models/weapons/coop_fg42_irons_gold.tik", "FG 42 Irons (Gold)", {26.7700f, -0.8550f, -5.5000f}, {-6.2000f, -0.8550f, -5.4400f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 12.000f}, // fg42_irons
     {"models/weapons/coop_g43_irons.tik", "G 43 Irons", {41.9500f, -1.1565f, -4.3880f}, {12.0845f, -1.1565f, -5.3300f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 17.000f}, // g43_irons
     {"models/weapons/coop_g43_irons_bloody.tik", "G 43 Irons (Bloody)", {41.9500f, -1.1565f, -4.3880f}, {12.0845f, -1.1565f, -5.3300f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 17.000f}, // g43_irons
     {"models/weapons/coop_g43_irons_blued.tik", "G 43 Irons (Blued)", {41.9500f, -1.1565f, -4.3880f}, {12.0845f, -1.1565f, -5.3300f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 17.000f}, // g43_irons
