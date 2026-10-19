@@ -1026,6 +1026,23 @@ usercmd_t CL_CreateCmd( void ) {
 	// store out the final values
 	CL_FinishMove( &cmd );
 
+	// [gamepad-next] in_padDebug 1: what the player actually sends this tick (move / look / buttons), 4 per second
+	{
+		static cvar_t *padDbg;
+		static int     padNextMs;
+
+		if ( !padDbg ) {
+			padDbg = Cvar_Get( "in_padDebug", "0", 0 );
+		}
+		if ( padDbg->integer && cls.realtime >= padNextMs &&
+		     ( cmd.forwardmove || cmd.rightmove || cmd.upmove || cmd.buttons ||
+		       fabsf( cl.viewangles[YAW] - oldAngles[YAW] ) > 0.01f || fabsf( cl.viewangles[PITCH] - oldAngles[PITCH] ) > 0.01f ) ) {
+			padNextMs = cls.realtime + 250;
+			Com_Printf( "^~^~^ PADCMD fwd %d right %d up %d buttons 0x%x dyaw %.2f dpitch %.2f\n", cmd.forwardmove, cmd.rightmove,
+			            cmd.upmove, cmd.buttons, cl.viewangles[YAW] - oldAngles[YAW], cl.viewangles[PITCH] - oldAngles[PITCH] );
+		}
+	}
+
 	// draw debug graphs of turning for mouse testing
 	if ( cl_debugMove->integer ) {
 		if ( cl_debugMove->integer == 1 ) {

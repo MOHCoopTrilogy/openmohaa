@@ -644,6 +644,13 @@ bool UIWindowManager::PadNavigate(int dx, int dy)
     if (found) {
         CL_SetMousePos((int)bx, (int)by);
     }
+    if (UI_GetCvarInt("ui_clickdebug", 0)) {
+        UIPoint2D at(bx, by);
+        UIWidget *w = found ? getResponder(at) : NULL;
+
+        uii.Sys_Printf("^~^~^ PADNAV dir %d,%d cands %d -> %s (%d,%d) widget '%s'\n", dx, dy, ncand, found ? "moved" : "none",
+                       (int)bx, (int)by, w ? w->getName() : "-");
+    }
     return found;
 }
 
