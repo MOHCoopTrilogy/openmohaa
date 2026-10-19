@@ -854,6 +854,17 @@ void CG_HudDrawElements()
     if (!cg_huddraw_force->integer && !cg_hud->integer) {
         return;
     }
+    // HZM coop: cutscene HUD hold (coop_mod/cutscene.scr::cut_lock sets coop_cineHud 1): every scripted huddraw / ihuddraw
+    // element (rank star, carried-item icons, cards ...) is hidden here and comes back when the cvar drops - the script state is untouched
+    {
+        static cvar_t *s_cvCine;
+        if (!s_cvCine) {
+            s_cvCine = cgi.Cvar_Get("coop_cineHud", "0", 0);
+        }
+        if (s_cvCine->integer) {
+            return;
+        }
+    }
 
     virtualScale[0] = cgs.glconfig.vidWidth / 640.0;
     virtualScale[1] = cgs.glconfig.vidHeight / 480.0;
