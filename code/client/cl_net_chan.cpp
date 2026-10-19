@@ -145,6 +145,16 @@ void CL_Netchan_Transmit( netchan_t *chan, msg_t* msg ) {
 
 	CL_Netchan_Encode( msg );
 	Netchan_Transmit( chan, msg->cursize, msg->data, cl_netprofile->integer ? &cls.netprofile.inPackets : NULL );
+
+	// HZM coop [joinflood 2026-10-14, bug-3905/bug-3910] send EVERY fragment now, as ioquake3 does. Netchan_Transmit
+	// only sends the first fragment of a message >= FRAGMENT_SIZE (~1300 bytes to a remote server) and nothing in the
+	// client ever sent the rest, so the server never completed that message - and because every client packet
+	// re-carries all unacknowledged client commands, every later packet was just as big: nothing the client sent
+	// (usercmds, acks of server commands) reached the server again until it timed the player out. A join alone
+	// queues ~1.5 KB of them (two userinfo + the pak checksums + the progression handshake).
+	while ( chan->unsentFragments ) {
+		CL_Netchan_TransmitNextFragment( chan );
+	}
 }
 
 extern 	int oldsize;

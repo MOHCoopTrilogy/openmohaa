@@ -37,9 +37,11 @@ server_t		sv;					// local server
 game_export_t	*ge = NULL;
 
 cvar_t	*sv_fps;				// time rate for running non-clients
+cvar_t	*sv_netProbe;
 cvar_t	*sv_lagProbe;			// HZM [user 2026-08-10]: 1 = report server frame overruns, which are
 								// what light the blinking "slow server" icon on every client
 cvar_t	*sv_timeout;			// seconds without any message
+cvar_t	*sv_cmdParkBytes;		// HZM coop [joinflood bug-3910] max bytes of reliable commands in flight to a remote client
 cvar_t	*sv_cmdPark;			// HZM coop [bug-3480] 1 = park server commands for a client that is behind (default)
 cvar_t	*sv_zombietime;			// seconds to sink messages after disconnect
 cvar_t	*sv_rconPassword;		// password for remote server commands
@@ -229,6 +231,38 @@ void SV_ParkClear( client_t *client ) {
 
 /*
 ======================
+SV_ParkWindowFull
+
+HZM coop [joinflood 2026-10-14, bug-3910] the in-flight window, by count (SV_PARK_WINDOW) and, for a remote client,
+by bytes (sv_cmdParkBytes): every unacknowledged command rides in every snapshot, so the bytes in flight ARE the
+snapshot's overhead. Over ~1300 bytes a snapshot fragments; at 256 commands it was 17 fragments, re-sent whole
+every frame until acked. A command that alone exceeds the window is still let out when nothing else is in flight.
+======================
+*/
+static qboolean SV_ParkWindowFull( client_t *client, int addLen ) {
+	int inflight = client->reliableSequence - client->reliableAcknowledge;
+	int limit, bytes, i;
+
+	if ( inflight >= SV_PARK_WINDOW ) {
+		return qtrue;
+	}
+	if ( inflight <= 0 || !sv_cmdParkBytes || sv_cmdParkBytes->integer <= 0
+		|| client->netchan.remoteAddress.type == NA_LOOPBACK || client->netchan.remoteAddress.type == NA_BOT ) {
+		return qfalse;
+	}
+	limit = sv_cmdParkBytes->integer;
+	bytes = addLen + 6;
+	for ( i = client->reliableAcknowledge + 1 ; i <= client->reliableSequence ; i++ ) {
+		bytes += (int)strlen( client->reliableCommands[ i & ( MAX_RELIABLE_COMMANDS - 1 ) ] ) + 6;
+		if ( bytes > limit ) {
+			return qtrue;
+		}
+	}
+	return qfalse;
+}
+
+/*
+======================
 SV_ParkDrain
 
 Called when the client has acknowledged something: move parked commands into the ring, oldest first, while the
@@ -246,7 +280,7 @@ void SV_ParkDrain( client_t *client ) {
 	if ( client->state < CS_PRIMED ) {
 		return;
 	}
-	while ( pk->head && client->reliableSequence - client->reliableAcknowledge < SV_PARK_WINDOW ) {
+	while ( pk->head && !SV_ParkWindowFull( client, (int)strlen( pk->head->cmd ) ) ) {
 		n = pk->head;
 		pk->head = n->next;
 		if ( !pk->head ) {
@@ -386,7 +420,7 @@ void SV_AddServerCommand( client_t *client, const char *cmd ) {
 	// goes out first, in order)
 	if ( pk && client->gamestateMessageNum != -1
 		&& ( pk->head || ( sv_cmdPark->integer
-			&& client->reliableSequence - client->reliableAcknowledge >= SV_PARK_WINDOW ) ) ) {
+			&& SV_ParkWindowFull( client, (int)strlen( cmd ) ) ) ) ) {
 		svParkNode_t	*n;
 		int				len = (int)strlen( cmd );
 
@@ -1047,6 +1081,108 @@ void SV_ConnectionlessPacket( netadr_t from, msg_t *msg ) {
 SV_ReadPackets
 =================
 */
+/*
+======================
+HZM [joinflood 2026-10-14] NET PROBE (sv_netProbe 1)
+======================
+*/
+typedef struct {
+	int snaps, snapBytes, snapMax, snapFrag, skipFrag, skipRate;
+	int inPk, inFragPk, maxInflight, maxParked, userinfos, histAt;
+} svNetProbe_t;
+static svNetProbe_t sv_np[MAX_CLIENTS];
+
+static svNetProbe_t *SV_NP( client_t *cl ) {
+	int n = (int)( cl - svs.clients );
+	if ( !sv_netProbe || !sv_netProbe->integer || !svs.clients || n < 0 || n >= MAX_CLIENTS ) {
+		return NULL;
+	}
+	return &sv_np[n];
+}
+
+void SV_NetProbe_Snap( client_t *cl, int bytes ) {
+	svNetProbe_t *p = SV_NP( cl );
+	if ( !p ) {
+		return;
+	}
+	p->snaps++;
+	p->snapBytes += bytes;
+	if ( bytes > p->snapMax ) {
+		p->snapMax = bytes;
+	}
+	if ( cl->netchan.remoteAddress.type != NA_LOOPBACK && bytes >= 1300 ) {
+		p->snapFrag++;
+	}
+}
+
+void SV_NetProbe_Userinfo( client_t *cl ) {
+	svNetProbe_t *p = SV_NP( cl );
+	if ( p ) {
+		p->userinfos++;
+	}
+}
+
+static void SV_CmdQueueReport( client_t *client, int pending );
+
+void SV_NetProbe_Skip( client_t *cl, int why ) {
+	svNetProbe_t *p = SV_NP( cl );
+	if ( !p ) {
+		return;
+	}
+	if ( why ) {
+		p->skipRate++;
+	} else {
+		p->skipFrag++;
+	}
+}
+
+static void SV_NetProbe_Frame( void ) {
+	static int s_npStart = 0;
+	int i;
+
+	if ( !sv_netProbe || !sv_netProbe->integer || !svs.clients ) {
+		return;
+	}
+	for ( i = 0 ; i < sv_maxclients->integer && i < MAX_CLIENTS ; i++ ) {
+		client_t *cl = &svs.clients[i];
+		svPark_t *pk = &sv_park[i];
+		int inflight;
+		if ( cl->state < CS_CONNECTED || cl->netchan.remoteAddress.type == NA_BOT ) {
+			continue;
+		}
+		inflight = cl->reliableSequence - cl->reliableAcknowledge;
+		if ( inflight > sv_np[i].maxInflight ) {
+			sv_np[i].maxInflight = inflight;
+		}
+		if ( pk->count > sv_np[i].maxParked ) {
+			sv_np[i].maxParked = pk->count;
+		}
+	}
+	if ( svs.time - s_npStart < 1000 ) {
+		return;
+	}
+	s_npStart = svs.time;
+	for ( i = 0 ; i < sv_maxclients->integer && i < MAX_CLIENTS ; i++ ) {
+		client_t *cl = &svs.clients[i];
+		svNetProbe_t *p = &sv_np[i];
+		if ( cl->state < CS_CONNECTED || cl->netchan.remoteAddress.type == NA_BOT
+			|| cl->netchan.remoteAddress.type == NA_LOOPBACK ) {
+			Com_Memset( p, 0, sizeof( *p ) );
+			continue;
+		}
+		Com_Printf( "^~^~^ SVNET cl=%d st=%d inflight=%d max=%d parked=%d max=%d snaps=%d avg=%d max=%d over1300=%d "
+			"skipfrag=%d skiprate=%d in=%d infrag=%d lastin=%d ping=%d rate=%d ui=%d uic=%d\n",
+			i, (int)cl->state, cl->reliableSequence - cl->reliableAcknowledge, p->maxInflight,
+			sv_park[i].count, p->maxParked, p->snaps, p->snaps ? p->snapBytes / p->snaps : 0, p->snapMax,
+			p->snapFrag, p->skipFrag, p->skipRate, p->inPk, p->inFragPk, svs.time - cl->lastPacketTime,
+			cl->ping, cl->rate, (int)strlen( cl->userinfo ), p->userinfos );
+		if ( cl->reliableSequence - cl->reliableAcknowledge + sv_park[i].count >= 48 ) {
+			SV_CmdQueueReport( cl, cl->reliableSequence - cl->reliableAcknowledge + sv_park[i].count );
+		}
+		Com_Memset( p, 0, sizeof( *p ) );
+	}
+}
+
 void SV_PacketEvent( netadr_t from, msg_t *msg ) {
 	int			i;
 	client_t	*cl;
@@ -1086,8 +1222,14 @@ void SV_PacketEvent( netadr_t from, msg_t *msg ) {
 			cl->netchan.remoteAddress.port = from.port;
 		}
 
+		if ( SV_NP( cl ) && msg->cursize >= 4 && ( ( (unsigned int)*(int *)msg->data ) & 0x80000000u ) ) {
+			SV_NP( cl )->inFragPk++; // HZM [joinflood] probe
+		}
 		// make sure it is a valid, in sequence packet
 		if (SV_Netchan_Process(cl, msg)) {
+			if ( SV_NP( cl ) ) {
+				SV_NP( cl )->inPk++; // HZM [joinflood] probe
+			}
 			// zombie clients still need to do the Netchan_Process
 			// to make sure they don't need to retransmit the final
 			// reliable message, but they don't do any other processing
@@ -1452,6 +1594,8 @@ void SV_Frame( int msec ) {
 			s_lpTotal = 0;
 		}
 	}
+
+	SV_NetProbe_Frame(); // HZM [joinflood 2026-10-14]
 
 	// update ping based on the all received frames
 	SV_CalcPings();

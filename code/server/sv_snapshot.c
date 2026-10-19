@@ -1307,6 +1307,7 @@ void SV_SendClientSnapshot( client_t *client ) {
 		MSG_Clear (&msg);
 	}
 
+	SV_NetProbe_Snap( client, msg.cursize ); // HZM [joinflood] probe
 	SV_SendMessageToClient( &msg, client );
 }
 
@@ -1341,6 +1342,7 @@ void SV_SendClientMessages(void)
 		if(c->netchan.unsentFragments || c->netchan_start_queue)
 		{
 			c->rateDelayed = qtrue;
+			SV_NetProbe_Skip( c, 0 ); // HZM [joinflood] probe
 			continue;		// Drop this snapshot if the packet queue is still full or delta compression will break
 		}
 
@@ -1354,6 +1356,7 @@ void SV_SendClientMessages(void)
 			{
 				// Not enough time since last packet passed through the line
 				c->rateDelayed = qtrue;
+				SV_NetProbe_Skip( c, 1 ); // HZM [joinflood] probe
 				continue;
 			}
 		}

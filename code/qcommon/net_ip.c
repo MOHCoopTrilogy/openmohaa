@@ -815,6 +815,32 @@ void Sys_ShowIP(void) {
 
 /*
 ====================
+NET_SetSocketBuffers
+
+HZM coop [joinflood 2026-10-14, bug-3912] a map's gamestate arrives as ~50 back-to-back 1300-byte fragments; the
+Windows default 64 KB receive buffer drops the tail, the gamestate never completes and the server resends it
+forever. 4 MB each way (the OS may grant less; the result is printed once per socket).
+====================
+*/
+static void NET_SetSocketBuffers( SOCKET s, const char *what ) {
+	int			want = 4 * 1024 * 1024;
+	int			got = 0, gotSnd = 0;
+	socklen_t	len = sizeof( got );
+
+	if ( setsockopt( s, SOL_SOCKET, SO_RCVBUF, (char *)&want, sizeof( want ) ) == SOCKET_ERROR ) {
+		Com_Printf( "WARNING: %s: setsockopt SO_RCVBUF: %s\n", what, NET_ErrorString() );
+	}
+	if ( setsockopt( s, SOL_SOCKET, SO_SNDBUF, (char *)&want, sizeof( want ) ) == SOCKET_ERROR ) {
+		Com_Printf( "WARNING: %s: setsockopt SO_SNDBUF: %s\n", what, NET_ErrorString() );
+	}
+	getsockopt( s, SOL_SOCKET, SO_RCVBUF, (char *)&got, &len );
+	len = sizeof( gotSnd );
+	getsockopt( s, SOL_SOCKET, SO_SNDBUF, (char *)&gotSnd, &len );
+	Com_Printf( "%s: socket buffers receive %d KB, send %d KB\n", what, got / 1024, gotSnd / 1024 );
+}
+
+/*
+====================
 NET_IPSocket
 ====================
 */
@@ -850,6 +876,7 @@ SOCKET NET_IPSocket( char *net_interface, int port, int *err ) {
 	if( setsockopt( newsocket, SOL_SOCKET, SO_BROADCAST, (char *) &i, sizeof(i) ) == SOCKET_ERROR ) {
 		Com_Printf( "WARNING: NET_IPSocket: setsockopt SO_BROADCAST: %s\n", NET_ErrorString() );
 	}
+	NET_SetSocketBuffers( newsocket, "NET_IPSocket" ); // HZM coop [bug-3912]
 
 	if( !net_interface || !net_interface[0]) {
 		address.sin_family = AF_INET;
@@ -917,6 +944,7 @@ SOCKET NET_IP6Socket( char *net_interface, int port, struct sockaddr_in6 *bindto
 		closesocket(newsocket);
 		return INVALID_SOCKET;
 	}
+	NET_SetSocketBuffers( newsocket, "NET_IP6Socket" ); // HZM coop [bug-3912]
 
 #ifdef IPV6_V6ONLY
 	{
