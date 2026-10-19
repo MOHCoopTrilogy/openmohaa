@@ -1027,11 +1027,87 @@ static const char *CG_CoopPickKeyName(int k1, int k2)
     return !p1 ? n1 : (!p2 ? n2 : n1);
 }
 
+// ---- [gamepad-next] controller glyphs -------------------------------------------------------------------------
+// A pad key label is the two bytes {PADLBL, 'a' + glyph}. textures/hud/coop_padglyphs.tga (docs/tools/gen_pad_glyphs.py,
+// shipped in the fixes pak) is a 4 x 4 atlas in the order of this table.
+#define PADLBL 1
+static const struct {
+    const char *name;
+    int         code;
+} s_padGlyphs[] = {
+    {"PAD0_A", 0},          {"PAD0_B", 1},           {"PAD0_X", 2},          {"PAD0_Y", 3},
+    {"PAD0_LEFTSHOULDER", 4}, {"PAD0_RIGHTSHOULDER", 5}, {"PAD0_LEFTTRIGGER", 6}, {"PAD0_RIGHTTRIGGER", 7},
+    {"PAD0_DPAD_UP", 8},    {"PAD0_DPAD_DOWN", 9},   {"PAD0_DPAD_LEFT", 10}, {"PAD0_DPAD_RIGHT", 11},
+    {"PAD0_LEFTSTICK_CLICK", 12}, {"PAD0_RIGHTSTICK_CLICK", 13}, {"PAD0_BACK", 14}, {"PAD0_START", 15},
+};
+static qhandle_t s_padGlyphShader = 0;
+
+static int CG_PadGlyphCode(const char *nm)
+{
+    int i;
+
+    if (!nm) {
+        return -1;
+    }
+    for (i = 0; i < (int)(sizeof(s_padGlyphs) / sizeof(s_padGlyphs[0])); i++) {
+        if (!Q_stricmp(nm, s_padGlyphs[i].name)) {
+            return s_padGlyphs[i].code;
+        }
+    }
+    return -1;
+}
+
+static qboolean CG_IsPadLabel(const char *s)
+{
+    return (s && s[0] == PADLBL && s[1]) ? qtrue : qfalse;
+}
+
+// size is in pixels, (x, y) the top-left corner
+static void CG_DrawPadGlyph(float x, float y, float size, int code, float alpha)
+{
+    vec4_t c;
+    float  u0 = (float)(code % 4) * 0.25f + 0.002f, v0 = (float)(code / 4) * 0.25f + 0.002f;
+
+    if (!s_padGlyphShader) {
+        s_padGlyphShader = cgi.R_RegisterShader("textures/hud/coop_padglyphs");
+    }
+    c[0] = c[1] = c[2] = 1.0f;
+    c[3]               = alpha;
+    cgi.R_SetColor(c);
+    cgi.R_DrawStretchPic(x, y, size, size, u0, v0, u0 + 0.246f, v0 + 0.246f, s_padGlyphShader);
+}
+
+// 1 when the player's last input came from the pad (the engine keeps in_padActive current), for forcing a refresh of
+// the cached key labels the moment the device changes
+static qboolean CG_PadModeChanged(int *seen)
+{
+    static cvar_t *cv;
+    int            now;
+
+    if (!cv) {
+        cv = cgi.Cvar_Get("in_padActive", "0", 0);
+    }
+    now = (cv && cv->integer) ? 1 : 0;
+    if (now != *seen) {
+        *seen = now;
+        return qtrue;
+    }
+    return qfalse;
+}
+
 // A key name as it is shown under an icon: upper case, and the long ones shortened so that what tells two keys
 // apart survives ("MOUSE4" was being cut to "MOUSE"). MOUSE4 -> M4, MWHEELUP -> WH-UP, KP_ENTER -> KP ENTER,
 // PAD0_DPAD_UP -> D-UP, PAD0_A -> A, PAD0_LEFTSHOULDER -> LB, PAD0_LEFTSTICK_UP -> LS UP. Whatever is still too wide is cut by the caller.
 static void CG_CoopItemKeyLabel(const char *nm, char *out, int outSize)
 {
+    int gc = CG_PadGlyphCode(nm);
+
+    if (gc >= 0 && outSize >= 3) {
+        out[0] = PADLBL;
+        out[1] = (char)('a' + gc);
+        out[2] = 0;
+        return;
+    }
     static const struct {
         const char *from, *to;
     } sub[] = {
@@ -1112,7 +1188,9 @@ static void CG_CoopItemKeys(void)
     static int nextMs = 0;
     int        i, k1, k2;
 
-    if (cg.time < nextMs && cg.time + 2000 > nextMs) {
+    static int padSeen = -1;
+
+    if (!CG_PadModeChanged(&padSeen) && cg.time < nextMs && cg.time + 2000 > nextMs) {
         return;
     }
     nextMs = cg.time + 1000; // bindings change in a menu, never mid-frame: once a second is plenty
@@ -1264,8 +1342,17 @@ static void CG_DrawCoopItems(void)
         }
 
         // bound key: centred under the icon, cut to the column so it can never touch the next one
-        Q_strncpyz(key, it->key, sizeof(key));
-        n = (int)strlen(key);
+        if (CG_IsPadLabel(it->key)) {
+            float gs = textH * 1.45f;
+
+            CG_DrawPadGlyph((float)((int)(xPx + iconPx * 0.5f - gs * 0.5f)), (float)((int)(topPx + iconPx + 1.0f * sy)), gs,
+                            it->key[1] - 'a', 0.92f * fade);
+            key[0] = 0;
+            n      = 0;
+        } else {
+            Q_strncpyz(key, it->key, sizeof(key));
+            n = (int)strlen(key);
+        }
         while (n > 0 && CG_FeedTextW(key, -1) * sx > pitchPx - 4.0f) {
             key[--n] = 0;
         }
@@ -1899,6 +1986,13 @@ static float CG_LootKeycap(fontheader_t *font, const char *key, float x, float y
     float  third = (float)((int)(h / 3.0f));
     vec4_t c;
 
+    if (CG_IsPadLabel(key)) {          // a controller button: its glyph, no key frame
+        float g = (float)((int)(h * 0.94f));
+
+        CG_DrawPadGlyph(x + (h - g) * 0.5f, y + (h - g) * 0.5f, g, key[1] - 'a', a);
+        return h;
+    }
+
     if (w < h) {
         w = h;
     }
@@ -1921,6 +2015,7 @@ void CG_DrawCoopLoot(void)
     static float   holdFracEnd = 0.0f;
     static char    keyLabel[16] = "";
     static int     keyNextMs    = 0;
+    static int     padSeenA     = -1;
     static int     artT = -1, artIdx = -1, artCls = 0;
     static char    artName[64] = "";
     fontheader_t  *font;
@@ -2022,7 +2117,7 @@ void CG_DrawCoopLoot(void)
         s_lootSearchShader = cgi.R_RegisterShader("textures/hud/loot/coop_loot_search");
     }
     // the bound Use key, as the item row shows its keys; bindings change in a menu, so once a second is plenty
-    if (cg.time >= keyNextMs || cg.time + 2000 < keyNextMs) {
+    if (CG_PadModeChanged(&padSeenA) || cg.time >= keyNextMs || cg.time + 2000 < keyNextMs) {
         int         k1 = -1, k2 = -1;
         const char *nm;
 
@@ -2093,7 +2188,7 @@ void CG_DrawCoopLoot(void)
     if (capH < textH + 5.0f) {
         capH = textH + 5.0f;
     }
-    capW = CG_FeedTextW(keyLabel, -1) * cgs.uiHiResScale[0] + capH * 0.62f;
+    capW = CG_IsPadLabel(keyLabel) ? capH : CG_FeedTextW(keyLabel, -1) * cgs.uiHiResScale[0] + capH * 0.62f;
     if (capW < capH) {
         capW = capH;
     }
@@ -2291,6 +2386,7 @@ void CG_DrawCoopAct(void)
     static float   alpha = 0.0f, holdFracEnd = 0.0f;
     static char    keyLabel[2][16] = {"", ""};
     static int     keyNextMs       = 0;
+    static int     padSeenB        = -1;
     char           spec[64], *tok, *save;
     char           name[32], caption[24];
     int            dt, h, hold = 0, fire = 0, dim = 0, k, ringMode = 0;
@@ -2415,7 +2511,7 @@ void CG_DrawCoopAct(void)
         s_lootSearchShader = cgi.R_RegisterShader("textures/hud/loot/coop_loot_search");
     }
     // the bound keys (Use / primary fire), as the loot prompt reads them; bindings change in a menu so once a second
-    if (cg.time >= keyNextMs || cg.time + 2000 < keyNextMs) {
+    if (CG_PadModeChanged(&padSeenB) || cg.time >= keyNextMs || cg.time + 2000 < keyNextMs) {
         static const char *cmds[2] = {"+use", "+attackprimary"};
         static const char *dflt[2] = {"USE", "FIRE"};
         int                j;
@@ -2426,7 +2522,7 @@ void CG_DrawCoopAct(void)
             const char *nm;
 
             cgi.Key_GetKeysForCommand(cmds[j], &k1, &k2);
-            nm = (k1 >= 0) ? cgi.Key_KeynumToBindString(k1) : NULL;
+            nm = (k1 >= 0) ? CG_CoopPickKeyName(k1, k2) : NULL;
             if (nm && nm[0] && nm[0] != '?') {
                 CG_CoopItemKeyLabel(nm, keyLabel[j], sizeof(keyLabel[j]));
                 keyLabel[j][8] = 0;
@@ -2448,7 +2544,7 @@ void CG_DrawCoopAct(void)
     if (capH < textH + 5.0f) {
         capH = textH + 5.0f;
     }
-    capW = CG_FeedTextW(keyLabel[fire], -1) * cgs.uiHiResScale[0] + capH * 0.62f;
+    capW = CG_IsPadLabel(keyLabel[fire]) ? capH : CG_FeedTextW(keyLabel[fire], -1) * cgs.uiHiResScale[0] + capH * 0.62f;
     if (capW < capH) {
         capW = capH;
     }

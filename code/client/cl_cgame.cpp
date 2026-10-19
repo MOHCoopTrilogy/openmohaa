@@ -861,7 +861,7 @@ void CL_InitCGameDLL( clientGameImport_t *cgi, clientGameExport_t **cge ) {
 	cgi->UI_GetHighResolutionScale  = UI_GetHighResolutionScale;
 	cgi->Key_StringToKeynum			= Key_StringToKeynum;
 	cgi->Key_KeynumToBindString		= Key_KeynumToBindString;
-	cgi->Key_GetKeysForCommand		= Key_GetKeysForCommand;
+	cgi->Key_GetKeysForCommand		= Key_GetKeysForCommandDev;
 
 	cgi->R_Model_GetHandle			= re.R_Model_GetHandle;
 

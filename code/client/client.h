@@ -608,6 +608,7 @@ float CL_KeyState (kbutton_t *key);
 const char *Key_KeynumToString( int keynum );
 const char *Key_KeynumToBindString( int keynum );
 void Key_GetKeysForCommand( const char *command, int *key1, int *key2 );
+void Key_GetKeysForCommandDev( const char *command, int *key1, int *key2 );
 int Key_GetCatcher( void );
 void CL_PadMoveCursor( int dx, int dy );
 void CL_SetMousePos( int x, int y );

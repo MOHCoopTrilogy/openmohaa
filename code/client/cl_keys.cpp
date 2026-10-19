@@ -714,6 +714,45 @@ void Key_GetKeysForCommand(const char *command, int *key1, int *key2)
 
 /*
 ===================
+Key_GetKeysForCommandDev
+
+[HZM gamepad-next] Key_GetKeysForCommand for the code that PRINTS a key to the player (cgame prompts, script
+getboundkey): the first slot is the binding on the device the player last used (in_padActive 1 = a pad button,
+0 = keyboard / mouse), the second is the other device. Key_GetKeysForCommand itself stays raw (the Controls menu
+needs its fixed slot order). A command with no binding on the preferred device falls back to the other one.
+===================
+*/
+void Key_GetKeysForCommandDev(const char *command, int *key1, int *key2)
+{
+    int i, kb = -1, pd = -1;
+    int padActive = Cvar_VariableIntegerValue("in_padActive");
+
+    for (i = 0; i < MAX_KEYS; i++) {
+        if (!keys[i].binding || stricmp(command, keys[i].binding)) {
+            continue;
+        }
+        if (i >= K_PAD0_A && i <= K_PAD0_TOUCHPAD) {
+            if (pd < 0) {
+                pd = i;
+            }
+        } else if (kb < 0) {
+            kb = i;
+        }
+    }
+    if (padActive && pd >= 0) {
+        *key1 = pd;
+        *key2 = kb;
+    } else if (kb >= 0) {
+        *key1 = kb;
+        *key2 = pd;
+    } else {
+        *key1 = pd;
+        *key2 = -1;
+    }
+}
+
+/*
+===================
 Key_Unbind_f
 ===================
 */
