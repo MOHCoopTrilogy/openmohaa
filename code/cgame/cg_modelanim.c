@@ -64,6 +64,50 @@ static void CoopGunLatchEnd(const char *why)
     s_coopGunLatch.ent = -1;
 }
 
+// HZM coop [other players' ADS 2026-10-19, user item 3] Is another player AIMING? No network field says so, but the server
+// puts a player in the AIM torso state while his ADS button is down, and that state's action is one of the coop_aim_* /
+// prone / supine aim aliases (player_Torso.st), which every client sees in his entity's frameInfo. Cached per player tiki.
+static qboolean CoopPlayerEntAimed(int num)
+{
+    static dtiki_t          *s_tiki = NULL;
+    static int               s_idx[7];
+    static const char *const s_names[7] = {"coop_aim_smg",     "coop_aim_mg",    "coop_aim_rifle", "coop_aim_pistol",
+                                           "coop_prone_aim",   "coop_prone_aim_pistol", "coop_supine_aim"};
+    centity_t               *ce;
+    dtiki_t                 *pt;
+    int                      k, q;
+
+    if (num < 0 || num >= MAX_CLIENTS) {
+        return qfalse;
+    }
+    ce = &cg_entities[num];
+    if (ce->currentState.eType != ET_PLAYER || (ce->currentState.eFlags & EF_DEAD) || ce->currentState.modelindex <= 0) {
+        return qfalse;
+    }
+    pt = cgi.R_Model_GetHandle(cgs.model_draw[ce->currentState.modelindex]);
+    if (!pt) {
+        return qfalse;
+    }
+    if (pt != s_tiki) {
+        for (q = 0; q < 7; q++) {
+            s_idx[q] = cgi.Anim_NumForName(pt, s_names[q]);
+        }
+        s_tiki = pt;
+    }
+    for (k = 0; k < MAX_FRAMEINFOS; k++) {
+        const frameInfo_t *fi = &ce->currentState.frameInfo[k];
+        if (fi->weight <= 0.0f || fi->index < 0) {
+            continue;
+        }
+        for (q = 0; q < 7; q++) {
+            if (s_idx[q] >= 0 && fi->index == s_idx[q]) {
+                return qtrue;
+            }
+        }
+    }
+    return qfalse;
+}
+
 // the server's row `iSrc` is showing in `slot` at time `t` (s) and the cgame shows `iSwap` there (-1 = no swap)
 static void CoopGunLatchSee(int ent, dtiki_t *tiki, int kind, int slot, int iSrc, int iSwap, float t)
 {
@@ -3070,6 +3114,38 @@ void CG_ModelAnim(centity_t *cent, qboolean bDoShaderTime)
     // them. Decided HERE on the first frame `reload` shows, so that frame's entry commands (the sound) are already
     // the shown animation's. Same length as `reload`; the server still runs `reload` (surface / ammo commands).
     // Client-only, display only. Matches the view-model code's choice of the hands' `_ads` clip (same inputs).
+    // HZM coop [other players' ADS 2026-10-19] ANOTHER player's gun, held aimed: the same `fire` -> `fire_ads` and
+    // `reload` -> `reload_ads_loaded` swaps the local gun gets. Their rounds are not known here, so the emptied variants
+    // (`reload_ads_empty`, `fire_last`) stay local-only. coop_vmAdsOthers 0 = off, 2 = print aim changes.
+    if (model.tiki && cg.snap && s1->parent != ENTITYNUM_NONE && s1->parent < MAX_CLIENTS && s1->parent != cg.snap->ps.clientNum) {
+        static cvar_t *pAdsOthers = NULL;
+        static int     s_lastAim[MAX_CLIENTS];
+        if (!pAdsOthers) {
+            pAdsOthers = cgi.Cvar_Get("coop_vmAdsOthers", "1", 0);
+        }
+        if (pAdsOthers->integer) {
+            qboolean bAim = CoopPlayerEntAimed(s1->parent);
+            if (pAdsOthers->integer > 1 && s_lastAim[s1->parent] != (int)bAim + 1) {
+                s_lastAim[s1->parent] = (int)bAim + 1;
+                cgi.Printf("^~^~^ ADSOTHER player=%d aimed=%d gun=%s\n", s1->parent, (int)bAim, cgi.TIKI_Name(model.tiki));
+            }
+            if (bAim) {
+                int iF = cgi.Anim_NumForName(model.tiki, "fire"), iFA = cgi.Anim_NumForName(model.tiki, "fire_ads");
+                int iR = cgi.Anim_NumForName(model.tiki, "reload"), iRA = cgi.Anim_NumForName(model.tiki, "reload_ads_loaded");
+                int kk;
+                for (kk = 0; kk < MAX_FRAMEINFOS; kk++) {
+                    if (!model.frameInfo[kk].weight) {
+                        continue;
+                    }
+                    if (iF != -1 && iFA != -1 && model.frameInfo[kk].index == iF) {
+                        model.frameInfo[kk].index = iFA;
+                    } else if (iR != -1 && iRA != -1 && model.frameInfo[kk].index == iR) {
+                        model.frameInfo[kk].index = iRA;
+                    }
+                }
+            }
+        }
+    }
     if (model.tiki && cg.snap && s1->parent == cg.snap->ps.clientNum && s1->parent != ENTITYNUM_NONE) {
         static cvar_t *pAimedGun  = NULL;
         static int     s_lastEnt  = -1;
