@@ -74,6 +74,11 @@ protected:
     void             HighlightFGColor(Event *ev);
 
 public:
+    // [HZM gamepad-next] a pull-down opened by the pad stays open after the button is released (A press/release)
+    static UIPulldownMenu *s_padOpen;
+    static bool            PadKey(int key);     // D-pad up/down move the highlight (and the cursor onto it)
+    static bool            PadDismiss(void);    // B: close it without choosing
+
     UIPulldownMenu();
     ~UIPulldownMenu();
 

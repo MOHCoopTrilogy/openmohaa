@@ -637,7 +637,8 @@ bool UIWindowManager::PadNavigate(int dx, int dy)
                            (int)w->CanActivate(), (int)w->isEnabled(), (int)w->IsVisible(), (int)w->getShow(),
                            (int)w->m_clippedframe.size.width, (int)c3.x, (int)c3.y, r3 ? r3->getName() : "-");
         }
-        if (!w->CanActivate() || !w->isEnabled()) {
+        // sliders and check boxes are not "activatable" in this UI (the mouse drags / toggles them) but the pad must reach them
+        if (!w->isEnabled() || !(w->CanActivate() || w->isSubclassOf(UISlider) || w->isSubclassOf(UICheckBox))) {
             continue;
         }
         if (w->m_clippedframe.size.width < 2 || w->m_clippedframe.size.height < 2) {
@@ -816,6 +817,11 @@ qboolean UIWindowManager::KeyEvent(int key, unsigned int time)
 {
     UIWidget *selwidget = NULL;
 
+    // [HZM gamepad-next] an open pad pull-down owns the D-pad (up / down = highlight, A = pick, B = cancel)
+    if (UIPulldownMenu::PadKey(key)) {
+        return true;
+    }
+
     // [HZM gamepad-next] LB / RB = previous / next tab; with no tab row they page the focused list.
     if ((key == K_PAD0_LEFTSHOULDER || key == K_PAD0_RIGHTSHOULDER) && !m_bindactive) {
         if (!PadTab(key == K_PAD0_RIGHTSHOULDER ? 1 : -1) && m_activeControl && m_activeControl != this) {
@@ -844,6 +850,20 @@ qboolean UIWindowManager::KeyEvent(int key, unsigned int time)
         static const int ddy[4]   = {-1, 1, 0, 0};
         int              d        = key - K_PAD0_DPAD_UP;
 
+        // the widget UNDER the cursor gets the arrow first (a slider the D-pad just landed on: left / right = value)
+        {
+            UIPoint2D here((float)uid.mouseX, (float)uid.mouseY);
+            UIWidget *w = getResponder(here);
+
+            for (; w && w != this; w = w->getParent()) {
+                if (w->isSubclassOf(UISlider) && w->KeyEvent(arrow[d], time)) {
+                    if (UI_GetCvarInt("ui_clickdebug", 0)) {
+                        uii.Sys_Printf("^~^~^ PADNAV dpad %d -> slider '%s'\n", d, w->getName());
+                    }
+                    return true;
+                }
+            }
+        }
         if (m_activeControl && m_activeControl != this && m_activeControl->KeyEvent(arrow[d], time)) {
             if (UI_GetCvarInt("ui_clickdebug", 0)) {
                 uii.Sys_Printf("^~^~^ PADNAV dpad %d eaten by '%s'\n", d, m_activeControl->getName());

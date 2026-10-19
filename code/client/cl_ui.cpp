@@ -2884,6 +2884,18 @@ void UI_DeactiveFloatingWindows(void)
 
 /*
 ====================
+UI_PadDismissPopup
+
+[HZM gamepad-next] B (Escape) closes a pad-opened pull-down first; returns qtrue when it did.
+====================
+*/
+qboolean UI_PadDismissPopup(void)
+{
+    return UIPulldownMenu::PadDismiss() ? qtrue : qfalse;
+}
+
+/*
+====================
 UI_PushMenu
 ====================
 */

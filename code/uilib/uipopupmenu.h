@@ -132,6 +132,7 @@ public:
     void              Dismiss(void);
     void              DismissEvent(Event *ev);
     void              setAutoDismiss(bool b);
+    bool              PadStep(int dir, float *outX, float *outY);
     void              setNextSelection(void);
     void              setPrevSelection(void);
     uipopup_describe *getSelectedDescribe(void);

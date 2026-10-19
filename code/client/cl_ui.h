@@ -136,6 +136,7 @@ qboolean UI_LoadHints_KeyNav(int key, qboolean down); // HZM hint arrows: CL_Key
 // windows
 //
 void UI_DeactiveFloatingWindows(void);
+qboolean UI_PadDismissPopup(void);
 
 //
 // console

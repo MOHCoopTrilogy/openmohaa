@@ -395,6 +395,50 @@ void UIPopupMenu::setAutoDismiss(bool b)
     m_autodismiss = b;
 }
 
+/*
+====================
+UIPopupMenu::PadStep
+
+[HZM gamepad-next] D-pad up / down in an open pull-down: highlight the next / previous item (separators skipped,
+wraps) and report the screen centre of that item, so the caller can put the cursor on it - then A is an ordinary click
+on the highlighted row.
+====================
+*/
+bool UIPopupMenu::PadStep(int dir, float *outX, float *outY)
+{
+    int n = m_describe->NumObjects();
+    int idx = m_selected, tries, i;
+
+    if (n < 1) {
+        return false;
+    }
+    for (tries = 0; tries < n; tries++) {
+        if (idx < 1 || idx > n) {
+            idx = (dir > 0) ? 1 : n;
+        } else {
+            idx += dir;
+            if (idx > n) {
+                idx = 1;
+            }
+            if (idx < 1) {
+                idx = n;
+            }
+        }
+        if (m_describe->ObjectAt(idx)->type != UIP_SEPARATOR) {
+            break;
+        }
+    }
+    setSelection(idx);
+
+    float top = getVirtualScale()[1] * 4.0f;
+    for (i = 1; i < idx; i++) {
+        top += getDescribeHeight(m_describe->ObjectAt(i));
+    }
+    *outX = m_screenframe.pos.x + m_frame.size.width * 0.5f;
+    *outY = m_screenframe.pos.y + top + getDescribeHeight(m_describe->ObjectAt(idx)) * 0.5f;
+    return true;
+}
+
 void UIPopupMenu::setNextSelection(void)
 {
     if (!m_describe->NumObjects()) {

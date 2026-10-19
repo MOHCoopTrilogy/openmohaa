@@ -1221,6 +1221,9 @@ void CL_KeyEvent(int key, qboolean down, unsigned time)
     // escape is always handled special
     if (key == K_ESCAPE) {
         if (down) {
+            if (UI_PadDismissPopup()) {
+                return;     // [HZM gamepad-next] B closes an open pull-down, nothing else
+            }
             qboolean wasup = UI_MenuUp();
             UI_DeactiveFloatingWindows();
 
