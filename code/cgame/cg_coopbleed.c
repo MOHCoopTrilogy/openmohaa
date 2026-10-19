@@ -89,6 +89,34 @@ static qboolean CG_BleedSelf(coopBleedEnt_t *out)
 }
 
 /*
+[2026-10-18 hdring] TEST INSTRUMENT (default off, not archived): coop_hdRingTest <0..1> draws the OWN bleed ring at that remaining
+fraction without a real DBNO (harness proof of the ring's look; the post-FX senses are untouched, they read CG_BleedSelf).
+*/
+static qboolean CG_BleedSelfOrTest(coopBleedEnt_t *out)
+{
+    static cvar_t *pT = NULL;
+
+    if (!pT) {
+        pT = cgi.Cvar_Get("coop_hdRingTest", "0", 0);
+    }
+    if (pT->value > 0.0f && cg.snap) {
+        out->num   = cg.snap->ps.clientNum;
+        out->rem   = pT->value > 1.0f ? 1.0f : pT->value;
+        out->total = 60;
+        out->flare = 0;
+        return qtrue;
+    }
+    return CG_BleedSelf(out);
+}
+
+/* [2026-10-18 hdring] the hold ring moves out while this is true (see cg_hdprogress.c) */
+qboolean CG_BleedSelfActive(void)
+{
+    coopBleedEnt_t b;
+    return CG_BleedSelf(&b);
+}
+
+/*
 Called from cg_view.c where the two post-FX signals are published. pHealthFrac: only touched while bleeding
 (the caller has already forced its DBNO value); pSuppress: raised to the bleed tunnel, never lowered.
 */
@@ -97,7 +125,7 @@ void CG_CoopBleedPostFx(float *pHealthFrac, float *pSuppress)
     coopBleedEnt_t b;
     float          prog, t;
 
-    if (!CG_BleedSelf(&b)) {
+    if (!CG_BleedSelfOrTest(&b)) {
         return;
     }
     prog = 1.0f - b.rem;
@@ -142,63 +170,27 @@ static qboolean CG_BleedProject(const vec3_t p, float *sx, float *sy)
 /* remaining-time colour: white -> red as the bleed-out runs */
 static void CG_BleedColor(float rem, float a, vec4_t col)
 {
-    float k = 1.0f - rem;
-    col[0]  = 1.0f;
-    col[1]  = 1.0f - 0.80f * k;
-    col[2]  = 1.0f - 0.85f * k;
+    // cream (the HUD's rank / readout white) -> the revive coral of the HD hold family as the time runs out
+    vec4_t hot;
+    float  k = 1.0f - rem;
+    CG_HdFamilyColor(HD_FAM_REVIVE, 1.0f, hot);
+    col[0]  = 0.941f + (hot[0] - 0.941f) * k;
+    col[1]  = 0.910f + (hot[1] - 0.910f) * k;
+    col[2]  = 0.839f + (hot[2] - 0.839f) * k;
     col[3]  = a;
 }
 
 /*
-A ring of whole-pixel boxes stepped round the circle, the hit marker's recipe. The track (full circle, dim) is
-drawn first; the fill is the arc from (1 - rem) of a turn clockwise from 12 o'clock round to 12 o'clock, so the
-empty part opens at the top and sweeps clockwise.
+[2026-10-18 hdring] The ring is now drawn by the shared HD family (cg_hdprogress.c): feathered triangle strips with round
+caps, no whole-pixel boxes. Same meaning as before: the track (full circle, dim) is drawn first; the fill is the arc from
+(1 - rem) of a turn clockwise from 12 o'clock round to 12 o'clock, so the empty part opens at the top and sweeps clockwise;
+a dark halo keeps it readable on snow.
 */
 static void CG_BleedRing(float cx, float cy, float r, float th, float rem, const vec4_t fill, float trackA)
 {
-    float step, a0, a, end, ow;
-    vec4_t col;
+    float haloA = (fill[3] > trackA ? fill[3] : trackA) * 0.55f;
 
-    if (r < 2.0f || th < 1.0f) {
-        return;
-    }
-    step = (th * 0.55f) / r;
-    if (step < 0.01f) {
-        step = 0.01f;
-    }
-
-    // a 1 px dark outline under the whole ring: a thin white arc vanishes on snow without it
-    ow = th + 2.0f;
-    col[0] = col[1] = col[2] = 0.0f;
-    col[3] = (fill[3] > trackA ? fill[3] : trackA) * 0.55f;
-    if (col[3] > 0.003f) {
-        float so = (ow * 0.55f) / r;
-        cgi.R_SetColor(col);
-        for (a = 0.0f; a < 2.0f * (float)M_PI; a += so) {
-            cgi.R_DrawBox(cx + (float)sin(a) * r - ow * 0.5f, cy - (float)cos(a) * r - ow * 0.5f, ow, ow);
-        }
-    }
-
-    if (trackA > 0.003f) {
-        col[0] = col[1] = col[2] = 0.10f;
-        col[3] = trackA;
-        cgi.R_SetColor(col);
-        for (a = 0.0f; a < 2.0f * (float)M_PI; a += step) {
-            cgi.R_DrawBox(cx + (float)sin(a) * r - th * 0.5f, cy - (float)cos(a) * r - th * 0.5f, th, th);
-        }
-    }
-
-    if (rem > 0.002f && fill[3] > 0.003f) {
-        cgi.R_SetColor(fill);
-        a0  = (1.0f - rem) * 2.0f * (float)M_PI;
-        end = 2.0f * (float)M_PI;
-        for (a = a0; a < end; a += step) {
-            cgi.R_DrawBox(cx + (float)sin(a) * r - th * 0.5f, cy - (float)cos(a) * r - th * 0.5f, th, th);
-        }
-        // the leading edge lands exactly on 12 o'clock
-        cgi.R_DrawBox(cx - th * 0.5f, cy - r - th * 0.5f, th, th);
-    }
-    cgi.R_SetColor(NULL);
+    CG_HdRing(cx, cy, r, th, rem, fill, trackA, haloA);
 }
 
 static void CG_BleedDrawSelf(float dt)
@@ -206,14 +198,15 @@ static void CG_BleedDrawSelf(float dt)
     static cvar_t *pNum = NULL;
     coopBleedEnt_t b;
     float          cx, cy, r, th, secs, rate, depth, pulse, f, a, rr;
-    int            th2, age;
+    int            age;
+    float          th2;
     vec4_t         col;
 
     if (!pNum) {
         pNum = cgi.Cvar_Get("coop_bleedNumber", "0", CVAR_ARCHIVE);
     }
 
-    if (!CG_BleedSelf(&b)) {
+    if (!CG_BleedSelfOrTest(&b)) {
         s_selfAppear   = 0.0f;
         s_selfFlareBit = -1;
         s_selfShown    = 1.0f;
@@ -270,12 +263,11 @@ static void CG_BleedDrawSelf(float dt)
         cy = cgs.glconfig.vidHeight * 0.5f;
     }
 
-    th = cgs.glconfig.vidHeight * 0.0024f;
-    if (th < 1.0f) {
-        th = 1.0f;
+    th = cgs.glconfig.vidHeight * 0.0026f;
+    if (th < 2.2f) {
+        th = 2.2f;
     }
-    th  = (float)(int)(th + 0.5f);
-    th2 = (int)(th + th * f + 0.5f);   // the flare thickens the stroke by whole pixels
+    th2 = th + th * f;   // the flare thickens the stroke (sub-pixel is fine now: the edge is feathered)
     r   = cgs.glconfig.vidHeight * 0.040f;   // clear of the crosshair arms with a gap
     rr  = r * (1.0f + 0.16f * f);
 
@@ -290,7 +282,7 @@ static void CG_BleedDrawSelf(float dt)
         col[2] += (0.12f - col[2]) * f;
         col[3] += (1.0f - col[3]) * f;
     }
-    CG_BleedRing(cx, cy, rr, (float)th2, s_selfShown, col, 0.45f * s_selfAppear);
+    CG_BleedRing(cx, cy, rr, th2, s_selfShown, col, 0.45f * s_selfAppear);
 
     if (pNum->integer) {
         const char *txt = va("%d", (int)ceil(secs - 0.05f));
@@ -391,10 +383,9 @@ static void CG_BleedDrawMates(void)
         }
 
         th = cgs.glconfig.vidHeight * 0.0019f;
-        if (th < 1.0f) {
-            th = 1.0f;
+        if (th < 1.6f) {
+            th = 1.6f;
         }
-        th = (float)(int)(th + 0.5f);
         r  = sz * 0.80f;
         CG_BleedColor(b.rem, 0.95f * a * pulse, col);
         CG_BleedRing(sx, sy, r, th, b.rem, col, 0.40f * a);

@@ -826,6 +826,7 @@ void CL_InitCGameDLL( clientGameImport_t *cgi, clientGameExport_t **cge ) {
 	cgi->R_GetShaderHeight			= re.GetShaderHeight;
 
 	cgi->R_DrawBox					= re.DrawBox;
+	cgi->R_DrawTrianglePic			= re.DrawTrianglePic;	// HZM coop hdring
 	cgi->R_SwipeBegin				= re.SwipeBegin;
 	cgi->R_SwipePoint				= re.SwipePoint;
 	cgi->R_SwipeEnd					= re.SwipeEnd;

@@ -16,6 +16,7 @@
     {"Enfield L42A1", "w_enfieldl42a1", "L42A1", 0.967f, 0.426f},
     {"FG 42", "w_fg42", "FG 42", 0.875f, 0.430f},
     {"G 43", "w_g43", "G43", 0.930f, 0.387f},
+    {"G 43 Irons", "w_g43irons", "G43 Irons", 0.930f, 0.332f},
     {"G43 Sniper", "w_g43sniper", "G43 Sniper", 0.938f, 0.367f},
     {"Gewehrgranate", "w_gewehrgranate", "Gewehrgranate", 0.967f, 0.387f},
     {"Hi-Standard Silenced", "w_histandardsilenced", "Hi-Standard", 0.494f, 0.566f},
@@ -43,6 +44,7 @@
     {"S&W M10 .38", "w_swm1038", "M10", 0.457f, 0.590f},
     {"SVT 40", "w_svt40", "SVT-40", 0.969f, 0.391f},
     {"Shotgun", "w_shotgun", "Shotgun", 0.902f, 0.438f},
+    {"Shotgun (Double Barrel)", "w_dbshotgun", "Double Barrel", 0.801f, 0.469f}, // HZM coop [dbshotgun]: full-name row (cg_coopfeed.c tries the full name first)
     {"Silenced Beretta", "w_silencedberetta", "Beretta", 0.613f, 0.504f},
     {"Silenced Colt .45", "w_silencedcolt45", "Colt .45", 0.602f, 0.473f},
     {"Silenced Grease Gun", "w_silencedgreasegun", "Grease Gun", 0.852f, 0.707f},

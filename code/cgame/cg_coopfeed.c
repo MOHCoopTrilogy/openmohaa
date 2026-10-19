@@ -848,7 +848,9 @@ can never run into its neighbour at any resolution; a longer name is cut to fit.
 */
 #define COOPITEM_ICON_V   14.0f // icon edge, virtual-480 units
 #define COOPITEM_TOP_V    66.0f // top of the icons above the bottom of the screen, virtual-480 units (feed: 70)
-#define COOPITEM_LEFT_V   6.0f
+// [bug-3953] the row's left edge is the health cluster's: the stamina arc's left edge (coop_staminaArcX, 32 hi-res
+// units), so the icons, the arc and the cross read as one group. It was 6 virtual-480 units (9 px at 720p), 23 px
+// short of the arc at 720p and 32 px at 1080p.
 #define COOPITEM_GAP_V    12.0f
 #define COOPITEM_MIN_ICON 14.0f // pixels
 #define COOPITEM_KEY_PX   48.0f // room a key label is guaranteed, in hi-res units
@@ -1009,7 +1011,8 @@ static void CG_DrawCoopItems(void)
         return;
     }
     // a briefing map has no kit to show, and the ready gate's roster is drawn in this corner there
-    if (strstr(cgs.mapname, "briefing/")) {
+    // [bug-3954] and the lobby maps (co_lobby*): the script side already publishes "-" there, this is the backstop
+    if (strstr(cgs.mapname, "briefing/") || strstr(cgs.mapname, "co_lobby")) {
         return;
     }
     CG_CoopItemKeys();
@@ -1067,7 +1070,14 @@ static void CG_DrawCoopItems(void)
         pitchPx = COOPITEM_KEY_PX * sx;
     }
     textH = 12.0f * sy;
-    xPx   = COOPITEM_LEFT_V * vs;
+    {
+        static cvar_t *pArcX = NULL;
+
+        if (!pArcX) {
+            pArcX = cgi.Cvar_Get("coop_staminaArcX", "32", CVAR_ARCHIVE);
+        }
+        xPx = pArcX->value * sx;
+    }
 
     for (i = 0; i < COOPITEM_N; i++) {
         coopItem_t *it = &s_coopItems[i];
@@ -1675,11 +1685,19 @@ void CG_DrawCoopLoot(void)
             artIdx = -1;
             artCls = (cls >= 0 && cls <= 2) ? cls : 0;
             Q_strncpyz(artName, cs ? cs : "", sizeof(artName));
-            p = strstr(artName, " (");
+            // HZM coop [dbshotgun 2026-10-13] the FULL name first: a gun that is its own weapon although its name
+            // carries a " (..)" part ("Shotgun (Double Barrel)") has its own picture row
+            for (i = 0; i < LOOT_ART_N; i++) {
+                if (!Q_stricmp(artName, s_lootArt[i].name)) {
+                    artIdx = i;
+                    break;
+                }
+            }
+            p = (artIdx < 0) ? strstr(artName, " (") : NULL;
             if (p) {
                 *p = 0; // "<Base Gun> (<Finish>)" is the same gun
             }
-            for (i = 0; i < LOOT_ART_N; i++) {
+            for (i = 0; i < LOOT_ART_N && artIdx < 0; i++) {
                 if (!Q_stricmp(artName, s_lootArt[i].name)) {
                     artIdx = i;
                     break;
@@ -1718,7 +1736,8 @@ void CG_DrawCoopLoot(void)
         capW = capH;
     }
     gap    = 30.0f * s;
-    trackW = (float)((int)(48.0f * s + 0.5f));
+    // [2026-10-18 hdring] no track bar any more: a hold shows the word "Hold" beside its keycap and the progress is the HD ring round the crosshair
+    trackW = CG_FeedTextW("Hold", -1) * cgs.uiHiResScale[0];
     trackH = (float)((int)(5.0f * s + 0.5f));
     if (trackH < 4.0f) {
         trackH = 4.0f;
@@ -1807,16 +1826,10 @@ void CG_DrawCoopLoot(void)
         } else {
             float w  = CG_LootKeycap(font, keyLabel, rx, rowY, capH, alpha);
             float tx = (float)((int)(rx + w + 6.0f * s));
-            float ty = (float)((int)(rowY + (capH - trackH) * 0.5f));
-
-            // the track: a dark slot with a thin cream rim, so an EMPTY track already says "hold"
-            CG_LootBox(tx - 2.0f, ty - 2.0f, trackW + 4.0f, trackH + 4.0f, 0.05f, 0.045f, 0.04f, 0.67f * alpha);
-            CG_LootBox(tx - 1.0f, ty - 1.0f, trackW + 2.0f, 1.0f, 0.94f, 0.91f, 0.84f, 0.58f * alpha);
-            CG_LootBox(tx - 1.0f, ty + trackH, trackW + 2.0f, 1.0f, 0.94f, 0.91f, 0.84f, 0.58f * alpha);
-            CG_LootBox(tx - 1.0f, ty, 1.0f, trackH, 0.94f, 0.91f, 0.84f, 0.58f * alpha);
-            CG_LootBox(tx + trackW, ty, 1.0f, trackH, 0.94f, 0.91f, 0.84f, 0.58f * alpha);
-            if (frac > 0.0f && fillA > 0.0f) {
-                CG_LootBox(tx, ty, (float)((int)(trackW * frac + 0.5f)), trackH, 0.94f, 0.91f, 0.84f, 0.94f * alpha * fillA);
+            // the hold ring (cg_hdprogress.c) round the crosshair: shown only while a hold runs or is fading out
+            CG_LootText(font, "Hold", tx, rowY + (capH - textH) * 0.5f - 1.0f * cgs.uiHiResScale[1], 0.94f, 0.91f, 0.84f, alpha * 0.85f);
+            if (fillA > 0.0f) {
+                CG_HdHoldRing(frac, HD_FAM_USE, alpha * fillA, 1, 1);
             }
         }
         x += g[i].gw + gap;

@@ -1038,6 +1038,27 @@ void CG_Init(clientGameImport_t *imported, int serverMessageNum, int serverComma
     cgi.Cvar_Set("coop_hudSmoke", "");
     // HZM-MP-END(mp_armory_session)
 
+    // HZM-LO-BEGIN(armory_pick_userinfo)
+    // [loadout review 2026-10-15] ARMORY PICKS AS STATE, NOT EVENTS. The armory used to send every pick as a name-bus token
+    // (`append name ,sn35`): the name is 32 chars and the server dispatches ONE token per ~0.75 s batch, so quick clicks
+    // stacked and all but the first were dropped. These USERINFO|ARCHIVE cvars carry the LATEST pick per row instead (skin
+    // page, helmet page, glove page, gun id per slot, finish id per slot); the armory cfgs `set` them, the server game
+    // script reads them with info_valueforkey (player.scr armory poll) and converges on the last value. Old clients simply
+    // never have them and keep using the name bus; the server accepts both. Same flags/pattern as the kit cvars below.
+    {
+        static const char *const kPickCvars[11] = {
+            "lp_s", "lp_h", "lp_g", "lp_w1", "lp_w2", "lp_w3", "lp_w4", "lp_f1", "lp_f2", "lp_f3", "lp_f4"
+        };
+        int pi;
+        for (pi = 0; pi < 11; pi++) {
+            cgi.Cvar_Get(kPickCvars[pi], "", CVAR_ARCHIVE | CVAR_USERINFO);
+        }
+    }
+    // capability flag: always "1" in the userinfo of a client that carries the lp_* state channel. The server then ignores that
+    // client's armory NAME-BUS tokens (the stale first token of a burst used to land AFTER the final state and win).
+    cgi.Cvar_Get("lp_v", "1", CVAR_USERINFO | CVAR_ROM);
+    // HZM-LO-END(armory_pick_userinfo)
+
     // HZM-MP-BEGIN(mp_kit_userinfo)
     // E1 [MP armories slice 2] - register the carried default kit cvars as USERINFO|ARCHIVE so a
     // player's MP weapon picks travel with them across servers via the userinfo string. Six slots
@@ -1133,6 +1154,9 @@ void CG_Init(clientGameImport_t *imported, int serverMessageNum, int serverComma
     // HUD setup
     CG_RefreshHudDrawElements();
     cgi.Cmd_Execute(EXEC_NOW, "ui_hud 1\n");
+
+    // HZM coop [bug-3903] progression follows the player: send our own save records to a remote server
+    CG_CoopSync_Init();
 }
 
 /*
@@ -1144,6 +1168,9 @@ Called before every level change or subsystem restart
 */
 void CG_Shutdown(void)
 {
+    // HZM coop [bug-3903] fold the last XP total the server showed us into our own save record
+    CG_CoopSync_Shutdown();
+
     L_ShutdownEvents();
     // Shutdown radar
     cgi.CL_InitRadar(NULL, NULL, -1);

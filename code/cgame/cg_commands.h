@@ -759,7 +759,14 @@ public:
 // slots exist purely to absorb a burst. m_tempmodels is a flat array in ClientGameCommandManager,
 // so the cost is bounded and paid once at load.
 #define MAX_TEMPMODELS 4096
-#define MAX_BEAMS      4096
+// HZM coop [bug-3881] 4096 -> 8192, and rain / snow keep to the first 4096 (coop_rainMaxBeams, cg_nature.cpp). Slow
+// snow has always wanted far more streaks than the pool holds and kept it full, so every other beam in the game was
+// refused while it snowed; rain streaks now live longer (until the tail has reached the ground) and from a rooftop
+// the downpour filled it too. Snow draws what it drew before; the other 4096 are for everything else.
+#define MAX_BEAMS      8192
+// HZM coop [bug-3881] cgame-only beam flag (the shared BEAM_ flags in q_shared.h end at 1<<14): a rain streak whose
+// head stops where the drop lands while its tail runs on into that point. See CG_HZMRainTailRun in cg_nature.cpp.
+#define BEAM_HZM_TAILRUN (1 << 24)
 
 class ClientGameCommandManager : public Listener
 {

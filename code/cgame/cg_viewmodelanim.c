@@ -266,7 +266,9 @@ int CG_GetVMAnimPrefixIndex()
         if (!Q_stricmp(szWeaponName, "Mosin Nagant Rifle")) {
             return WPREFIX_MOSIN;
         }
-        if (!Q_stricmp(szWeaponName, "G 43")) {
+        // HZM coop [g43 irons 2026-10-12] "G 43 Irons" = the G43 without its scope (coop_g43_irons*.tik): the same
+        // hands. It is a base name of its own on purpose - the scope table (cg_hzmscope.c) lists "G 43".
+        if (!Q_stricmp(szWeaponName, "G 43") || !Q_stricmp(szWeaponName, "G 43 Irons")) {
             return WPREFIX_G43;
         }
         if (!Q_stricmp(szWeaponName, "Enfield L42A1")) {
@@ -504,8 +506,20 @@ int CG_GetVMAnimPrefixIndex()
 // catch entering ADS and miss leaving it - which is the direction actually complained about.
 // HZM coop - client-only viewmodel anim id for the lower/raise idle gesture. NOT a server value.
 #define COOP_VM_ANIM_IDLELOWER 15
+// HZM coop [aimed per-shot cycle 2026-10-12] client-only: the hands rack a hand-cycled gun after an aimed shot
+#define COOP_VM_ANIM_CYCLE 16
 
 static int s_iCoopPrevVMAnim = -1;
+// HZM coop [heavy lane 2026-10-13, shotgun] the reload in progress STARTED on an empty gun (taken when its `reload` row
+// is chosen): the end of a start / single / end reload racks the action only then (apply_sgpump.py)
+static qboolean s_coopReloadFromEmpty = qtrue;
+// HZM coop [heavy lane 2026-10-13, shotgun] the end row now starting is a BREAK-OFF with a round chambered: the server
+// stepped the view-anim change counter by two (state RELOAD_SHOTGUN_BREAK_QUICK, apply_sgbreak.py)
+static qboolean s_coopReloadBreak = qfalse;
+qboolean        CG_CoopReloadFromEmpty(void)
+{
+    return s_coopReloadFromEmpty;
+}
 static qboolean s_coopAdsClip = qfalse; // HZM coop [adsanim] the clip being started is a <gun>_<anim>_ads variant
 static qboolean s_coopAdsBolt = qfalse; // HZM coop [adsreload] ...and it is a bolt (rechamber) clip
 static int      s_coopAdsSlot = -1;     // HZM coop [adsbolt] slot playing an _ads clip (-1 = none)
@@ -567,10 +581,43 @@ qboolean CG_VMAmmoPropEarly(dtiki_t *tiki)
     return qtrue;
 }
 
+// HZM coop [aimed per-shot cycle 2026-10-12] the client-only cycle clip is what the hands are playing right now
+qboolean CG_VMAimedCycleActive(void)
+{
+    return (cgi.anim && cgi.anim->g_iLastVMAnim == COOP_VM_ANIM_CYCLE) ? qtrue : qfalse;
+}
+
 qboolean CG_VMAdsTagRight(void)
 {
     // HZM coop [adsreload] bolt clips only: a reload clip keeps the server's tag (its ammo prop rides the other hand)
-    return (s_coopAdsSlot >= 0 && s_coopAdsSlot == cgi.anim->g_iCurrentVMAnimSlot && s_coopAdsBolt) ? qtrue : qfalse;
+    // HZM coop [ads rifles 2026-10-12] ...and only while the aimed bolt clip is still BLENDING IN (that is what the
+    // override is for: the aim pose's tag_weapon_left sits ~16 u up the fore-end). Once the clip is alone on screen
+    // both of its tags hold the gun, and the gun must ride the server's tag - the OFF hand, which is still. Kept on
+    // tag_weapon_right for the whole clip it hung off the hand that travels to the bolt: the clip's tag keys undo that
+    // hand's motion only AT the clip's frames (40 fps), and between them lerp(arm) x lerp(tag) is not the gun's pose,
+    // so the rifle jittered 10-20 px (about 1 deg, single rendered frames up to 3 deg) for the 0.2 s of the reach and
+    // again on the hand's way back to the grip - the "3-8 % at the two ends of each clip" of runs ra5-ra7, and the
+    // same in the shipped hand-keyed clips (run rb3, VMH probe: tag R for all 69 frames, gun y -0.82..-1.11..-0.57).
+    return (s_coopAdsSlot >= 0 && s_coopAdsSlot == cgi.anim->g_iCurrentVMAnimSlot && s_coopAdsBolt
+            && s_fCoopVMCurW < 0.999f)
+             ? qtrue
+             : qfalse;
+}
+
+// HZM coop [ads rifles 2026-10-12] the hands play a `<gun>_rechamber_ads` clip (blending in or alone): the held gun
+// then shows its tik's `rechamber_ads` (cg_modelanim.c) - the hand rides THAT clip's bolt
+qboolean CG_VMAdsBoltClip(void)
+{
+    return (cgi.anim && s_coopAdsSlot >= 0 && s_coopAdsSlot == cgi.anim->g_iCurrentVMAnimSlot && s_coopAdsBolt) ? qtrue : qfalse;
+}
+
+// HZM coop [ads rifles 2026-10-12] an aimed bolt clip is the only clip on screen: both weapon tags hold the gun
+qboolean CG_VMAdsBoltSolo(void)
+{
+    return (s_coopAdsSlot >= 0 && s_coopAdsSlot == cgi.anim->g_iCurrentVMAnimSlot && s_coopAdsBolt
+            && s_fCoopVMCurW >= 0.999f)
+             ? qtrue
+             : qfalse;
 }
 
 float CG_VMAimWeight(void)
@@ -704,6 +751,41 @@ static void CoopPerWeaponReloadAnim(dtiki_t *pTiki, const char *suffix, char *an
     }
 }
 
+// HZM coop [heavy lane 2026-10-13, shotgun pump] the aimed per-shot cycle of ONE gun: `coopr_<weapon key>_<suffix>_ads`
+// (suffix "cycle" / "cyclelast"). Found by the exact weapon name, or by its "(Finish)"-stripped base when the held gun
+// is the same mesh as that base gun (a different gun whose name merely ends in "(...)" does not borrow the row).
+static qboolean s_coopCycleWpn  = qfalse; // the running cycle came from a per-weapon row
+static qboolean s_coopCycleLast = qfalse; // ... and it followed the last round
+
+static int CoopPerWeaponCycleRow(dtiki_t *pTiki, const char *suffix)
+{
+    char        anim[MAX_QPATH], ads[MAX_QPATH], base[64], key[64], exact[MAX_QPATH];
+    const char *wpn;
+    int         iAds;
+
+    if (!pTiki || !cg.snap || cg.snap->ps.activeItems[1] < 0) {
+        return -1;
+    }
+    anim[0] = 0;
+    CoopPerWeaponReloadAnim(pTiki, suffix, anim, sizeof(anim));
+    if (!anim[0]) {
+        return -1;
+    }
+    Com_sprintf(ads, sizeof(ads), "%s_ads", anim);
+    iAds = cgi.Anim_NumForName(pTiki, ads);
+    if (iAds == -1) {
+        return -1;
+    }
+    wpn = CG_ConfigString(CS_WEAPONS + cg.snap->ps.activeItems[1]);
+    CoopWeaponKey(wpn, key, sizeof(key));
+    Com_sprintf(exact, sizeof(exact), "coopr_%s_%s", key, suffix);
+    if (cgi.Anim_NumForName(pTiki, exact) == -1 && CoopStripSkinSuffix(wpn, base, sizeof(base))
+        && !CG_AdsSightSameMesh(wpn, base)) {
+        return -1;
+    }
+    return iAds;
+}
+
 void CG_ViewModelAnimation(refEntity_t *pModel)
 {
     int         i;
@@ -751,10 +833,62 @@ void CG_ViewModelAnimation(refEntity_t *pModel)
     }
 
     if (cg.snap->ps.iViewModelAnimChanged != cgi.anim->g_iLastVMAnimChanged) {
+        s_coopReloadBreak = (cg.snap->ps.iViewModelAnim == VM_ANIM_RELOAD_END
+                             && ((cg.snap->ps.iViewModelAnimChanged - cgi.anim->g_iLastVMAnimChanged) & 3) == 2
+                             && (cgi.anim->g_iLastVMAnim == VM_ANIM_RELOAD || cgi.anim->g_iLastVMAnim == VM_ANIM_RELOAD_SINGLE))
+                                ? qtrue
+                                : qfalse;
         bAnimChanged                   = qtrue;
         s_iCoopPrevVMAnim              = cgi.anim->g_iLastVMAnim; // what we are blending FROM
         cgi.anim->g_iLastVMAnim        = cg.snap->ps.iViewModelAnim;
         cgi.anim->g_iLastVMAnimChanged = cg.snap->ps.iViewModelAnimChanged;
+    }
+
+    // HZM coop [aimed per-shot cycle 2026-10-12] user: "That hi standard needs a first person ads cock animation
+    // between shots too". The aimed pistol fire plays the static aim pose (`charge`); a gun that is cycled by hand
+    // after every shot (silenced Hi-Standard, fire delay 1.0 s) then never showed it. When the clip ammo drops
+    // while aiming, the aim pose is up and rounds are left, play `<prefix>_cycle_ads` if fps_anims has that row
+    // (no row = nothing happens). Client-only id, started and ended here; any real change from the server above
+    // simply replaces it (the next shot, a reload, a weapon switch).
+    {
+        static cvar_t *pCycle       = NULL;
+        static int     s_cycClip    = -1;
+        static int     s_cycItem    = -1;
+        static int     s_cycEnd     = 0;
+        int            iClip        = cg.snap->ps.stats[STAT_CLIPAMMO];
+        int            iItem        = cg.snap->ps.activeItems[1];
+        if (!pCycle) {
+            pCycle = cgi.Cvar_Get("coop_vmAimedCycle", "1", 0);
+        }
+        if (cgi.anim->g_iLastVMAnim != COOP_VM_ANIM_CYCLE) {
+            s_cycEnd = 0;
+        }
+        if (iItem == s_cycItem && s_cycClip > 0 && iClip >= 0 && iClip < s_cycClip && pCycle->integer
+            && cgi.anim->g_iLastVMAnim == VM_ANIM_CHARGE && CG_AimingDownSights()) {
+            char szCyc[MAX_QPATH];
+            int  iCyc;
+            // [heavy lane, shotgun pump] the gun's own row first (and its last-round row); the prefix row as before
+            iCyc            = CoopPerWeaponCycleRow(pTiki, iClip > 0 ? "cycle" : "cyclelast");
+            s_coopCycleWpn  = (iCyc != -1) ? qtrue : qfalse;
+            s_coopCycleLast = (iCyc != -1 && iClip == 0) ? qtrue : qfalse;
+            if (iCyc == -1 && iClip > 0) {
+                Com_sprintf(szCyc, sizeof(szCyc), "%s_cycle_ads", AnimPrefixList[iAnimPrefixIndex]);
+                iCyc = cgi.Anim_NumForName(pTiki, szCyc);
+            }
+            if (iCyc != -1) {
+                bAnimChanged            = qtrue;
+                s_iCoopPrevVMAnim       = cgi.anim->g_iLastVMAnim;
+                cgi.anim->g_iLastVMAnim = COOP_VM_ANIM_CYCLE;
+                s_cycEnd                = cg.time + (int)(cgi.Anim_Time(pTiki, iCyc) * 1000.0f) - 50;
+            }
+        } else if (s_cycEnd && cg.time >= s_cycEnd && cgi.anim->g_iLastVMAnim == COOP_VM_ANIM_CYCLE) {
+            bAnimChanged            = qtrue; // back to the aim pose
+            s_iCoopPrevVMAnim       = cgi.anim->g_iLastVMAnim;
+            cgi.anim->g_iLastVMAnim = VM_ANIM_CHARGE;
+            s_cycEnd                = 0;
+        }
+        s_cycClip = iClip;
+        s_cycItem = iItem;
     }
 
     /*
@@ -889,6 +1023,9 @@ void CG_ViewModelAnimation(refEntity_t *pModel)
         case VM_ANIM_RECHAMBER:
             pszAnimSuffix = "rechamber";
             break;
+        case COOP_VM_ANIM_CYCLE:
+            pszAnimSuffix = s_coopCycleLast ? "cyclelast" : "cycle";
+            break;
         case COOP_VM_ANIM_IDLELOWER:
             // HZM coop [user 2026-08-21] the lower/raise idle gesture. CLIENT-ONLY: this value is
             // never networked - the server has no idea it exists - it is only ever written locally
@@ -935,9 +1072,75 @@ void CG_ViewModelAnimation(refEntity_t *pModel)
         Com_sprintf(szAnimName, sizeof(szAnimName), "%s_%s", AnimPrefixList[iAnimPrefixIndex], pszAnimSuffix);
         // HZM coop [reload audit phase B] per-weapon reload clip (apply_reloadclips.py): coopr_<weapon key>_<suffix>
         // wins when the hands tiki has it - lets one gun of a shared prefix get the reload that fits ITS feed.
+        // [rifle lane 2026-10-12, same rule as the pistol lane's ads-next] also the aim pose (`charge`): the iron-sight
+        // G43 ("G 43 Irons") shares the g43 prefix but aims over its own sights - coopr_g_43_irons_charge.
+        // [pistol lane 2026-10-12] also the aim pose (`charge`: the Luger sits differently in the hand than the Colt
+        // whose rows it borrows) and the client-only per-shot cycle (Welrod).
         if (cgi.anim->g_iLastVMAnim == VM_ANIM_RELOAD || cgi.anim->g_iLastVMAnim == VM_ANIM_RELOAD_SINGLE
-            || cgi.anim->g_iLastVMAnim == VM_ANIM_RELOAD_END) {
+            || cgi.anim->g_iLastVMAnim == VM_ANIM_RELOAD_END || cgi.anim->g_iLastVMAnim == VM_ANIM_CHARGE
+            || (cgi.anim->g_iLastVMAnim == COOP_VM_ANIM_CYCLE && s_coopCycleWpn)) {
             CoopPerWeaponReloadAnim(pTiki, pszAnimSuffix, szAnimName, sizeof(szAnimName));
+        } else {
+            // HZM coop [ads smg lane 2026-10-13] per-weapon HOLD: the same coopr_<weapon key>_<suffix> rule for every
+            // other view animation (idle, idle0-2, charge, fire, ...), so one gun of a shared prefix can be HELD the
+            // way its own mesh asks (user: the MP18 - prefix mp40, whose hands hold a magazine housing under the gun -
+            // is held by its side magazine like the Sten). No row = the prefix row, silently; looked up only when the
+            // animation changes. coop_vmPerWeaponRows 0 = off.
+            static cvar_t *pPerWeapon = NULL;
+            if (!pPerWeapon) {
+                pPerWeapon = cgi.Cvar_Get("coop_vmPerWeaponRows", "1", 0);
+            }
+            if (pPerWeapon->integer) {
+                CoopPerWeaponReloadAnim(pTiki, pszAnimSuffix, szAnimName, sizeof(szAnimName));
+            }
+        }
+        // HZM coop [dbshotgun 2026-10-12 b] the HANDS follow the held gun's empty-clip swap (cg_modelanim.c:
+        // `reload_single` -> `reload_single_first`): a per-weapon row `coopr_<weapon>_reload_single` that starts on an
+        // EMPTY clip plays `coopr_<weapon>_reload_single_l` when the hands tiki has it - the double barrel's first
+        // shell goes into the LEFT chamber, so the loading hand has a clip for each chamber. Only coopr_ rows are
+        // looked at and no other gun has a `_l` row: nothing else changes. The aimed `_ads` suffix below is
+        // appended to whichever name this leaves. (`_l`, not `_first`: a tiki alias holds 47 characters and
+        // `coopr_shotgun_double_barrel_reload_single_first_ads` is 51 - it was never found and the hip clip played.)
+        if (cgi.anim->g_iLastVMAnim == VM_ANIM_RELOAD_SINGLE && cg.snap && cg.snap->ps.stats[STAT_CLIPAMMO] == 0
+            && !Q_strncmp(szAnimName, "coopr_", 6)) {
+            char szFirst[MAX_QPATH];
+            Com_sprintf(szFirst, sizeof(szFirst), "%s_l", szAnimName);
+            if (cgi.Anim_NumForName(pTiki, szFirst) != -1) {
+                Q_strncpyz(szAnimName, szFirst, sizeof(szAnimName));
+            }
+        }
+        // HZM coop [revolver reload 2026-10-12] EMPTY GUN: a reload that STARTS on an empty magazine / cylinder plays
+        // `<row>_empty` when fps_anims defines it (user: "reloading could be as easy as dumping the entire rounds out
+        // if they are all spent") - the row carries what only an empty gun shows, e.g. the cases falling as a
+        // top-break opens. No row = the normal reload row, silently. The `_ads` step below then looks for
+        // `<row>_empty_ads`. Client-only; the clip ammo is the snapshot's, so every client that predicts it agrees.
+        if (cgi.anim->g_iLastVMAnim == VM_ANIM_RELOAD && cg.snap && cg.snap->ps.stats[STAT_MAXCLIPAMMO] > 0) {
+            s_coopReloadFromEmpty = (cg.snap->ps.stats[STAT_CLIPAMMO] == 0) ? qtrue : qfalse;
+        }
+        // HZM coop [heavy lane, shotgun] a reload that started with rounds in the gun ends WITHOUT the pump:
+        // `<row>_loaded` for the end row when fps_anims has it (the `_ads` step below then finds `<row>_loaded_ads`)
+        if (cgi.anim->g_iLastVMAnim == VM_ANIM_RELOAD_END && !s_coopReloadFromEmpty) {
+            char szLoaded[MAX_QPATH];
+            Com_sprintf(szLoaded, sizeof(szLoaded), "%s_%s", szAnimName, s_coopReloadBreak ? "break" : "loaded");
+            if (cgi.Cvar_Get("coop_vmEmptyReload", "1", 0)->integer && cgi.Anim_NumForName(pTiki, szLoaded) == -1
+                && s_coopReloadBreak) {
+                Com_sprintf(szLoaded, sizeof(szLoaded), "%s_loaded", szAnimName); // no break row: the normal end
+            }
+            if (cgi.Cvar_Get("coop_vmEmptyReload", "1", 0)->integer && cgi.Anim_NumForName(pTiki, szLoaded) != -1) {
+                Q_strncpyz(szAnimName, szLoaded, sizeof(szAnimName));
+            }
+        }
+        if (cgi.anim->g_iLastVMAnim == VM_ANIM_RELOAD && cg.snap && cg.snap->ps.stats[STAT_MAXCLIPAMMO] > 0
+            && cg.snap->ps.stats[STAT_CLIPAMMO] == 0) {
+            static cvar_t *pEmptyRows = NULL;
+            char           szEmpty[MAX_QPATH];
+            if (!pEmptyRows) {
+                pEmptyRows = cgi.Cvar_Get("coop_vmEmptyReload", "1", 0);
+            }
+            Com_sprintf(szEmpty, sizeof(szEmpty), "%s_empty", szAnimName);
+            if (pEmptyRows->integer && cgi.Anim_NumForName(pTiki, szEmpty) != -1) {
+                Q_strncpyz(szAnimName, szEmpty, sizeof(szAnimName));
+            }
         }
         // HZM coop [adsanim 2026-10-04 / adsbolt] AIMED BOLT: a reload or bolt that starts while aiming plays the
         // gun's dedicated `<prefix>_<suffix>_ads` clip when fps_anims defines one (hand-keyed to start and end in
@@ -953,9 +1156,16 @@ void CG_ViewModelAnimation(refEntity_t *pModel)
             }
             if (pAdsAnims->integer && !bWeaponChanged && CG_AimingDownSights()
                 && (a == VM_ANIM_RELOAD || a == VM_ANIM_RELOAD_SINGLE || a == VM_ANIM_RELOAD_END
-                    || a == VM_ANIM_RECHAMBER)) {
+                    || a == VM_ANIM_RECHAMBER || a == COOP_VM_ANIM_CYCLE)) {
                 char szAds[MAX_QPATH];
                 Com_sprintf(szAds, sizeof(szAds), "%s_ads", szAnimName);
+                if (CG_CoopBrace() > 0.5f) { // HZM coop [adsbrace] braced: the brace carries the weight
+                    char szAdsB[MAX_QPATH];
+                    Com_sprintf(szAdsB, sizeof(szAdsB), "%s_adsb", szAnimName);
+                    if (cgi.Anim_NumForName(pTiki, szAdsB) != -1) {
+                        Q_strncpyz(szAds, szAdsB, sizeof(szAds));
+                    }
+                }
                 if (cgi.Anim_NumForName(pTiki, szAds) != -1
                     && CoopAdsClipFitsHeldGun(AnimPrefixList[iAnimPrefixIndex])) {
                     Q_strncpyz(s_szCoopHipAnim, szAnimName, sizeof(s_szCoopHipAnim));

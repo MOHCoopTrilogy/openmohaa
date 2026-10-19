@@ -582,6 +582,12 @@ static void CG_ServerCommand(qboolean modelOnly)
         return;
     }
 
+    // HZM coop [bug-3903] a progression record the server saved for us (cg_coopsync.c)
+    if (!strcmp(cmd, "coopsave")) {
+        CG_CoopSync_Command();
+        return;
+    }
+
     cgi.Printf("Unknown client game command: %s\n", cmd);
 }
 

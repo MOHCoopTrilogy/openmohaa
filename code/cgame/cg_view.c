@@ -2009,6 +2009,11 @@ static int CG_AdsAnimClass(void)
     if (!cg.snap) {
         return 2;
     }
+    // HZM coop [aimed per-shot cycle 2026-10-12] the server still says `charge` while the hands play the client-only
+    // cycle clip: hold the aligned pose and let the clip's own gun motion play, as for fire / rechamber
+    if (CG_VMAimedCycleActive()) {
+        return 1;
+    }
     a = cg.snap->ps.iViewModelAnim;
     switch (a) {
     case VM_ANIM_IDLE:
@@ -2254,6 +2259,75 @@ static void CG_AdsRigSolve(refEntity_t *pREnt)
             s_rigTgtOk    = qtrue;
             updated       = qtrue;
             s_rigFreshGun = 0;
+        }
+    }
+    // HZM coop [settled rig target 2026-10-12, bug-3597] DIAGNOSTIC + OPTIONAL FIX, DEFAULT OFF. The target is tracked
+    // live in the aim pose and frozen the frame a fire / reload clip starts, so it freezes with whatever was in it. The
+    // suspicion (heavy lane): an emptied gun starts its aimed reload mid-recoil, the frozen target carries that
+    // frame's leftover and the whole clip plays off the aim by it. MEASURED, NOT CONFIRMED (runs tm1-tm3): at the
+    // freeze the target differs from its at-rest average by 0.0000 rad on the Colt and 0.0003 rad (0.02 deg) /
+    // 0.03 u on the BAR emptied with 20 shots - the live target does not follow the recoil. An offset at the end of
+    // an aimed reload comes from the clip (a physics tail that is not back at zero on its last frame), not from here.
+    // Kept: a slow average of the target from the frames in which it is at rest (per weapon and stance); the frame a
+    // freeze starts, cg_adsSightDebug 2 prints `ADSSETTLE` with the difference to it (any lane can check its own
+    // case), and cg_adsRigSettle 1 holds the settled value instead, easing the difference out through the
+    // inertialization offset (continuous on screen).
+    {
+        static cvar_t  *pSet = NULL;
+        static float    s_set[8], s_prevTgt[8];
+        static float    s_setMs = 0.0f;
+        static int      s_setSig = -1, s_setTime = 0;
+        static qboolean s_prevOk = qfalse;
+        const int       sig = wpnIdx * 4099 + (cg.predicted_player_state.pm_flags & (PMF_DUCKED | (1 << 1) | PMF_VIEW_DUCK_RUN | PMF_TURRET | PMF_COOP_COVER)) * 61
+                              + (int)cg.predicted_player_state.viewheight * 7 + (int)floor(cg.predicted_player_state.fLeanAngle * 0.25f + 0.5f);
+
+        if (!pSet) {
+            pSet = cgi.Cvar_Get("cg_adsRigSettle", "0", 0);
+        }
+        if (updated) {
+            if (sig != s_setSig) {
+                s_setSig = sig;
+                s_setMs  = 0.0f;
+                s_prevOk = qfalse;
+            }
+            if (s_prevOk && dt > 0.0f && s_rigBlend > 0.995f) {
+                float vr = 0.0f, vm = 0.0f;
+                for (k = 0; k < 3; k++) {
+                    vr += (s_rigTgt[k] - s_prevTgt[k]) * (s_rigTgt[k] - s_prevTgt[k]);
+                    vm += (s_rigTgt[3 + k] - s_prevTgt[3 + k]) * (s_rigTgt[3 + k] - s_prevTgt[3 + k]);
+                }
+                if (sqrt(vr) / dt < 0.012f && sqrt(vm) / dt < 0.2f) { // at rest: under 0.7 deg/s and 0.2 u/s
+                    const float a = (s_setMs <= 0.0f) ? 1.0f : 1.0f - (float)exp(-dt / 0.25f);
+                    for (k = 0; k < 8; k++) {
+                        s_set[k] += a * (s_rigTgt[k] - s_set[k]);
+                    }
+                    s_setMs += dt * 1000.0f;
+                    if (s_setMs > 100000.0f) {
+                        s_setMs = 100000.0f;
+                    }
+                    s_setTime = cg.time;
+                }
+            }
+            for (k = 0; k < 8; k++) {
+                s_prevTgt[k] = s_rigTgt[k];
+            }
+            s_prevOk = qtrue;
+        } else {
+            if (s_rigTgtLive && s_rigTgtOk && sig == s_setSig && s_setMs >= 200.0f && cg.time >= s_setTime
+                && cg.time - s_setTime < 15000) {
+                if (pDbg->integer >= 2) { // the freeze starts this frame: frozen target MINUS the settled one
+                    cgi.Printf("^~^~^ ADSSETTLE t=%d applied=%d rot=(%.4f %.4f %.4f)rad move=(%.3f %.3f %.3f)u cant=%.4f ms=%.0f\n", cg.time,
+                               pSet->integer ? 1 : 0, s_rigTgt[0] - s_set[0], s_rigTgt[1] - s_set[1], s_rigTgt[2] - s_set[2],
+                               s_rigTgt[3] - s_set[3], s_rigTgt[4] - s_set[4], s_rigTgt[5] - s_set[5], s_rigTgt[6] - s_set[6], s_setMs);
+                }
+                if (pSet->integer) {
+                    for (k = 0; k < 8; k++) { // hold the settled aim, ease the difference out
+                        s_rigOff[k] += s_rigTgt[k] - s_set[k];
+                        s_rigTgt[k]  = s_set[k];
+                    }
+                }
+            }
+            s_prevOk = qfalse;
         }
     }
     s_rigTgtLive = updated;
@@ -9557,6 +9631,8 @@ void CG_DrawActiveFrame(int serverTime, int frameTime, stereoFrame_t stereoView,
     cg.time         = serverTime;
     cg.frametime    = frameTime;
     cg.demoPlayback = demoPlayback;
+
+    CG_CoopSync_Frame(); // HZM coop [bug-3903] pace the progression upload (cg_coopsync.c)
 
     // HZM coop bug-1502 - run every frame regardless of view/weapon state (see function banner).
     CG_AdsFactorAdvance(); // must precede every consumer - see the banner on the function
