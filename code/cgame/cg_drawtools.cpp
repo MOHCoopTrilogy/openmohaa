@@ -648,11 +648,11 @@ void CG_RefreshHudDrawElements()
 /*
 HZM coop [text sweep 2026-10-19, bug-4093] STYLED SCRIPT TEXT. Every scripted huddraw / ihuddraw STRING in a coop session
 is drawn here by one rule instead of by edits to ~600 script lines:
- - SIZE: a 640x480 "virtual" string was scaled by vid/480 (2.25x at 1080p) while the event feed is a fixed 12 px, so a
-   verdana-12 hint was 27 px tall at 1080p. Every string now uses the hi-res scale the feed uses, so the same font is the
-   same size on every screen.
- - FONT: facfont / handle / delima (the 20-30 px display faces) become verdana-14 at 1.25x (headline, 1.46x the feed);
-   courier becomes verdana-12 (body). verdana-12 / -14 and the default stay. marlett (symbol font) is left alone.
+ - SIZE: a 640x480 "virtual" string was scaled by vid/480 (2.25x at 1080p) with a different font each; every string now
+   uses u = vidHeight / 500 (one scale for all screens) times its tier.
+ - TIER: body = verdana-12 (courier / verdana-10 too; a plain verdana-14 at 0.9) ~16 px cap at 1080p; headline = facfont /
+   handle / delima -> verdana-14 x1.4 ~26 px; urgent alert = a red / orange string -> verdana-14 x1.7 ~31 px.
+   marlett (symbol font) and the debrief / rank card slots (62-73, 127-134) are left alone.
  - ANCHOR: the string keeps the centre line (x for centred / right aligned text, y always) it had in its ORIGINAL
    font, so a script that centred "PROMOTED" by hand still looks centred.
  - LEGIBILITY: a 1 px black shadow at 0.8 of the string's own (faded) alpha.
@@ -779,7 +779,7 @@ static qboolean CG_HudDrawStyledString(int i, float fX, float fY, qboolean bVirt
     fontheader_t *of   = cgi.HudDrawElements[i].pFont ? cgi.HudDrawElements[i].pFont : cgs.media.hudDrawFont;
     fontheader_t *nf   = of;
     float         mult = 1.0f;
-    vec2_t        os, ns;
+    vec2_t        os, ns, hu;
     float         ow, oh, nw, nh, ox, oy, x, y, sh;
     vec4_t        shadow;
 
@@ -790,11 +790,29 @@ static qboolean CG_HudDrawStyledString(int i, float fX, float fY, qboolean bVirt
         s_fHeadline = cgi.R_LoadFont("verdana-14");
         s_fBody     = cgi.R_LoadFont("verdana-12");
     }
-    if (!Q_stricmpn(fn, "facfont", 7) || !Q_stricmpn(fn, "handle", 6) || !Q_stricmpn(fn, "delima", 6)) {
-        nf   = s_fHeadline;
-        mult = 1.25f;
-    } else if (!Q_stricmpn(fn, "courier", 7)) {
-        nf = s_fBody;
+    // slots of the debrief / rank card (xp.scr 62-73, 127-134): sized in bug-4004, left exactly as authored
+    if ((i >= 62 && i <= 73) || (i >= 127 && i <= 134)) {
+        return qfalse;
+    }
+    // tiers, in feed-relative units: u = vidHeight / 500 (2.16 at 1080p, 1.44 at 720p, 1.54 at 1024x768) - the same
+    // resolution scaling for every screen; cap heights at 1080p: body ~16 px, headline ~26 px, urgent alert ~31 px
+    //   body     verdana-12 (courier, verdana-10 too) x1.0, a plain verdana-14 x0.9
+    //   headline facfont / handle / delima -> verdana-14 x1.4
+    //   alert    a red / orange string (r > 0.8, g < 0.6, b < 0.5) -> verdana-14 x1.7
+    {
+        float u = cgs.glconfig.vidHeight / 500.0f;
+        hu[0] = hu[1] = u;
+        if (vColor[0] > 0.8f && vColor[1] < 0.6f && vColor[2] < 0.5f) {
+            nf   = s_fHeadline;
+            mult = 1.7f;
+        } else if (!Q_stricmpn(fn, "facfont", 7) || !Q_stricmpn(fn, "handle", 6) || !Q_stricmpn(fn, "delima", 6)) {
+            nf   = s_fHeadline;
+            mult = 1.4f;
+        } else if (!Q_stricmpn(fn, "courier", 7) || !Q_stricmpn(fn, "verdana-10", 10) || !Q_stricmpn(fn, "verdana-12", 10)) {
+            nf = s_fBody;
+        } else {
+            mult = 0.9f; // verdana-14 / default
+        }
     }
     if (!of || !nf || !of->sgl[0] || !nf->sgl[0] || of->sgl[0]->height <= 0.0f || nf->sgl[0]->height <= 0.0f) {
         return qfalse;
@@ -815,8 +833,8 @@ static qboolean CG_HudDrawStyledString(int i, float fX, float fY, qboolean bVirt
         ns[0] = os[0] * of->sgl[0]->height / nf->sgl[0]->height;
         ns[1] = os[1] * of->sgl[0]->height / nf->sgl[0]->height;
     } else {
-        ns[0] = cgs.uiHiResScale[0] * mult;
-        ns[1] = cgs.uiHiResScale[1] * mult;
+        ns[0] = hu[0] * mult;
+        ns[1] = hu[1] * mult;
     }
 
     ow = (float)cgi.UI_FontStringWidth(of, txt, -1) * os[0];
@@ -834,7 +852,7 @@ static qboolean CG_HudDrawStyledString(int i, float fX, float fY, qboolean bVirt
     x = (float)(int)(x + 0.5f);
     y = (float)(int)(y + 0.5f);
 
-    sh        = (cgs.uiHiResScale[1] > 1.0f) ? (float)(int)(cgs.uiHiResScale[1] + 0.5f) : 1.0f;
+    sh        = (hu[1] > 1.4f) ? (float)(int)(hu[1] * 0.75f + 0.5f) : 1.0f;
     shadow[0] = shadow[1] = shadow[2] = 0.0f;
     shadow[3] = vColor[3] * 0.8f;
     cgi.R_SetColor(shadow);
