@@ -540,8 +540,14 @@ static float CL_PadLookCurve( float v ) {
 			mag = 1.0f;
 		}
 	}
-	if ( joy_response && joy_response->value > 1.0f ) {
-		mag = powf( mag, joy_response->value );
+	{
+		int curve = joy_curve ? joy_curve->integer : 1;
+
+		if ( curve == 2 ) {
+			mag = mag * mag * ( 3.0f - 2.0f * mag );          // dynamic: gentle start, quick finish (smoothstep)
+		} else if ( curve == 1 && joy_response && joy_response->value > 1.0f ) {
+			mag = powf( mag, joy_response->value );           // exponential
+		}                                                     // 0 = linear
 	}
 	return ( v < 0 ? -mag : mag ) * 32767.0f;
 }
@@ -557,10 +563,38 @@ void CL_JoystickMove( usercmd_t *cmd ) {
 		lookScale *= cge->CG_SensitivityScale();
 	}
 
-	float yaw     = j_yaw->value     * CL_PadLookCurve( cl.joystickAxis[j_yaw_axis->integer] )   * lookScale;
+	// [gamepad-next] per-axis speed, ADS multiplier, acceleration while the stick is held fully over, invert Y
+	float accelMul = 1.0f;
+	{
+		static float accelHold;
+		float        lmag = fabsf( (float)cl.joystickAxis[j_yaw_axis->integer] );
+		float        pmag = fabsf( (float)cl.joystickAxis[j_pitch_axis->integer] );
+
+		if ( pmag > lmag ) lmag = pmag;
+		lmag /= 32767.0f;
+		if ( joy_accel && joy_accel->integer && lmag > 0.85f ) {
+			accelHold += cls.frametime * 0.001f;
+		} else {
+			accelHold = 0.0f;
+		}
+		if ( joy_accel && joy_accel->integer ) {
+			float t = joy_accelTime ? joy_accelTime->value : 0.6f;
+			float ramp = ( t > 0.01f ) ? ( accelHold / t ) : 1.0f;
+			float mx = joy_accelMax ? joy_accelMax->value : 1.5f;
+
+			if ( ramp > 1.0f ) ramp = 1.0f;
+			if ( mx < 1.0f ) mx = 1.0f;
+			accelMul = 1.0f + ( mx - 1.0f ) * ramp;
+		}
+	}
+	if ( in_buttons[13].active && joy_adsScale && joy_adsScale->value > 0.0f ) {
+		lookScale *= joy_adsScale->value;
+	}
+	lookScale *= accelMul;
+	float yaw     = j_yaw->value     * CL_PadLookCurve( cl.joystickAxis[j_yaw_axis->integer] )   * lookScale * ( joy_lookX ? joy_lookX->value : 1.0f );
 	float right   = j_side->value    * cl.joystickAxis[j_side_axis->integer];
 	float forward = j_forward->value * cl.joystickAxis[j_forward_axis->integer];
-	float pitch   = j_pitch->value   * CL_PadLookCurve( cl.joystickAxis[j_pitch_axis->integer] ) * lookScale;
+	float pitch   = j_pitch->value   * CL_PadLookCurve( cl.joystickAxis[j_pitch_axis->integer] ) * lookScale * ( joy_lookY ? joy_lookY->value : 1.0f ) * ( ( joy_invertY && joy_invertY->integer ) ? -1.0f : 1.0f );
 	float up      = j_up->value      * cl.joystickAxis[j_up_axis->integer];
 
 	if ( in_speed.active ^ cl_run->integer ) {

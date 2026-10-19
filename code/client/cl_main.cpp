@@ -123,6 +123,14 @@ cvar_t	*j_up_axis;
 // old linear behaviour, so a keyboard player is unaffected and a controller player can dial these in.
 cvar_t	*joy_response;        // look response-curve exponent (1 = linear, higher = finer near-centre aim)
 cvar_t	*joy_outerThreshold;  // outer dead-zone: saturate to full past (1 - this)
+cvar_t	*joy_lookX;
+cvar_t	*joy_lookY;
+cvar_t	*joy_adsScale;
+cvar_t	*joy_curve;
+cvar_t	*joy_invertY;
+cvar_t	*joy_accel;
+cvar_t	*joy_accelTime;
+cvar_t	*joy_accelMax;
 cvar_t	*coop_padLookScale;   // one master look-sensitivity multiplier for the sticks
 
 cvar_t	*cl_activeAction;
@@ -4385,7 +4393,17 @@ void CL_Init( void ) {
 	// [controller feel] analog LOOK tuning (see CL_JoystickMove). Neutral defaults reproduce the old linear
 	// feel; coop_defaults.cfg seeds nicer starting values that a Controls slider can then adjust.
 	joy_response       = Cvar_Get( "joy_response",       "1.0", CVAR_ARCHIVE );
-	joy_outerThreshold = Cvar_Get( "joy_outerThreshold", "0.0", CVAR_ARCHIVE );
+	joy_outerThreshold = Cvar_Get( "joy_outerThreshold", "0.02", CVAR_ARCHIVE );
+	// [gamepad-next] handheld (ROG Ally) defaults; all archived = saved per player. joy_threshold (sdl_input.c) is the
+	// inner dead-zone, joy_outerThreshold the outer one.
+	joy_lookX    = Cvar_Get( "joy_lookX",    "1.0",  CVAR_ARCHIVE );
+	joy_lookY    = Cvar_Get( "joy_lookY",    "0.8",  CVAR_ARCHIVE );
+	joy_adsScale = Cvar_Get( "joy_adsScale", "0.6",  CVAR_ARCHIVE );
+	joy_curve    = Cvar_Get( "joy_curve",    "1",    CVAR_ARCHIVE );
+	joy_invertY  = Cvar_Get( "joy_invertY",  "0",    CVAR_ARCHIVE );
+	joy_accel    = Cvar_Get( "joy_accel",    "1",    CVAR_ARCHIVE );
+	joy_accelTime = Cvar_Get( "joy_accelTime", "0.6", CVAR_ARCHIVE );
+	joy_accelMax = Cvar_Get( "joy_accelMax", "1.5",  CVAR_ARCHIVE );
 	coop_padLookScale  = Cvar_Get( "coop_padLookScale",  "1.0", CVAR_ARCHIVE );
 
 	cl_motdString = Cvar_Get( "cl_motdString", "", CVAR_ROM );

@@ -65,6 +65,8 @@ static cvar_t *in_padUiSpeed    = NULL;   // UI cursor speed, screen widths per 
 static cvar_t *in_padDebug      = NULL;   // 1 = log mapped pad keys as "^~^~^ PADKEY ..."
 static cvar_t *in_padTestScript = NULL;   // CVAR_INIT (command line only): drive a virtual pad from a script file
 static cvar_t *in_padActive     = NULL;   // 1 while the last input came from the pad, 0 for keyboard / mouse
+static cvar_t *in_padCfgVer     = NULL;   // pad settings migration marker (archived)
+static qboolean padAutoLatched  = qfalse; // in_padGame -1 (auto): set by the first pad button / stick use
 static cvar_t *in_padGame       = NULL;   // 1 = the pad also plays the game (movement / look / fire); menus always work
 static cvar_t *in_padUiAccel    = NULL;   // extra cursor speed while the stick is held fully over (0 = none)
 static cvar_t *in_padUiDeadzone = NULL;   // menu stick deadzone, 0..0.9
@@ -981,6 +983,14 @@ static void IN_PadService( void )
 		return;
 	}
 
+	{   // the Controls page shows this word next to the Auto / Off / On buttons
+		const char *lbl = ( in_padGame && in_padGame->integer == 1 ) ? "On" : ( ( in_padGame && in_padGame->integer == 0 ) ? "Off" : "Auto" );
+
+		Cvar_Get( "in_padGameLabel", "Auto", CVAR_TEMP );
+		if ( strcmp( Cvar_VariableString( "in_padGameLabel" ), lbl ) ) {
+			Cvar_Set( "in_padGameLabel", lbl );
+		}
+	}
 	IN_PadTestDrive();
 	if ( !gamepad && padWantOpen && now >= nextOpenMs ) {
 		nextOpenMs = now + 400;
@@ -1182,8 +1192,25 @@ static void IN_GamepadMove( void )
 		return;
 	}
 
-	// in-game play with the pad is opt-in (in_padGame 1, Options > Controls > ENABLE); Start still opens the menu
-	if ( !( in_padGame && in_padGame->integer ) ) {
+	// any pad button or stick use latches "auto" on (in_padGame -1); keyboard and mouse keep working alongside
+	if ( !padAutoLatched ) {
+		for ( i = 0; i < SDL_CONTROLLER_BUTTON_MAX && !padAutoLatched; i++ ) {
+			if ( SDL_GameControllerGetButton( gamepad, SDL_CONTROLLER_BUTTON_A + i ) ) {
+				padAutoLatched = qtrue;
+			}
+		}
+		for ( i = 0; i < SDL_CONTROLLER_AXIS_MAX && !padAutoLatched; i++ ) {
+			float f = fabsf( (float)SDL_GameControllerGetAxis( gamepad, SDL_CONTROLLER_AXIS_LEFTX + i ) / 32767.0f );
+
+			if ( f > ( in_joystickThreshold ? in_joystickThreshold->value : 0.15f ) + 0.1f ) {
+				padAutoLatched = qtrue;
+			}
+		}
+	}
+
+	// in-game play with the pad: in_padGame 1 = on, 0 = off, -1 = auto (on once a pad control has been used).
+	// Start still opens the menu when it is off.
+	if ( !( ( in_padGame && in_padGame->integer == 1 ) || ( in_padGame && in_padGame->integer < 0 && padAutoLatched ) ) ) {
 		qboolean start = SDL_GameControllerGetButton( gamepad, SDL_CONTROLLER_BUTTON_START ) ? qtrue : qfalse;
 
 		if ( start != stick_state.buttons[SDL_CONTROLLER_BUTTON_START] ) {
@@ -1880,7 +1907,17 @@ void IN_Init( void *windowData )
 	in_padDebug = Cvar_Get( "in_padDebug", "0", 0 );
 	in_padTestScript = Cvar_Get( "in_padTestScript", "", CVAR_INIT );
 	in_padActive = Cvar_Get( "in_padActive", "0", CVAR_TEMP );
-	in_padGame = Cvar_Get( "in_padGame", "0", CVAR_ARCHIVE );
+	in_padGame = Cvar_Get( "in_padGame", "-1", CVAR_ARCHIVE );
+	// in_padGame: -1 auto (in-game pad play turns on as soon as a pad button or stick is used), 0 off, 1 on. Until
+	// 2026-10-19 the default was 0, which nobody chose on purpose: a saved 0 is migrated to auto ONCE.
+	in_padCfgVer = Cvar_Get( "in_padCfgVer", "0", CVAR_ARCHIVE );
+	Cvar_Get( "in_padGameLabel", "Auto", CVAR_TEMP );
+	if ( in_padCfgVer->integer < 1 ) {
+		if ( in_padGame->integer == 0 ) {
+			Cvar_Set( "in_padGame", "-1" );
+		}
+		Cvar_Set( "in_padCfgVer", "1" );
+	}
 	in_padUiAccel = Cvar_Get( "in_padUiAccel", "1.0", CVAR_ARCHIVE );
 	in_padUiDeadzone = Cvar_Get( "in_padUiDeadzone", "0.2", CVAR_ARCHIVE );
 	in_padTestGo = Cvar_Get( "in_padTestGo", "0", CVAR_TEMP );
