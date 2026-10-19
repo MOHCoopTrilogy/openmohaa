@@ -879,15 +879,44 @@ static coopItem_t s_coopItems[COOPITEM_N] = {
     {"coop_hudSmoke", "useweaponclass grenade", "textures/hud/coop_reward_paradrop", NULL, 0, ""},
 };
 
+// [gamepad-next] Which of a command's (up to) two bindings to print on a key cap. The engine keeps in_padActive
+// current (1 = the last input came from the pad, 0 = keyboard / mouse). A pad player sees the pad control (PAD0_A
+// -> "A", PAD0_LEFTSHOULDER -> "LB" ...); a keyboard player sees the keyboard / mouse one, as before, because the
+// mod binds the d-pad by default and its name is not what someone at a keyboard is looking for.
+static const char *CG_CoopPickKeyName(int k1, int k2)
+{
+    static cvar_t *s_cvPadActive;
+    const char    *n1 = k1 >= 0 ? cgi.Key_KeynumToBindString(k1) : NULL;
+    const char    *n2 = k2 >= 0 ? cgi.Key_KeynumToBindString(k2) : NULL;
+    qboolean       p1 = n1 && !Q_stricmpn(n1, "PAD", 3);
+    qboolean       p2 = n2 && !Q_stricmpn(n2, "PAD", 3);
+    qboolean       wantPad;
+
+    if (!s_cvPadActive) {
+        s_cvPadActive = cgi.Cvar_Get("in_padActive", "0", 0);
+    }
+    wantPad = s_cvPadActive && s_cvPadActive->integer;
+    if (!n2 || !n2[0]) {
+        return n1;
+    }
+    if (!n1 || !n1[0]) {
+        return n2;
+    }
+    if (wantPad) {
+        return p1 ? n1 : (p2 ? n2 : n1);
+    }
+    return !p1 ? n1 : (!p2 ? n2 : n1);
+}
+
 // A key name as it is shown under an icon: upper case, and the long ones shortened so that what tells two keys
 // apart survives ("MOUSE4" was being cut to "MOUSE"). MOUSE4 -> M4, MWHEELUP -> WH-UP, KP_ENTER -> KP ENTER,
-// PAD0_DPAD_UP -> D-UP, PAD0_LEFTSTICK_UP -> LS UP. Whatever is still too wide is cut by the caller.
+// PAD0_DPAD_UP -> D-UP, PAD0_A -> A, PAD0_LEFTSHOULDER -> LB, PAD0_LEFTSTICK_UP -> LS UP. Whatever is still too wide is cut by the caller.
 static void CG_CoopItemKeyLabel(const char *nm, char *out, int outSize)
 {
     static const struct {
         const char *from, *to;
     } sub[] = {
-        {"PAD0_", ""}, {"MWHEELUP", "WH-UP"}, {"MWHEELDOWN", "WH-DN"}, {"MOUSE", "M"},
+        {"PAD0_", ""}, {"LEFTSHOULDER", "LB"}, {"RIGHTSHOULDER", "RB"}, {"LEFTTRIGGER", "LT"}, {"RIGHTTRIGGER", "RT"}, {"MWHEELUP", "WH-UP"}, {"MWHEELDOWN", "WH-DN"}, {"MOUSE", "M"},
         {"DPAD_RIGHT", "D-RT"}, {"DPAD_LEFT", "D-LT"}, {"DPAD_DOWN", "D-DN"}, {"DPAD_UP", "D-UP"}, {"DPAD_", "D-"},
         {"LEFTSTICK", "LS"}, {"RIGHTSTICK", "RS"}, {"SHOULDER", "SH"}, {"TRIGGER", "TR"}, {"LEFTARROW", "LEFT"},
         {"RIGHTARROW", "RIGHT"}, {"UPARROW", "UP"}, {"DOWNARROW", "DOWN"}, {"SEMICOLON", ";"},
@@ -978,16 +1007,7 @@ static void CG_CoopItemKeys(void)
         if (k1 < 0) {
             continue;
         }
-        nm = cgi.Key_KeynumToBindString(k1);
-        // two bindings: show the keyboard / mouse one. A gamepad control bound to the same action (the mod binds the
-        // d-pad by default) is not what a player at a keyboard is looking for, and its name is long.
-        if (k2 >= 0 && nm && !Q_stricmpn(nm, "PAD", 3)) {
-            const char *nm2 = cgi.Key_KeynumToBindString(k2);
-
-            if (nm2 && nm2[0] && Q_stricmpn(nm2, "PAD", 3)) {
-                nm = nm2;
-            }
-        }
+        nm = CG_CoopPickKeyName(k1, k2);
         if (!nm || !nm[0]) {
             continue;
         }
@@ -1666,7 +1686,7 @@ void CG_DrawCoopLoot(void)
 
         keyNextMs = cg.time + 1000;
         cgi.Key_GetKeysForCommand("+use", &k1, &k2);
-        nm = (k1 >= 0) ? cgi.Key_KeynumToBindString(k1) : NULL;
+        nm = (k1 >= 0) ? CG_CoopPickKeyName(k1, k2) : NULL;
         if (nm && nm[0] && nm[0] != '?') {
             CG_CoopItemKeyLabel(nm, keyLabel, sizeof(keyLabel));
             keyLabel[8] = 0;
