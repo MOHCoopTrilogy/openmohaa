@@ -774,6 +774,7 @@ static padStep_t padSteps[PAD_MAX_STEPS];
 static int padNumSteps = -1;
 static int padNextStep = 0;
 static int padT0 = 0;
+static int padHold = 0;     // "@hold" in the script: the clock does not start until in_padTestGo is set
 
 static void IN_PadTestLoad( void )
 {
@@ -791,6 +792,10 @@ static void IN_PadTestLoad( void )
 
 		memset( st, 0, sizeof( *st ) );
 		if ( line[0] == '#' || line[0] == '\n' || line[0] == '\r' ) {
+			continue;
+		}
+		if ( !strncmp( line, "@hold", 5 ) ) {
+			padHold = 1;
 			continue;
 		}
 		if ( !strncmp( line, "@attach", 7 ) ) {
@@ -820,6 +825,10 @@ static void IN_PadTestDrive( void )
 		padT0       = Sys_Milliseconds();
 		padNextStep = 0;
 	}
+	if ( padHold && !( in_padTestGo && in_padTestGo->integer ) ) {
+		return;
+	}
+	padHold = 0;
 	if ( in_padTestGo && in_padTestGo->integer ) {
 		Cvar_Set( "in_padTestGo", "0" );
 		padNextStep = 0;
