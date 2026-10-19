@@ -145,6 +145,7 @@ UIWindowManager::UIWindowManager()
 {
     m_amidead          = false;
     m_lastbuttons      = 0;
+    m_padClick         = 0;
     m_oldview          = NULL;
     m_firstResponder   = NULL;
     m_backgroundwidget = NULL;
@@ -292,6 +293,13 @@ void UIWindowManager::ServiceEvents(void)
     pos.x   = uid.mouseX;
     pos.y   = uid.mouseY;
     buttons = uid.mouseFlags;
+    // [HZM gamepad-next] PadTab click: frame 3 hover, frame 2 button down, frame 1 button up
+    if (m_padClick > 0) {
+        if (m_padClick == 2) {
+            buttons |= 1;
+        }
+        m_padClick--;
+    }
 
     if (m_bindactive) {
         view = m_bindactive;
@@ -654,9 +662,138 @@ bool UIWindowManager::PadNavigate(int dx, int dy)
     return found;
 }
 
+/*
+====================
+UIWindowManager::PadTab
+
+[HZM gamepad-next] LB / RB. Tabs in this UI are plain buttons whose names start with "tab" or "foldertab" (Armory
+categories, loadout pages, options folders). The row is ordered by position; the current tab is the one under the
+cursor, else the one the pad last picked. The cursor jumps to the previous / next tab and a click is injected.
+====================
+*/
+bool UIWindowManager::PadTab(int dir)
+{
+    struct Cand {
+        UIWidget *w;
+        float     x, y;
+    };
+    enum { MAXC = 64, MAXSTACK = 1024 };
+    static Cand      cand[MAXC];
+    static UIWidget *stack[MAXSTACK];
+    static float     lastX = -1, lastY = -1;
+    int              n = 0, sp = 0, i, j, cur = -1;
+
+    stack[sp++] = this;
+    while (sp > 0) {
+        UIWidget *w = stack[--sp];
+
+        for (i = 1; i <= w->m_children.NumObjects(); i++) {
+            if (sp < MAXSTACK) {
+                stack[sp++] = w->m_children.ObjectAt(i);
+            }
+        }
+        if (w == this || n >= MAXC) {
+            continue;
+        }
+        {
+            const char *nm = w->getName();
+
+            if (!nm || (Q_stricmpn(nm, "tab", 3) && Q_stricmpn(nm, "foldertab", 9))) {
+                continue;
+            }
+        }
+        if (!w->CanActivate() || !w->isEnabled() || w->m_clippedframe.size.width < 2) {
+            continue;
+        }
+        {
+            UIPoint2D c(w->m_clippedframe.pos.x + w->m_clippedframe.size.width * 0.5f,
+                        w->m_clippedframe.pos.y + w->m_clippedframe.size.height * 0.5f);
+
+            if (getResponder(c) != w) {
+                continue;
+            }
+            cand[n].w = w;
+            cand[n].x = c.x;
+            cand[n].y = c.y;
+            n++;
+        }
+    }
+    if (n < 2) {
+        return false;
+    }
+
+    // order: rows (y bucketed to 24 px), then x
+    for (i = 1; i < n; i++) {
+        Cand t = cand[i];
+
+        for (j = i - 1; j >= 0; j--) {
+            long rj = (long)(cand[j].y / 24.0f), rt = (long)(t.y / 24.0f);
+
+            if (rj < rt || (rj == rt && cand[j].x <= t.x)) {
+                break;
+            }
+            cand[j + 1] = cand[j];
+        }
+        cand[j + 1] = t;
+    }
+
+    {
+        UIPoint2D here((float)uid.mouseX, (float)uid.mouseY);
+        UIWidget *under = getResponder(here);
+
+        for (i = 0; i < n; i++) {
+            if (cand[i].w == under) {
+                cur = i;
+                break;
+            }
+        }
+        if (cur < 0 && lastX >= 0) {
+            for (i = 0; i < n; i++) {
+                if (fabsf(cand[i].x - lastX) < 2 && fabsf(cand[i].y - lastY) < 2) {
+                    cur = i;
+                    break;
+                }
+            }
+        }
+    }
+    if (cur < 0) {
+        cur = (dir > 0) ? -1 : 0;
+    }
+    cur = (cur + dir + n) % n;
+    lastX = cand[cur].x;
+    lastY = cand[cur].y;
+    CL_SetMousePos((int)lastX, (int)lastY);
+    m_padClick = 3;       // ServiceEvents: hover frame, press frame, release frame
+    if (UI_GetCvarInt("ui_clickdebug", 0)) {
+        uii.Sys_Printf("^~^~^ PADTAB dir %d -> '%s' (%d of %d)\n", dir, cand[cur].w->getName(), cur + 1, n);
+    }
+    return true;
+}
+
 qboolean UIWindowManager::KeyEvent(int key, unsigned int time)
 {
     UIWidget *selwidget = NULL;
+
+    // [HZM gamepad-next] LB / RB = previous / next tab; with no tab row they page the focused list.
+    if ((key == K_PAD0_LEFTSHOULDER || key == K_PAD0_RIGHTSHOULDER) && !m_bindactive) {
+        if (!PadTab(key == K_PAD0_RIGHTSHOULDER ? 1 : -1) && m_activeControl && m_activeControl != this) {
+            m_activeControl->KeyEvent(key == K_PAD0_RIGHTSHOULDER ? K_PGDN : K_PGUP, time);
+        }
+        return true;
+    }
+
+    // [HZM gamepad-next] right-stick scroll arrives as wheel ticks: give them to the list UNDER the cursor, not
+    // only to the focused control (a list nobody clicked would never scroll). Pad input only.
+    if ((key == K_MWHEELUP || key == K_MWHEELDOWN) && !m_bindactive && UI_GetCvarInt("in_padActive", 0)) {
+        UIPoint2D here((float)uid.mouseX, (float)uid.mouseY);
+        UIWidget *w = getResponder(here);
+
+        for (; w && w != this; w = w->getParent()) {
+            if (w->KeyEvent(key, time)) {
+                return true;
+            }
+        }
+    }
 
     // [HZM gamepad-next] D-pad: the focused widget gets the arrow first (lists, sliders), else focus moves.
     if (key >= K_PAD0_DPAD_UP && key <= K_PAD0_DPAD_RIGHT && !m_bindactive) {

@@ -73,6 +73,8 @@ public:
     virtual void      CharEvent(int ch) override;
     virtual qboolean  KeyEvent(int key, unsigned int time) override;
     bool              PadNavigate(int dx, int dy);
+    bool              PadTab(int dir);
+    int               m_padClick;
     void              CreateMenus(void);
     UIReggedMaterial *RegisterShader(const str& name);
     UIReggedMaterial *RefreshShader(const str& name);

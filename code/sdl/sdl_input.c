@@ -65,6 +65,9 @@ static cvar_t *in_padUiSpeed    = NULL;   // UI cursor speed, screen widths per 
 static cvar_t *in_padDebug      = NULL;   // 1 = log mapped pad keys as "^~^~^ PADKEY ..."
 static cvar_t *in_padTestScript = NULL;   // CVAR_INIT (command line only): drive a virtual pad from a script file
 static cvar_t *in_padActive     = NULL;   // 1 while the last input came from the pad, 0 for keyboard / mouse
+static cvar_t *in_padGame       = NULL;   // 1 = the pad also plays the game (movement / look / fire); menus always work
+static cvar_t *in_padUiAccel    = NULL;   // extra cursor speed while the stick is held fully over (0 = none)
+static cvar_t *in_padUiDeadzone = NULL;   // menu stick deadzone, 0..0.9
 static cvar_t *in_padTestGo     = NULL;   // set to 1 (console) to restart the test script clock
 static cvar_t *in_padTestHang   = NULL;   // CVAR_INIT: seconds the init thread stalls (proves the hang guard)
 
@@ -763,10 +766,11 @@ it, so movement / look / fire / menu navigation can be proven without a physical
 ===============
 */
 typedef struct {
-	int t;
-	int kind;   // 0 state, 1 attach, 2 detach
-	int ax[6];
-	int btn;
+	int  t;
+	int  kind;   // 0 state, 1 attach, 2 detach, 3 console command
+	int  ax[6];
+	int  btn;
+	char cmd[64];
 } padStep_t;
 
 #define PAD_MAX_STEPS 2048
@@ -801,6 +805,18 @@ static void IN_PadTestLoad( void )
 		if ( !strncmp( line, "@attach", 7 ) ) {
 			st->kind = 1;
 			if ( sscanf( line + 7, "%d", &st->t ) == 1 ) padNumSteps++;
+		} else if ( !strncmp( line, "@cmd", 4 ) ) {
+			char *c = line + 4;
+
+			st->kind = 3;
+			if ( sscanf( c, "%d", &st->t ) == 1 ) {
+				while ( *c == ' ' ) c++;
+				while ( *c && *c != ' ' ) c++;      // skip the time token
+				while ( *c == ' ' ) c++;
+				Q_strncpyz( st->cmd, c, sizeof( st->cmd ) );
+				st->cmd[strcspn( st->cmd, "\r\n" )] = 0;
+				padNumSteps++;
+			}
 		} else if ( !strncmp( line, "@detach", 7 ) ) {
 			st->kind = 2;
 			if ( sscanf( line + 7, "%d", &st->t ) == 1 ) padNumSteps++;
@@ -859,6 +875,8 @@ static void IN_PadTestDrive( void )
 			i          = SDL_JoystickAttachVirtualEx( &d );
 			Com_Printf( "^~^~^ PADTEST attach -> %d\n", i );
 			padWantOpen = qtrue;
+		} else if ( st->kind == 3 ) {
+			Cbuf_ExecuteText( EXEC_APPEND, va( "%s\n", st->cmd ) );
 		} else if ( st->kind == 2 ) {
 			int n = SDL_NumJoysticks();
 
@@ -985,8 +1003,8 @@ static int IN_PadMenuKey( int button )
 	case SDL_CONTROLLER_BUTTON_DPAD_DOWN:  return K_PAD0_DPAD_DOWN;
 	case SDL_CONTROLLER_BUTTON_DPAD_LEFT:  return K_PAD0_DPAD_LEFT;
 	case SDL_CONTROLLER_BUTTON_DPAD_RIGHT: return K_PAD0_DPAD_RIGHT;
-	case SDL_CONTROLLER_BUTTON_LEFTSHOULDER:  return K_PGUP;
-	case SDL_CONTROLLER_BUTTON_RIGHTSHOULDER: return K_PGDN;
+	case SDL_CONTROLLER_BUTTON_LEFTSHOULDER:  return K_PAD0_LEFTSHOULDER;     // tabs (UIWindowManager::PadTab)
+	case SDL_CONTROLLER_BUTTON_RIGHTSHOULDER: return K_PAD0_RIGHTSHOULDER;
 	}
 	return 0;
 }
@@ -1006,36 +1024,54 @@ static float IN_PadRamp( int raw )
 ===============
 IN_GamepadUI
 
-Menu mode: both sticks drive the UI cursor, A = left click, B / Start = back, D-pad = move focus to the next
-widget (uilib UIWindowManager::PadNavigate), Y = on-screen keyboard.
+Menu mode (works in every menu, with in_padGame 0 or 1):
+  left stick   UI cursor, response curve + a ramp-up while held fully over (in_padUiSpeed / in_padUiAccel /
+               in_padUiDeadzone)
+  right stick  scrolls the list under the cursor (mouse-wheel ticks, rate follows the deflection)
+  D-pad        moves focus to the next widget in that direction (UIWindowManager::PadNavigate); auto-repeats
+  A            left click        B / Start   back / close (Escape)
+  LB / RB      previous / next tab (UIWindowManager::PadTab)
+  Y            Windows on-screen keyboard
 ===============
 */
 static void IN_GamepadUI( void )
 {
 	static int   lastMs = 0;
-	static float accX = 0, accY = 0;
+	static float accX = 0, accY = 0, held = 0, wheelAcc = 0;
 	static int   repeatAt[4];
 	int          now = Sys_Milliseconds();
-	float        dt = ( now - lastMs ) * 0.001f, sx, sy, speed;
+	float        dt = ( now - lastMs ) * 0.001f, lx, ly, mag, dz, curve, accel, rs, speed;
 	int          i, dx, dy;
 
 	if ( dt > 0.1f || dt < 0.0f ) dt = 0.1f;
 	lastMs = now;
 
-	sx = IN_PadRamp( SDL_GameControllerGetAxis( gamepad, SDL_CONTROLLER_AXIS_LEFTX ) ) +
-	     IN_PadRamp( SDL_GameControllerGetAxis( gamepad, SDL_CONTROLLER_AXIS_RIGHTX ) );
-	sy = IN_PadRamp( SDL_GameControllerGetAxis( gamepad, SDL_CONTROLLER_AXIS_LEFTY ) ) +
-	     IN_PadRamp( SDL_GameControllerGetAxis( gamepad, SDL_CONTROLLER_AXIS_RIGHTY ) );
-	if ( sx > 1.0f ) sx = 1.0f;
-	if ( sx < -1.0f ) sx = -1.0f;
-	if ( sy > 1.0f ) sy = 1.0f;
-	if ( sy < -1.0f ) sy = -1.0f;
-	sx *= fabsf( sx );   // square response: fine near the middle, fast at the rim
-	sy *= fabsf( sy );
+	dz = in_padUiDeadzone ? in_padUiDeadzone->value : 0.2f;
+	if ( dz < 0.0f ) dz = 0.0f;
+	if ( dz > 0.9f ) dz = 0.9f;
 
-	speed = cls.glconfig.vidWidth * ( in_padUiSpeed ? in_padUiSpeed->value : 0.55f );
-	accX += sx * speed * dt;
-	accY += sy * speed * dt;
+	// ---- left stick: cursor. Radial deadzone, then (m^2) shaping so small pushes are precise.
+	lx  = SDL_GameControllerGetAxis( gamepad, SDL_CONTROLLER_AXIS_LEFTX ) / 32767.0f;
+	ly  = SDL_GameControllerGetAxis( gamepad, SDL_CONTROLLER_AXIS_LEFTY ) / 32767.0f;
+	mag = sqrtf( lx * lx + ly * ly );
+	if ( mag > dz ) {
+		float m = ( mag - dz ) / ( 1.0f - dz );
+
+		if ( m > 1.0f ) m = 1.0f;
+		curve = m * m / mag;                     // scale the unit direction by the shaped magnitude
+		lx *= curve;
+		ly *= curve;
+		held += ( m > 0.85f ) ? dt : -dt * 3.0f;  // ramp-up only for a sustained full push
+		if ( held < 0.0f ) held = 0.0f;
+		if ( held > 0.8f ) held = 0.8f;
+	} else {
+		lx = ly = 0.0f;
+		held = 0.0f;
+	}
+	accel = 1.0f + ( in_padUiAccel ? in_padUiAccel->value : 1.5f ) * ( held / 0.8f );
+	speed = cls.glconfig.vidWidth * ( in_padUiSpeed ? in_padUiSpeed->value : 0.55f ) * accel;
+	accX += lx * speed * dt;
+	accY += ly * speed * dt;
 	dx = (int)accX;
 	dy = (int)accY;
 	accX -= dx;
@@ -1048,9 +1084,28 @@ static void IN_GamepadUI( void )
 
 			if ( now >= nextLogMs ) {
 				nextLogMs = now + 300;
-				Com_Printf( "^~^~^ PADUI cursor %d %d (guimouse %d)\n", cl.mousex, cl.mousey, (int)in_guimouse );
+				Com_Printf( "^~^~^ PADUI cursor %d %d accel %.2f\n", cl.mousex, cl.mousey, accel );
 			}
 		}
+	}
+
+	// ---- right stick: scroll the list under the cursor (wheel ticks, up to 14 per second)
+	rs = SDL_GameControllerGetAxis( gamepad, SDL_CONTROLLER_AXIS_RIGHTY ) / 32767.0f;
+	if ( fabsf( rs ) > dz ) {
+		rs = ( fabsf( rs ) - dz ) / ( 1.0f - dz ) * ( rs < 0 ? -1.0f : 1.0f );
+		wheelAcc += rs * 14.0f * dt;
+		while ( wheelAcc >= 1.0f ) {          // stick down = content moves up = wheel down
+			IN_PadKey( K_MWHEELDOWN, qtrue );
+			IN_PadKey( K_MWHEELDOWN, qfalse );
+			wheelAcc -= 1.0f;
+		}
+		while ( wheelAcc <= -1.0f ) {
+			IN_PadKey( K_MWHEELUP, qtrue );
+			IN_PadKey( K_MWHEELUP, qfalse );
+			wheelAcc += 1.0f;
+		}
+	} else {
+		wheelAcc = 0.0f;
 	}
 
 	for ( i = 0; i < SDL_CONTROLLER_BUTTON_MAX; i++ ) {
@@ -1119,6 +1174,17 @@ static void IN_GamepadMove( void )
 			}
 		}
 		IN_GamepadUI();
+		return;
+	}
+
+	// in-game play with the pad is opt-in (in_padGame 1, Options > Controls > ENABLE); Start still opens the menu
+	if ( !( in_padGame && in_padGame->integer ) ) {
+		qboolean start = SDL_GameControllerGetButton( gamepad, SDL_CONTROLLER_BUTTON_START ) ? qtrue : qfalse;
+
+		if ( start != stick_state.buttons[SDL_CONTROLLER_BUTTON_START] ) {
+			stick_state.buttons[SDL_CONTROLLER_BUTTON_START] = start;
+			IN_PadKey( K_ESCAPE, start );
+		}
 		return;
 	}
 
@@ -1809,6 +1875,9 @@ void IN_Init( void *windowData )
 	in_padDebug = Cvar_Get( "in_padDebug", "0", 0 );
 	in_padTestScript = Cvar_Get( "in_padTestScript", "", CVAR_INIT );
 	in_padActive = Cvar_Get( "in_padActive", "0", CVAR_TEMP );
+	in_padGame = Cvar_Get( "in_padGame", "0", CVAR_ARCHIVE );
+	in_padUiAccel = Cvar_Get( "in_padUiAccel", "1.5", CVAR_ARCHIVE );
+	in_padUiDeadzone = Cvar_Get( "in_padUiDeadzone", "0.2", CVAR_ARCHIVE );
 	in_padTestGo = Cvar_Get( "in_padTestGo", "0", CVAR_TEMP );
 	in_padTestHang = Cvar_Get( "in_padTestHang", "0", CVAR_INIT );
 
