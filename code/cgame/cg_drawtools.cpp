@@ -849,6 +849,21 @@ static qboolean CG_HudDrawStyledString(int i, float fX, float fY, qboolean bVirt
         x = ox + (ow - nw);
     }
     y = oy + (oh - nh) * 0.5f;
+    // never under the compass bar: a string that would overlap its strip (centre, 0.42W wide) starts 6 px below the band
+    {
+        static cvar_t *s_cvBand;
+        float          band, cw, half, cx = cgs.glconfig.vidWidth * 0.5f;
+
+        if (!s_cvBand) {
+            s_cvBand = cgi.Cvar_Get("coop_compassBarLive", "0", 0);
+        }
+        band = (float)s_cvBand->integer;
+        cw   = (0.42f * cgs.glconfig.vidWidth < 0.75f * cgs.glconfig.vidHeight) ? 0.42f * cgs.glconfig.vidWidth : 0.75f * cgs.glconfig.vidHeight;
+        half = cw * 0.5f;
+        if (band > 0.0f && y < band + 6.0f && y + nh > 0.0f && x + nw > cx - half && x < cx + half) {
+            y = band + 6.0f;
+        }
+    }
     x = (float)(int)(x + 0.5f);
     y = (float)(int)(y + 0.5f);
 
@@ -872,16 +887,11 @@ void CG_HudDrawElements()
     if (!cg_huddraw_force->integer && !cg_hud->integer) {
         return;
     }
-    // HZM coop: cutscene HUD hold (coop_mod/cutscene.scr::cut_lock sets coop_cineHud 1): every scripted huddraw / ihuddraw
-    // element (rank star, carried-item icons, cards ...) is hidden here and comes back when the cvar drops - the script state is untouched
-    {
-        static cvar_t *s_cvCine;
-        if (!s_cvCine) {
-            s_cvCine = cgi.Cvar_Get("coop_cineHud", "0", 0);
-        }
-        if (s_cvCine->integer) {
-            return;
-        }
+    // HZM coop: cutscene HUD hold (coop_mod/cutscene.scr::cut_lock pokes coop_cineHud): every scripted huddraw / ihuddraw
+    // element (rank star, carried-item icons, cards ...) is hidden while CG_CoopCineHudActive holds (self-expiring, consumed
+    // from the cvar there) and comes back with it - the script state is untouched
+    if (CG_CoopCineHudActive()) {
+        return;
     }
 
     virtualScale[0] = cgs.glconfig.vidWidth / 640.0;
