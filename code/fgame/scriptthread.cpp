@@ -3643,7 +3643,7 @@ void ScriptThread::CenterPrint(Event *ev)
     for (j = 0; j < game.maxclients; j++) {
         other = &g_entities[j];
         if (other->inuse && other->client) {
-            gi.centerprintf(other, ev->GetString(1));
+            G_CoopCenterPrint(other, ev->GetString(1));
         }
     }
 }

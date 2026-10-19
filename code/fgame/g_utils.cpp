@@ -2285,6 +2285,24 @@ void G_CoopFeedPrintAll(int cat, const char *key, const char *text, int iVanilla
     }
 }
 
+/*
+HZM coop [text sweep 2026-10-19] G_CoopCenterPrint - an INFORMATIONAL centre-screen line ("You need the key", a
+trigger_message hint, a map's scripted "centerprint") goes to the bottom-left event feed (cat 2, key "cp") in a coop
+session for a client whose cgame has the feed, and to the retail centre print for everyone else (MP, an old cgame, a
+bot). Crucial alerts do not come through here (they are ihuddraw / bold prints with their own style).
+*/
+void G_CoopCenterPrint(gentity_t *ent, const char *text)
+{
+    if (!ent || !text || !text[0]) {
+        return;
+    }
+    // the retail centre print converts "$$loc$$" keys in the client; the feed does not, so convert first
+    if (ent->client && G_CoopFeedPrint(ent - g_entities, 2, "cp", gi.LV_ConvertString(text))) {
+        return;
+    }
+    gi.centerprintf(ent, "%s", text);
+}
+
 void G_CenterPrintToAllClients(const char *pszString)
 {
     gentity_t *ent;
