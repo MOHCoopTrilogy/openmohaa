@@ -8458,6 +8458,11 @@ static int CG_CalcViewValues(void)
 
     if (cg.snap->ps.stats[STAT_HEALTH] > 0) {
         VectorSubtract(cg.refdefViewAngles, cg.predicted_player_state.damage_angles, cg.refdefViewAngles);
+        {   // HZM coop - dev-only (cg_vmDbgFix 1): no weapon view kick, so a long automatic burst leaves the view where it was (close-up stills of reloads)
+            static cvar_t *pDbgFix = NULL;
+            if (!pDbgFix) { pDbgFix = cgi.Cvar_Get("cg_vmDbgFix", "0", 0); }
+            if (pDbgFix->integer) { cg.viewkick[0] = 0.0f; cg.viewkick[1] = 0.0f; }
+        }
         cg.refdefViewAngles[0] += cg.viewkick[0];
         cg.refdefViewAngles[1] += cg.viewkick[1];
 
