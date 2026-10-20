@@ -1040,6 +1040,15 @@ static void CG_OffsetThirdPersonView(void)
         VectorCopy(look_offset, saved_look_offset);
     }
 
+    // HZM coop - dev-only chase-camera orbit (close-up stills of a gun part from the side: the freecam is mouse-only). 0 = off.
+    {
+        static cvar_t *pDbgYaw = NULL, *pDbgPitch = NULL;
+        if (!pDbgYaw)   { pDbgYaw   = cgi.Cvar_Get("cg_camYawDebug", "0", 0); }
+        if (!pDbgPitch) { pDbgPitch = cgi.Cvar_Get("cg_camPitchDebug", "0", 0); }
+        target_angles[YAW]   += pDbgYaw->value;
+        target_angles[PITCH] += pDbgPitch->value;
+    }
+
     target_angles[YAW]   = AngleNormalize360(target_angles[YAW]);
     target_angles[PITCH] = AngleNormalize180(target_angles[PITCH]);
 
