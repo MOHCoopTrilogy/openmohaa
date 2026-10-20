@@ -126,6 +126,9 @@ const char *Key_KeynumToBindString( int keynum ) {
 void Key_GetKeysForCommand( const char *command, int *key1, int *key2 ) {
 }
 
+void Key_GetKeysForCommandDev( const char *command, int *key1, int *key2 ) {
+}
+
 void SCR_DebugGraph( float value ) {
 }
 
