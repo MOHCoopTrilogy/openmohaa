@@ -1706,7 +1706,7 @@ PF_Key_GetKeysForCommand
 void PF_Key_GetKeysForCommand( const char *command, int *key1, int *key2 )
 {
 	if( com_cl_running->integer ) {
-		Key_GetKeysForCommand( command, key1, key2 );
+		Key_GetKeysForCommandDev( command, key1, key2 );
 	} else {
 		*key1 = 0;
 		*key2 = 0;

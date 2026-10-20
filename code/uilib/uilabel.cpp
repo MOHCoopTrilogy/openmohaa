@@ -263,6 +263,9 @@ void UILabel::Draw(void)
             }
         }
 
+        // [gamepad-next] a cvar-linked label (the loading-screen hint strip) can carry {key:use} tokens too
+        string = CL_ExpandKeyTokens(string);
+
         if (m_linkstrings.NumObjects()) {
             cvar_t *cvar = UI_FindCvar(m_cvarname);
             if (cvar) {

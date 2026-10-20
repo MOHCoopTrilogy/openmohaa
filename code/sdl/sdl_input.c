@@ -65,6 +65,8 @@ static cvar_t *in_padUiSpeed    = NULL;   // UI cursor speed, screen widths per 
 static cvar_t *in_padDebug      = NULL;   // 1 = log mapped pad keys as "^~^~^ PADKEY ..."
 static cvar_t *in_padTestScript = NULL;   // CVAR_INIT (command line only): drive a virtual pad from a script file
 static cvar_t *in_padActive     = NULL;   // 1 while the last input came from the pad, 0 for keyboard / mouse
+static cvar_t *in_padCfgVer     = NULL;   // pad settings migration marker (archived)
+static qboolean padAutoLatched  = qfalse; // in_padGame -1 (auto): set by the first pad button / stick use
 static cvar_t *in_padGame       = NULL;   // 1 = the pad also plays the game (movement / look / fire); menus always work
 static cvar_t *in_padUiAccel    = NULL;   // extra cursor speed while the stick is held fully over (0 = none)
 static cvar_t *in_padUiDeadzone = NULL;   // menu stick deadzone, 0..0.9
@@ -808,6 +810,9 @@ static void IN_PadTestLoad( void )
 		} else if ( !strncmp( line, "@cursor", 7 ) ) {
 			st->kind = 4;      // test only: put the UI cursor somewhere known
 			if ( sscanf( line + 7, "%d %d %d", &st->t, &st->ax[0], &st->ax[1] ) == 3 ) padNumSteps++;
+		} else if ( !strncmp( line, "@kbm", 4 ) ) {
+			st->kind = 5;      // test only: act as if the keyboard / mouse was just used (key prompts switch to key names)
+			if ( sscanf( line + 4, "%d", &st->t ) == 1 ) padNumSteps++;
 		} else if ( !strncmp( line, "@cmd", 4 ) ) {
 			char *c = line + 4;
 
@@ -878,6 +883,8 @@ static void IN_PadTestDrive( void )
 			i          = SDL_JoystickAttachVirtualEx( &d );
 			Com_Printf( "^~^~^ PADTEST attach -> %d\n", i );
 			padWantOpen = qtrue;
+		} else if ( st->kind == 5 ) {
+			IN_PadNoteKbm();
 		} else if ( st->kind == 4 ) {
 			CL_SetMousePos( st->ax[0], st->ax[1] );
 		} else if ( st->kind == 3 ) {
@@ -921,11 +928,49 @@ Per client frame: deferred, off-thread SDL bring-up (see the comment at the top)
 after hot-plug, and the optional test driver.
 ===============
 */
+/*
+IN_PadMirrors
+
+Friendly text for the Options > Controls > AIM / SENSITIVITY value labels (a label shows a cvar's raw string, "1.000000").
+in_padV_<name> = percent for the sensitivities and deadzones, seconds / multiplier for the acceleration.
+*/
+static void IN_PadMirrors( void )
+{
+	static const struct {
+		const char *cv, *mirror, *fmt;
+	} m[] = {
+		{"joy_lookX", "in_padV_lookX", "pct"},         {"joy_lookY", "in_padV_lookY", "pct"},
+		{"joy_adsScale", "in_padV_adsScale", "pct"},   {"joy_threshold", "in_padV_inner", "pct"},
+		{"joy_outerThreshold", "in_padV_outer", "pct"}, {"joy_response", "in_padV_response", "x1"},
+		{"joy_accelTime", "in_padV_accelTime", "sec"}, {"joy_accelMax", "in_padV_accelMax", "x1"},
+	};
+	int i;
+
+	for ( i = 0; i < (int)( sizeof( m ) / sizeof( m[0] ) ); i++ ) {
+		float v = Cvar_VariableValue( m[i].cv );
+		char  buf[24];
+
+		if ( !strcmp( m[i].fmt, "pct" ) ) {
+			Com_sprintf( buf, sizeof( buf ), "%d%%", (int)( v * 100.0f + 0.5f ) );
+		} else if ( !strcmp( m[i].fmt, "sec" ) ) {
+			Com_sprintf( buf, sizeof( buf ), "%.1f s", v );
+		} else {
+			Com_sprintf( buf, sizeof( buf ), "%.1fx", v );
+		}
+		Cvar_Get( m[i].mirror, "", CVAR_TEMP );
+		if ( strcmp( Cvar_VariableString( m[i].mirror ), buf ) ) {
+			Cvar_Set( m[i].mirror, buf );
+		}
+	}
+}
+
 static void IN_PadService( void )
 {
 	static int nextOpenMs = 0;
 	int        now = Sys_Milliseconds();
 	qboolean   en  = IN_PadEnabled();
+
+	IN_PadMirrors();
 
 	padFramesSeen++;
 	if ( en != padWasEnabled ) {
@@ -981,6 +1026,23 @@ static void IN_PadService( void )
 		return;
 	}
 
+	{   // the Controls page shows this word next to the Auto / Off / On buttons
+		const char *lbl = ( in_padGame && in_padGame->integer == 1 ) ? "On" : ( ( in_padGame && in_padGame->integer == 0 ) ? "Off" : "Auto" );
+
+		Cvar_Get( "in_padGameLabel", "Auto", CVAR_TEMP );
+		if ( strcmp( Cvar_VariableString( "in_padGameLabel" ), lbl ) ) {
+			Cvar_Set( "in_padGameLabel", lbl );
+		}
+		{   // same for the response-curve choice
+			int         cv  = Cvar_VariableIntegerValue( "joy_curve" );
+			const char *cl  = cv == 0 ? "Linear" : ( cv == 2 ? "Dynamic" : "Exponential" );
+
+			Cvar_Get( "in_padCurveLabel", "Exponential", CVAR_TEMP );
+			if ( strcmp( Cvar_VariableString( "in_padCurveLabel" ), cl ) ) {
+				Cvar_Set( "in_padCurveLabel", cl );
+			}
+		}
+	}
 	IN_PadTestDrive();
 	if ( !gamepad && padWantOpen && now >= nextOpenMs ) {
 		nextOpenMs = now + 400;
@@ -1182,8 +1244,25 @@ static void IN_GamepadMove( void )
 		return;
 	}
 
-	// in-game play with the pad is opt-in (in_padGame 1, Options > Controls > ENABLE); Start still opens the menu
-	if ( !( in_padGame && in_padGame->integer ) ) {
+	// any pad button or stick use latches "auto" on (in_padGame -1); keyboard and mouse keep working alongside
+	if ( !padAutoLatched ) {
+		for ( i = 0; i < SDL_CONTROLLER_BUTTON_MAX && !padAutoLatched; i++ ) {
+			if ( SDL_GameControllerGetButton( gamepad, SDL_CONTROLLER_BUTTON_A + i ) ) {
+				padAutoLatched = qtrue;
+			}
+		}
+		for ( i = 0; i < SDL_CONTROLLER_AXIS_MAX && !padAutoLatched; i++ ) {
+			float f = fabsf( (float)SDL_GameControllerGetAxis( gamepad, SDL_CONTROLLER_AXIS_LEFTX + i ) / 32767.0f );
+
+			if ( f > ( in_joystickThreshold ? in_joystickThreshold->value : 0.15f ) + 0.1f ) {
+				padAutoLatched = qtrue;
+			}
+		}
+	}
+
+	// in-game play with the pad: in_padGame 1 = on, 0 = off, -1 = auto (on once a pad control has been used).
+	// Start still opens the menu when it is off.
+	if ( !( ( in_padGame && in_padGame->integer == 1 ) || ( in_padGame && in_padGame->integer < 0 && padAutoLatched ) ) ) {
 		qboolean start = SDL_GameControllerGetButton( gamepad, SDL_CONTROLLER_BUTTON_START ) ? qtrue : qfalse;
 
 		if ( start != stick_state.buttons[SDL_CONTROLLER_BUTTON_START] ) {
@@ -1880,7 +1959,17 @@ void IN_Init( void *windowData )
 	in_padDebug = Cvar_Get( "in_padDebug", "0", 0 );
 	in_padTestScript = Cvar_Get( "in_padTestScript", "", CVAR_INIT );
 	in_padActive = Cvar_Get( "in_padActive", "0", CVAR_TEMP );
-	in_padGame = Cvar_Get( "in_padGame", "0", CVAR_ARCHIVE );
+	in_padGame = Cvar_Get( "in_padGame", "-1", CVAR_ARCHIVE );
+	// in_padGame: -1 auto (in-game pad play turns on as soon as a pad button or stick is used), 0 off, 1 on. Until
+	// 2026-10-19 the default was 0, which nobody chose on purpose: a saved 0 is migrated to auto ONCE.
+	in_padCfgVer = Cvar_Get( "in_padCfgVer", "0", CVAR_ARCHIVE );
+	Cvar_Get( "in_padGameLabel", "Auto", CVAR_TEMP );
+	if ( in_padCfgVer->integer < 1 ) {
+		if ( in_padGame->integer == 0 ) {
+			Cvar_Set( "in_padGame", "-1" );
+		}
+		Cvar_Set( "in_padCfgVer", "1" );
+	}
 	in_padUiAccel = Cvar_Get( "in_padUiAccel", "1.0", CVAR_ARCHIVE );
 	in_padUiDeadzone = Cvar_Get( "in_padUiDeadzone", "0.2", CVAR_ARCHIVE );
 	in_padTestGo = Cvar_Get( "in_padTestGo", "0", CVAR_TEMP );

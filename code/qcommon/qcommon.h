@@ -1346,6 +1346,7 @@ qboolean IN_SetCursorFromImage(const byte *pic, int width, int height, pCursorFr
 void IN_FreeCursor();
 qboolean IN_IsCursorActive();
 void IN_SetMousePosition(int x, int y);
+const char *CL_ExpandKeyTokens(const char *in);
 
 void Com_Pause();
 void Com_Unpause();

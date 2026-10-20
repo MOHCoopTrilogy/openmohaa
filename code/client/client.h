@@ -464,6 +464,15 @@ extern	cvar_t	*j_up_axis;
 
 extern	cvar_t	*joy_response;        // [controller feel] analog look response curve
 extern	cvar_t	*joy_outerThreshold;  // [controller feel] outer dead-zone
+// [gamepad-next] aim settings for in-game pad play (Options > Controls > AIM / SENSITIVITY)
+extern	cvar_t	*joy_lookX;           // horizontal look speed multiplier
+extern	cvar_t	*joy_lookY;           // vertical look speed multiplier
+extern	cvar_t	*joy_adsScale;        // extra look multiplier while aiming down sights (+button13)
+extern	cvar_t	*joy_curve;           // 0 linear, 1 exponential (joy_response), 2 dynamic (smooth S-curve)
+extern	cvar_t	*joy_invertY;         // 1 = push up to look down
+extern	cvar_t	*joy_accel;           // 1 = look speeds up while the stick is held fully over
+extern	cvar_t	*joy_accelTime;       // seconds of full deflection to reach the top speed
+extern	cvar_t	*joy_accelMax;        // the top speed multiplier of the acceleration
 extern	cvar_t	*coop_padLookScale;   // [controller feel] master stick look-sensitivity
 
 extern	cvar_t	*cl_timedemo;
@@ -608,6 +617,7 @@ float CL_KeyState (kbutton_t *key);
 const char *Key_KeynumToString( int keynum );
 const char *Key_KeynumToBindString( int keynum );
 void Key_GetKeysForCommand( const char *command, int *key1, int *key2 );
+void Key_GetKeysForCommandDev( const char *command, int *key1, int *key2 );
 int Key_GetCatcher( void );
 void CL_PadMoveCursor( int dx, int dy );
 void CL_SetMousePos( int x, int y );

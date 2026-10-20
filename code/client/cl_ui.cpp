@@ -6835,7 +6835,7 @@ static void UI_LoadHints_PlaceNav(void)
         sx = sy;
     }
 
-    tw    = font->getWidth(Cvar_VariableString("ui_loadhint"), -1) * sx;
+    tw    = font->getWidth(CL_ExpandKeyTokens(Cvar_VariableString("ui_loadhint")), -1) * sx;
     frame = label->getFrame();
     cx    = frame.pos.x + frame.size.width * 0.5f;
     cy    = frame.pos.y + frame.size.height * 0.5f;
@@ -7072,6 +7072,21 @@ void UI_TestUpdateScreen(unsigned int timeout)
     s_loadProbe.tickDepth++;
     SCR_UpdateScreen();
     s_loadProbe.tickDepth--;
+    {   // [gamepad-next] test aid: ui_loadShot <name> takes ONE screenshot a few frames into a real map load
+        static int shotTicks;
+        const char *nm = Cvar_VariableString("ui_loadShot");
+
+        if (nm[0]) {
+            if (++shotTicks == 12) {
+                Cbuf_ExecuteText(EXEC_NOW, va("screenshotJPEG %s\n", nm));
+                Cvar_Set("ui_loadShot", "");
+                shotTicks = 0;
+                SCR_UpdateScreen();
+            }
+        } else {
+            shotTicks = 0;
+        }
+    }
     if (s_loadProbe.active && s_loadProbe.draws == probeDraws) {
         s_loadProbe.suppressed++;
     }

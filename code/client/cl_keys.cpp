@@ -714,6 +714,154 @@ void Key_GetKeysForCommand(const char *command, int *key1, int *key2)
 
 /*
 ===================
+Key_GetKeysForCommandDev
+
+[HZM gamepad-next] Key_GetKeysForCommand for the code that PRINTS a key to the player (cgame prompts, script
+getboundkey): the first slot is the binding on the device the player last used (in_padActive 1 = a pad button,
+0 = keyboard / mouse), the second is the other device. Key_GetKeysForCommand itself stays raw (the Controls menu
+needs its fixed slot order). A command with no binding on the preferred device falls back to the other one.
+===================
+*/
+void Key_GetKeysForCommandDev(const char *command, int *key1, int *key2)
+{
+    int i, kb = -1, pd = -1;
+    int padActive = Cvar_VariableIntegerValue("in_padActive");
+
+    for (i = 0; i < MAX_KEYS; i++) {
+        if (!keys[i].binding || stricmp(command, keys[i].binding)) {
+            continue;
+        }
+        if (i >= K_PAD0_A && i <= K_PAD0_TOUCHPAD) {
+            if (pd < 0) {
+                pd = i;
+            }
+        } else if (kb < 0) {
+            kb = i;
+        }
+    }
+    if (padActive && pd >= 0) {
+        *key1 = pd;
+        *key2 = kb;
+    } else if (kb >= 0) {
+        *key1 = kb;
+        *key2 = pd;
+    } else {
+        *key1 = pd;
+        *key2 = -1;
+    }
+}
+
+/*
+===================
+CL_ExpandKeyTokens
+
+[HZM gamepad-next] "{key:use}" in any localized string (ui labels, hud text, loading tips, briefing prompts) becomes the
+key or controller button bound to that action on the device the player last used: "F" with a keyboard, "LB" with a pad.
+The name is an alias (use, fire, jump, crouch, reload, scores, medkit, cover, ammobox, grenade, ads) or a raw command
+("{key:+use}"). An action with no binding on either device prints its alias in capitals.
+===================
+*/
+static const char *CL_KeyTokenText(int key)
+{
+    static const struct {
+        const char *from, *to;
+    } t[] = {{"PAD0_A", "A"}, {"PAD0_B", "B"}, {"PAD0_X", "X"}, {"PAD0_Y", "Y"}, {"PAD0_LEFTSHOULDER", "LB"},
+             {"PAD0_RIGHTSHOULDER", "RB"}, {"PAD0_LEFTTRIGGER", "LT"}, {"PAD0_RIGHTTRIGGER", "RT"},
+             {"PAD0_DPAD_UP", "D-pad Up"}, {"PAD0_DPAD_DOWN", "D-pad Down"}, {"PAD0_DPAD_LEFT", "D-pad Left"},
+             {"PAD0_DPAD_RIGHT", "D-pad Right"}, {"PAD0_LEFTSTICK_CLICK", "L3"}, {"PAD0_RIGHTSTICK_CLICK", "R3"},
+             {"PAD0_BACK", "View"}, {"PAD0_START", "Menu"}};
+    const char *nm = Key_KeynumToBindString(key);
+    int         i;
+
+    for (i = 0; nm && i < (int)(sizeof(t) / sizeof(t[0])); i++) {
+        if (!Q_stricmp(nm, t[i].from)) {
+            return t[i].to;
+        }
+    }
+    if (nm) {      // keyboard / mouse names print in capitals ("F", "MOUSE1", "RIGHTARROW")
+        static char up[32];
+
+        for (i = 0; nm[i] && i < 31; i++) {
+            up[i] = (char)toupper((unsigned char)nm[i]);
+        }
+        up[i] = 0;
+        return up;
+    }
+    return nm;
+}
+
+const char *CL_ExpandKeyTokens(const char *in)
+{
+    static char buf[4][1024];
+    static int  bi;
+    static const struct {
+        const char *alias, *cmd;
+    } al[] = {{"use", "+use"}, {"fire", "+attackprimary"}, {"jump", "+moveup"}, {"crouch", "+movedown"},
+              {"reload", "reload"}, {"scores", "+scores"}, {"medkit", "append name ,8mk"},
+              {"cover", "append name ,9cv"}, {"ammobox", "append name ,abx"}, {"grenade", "+coopnade"},
+              {"ads", "+button13"}};
+    char       *out;
+    const char *p = in, *q;
+    int         n = 0;
+
+    if (!in || !strstr(in, "{key:")) {
+        return in;
+    }
+    out = buf[bi++ & 3];
+    while (*p && n < 1000) {
+        if (!strncmp(p, "{key:", 5) && (q = strchr(p, '}')) != NULL && q - p < 60) {
+            char        name[64], up[64];
+            const char *cmd = NULL, *txt = NULL;
+            int         k1 = -1, k2 = -1, i, len = (int)(q - p) - 5;
+
+            memcpy(name, p + 5, len);
+            name[len] = 0;
+            for (i = 0; i < (int)(sizeof(al) / sizeof(al[0])); i++) {
+                if (!Q_stricmp(name, al[i].alias)) {
+                    cmd = al[i].cmd;
+                }
+            }
+            if (!cmd) {
+                cmd = name;
+            }
+            Key_GetKeysForCommandDev(cmd, &k1, &k2);
+            if (k1 >= 0) {
+                txt = CL_KeyTokenText(k1);
+            }
+            if (!txt || !txt[0]) {
+                for (i = 0; name[i] && i < 63; i++) {
+                    up[i] = (char)toupper((unsigned char)name[i]);
+                }
+                up[i] = 0;
+                txt   = up;
+            }
+            for (i = 0; txt[i] && n < 1000; i++) {
+                out[n++] = txt[i];
+            }
+            p = q + 1;
+        } else {
+            out[n++] = *p++;
+        }
+    }
+    out[n] = 0;
+    return out;
+}
+
+// "keytokens <text>": print the text with its {key:...} tokens expanded for the device in use (test / diagnostics)
+static void CL_KeyTokens_f(void)
+{
+    char        line[1024] = "";
+    int         i;
+
+    for (i = 1; i < Cmd_Argc(); i++) {
+        Q_strcat(line, sizeof(line), Cmd_Argv(i));
+        Q_strcat(line, sizeof(line), " ");
+    }
+    Com_Printf("^~^~^ KEYTOKENS pad=%d : %s\n", Cvar_VariableIntegerValue("in_padActive"), CL_ExpandKeyTokens(line));
+}
+
+/*
+===================
 Key_Unbind_f
 ===================
 */
@@ -1040,6 +1188,7 @@ void CL_InitKeyCommands(void)
     Cmd_AddCommand("coop_objkey", CL_CoopObjKey_f);
     Cmd_AddCommand("bind", Key_Bind_f);
     Cmd_AddCommand("unbind", Key_Unbind_f);
+    Cmd_AddCommand("keytokens", CL_KeyTokens_f);
     Cmd_AddCommand("altbind", Key_AltBind_f);
     Cmd_AddCommand("unaltbind", Key_Unaltbind_f);
     Cmd_AddCommand("ctrlbind", Key_CtrlBind_f);

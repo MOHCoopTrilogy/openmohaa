@@ -25,6 +25,28 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 
 #include "cg_local.h"
 
+// [gamepad-next] the text of a key in a printed line ("Press Use(%s) ..."): a controller button gets its short name
+// (A, LB, RT, D-UP ...) instead of PAD0_LEFTSHOULDER; anything else is the engine's own name.
+static const char *CG_KeyText(int key)
+{
+    static const struct {
+        const char *from, *to;
+    } t[] = {{"PAD0_A", "A"}, {"PAD0_B", "B"}, {"PAD0_X", "X"}, {"PAD0_Y", "Y"}, {"PAD0_LEFTSHOULDER", "LB"},
+             {"PAD0_RIGHTSHOULDER", "RB"}, {"PAD0_LEFTTRIGGER", "LT"}, {"PAD0_RIGHTTRIGGER", "RT"},
+             {"PAD0_DPAD_UP", "D-pad Up"}, {"PAD0_DPAD_DOWN", "D-pad Down"}, {"PAD0_DPAD_LEFT", "D-pad Left"},
+             {"PAD0_DPAD_RIGHT", "D-pad Right"}, {"PAD0_LEFTSTICK_CLICK", "L3"}, {"PAD0_RIGHTSTICK_CLICK", "R3"},
+             {"PAD0_BACK", "View"}, {"PAD0_START", "Menu"}};
+    const char *nm = cgi.Key_KeynumToBindString(key);
+    int         i;
+
+    for (i = 0; nm && i < (int)(sizeof(t) / sizeof(t[0])); i++) {
+        if (!Q_stricmp(nm, t[i].from)) {
+            return t[i].to;
+        }
+    }
+    return nm;
+}
+
 extern "C" void CG_DrawCoopIcons(void);
 
 // HZM coop - HUD FADE state (logic lives above CG_Draw2D; declared here because huddraw/
@@ -1502,7 +1524,7 @@ void CG_DrawSpectatorView_ver_15()
 
     if (!bOnTeam) {
         cgi.Key_GetKeysForCommand("+attackprimary", &iKey1, &iKey2);
-        pszString = cgi.LV_ConvertString(va("Press Fire(%s) to join the battle!", cgi.Key_KeynumToBindString(iKey1)));
+        pszString = cgi.LV_ConvertString(va("Press Fire(%s) to join the battle!", CG_KeyText(iKey1)));
         fX        = (float)(cgs.glconfig.vidWidth
                      - cgi.UI_FontStringWidth(cgs.media.attackerFont, pszString, -1) * cgs.uiHiResScale[0])
            * 0.5;
@@ -1519,8 +1541,8 @@ void CG_DrawSpectatorView_ver_15()
 
         pszString = cgi.LV_ConvertString(
             va("Press Jump(%s) or Duck(%s) to follow a different player.",
-               cgi.Key_KeynumToBindString(iKey1),
-               cgi.Key_KeynumToBindString(iKey1b))
+               CG_KeyText(iKey1),
+               CG_KeyText(iKey1b))
         );
 
         fX = (float)(cgs.glconfig.vidWidth
@@ -1536,7 +1558,7 @@ void CG_DrawSpectatorView_ver_15()
     if (!bOnTeam && (cg.predicted_player_state.pm_flags & PMF_CAMERA_VIEW)) {
         cgi.Key_GetKeysForCommand("+use", &iKey1, &iKey2);
         pszString =
-            cgi.LV_ConvertString(va("Press Use(%s) to enter free spectate mode.", cgi.Key_KeynumToBindString(iKey1)));
+            cgi.LV_ConvertString(va("Press Use(%s) to enter free spectate mode.", CG_KeyText(iKey1)));
 
         fX = (float)(cgs.glconfig.vidWidth
                      - cgi.UI_FontStringWidth(cgs.media.attackerFont, pszString, -1) * cgs.uiHiResScale[0])
@@ -1552,7 +1574,7 @@ void CG_DrawSpectatorView_ver_15()
         cgi.Key_GetKeysForCommand("+use", &iKey1, &iKey2);
 
         pszString = cgi.LV_ConvertString(
-            va("Press Use(%s) to enter player following spectate mode.", cgi.Key_KeynumToBindString(iKey1))
+            va("Press Use(%s) to enter player following spectate mode.", CG_KeyText(iKey1))
         );
 
         fX = (float)(cgs.glconfig.vidWidth
@@ -1637,9 +1659,9 @@ void CG_DrawSpectatorView_ver_6()
 
     if (cg.predicted_player_state.pm_flags & PMF_CAMERA_VIEW) {
         pszString =
-            cgi.LV_ConvertString(va("Press Use(%s) to follow a different player.", cgi.Key_KeynumToBindString(iKey1)));
+            cgi.LV_ConvertString(va("Press Use(%s) to follow a different player.", CG_KeyText(iKey1)));
     } else {
-        pszString = cgi.LV_ConvertString(va("Press Use(%s) to follow a player.", cgi.Key_KeynumToBindString(iKey1)));
+        pszString = cgi.LV_ConvertString(va("Press Use(%s) to follow a player.", CG_KeyText(iKey1)));
     }
 
     fX = (float)(cgs.glconfig.vidWidth
@@ -1656,8 +1678,8 @@ void CG_DrawSpectatorView_ver_6()
         cgi.Key_GetKeysForCommand("+movedown", &iKey1b, &iKey2b);
         pszString = cgi.LV_ConvertString(
             va("Press Jump(%s) or Duck(%s) to free spectate.",
-               cgi.Key_KeynumToBindString(iKey1),
-               cgi.Key_KeynumToBindString(iKey1b))
+               CG_KeyText(iKey1),
+               CG_KeyText(iKey1b))
         );
 
         fX = (float)(cgs.glconfig.vidWidth
@@ -4193,7 +4215,7 @@ static void CG_DrawBracePip(void)
 
     // the bound Use key under the icon: "MOUNT (F)"
     cgi.Key_GetKeysForCommand("+use", &iKey1, &iKey2);
-    pszKey   = cgi.Key_KeynumToBindString(iKey1);
+    pszKey   = CG_KeyText(iKey1);
     pszLabel = (pszKey && pszKey[0] && pszKey[0] != '?') ? va("MOUNT %s", pszKey) : "MOUNT";
     tw = cgi.UI_FontStringWidth(cgs.media.hudDrawFont, pszLabel, -1) * cgs.uiHiResScale[0];
     tx = px + sz * 0.5f - tw * 0.5f;
