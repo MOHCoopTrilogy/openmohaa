@@ -195,6 +195,7 @@ Entity *findclientsinradius(Entity *startent, Vector org, float rad);
 void G_TouchTriggers(gentity_t *ent);
 void G_TouchSolids(gentity_t *ent);
 
+void G_CoopCenterPrint(gentity_t *ent, const char *text);
 void G_CenterPrintToAllClients(const char *pszString);
 void G_PrintToAllClients(const char *pszString, int iType = 1);
 // HZM coop [user 2026-10-06, feed round 2] the event feed for text the engine prints (g_utils.cpp)

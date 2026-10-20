@@ -1158,7 +1158,7 @@ bool UseAnim::canBeUsed(Entity *activator)
             if (dialog.length() > 0) {
                 activator->Sound(dialog);
             } else {
-                gi.centerprintf(activator->edict, "You need the %s", item->getName().c_str());
+                G_CoopCenterPrint(activator->edict, va("You need the %s", item->getName().c_str()));
             }
             delete item;
 

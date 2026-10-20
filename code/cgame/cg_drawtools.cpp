@@ -645,6 +645,240 @@ void CG_RefreshHudDrawElements()
     }
 }
 
+/*
+HZM coop [text sweep 2026-10-19, bug-4093] STYLED SCRIPT TEXT. Every scripted huddraw / ihuddraw STRING in a coop session
+is drawn here by one rule instead of by edits to ~600 script lines:
+ - SIZE: a 640x480 "virtual" string was scaled by vid/480 (2.25x at 1080p) with a different font each; every string now
+   uses u = vidHeight / 500 (one scale for all screens) times its tier.
+ - TIER: body = verdana-12 (courier / verdana-10 too; a plain verdana-14 at 0.9) ~16 px cap at 1080p; headline = facfont /
+   handle / delima -> verdana-14 x1.4 ~26 px; urgent alert = a red / orange string -> verdana-14 x1.7 ~31 px.
+   marlett (symbol font) and the debrief / rank card slots (62-73, 127-134) are left alone.
+ - ANCHOR: the string keeps the centre line (x for centred / right aligned text, y always) it had in its ORIGINAL
+   font, so a script that centred "PROMOTED" by hand still looks centred.
+ - LEGIBILITY: a 1 px black shadow at 0.8 of the string's own (faded) alpha.
+Not applied to the lobby and briefing maps (their layout was drawn for the original sizes), while the HUD is hidden by a
+cinematic / credits roll / intermission (titles keep their authored look), or outside a coop session.
+coop_hudTextStyle 0 turns the whole rule off.
+*/
+static cvar_t       *s_cvTextStyle;
+static cvar_t       *s_cvTextSess;
+static fontheader_t *s_fHeadline;
+static fontheader_t *s_fBody;
+
+static qboolean CG_CoopCineHudActive(void); // defined with the cinematic hold below
+
+static qboolean CG_HudTextStyleOn(void)
+{
+    if (!s_cvTextStyle) {
+        s_cvTextStyle = cgi.Cvar_Get("coop_hudTextStyle", "1", CVAR_ARCHIVE);
+        s_cvTextSess  = cgi.Cvar_Get("coop_isCoopSession", "0", 0);
+    }
+    if (!s_cvTextStyle->integer || !s_cvTextSess->integer) {
+        return qfalse;
+    }
+    if (strstr(cgs.mapname, "briefing/") || strstr(cgs.mapname, "co_lobby")) {
+        return qfalse;
+    }
+    // a cinematic / credits roll / intermission hides the HUD: the scripted text there IS the picture (titles), keep it as authored
+    if (!cg.snap || (cg.snap->ps.pm_flags & (PMF_NO_HUD | PMF_INTERMISSION))) {
+        return qfalse;
+    }
+    return qtrue;
+}
+
+// A string that sits ON a panel (a baked card / service-record page drawn in the same 640x480 frame) must keep
+// scaling with that panel, or it shrinks to a stamp in the middle of a big card at 1080p. The pixel rects of the
+// visible panel-sized shader elements are collected once per frame (not full-screen curtains: those are backdrops).
+#define HUD_MAX_PANELS 8
+static float s_panelRect[HUD_MAX_PANELS][4];
+static int   s_nPanels;
+
+static qboolean CG_HudElemPixelRect(int i, float *px, float *py, float *pw, float *ph)
+{
+    float fX = cgi.HudDrawElements[i].iX, fY = cgi.HudDrawElements[i].iY;
+    float fW = cgi.HudDrawElements[i].iWidth, fH = cgi.HudDrawElements[i].iHeight;
+    float sx, sy;
+
+    if (cgi.HudDrawElements[i].bVirtualScreen) {
+        sx = cgs.glconfig.vidWidth / 640.0f;
+        sy = cgs.glconfig.vidHeight / 480.0f;
+        if (cgi.HudDrawElements[i].iHorizontalAlign == HUD_ALIGN_X_CENTER) {
+            fX += 320.0f - fW * 0.5f;
+        } else if (cgi.HudDrawElements[i].iHorizontalAlign == HUD_ALIGN_X_RIGHT) {
+            fX += 640.0f;
+        }
+        if (cgi.HudDrawElements[i].iVerticalAlign == HUD_ALIGN_Y_CENTER) {
+            fY += 240.0f - fH * 0.5f;
+        } else if (cgi.HudDrawElements[i].iVerticalAlign == HUD_ALIGN_Y_BOTTOM) {
+            fY += 480.0f;
+        }
+    } else {
+        sx = cgs.uiHiResScale[0];
+        sy = cgs.uiHiResScale[1];
+        fX *= sx;
+        fY *= sy;
+        fW *= sx;
+        fH *= sy;
+        if (cgi.HudDrawElements[i].iHorizontalAlign == HUD_ALIGN_X_CENTER) {
+            fX += cgs.glconfig.vidWidth * 0.5f - fW * 0.5f;
+        } else if (cgi.HudDrawElements[i].iHorizontalAlign == HUD_ALIGN_X_RIGHT) {
+            fX += cgs.glconfig.vidWidth;
+        }
+        if (cgi.HudDrawElements[i].iVerticalAlign == HUD_ALIGN_Y_CENTER) {
+            fY += cgs.glconfig.vidHeight * 0.5f - fH * 0.5f;
+        } else if (cgi.HudDrawElements[i].iVerticalAlign == HUD_ALIGN_Y_BOTTOM) {
+            fY += cgs.glconfig.vidHeight;
+        }
+        sx = sy = 1.0f;
+    }
+    *px = fX * sx;
+    *py = fY * sy;
+    *pw = fW * sx;
+    *ph = fH * sy;
+    return qtrue;
+}
+
+static void CG_HudCollectPanels(void)
+{
+    const float W = (float)cgs.glconfig.vidWidth, H = (float)cgs.glconfig.vidHeight;
+    int         i;
+    float       x, y, w, h;
+
+    s_nPanels = 0;
+    for (i = 0; i < MAX_HUDDRAW_ELEMENTS && s_nPanels < HUD_MAX_PANELS; i++) {
+        if (cgi.HudDrawElements[i].string[0] || !cgi.HudDrawElements[i].hShader || cgi.HudDrawElements[i].vColor[3] < 0.05f) {
+            continue;
+        }
+        CG_HudElemPixelRect(i, &x, &y, &w, &h);
+        if (w >= 0.31f * W && h >= 0.21f * H && w * h < 0.6f * W * H) {
+            s_panelRect[s_nPanels][0] = x;
+            s_panelRect[s_nPanels][1] = y;
+            s_panelRect[s_nPanels][2] = w;
+            s_panelRect[s_nPanels][3] = h;
+            s_nPanels++;
+        }
+    }
+}
+
+static qboolean CG_HudPointOnPanel(float x, float y)
+{
+    int k;
+
+    for (k = 0; k < s_nPanels; k++) {
+        if (x >= s_panelRect[k][0] && x <= s_panelRect[k][0] + s_panelRect[k][2] && y >= s_panelRect[k][1]
+            && y <= s_panelRect[k][1] + s_panelRect[k][3]) {
+            return qtrue;
+        }
+    }
+    return qfalse;
+}
+
+// returns qfalse when the string should be drawn the old way (symbol font, unknown font metrics)
+static qboolean CG_HudDrawStyledString(int i, float fX, float fY, qboolean bVirtual, const float *vColor, const vec2_t virtualScale)
+{
+    const char   *fn   = cgi.HudDrawElements[i].fontName;
+    const char   *txt  = cgi.LV_ConvertString(cgi.HudDrawElements[i].string);
+    fontheader_t *of   = cgi.HudDrawElements[i].pFont ? cgi.HudDrawElements[i].pFont : cgs.media.hudDrawFont;
+    fontheader_t *nf   = of;
+    float         mult = 1.0f;
+    vec2_t        os, ns, hu;
+    float         ow, oh, nw, nh, ox, oy, x, y, sh;
+    vec4_t        shadow;
+
+    if (!Q_stricmpn(fn, "marlett", 7)) {
+        return qfalse;
+    }
+    if (!s_fHeadline) {
+        s_fHeadline = cgi.R_LoadFont("verdana-14");
+        s_fBody     = cgi.R_LoadFont("verdana-12");
+    }
+    // slots of the debrief / rank card (xp.scr 62-73, 127-134): sized in bug-4004, left exactly as authored
+    if ((i >= 62 && i <= 73) || (i >= 127 && i <= 134)) {
+        return qfalse;
+    }
+    // tiers, in feed-relative units: u = vidHeight / 500 (2.16 at 1080p, 1.44 at 720p, 1.54 at 1024x768) - the same
+    // resolution scaling for every screen; cap heights at 1080p: body ~16 px, headline ~26 px, urgent alert ~31 px
+    //   body     verdana-12 (courier, verdana-10 too) x1.0, a plain verdana-14 x0.9
+    //   headline facfont / handle / delima -> verdana-14 x1.4
+    //   alert    a red / orange string (r > 0.8, g < 0.6, b < 0.5) -> verdana-14 x1.7
+    {
+        float u = cgs.glconfig.vidHeight / 500.0f;
+        hu[0] = hu[1] = u;
+        if (vColor[0] > 0.8f && vColor[1] < 0.6f && vColor[2] < 0.5f) {
+            nf   = s_fHeadline;
+            mult = 1.7f;
+        } else if (!Q_stricmpn(fn, "facfont", 7) || !Q_stricmpn(fn, "handle", 6) || !Q_stricmpn(fn, "delima", 6)) {
+            nf   = s_fHeadline;
+            mult = 1.4f;
+        } else if (!Q_stricmpn(fn, "courier", 7) || !Q_stricmpn(fn, "verdana-10", 10) || !Q_stricmpn(fn, "verdana-12", 10)) {
+            nf = s_fBody;
+        } else {
+            mult = 0.9f; // verdana-14 / default
+        }
+    }
+    if (!of || !nf || !of->sgl[0] || !nf->sgl[0] || of->sgl[0]->height <= 0.0f || nf->sgl[0]->height <= 0.0f) {
+        return qfalse;
+    }
+    if (bVirtual) {
+        os[0] = virtualScale[0];
+        os[1] = virtualScale[1];
+        ox    = fX * virtualScale[0];
+        oy    = fY * virtualScale[1];
+    } else {
+        os[0] = cgs.uiHiResScale[0];
+        os[1] = cgs.uiHiResScale[1];
+        ox    = fX;
+        oy    = fY;
+    }
+    if (CG_HudPointOnPanel(ox, oy)) {
+        // on a panel: keep the string's pixel height (it scales with the card), only the face changes
+        ns[0] = os[0] * of->sgl[0]->height / nf->sgl[0]->height;
+        ns[1] = os[1] * of->sgl[0]->height / nf->sgl[0]->height;
+    } else {
+        ns[0] = hu[0] * mult;
+        ns[1] = hu[1] * mult;
+    }
+
+    ow = (float)cgi.UI_FontStringWidth(of, txt, -1) * os[0];
+    oh = of->sgl[0]->height * os[1];
+    nw = (float)cgi.UI_FontStringWidth(nf, txt, -1) * ns[0];
+    nh = nf->sgl[0]->height * ns[1];
+
+    x = ox;
+    if (cgi.HudDrawElements[i].iHorizontalAlign == HUD_ALIGN_X_CENTER) {
+        x = ox + (ow - nw) * 0.5f;
+    } else if (cgi.HudDrawElements[i].iHorizontalAlign == HUD_ALIGN_X_RIGHT) {
+        x = ox + (ow - nw);
+    }
+    y = oy + (oh - nh) * 0.5f;
+    // never under the compass bar: a string that would overlap its strip (centre, 0.42W wide) starts 6 px below the band
+    {
+        static cvar_t *s_cvBand;
+        float          band, cw, half, cx = cgs.glconfig.vidWidth * 0.5f;
+
+        if (!s_cvBand) {
+            s_cvBand = cgi.Cvar_Get("coop_compassBarLive", "0", 0);
+        }
+        band = (float)s_cvBand->integer;
+        cw   = (0.42f * cgs.glconfig.vidWidth < 0.75f * cgs.glconfig.vidHeight) ? 0.42f * cgs.glconfig.vidWidth : 0.75f * cgs.glconfig.vidHeight;
+        half = cw * 0.5f;
+        if (band > 0.0f && y < band + 6.0f && y + nh > 0.0f && x + nw > cx - half && x < cx + half) {
+            y = band + 6.0f;
+        }
+    }
+    x = (float)(int)(x + 0.5f);
+    y = (float)(int)(y + 0.5f);
+
+    sh        = (hu[1] > 1.4f) ? (float)(int)(hu[1] * 0.75f + 0.5f) : 1.0f;
+    shadow[0] = shadow[1] = shadow[2] = 0.0f;
+    shadow[3] = vColor[3] * 0.8f;
+    cgi.R_SetColor(shadow);
+    cgi.R_DrawString(nf, txt, (x + sh) / ns[0], (y + sh) / ns[1], -1, ns);
+    cgi.R_SetColor(vColor);
+    cgi.R_DrawString(nf, txt, x / ns[0], y / ns[1], -1, ns);
+    return qtrue;
+}
+
 void CG_HudDrawElements()
 {
     int    i;
@@ -655,9 +889,19 @@ void CG_HudDrawElements()
     if (!cg_huddraw_force->integer && !cg_hud->integer) {
         return;
     }
+    // HZM coop: cutscene HUD hold (coop_mod/cutscene.scr::cut_lock pokes coop_cineHud): every scripted huddraw / ihuddraw
+    // element (rank star, carried-item icons, cards ...) is hidden while CG_CoopCineHudActive holds (self-expiring, consumed
+    // from the cvar there) and comes back with it - the script state is untouched
+    if (CG_CoopCineHudActive()) {
+        return;
+    }
 
     virtualScale[0] = cgs.glconfig.vidWidth / 640.0;
     virtualScale[1] = cgs.glconfig.vidHeight / 480.0;
+    qboolean bTextStyle = CG_HudTextStyleOn();
+    if (bTextStyle) {
+        CG_HudCollectPanels();
+    }
 
     for (i = 0; i < MAX_HUDDRAW_ELEMENTS; i++) {
         if ((!cgi.HudDrawElements[i].hShader && !cgi.HudDrawElements[i].string[0])
@@ -711,16 +955,19 @@ void CG_HudDrawElements()
         // same activity-driven fade as the health/ammo panels (compass exempt - it is not huddraw).
         // Slots >= 100 are PERSISTENT lobby UI (the bottom-left roster + the top-left control help) and
         // must stay fully visible - they are exempt from the fade.
-        {
-            vec4_t vFadedCol;
-            Vector4Copy(cgi.HudDrawElements[i].vColor, vFadedCol);
-            if (i < 100) {
-                vFadedCol[3] *= s_hudFadeShown;
-            }
-            cgi.R_SetColor(vFadedCol);
+        vec4_t vFadedCol;
+        Vector4Copy(cgi.HudDrawElements[i].vColor, vFadedCol);
+        if (i < 100) {
+            vFadedCol[3] *= s_hudFadeShown;
         }
+        cgi.R_SetColor(vFadedCol);
         if (cgi.HudDrawElements[i].string[0]) {
             fontheader_t *pFont = cgi.HudDrawElements[i].pFont;
+            if (bTextStyle
+                && CG_HudDrawStyledString(i, fX, fY, cgi.HudDrawElements[i].bVirtualScreen, vFadedCol, virtualScale)) {
+                cgi.R_SetColor(NULL);
+                continue;
+            }
             if (!pFont) {
                 pFont = cgs.media.hudDrawFont;
             }

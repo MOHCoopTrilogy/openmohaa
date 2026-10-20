@@ -626,9 +626,9 @@ void Trigger::ActivateTargets(Event *ev)
         // HACK HACK HACK
         // if it is a camera, pass in default player
         if (!other->isClient()) {
-            gi.centerprintf(&g_entities[0], Director.GetString(message).c_str());
+            G_CoopCenterPrint(&g_entities[0], Director.GetString(message).c_str());
         } else {
-            gi.centerprintf(other->edict, Director.GetString(message).c_str());
+            G_CoopCenterPrint(other->edict, Director.GetString(message).c_str());
         }
         if (Noise().length()) {
             other->Sound(Director.GetString(noise).c_str(), CHAN_VOICE);
@@ -2211,7 +2211,7 @@ void TriggerDamageTargets::DamageTargets(Event *ev)
     // print the message
     //
     if (message != STRING_EMPTY && other && other->isClient()) {
-        gi.centerprintf(other->edict, Director.GetString(message).c_str());
+        G_CoopCenterPrint(other->edict, Director.GetString(message).c_str());
         if (Noise().length()) {
             other->Sound(Noise().c_str(), CHAN_VOICE);
         }

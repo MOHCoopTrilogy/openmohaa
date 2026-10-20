@@ -1032,7 +1032,7 @@ void Door::TryOpen(Event *ev)
     }
 
     if (Message().length()) {
-        gi.centerprintf(other->edict, Message().c_str());
+        G_CoopCenterPrint(other->edict, Message().c_str());
         Sound(sound_message, CHAN_VOICE);
     }
 
