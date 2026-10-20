@@ -740,6 +740,7 @@ const adsGunTune_t *CG_FindAdsTune(const char *wpn);
     void  CG_HudFadeTouch(void); // HZM coop - HUD fade: mark HUD-relevant activity (objective updates, suppression, ...)
     void  CG_AddSuppression(float amount); // HZM coop - bump the under-fire suppression FX (near-miss zings / hits)
     void  CG_AddHeat(float amount); // HZM coop - bump the heat-haze shimmer FX (nearby explosions)
+    void  CG_CoopNoteOtherShot(const vec3_t org); // HZM coop - a shot was fired at this barrel position: the nearest OTHER player's gun plays its fire clip locally
     void  CG_AddMuzzleHeat(float amount); // HZM coop - bump the LOCALIZED gun-muzzle heat shimmer (gunfire)
     void  CG_AddCoopDynamicLight(const vec3_t org, float r, float g, float b, float radius, int life_ms); // HZM coop - push a transient dlight (muzzle/explosion)
     void  CG_AddCoopDynamicLights(void); // HZM coop - per-frame: re-add the live transient dlights

@@ -606,6 +606,12 @@ static void CG_MakeBulletTracerInternal(
         }
     }
 
+    // HZM coop [other players' gun anims 2026-10-19] the server sends no weapon animation to other clients: the shot event drives the
+    // nearest other player's gun fire clip locally (cg_modelanim.c, coop_vmAdsOthers)
+    if (i_iNumBullets > 0) {
+        CG_CoopNoteOtherShot(i_vBarrel);
+    }
+
     // HZM coop - DYNAMIC MUZZLE LIGHT: a brief warm flash at the barrel that lights nearby surfaces while
     // firing (your own gun + others'). Very short life so it reads as a flicker, not a lamp. coop_muzzleLight
     // = flash radius (0 = off). The per-frame fade + the coop_dynLights master are handled in cg_view.c.

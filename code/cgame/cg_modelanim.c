@@ -75,6 +75,7 @@ static qboolean CoopPlayerEntAimed(int num)
                                            "coop_prone_aim",   "coop_prone_aim_pistol", "coop_supine_aim"};
     centity_t               *ce;
     dtiki_t                 *pt;
+    static int               s_hold[MAX_CLIENTS]; // the aim is held 500 ms past the last frame it was seen: the aimed SHOT is its own torso state
     int                      k, q;
 
     if (num < 0 || num >= MAX_CLIENTS) {
@@ -101,8 +102,73 @@ static qboolean CoopPlayerEntAimed(int num)
         }
         for (q = 0; q < 7; q++) {
             if (s_idx[q] >= 0 && fi->index == s_idx[q]) {
+                s_hold[num] = cg.time + 500;
                 return qtrue;
             }
+        }
+    }
+    return (cg.time < s_hold[num]) ? qtrue : qfalse;
+}
+
+// HZM coop [other players' gun anims 2026-10-19] The server sends weapon animations to the OWNER only (measured: two clients, A's gun
+// shows fire / reload in A's own snapshots and stays `idle` in B's). So another player's gun is driven here: a shot event
+// (cg_parsemsg.cpp -> CG_CoopNoteOtherShot) starts `fire` (`fire_ads` while he is aimed and the tik has it), and the start of his torso
+// reload animation starts `reload` (`reload_ads_loaded` while aimed). Display only; nothing is sent.
+static int s_otherShotT[MAX_CLIENTS];
+static int s_otherRelT[MAX_CLIENTS];
+static int s_otherRelWas[MAX_CLIENTS];
+
+void CG_CoopNoteOtherShot(const vec3_t org)
+{
+    int   i, best = -1;
+    float bd = 90.0f * 90.0f;
+
+    if (!cg.snap) {
+        return;
+    }
+    for (i = 0; i < MAX_CLIENTS; i++) {
+        centity_t *ce = &cg_entities[i];
+        vec3_t     d;
+        float      dd;
+        if (i == cg.snap->ps.clientNum || ce->currentState.eType != ET_PLAYER || (ce->currentState.eFlags & EF_DEAD)) {
+            continue;
+        }
+        VectorSubtract(ce->lerpOrigin, org, d);
+        d[2] *= 0.5f;
+        dd = VectorLengthSquared(d);
+        if (dd < bd) {
+            bd   = dd;
+            best = i;
+        }
+    }
+    if (best >= 0) {
+        s_otherShotT[best] = cg.time;
+    }
+}
+
+// is player `num`'s torso in a reload animation (its alias name carries "reload")?
+static qboolean CoopPlayerEntReloading(int num)
+{
+    centity_t *ce = &cg_entities[num];
+    dtiki_t   *pt;
+    int        k;
+
+    if (num < 0 || num >= MAX_CLIENTS || ce->currentState.eType != ET_PLAYER || ce->currentState.modelindex <= 0) {
+        return qfalse;
+    }
+    pt = cgi.R_Model_GetHandle(cgs.model_draw[ce->currentState.modelindex]);
+    if (!pt) {
+        return qfalse;
+    }
+    for (k = 0; k < MAX_FRAMEINFOS; k++) {
+        const frameInfo_t *fi = &ce->currentState.frameInfo[k];
+        const char        *nm;
+        if (fi->weight <= 0.0f || fi->index < 0) {
+            continue;
+        }
+        nm = cgi.Anim_NameForNum(pt, fi->index);
+        if (nm && strstr(nm, "reload")) {
+            return qtrue;
         }
     }
     return qfalse;
@@ -3206,9 +3272,8 @@ void CG_ModelAnim(centity_t *cent, qboolean bDoShaderTime)
     // them. Decided HERE on the first frame `reload` shows, so that frame's entry commands (the sound) are already
     // the shown animation's. Same length as `reload`; the server still runs `reload` (surface / ammo commands).
     // Client-only, display only. Matches the view-model code's choice of the hands' `_ads` clip (same inputs).
-    // HZM coop [other players' ADS 2026-10-19] ANOTHER player's gun, held aimed: the same `fire` -> `fire_ads` and
-    // `reload` -> `reload_ads_loaded` swaps the local gun gets. Their rounds are not known here, so the emptied variants
-    // (`reload_ads_empty`, `fire_last`) stay local-only. coop_vmAdsOthers 0 = off, 2 = print aim changes.
+    // HZM coop [other players' gun anims 2026-10-19] ANOTHER player's gun: fire / reload played locally (see CG_CoopNoteOtherShot).
+    // coop_vmAdsOthers 0 = off, 2 = print the aim changes.
     if (model.tiki && cg.snap && s1->parent != ENTITYNUM_NONE && s1->parent < MAX_CLIENTS && s1->parent != cg.snap->ps.clientNum) {
         static cvar_t *pAdsOthers = NULL;
         static int     s_lastAim[MAX_CLIENTS];
@@ -3216,26 +3281,67 @@ void CG_ModelAnim(centity_t *cent, qboolean bDoShaderTime)
             pAdsOthers = cgi.Cvar_Get("coop_vmAdsOthers", "1", 0);
         }
         if (pAdsOthers->integer) {
-            qboolean bAim = CoopPlayerEntAimed(s1->parent);
-            if (pAdsOthers->integer > 1 && s_lastAim[s1->parent] != (int)bAim + 1) {
-                s_lastAim[s1->parent] = (int)bAim + 1;
-                cgi.Printf("^~^~^ ADSOTHER player=%d aimed=%d gun=%s\n", s1->parent, (int)bAim, cgi.TIKI_Name(model.tiki));
+            int      pl   = s1->parent;
+            qboolean bHeld = qfalse; // only the gun in his HAND (tag_weapon_*), not the ones slung / holstered
+            qboolean bAim;
+            {
+                dtiki_t *pPt = cg_entities[pl].currentState.modelindex > 0 ? cgi.R_Model_GetHandle(cgs.model_draw[cg_entities[pl].currentState.modelindex]) : NULL;
+                const char *szHT = pPt ? cgi.Tag_NameForNum(pPt, s1->tag_num & TAG_MASK) : NULL;
+                bHeld = (szHT && strstr(szHT, "weapon")) ? qtrue : qfalse;
             }
-            if (bAim) {
-                int iF = cgi.Anim_NumForName(model.tiki, "fire"), iFA = cgi.Anim_NumForName(model.tiki, "fire_ads");
-                int iR = cgi.Anim_NumForName(model.tiki, "reload"), iRA = cgi.Anim_NumForName(model.tiki, "reload_ads_loaded");
-                int kk;
-                for (kk = 0; kk < MAX_FRAMEINFOS; kk++) {
-                    if (!model.frameInfo[kk].weight) {
-                        continue;
+            if (!bHeld) {
+                goto coopOthersDone;
+            }
+            bAim = CoopPlayerEntAimed(pl);
+            qboolean bRel = CoopPlayerEntReloading(pl);
+            int      iOver = -1;
+            float    tOver = 0.0f;
+
+            if (pAdsOthers->integer > 1 && s_lastAim[pl] != (int)bAim + 1) {
+                s_lastAim[pl] = (int)bAim + 1;
+                cgi.Printf("^~^~^ ADSOTHER player=%d aimed=%d gun=%s\n", pl, (int)bAim, cgi.TIKI_Name(model.tiki));
+            }
+            if (bRel && !s_otherRelWas[pl]) {
+                s_otherRelT[pl] = cg.time;
+            }
+            s_otherRelWas[pl] = bRel;
+            if (bRel) {
+                int iR = cgi.Anim_NumForName(model.tiki, (bAim && cgi.Anim_NumForName(model.tiki, "reload_ads_loaded") != -1) ? "reload_ads_loaded" : "reload");
+                if (iR != -1) {
+                    float el = (cg.time - s_otherRelT[pl]) / 1000.0f;
+                    if (el >= 0.0f && el < cgi.Anim_Time(model.tiki, iR)) {
+                        iOver = iR;
+                        tOver = el;
                     }
-                    if (iF != -1 && iFA != -1 && model.frameInfo[kk].index == iF) {
-                        model.frameInfo[kk].index = iFA;
-                    } else if (iR != -1 && iRA != -1 && model.frameInfo[kk].index == iR) {
-                        model.frameInfo[kk].index = iRA;
+                }
+            } else if (cg.time - s_otherShotT[pl] >= 0 && cg.time - s_otherShotT[pl] < 3000) {
+                int iF = cgi.Anim_NumForName(model.tiki, (bAim && cgi.Anim_NumForName(model.tiki, "fire_ads") != -1) ? "fire_ads" : "fire");
+                if (iF != -1) {
+                    float el = (cg.time - s_otherShotT[pl]) / 1000.0f;
+                    if (el < cgi.Anim_Time(model.tiki, iF)) {
+                        iOver = iF;
+                        tOver = el;
                     }
                 }
             }
+            if (iOver != -1) {
+                int kk;
+                for (kk = 1; kk < MAX_FRAMEINFOS; kk++) {
+                    model.frameInfo[kk].weight = 0.0f;
+                }
+                model.frameInfo[0].index  = iOver;
+                model.frameInfo[0].time   = tOver;
+                model.frameInfo[0].weight = 1.0f;
+                if (pAdsOthers->integer > 1) {
+                    static int s_pt = 0;
+                    if (cg.time - s_pt > 100) {
+                        s_pt = cg.time;
+                        cgi.Printf("^~^~^ ADSOTHER play player=%d %s t=%.3f aimed=%d gun=%s\n", pl, cgi.Anim_NameForNum(model.tiki, iOver), tOver,
+                                   (int)bAim, cgi.TIKI_Name(model.tiki));
+                    }
+                }
+            }
+coopOthersDone:;
         }
     }
     if (model.tiki && cg.snap && s1->parent == cg.snap->ps.clientNum && s1->parent != ENTITYNUM_NONE) {
