@@ -1040,6 +1040,15 @@ static void CG_OffsetThirdPersonView(void)
         VectorCopy(look_offset, saved_look_offset);
     }
 
+    // HZM coop - dev-only chase-camera orbit (close-up stills of a gun part from the side: the freecam is mouse-only). 0 = off.
+    {
+        static cvar_t *pDbgYaw = NULL, *pDbgPitch = NULL;
+        if (!pDbgYaw)   { pDbgYaw   = cgi.Cvar_Get("cg_camYawDebug", "0", 0); }
+        if (!pDbgPitch) { pDbgPitch = cgi.Cvar_Get("cg_camPitchDebug", "0", 0); }
+        target_angles[YAW]   += pDbgYaw->value;
+        target_angles[PITCH] += pDbgPitch->value;
+    }
+
     target_angles[YAW]   = AngleNormalize360(target_angles[YAW]);
     target_angles[PITCH] = AngleNormalize180(target_angles[PITCH]);
 
@@ -1721,6 +1730,18 @@ void CG_AddMuzzleHeat(float amount)
     // so EVERY gun shows the same per-shot heat regardless of fire rate. The old additive version stacked
     // fast guns (Thompson) up to max while slow guns (handgun/BAR) barely registered. coop_heatGun = the
     // shared per-shot level for all guns.
+    // HZM coop [ads shimmer 2026-10-19, user item 2] firing while AIMED: the barrel's shimmer stands out a bit more.
+    // The pose factor (0 hip .. 1 full sight alignment) scales the per-shot level by coop_heatGunAds (default 0.5 = 1.5x
+    // at full ADS; 0 = as before) and the decay below runs coop_heatGunAdsFade (default 0.25) longer. Hip fire unchanged.
+    {
+        static cvar_t *pAdsGain = NULL;
+        if (!pAdsGain) {
+            pAdsGain = cgi.Cvar_Get("coop_heatGunAds", "0.5", CVAR_ARCHIVE);
+        }
+        if (pAdsGain->value > 0.0f) {
+            amount *= 1.0f + pAdsGain->value * CG_AdsPoseFactor();
+        }
+    }
     if (amount > s_coopMuzzleHeat) {
         s_coopMuzzleHeat = amount;
     }
@@ -7933,7 +7954,17 @@ static int CG_CalcFov(void)
         // LOCALIZED muzzle heat decays on the same fade and publishes only its INTENSITY (r_ppMuzzleHeat).
         // The hot-spot position/size (r_ppMuzzleX/Y/Radius) are renderer-side tunable cvars - we don't write
         // them here so the user can dial the gun hot-spot without the cgame stomping it every frame.
-        s_coopMuzzleHeat -= dt2 / hfade;
+        {
+            static cvar_t *pAdsFade = NULL;
+            float          fMzFade = hfade;
+            if (!pAdsFade) {
+                pAdsFade = cgi.Cvar_Get("coop_heatGunAdsFade", "0.25", CVAR_ARCHIVE);
+            }
+            if (pAdsFade->value > 0.0f) {
+                fMzFade = hfade * (1.0f + pAdsFade->value * CG_AdsPoseFactor()); // [ads shimmer] lingers a little longer aimed
+            }
+            s_coopMuzzleHeat -= dt2 / fMzFade;
+        }
         if (s_coopMuzzleHeat < 0.0f) { s_coopMuzzleHeat = 0.0f; }
         cgi.Cvar_Set("r_ppMuzzleHeat", va("%g", s_coopMuzzleHeat));
     }
