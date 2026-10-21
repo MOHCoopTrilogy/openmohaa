@@ -4785,6 +4785,21 @@ coopOthersDone:;
             model.renderfx &= ~(RF_FIRST_PERSON | RF_THIRD_PERSON);
             // set the first person render flag
             model.renderfx |= RF_FIRST_PERSON;
+
+            {   // HZM coop - dev-only close viewmodel camera: cg_vmDbgF / cg_vmDbgR / cg_vmDbgU move the gun + hands along the view axes (all 0 = off).
+                // cg_vmDbgFix 1 (cg_view.c) also zeroes the weapon view kick and cg_adsRecoil is zeroed by the harness.
+                static cvar_t *pDF = NULL, *pDR = NULL, *pDU = NULL;
+                if (!pDF) {
+                    pDF = cgi.Cvar_Get("cg_vmDbgF", "0", 0);
+                    pDR = cgi.Cvar_Get("cg_vmDbgR", "0", 0);
+                    pDU = cgi.Cvar_Get("cg_vmDbgU", "0", 0);
+                }
+                if (pDF->value != 0.0f || pDR->value != 0.0f || pDU->value != 0.0f) {
+                    VectorMA(model.origin, pDF->value, cg.refdef.viewaxis[0], model.origin);
+                    VectorMA(model.origin, -pDR->value, cg.refdef.viewaxis[1], model.origin);
+                    VectorMA(model.origin, pDU->value, cg.refdef.viewaxis[2], model.origin);
+                }
+            }
         }
     }
 
