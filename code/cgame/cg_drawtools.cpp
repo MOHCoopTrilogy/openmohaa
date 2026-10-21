@@ -1210,10 +1210,21 @@ void CG_DrawObjectives()
     }
 }
 
+static qboolean CG_CoopCineHudActive(void);   // defined with the cinematic hold below
+
 void CG_DrawPlayerTeam()
 {
     qhandle_t handle;
     if (!cg_hud->integer) {
+        return;
+    }
+    // HZM coop [user 2026-10-20] the Allied star is persistent chrome that used to ignore drawhud 0 (PMF_NO_HUD) and the
+    // cinematic hold, so it stayed on screen through every cutscene-locked scene (U-boat finale). Same gates as the
+    // health frame: no HUD, intermission, cinematic hold.
+    if (cg.snap && (cg.snap->ps.pm_flags & (PMF_NO_HUD | PMF_INTERMISSION))) {
+        return;
+    }
+    if (CG_CoopCineHudActive()) {
         return;
     }
 
