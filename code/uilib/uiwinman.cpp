@@ -22,6 +22,11 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 
 #include "ui_local.h"
 
+// [HZM keynav-next] keyboard navigation of the mouse-only menus (arrows / Tab move focus like the pad's D-pad, Enter and
+// Space click the widget under the cursor). ui_keyNav 0 switches it off. Never taken while a text field has focus.
+static bool s_keyNavShown  = false;   // the keyboard has moved the UI cursor: draw it, and Enter / Space may click
+static int  s_keyClickUpAt = 0;       // Sys_Milliseconds() at which the synthetic MOUSE1 is released (0 = none)
+
 Event W_MouseExited
 (
     "mouse_exited",
@@ -247,6 +252,12 @@ void UIWindowManager::UpdateViews(void)
     int n;
     int x, y;
 
+    // [HZM keynav-next] release the synthetic click a short while after the press (the UI polls the button state per frame)
+    if (s_keyClickUpAt && Sys_Milliseconds() >= s_keyClickUpAt) {
+        s_keyClickUpAt = 0;
+        Com_QueueEvent(Sys_Milliseconds(), SE_KEY, K_MOUSE1, qfalse, 0, NULL);
+    }
+
     if (m_backgroundwidget) {
         m_backgroundwidget->Display(m_frame, 1.0);
 
@@ -268,7 +279,7 @@ void UIWindowManager::UpdateViews(void)
         // Added in OPM
         //  Draw the mouse if it has been grabbed
         // [gamepad-next] also while the pad drives the menu in a window: the OS cursor is not in screenshots / capture
-        if (IN_IsCursorActive() || UI_GetCvarInt("in_padActive", 0)) {
+        if (IN_IsCursorActive() || UI_GetCvarInt("in_padActive", 0) || s_keyNavShown) {
             VectorSet4(col, 1, 1, 1, 1);
             uii.Rend_SetColor(col);
 
@@ -644,6 +655,14 @@ bool UIWindowManager::PadNavigate(int dx, int dy)
         if (w->m_clippedframe.size.width < 2 || w->m_clippedframe.size.height < 2) {
             continue;
         }
+        // [HZM keynav-next] a dot-sized button (under 6 x 6 menu units: the retail c3 easter egg) is not a focus stop
+        {
+            const float sx = m_frame.size.width / 640.0f, sy = m_frame.size.height / 480.0f;   // px per menu unit
+
+            if (w->m_clippedframe.size.width < 6.0f * sx && w->m_clippedframe.size.height < 6.0f * sy) {
+                continue;
+            }
+        }
         {
             float cx, cy;
 
@@ -872,6 +891,69 @@ qboolean UIWindowManager::KeyEvent(int key, unsigned int time)
         }
         PadNavigate(ddx[d], ddy[d]);
         return true;
+    }
+
+    // [HZM keynav-next] keyboard: arrows / Tab = focus to the next widget in that direction (the pad's D-pad logic), Enter /
+    // Space = click what the cursor is on. Lists, sliders and pull-downs that take the arrow themselves get it first, and
+    // a text field keeps every key (the legacy Up / Down field order is unchanged).
+    if (!m_bindactive && UI_GetCvarInt("ui_keyNav", 1)) {
+        const bool typing = m_activeControl && m_activeControl != this
+                         && (m_activeControl->isSubclassOf(UIField) || m_activeControl->isSubclassOf(UIMultiLineEdit));
+
+        if (!typing) {
+            const bool shift = uii.Sys_IsKeyDown(K_SHIFT) != 0;
+            int        dx = 0, dy = 0;
+            bool       nav = false;
+
+            switch (key) {
+            case K_UPARROW:    dy = -1; nav = true; break;
+            case K_DOWNARROW:  dy = 1;  nav = true; break;
+            case K_LEFTARROW:  dx = -1; nav = true; break;
+            case K_RIGHTARROW: dx = 1;  nav = true; break;
+            case K_TAB:
+                if (!uii.Sys_IsKeyDown(K_CTRL)) {
+                    dx  = shift ? -1 : 1;
+                    nav = true;
+                }
+                break;
+            default: break;
+            }
+
+            if (nav) {
+                if (key != K_TAB) {
+                    UIPoint2D here((float)uid.mouseX, (float)uid.mouseY);
+                    UIWidget *w = getResponder(here);
+
+                    for (; w && w != this; w = w->getParent()) {
+                        if (w->isSubclassOf(UISlider) && w->KeyEvent(key, time)) {
+                            return true;
+                        }
+                    }
+                    if (m_activeControl && m_activeControl != this && m_activeControl->KeyEvent(key, time)) {
+                        return true;
+                    }
+                }
+                bool moved = PadNavigate(dx, dy);
+
+                if (!moved && key == K_TAB) {
+                    moved = PadNavigate(0, shift ? -1 : 1);   // end of a row: continue down the next one
+                }
+                if (moved) {
+                    if (!s_keyNavShown) {
+                        UI_SetCvarInt("ui_keyNavActive", 1);   // menus may hide pad / keyboard-unfriendly bits (main.urc c3)
+                    }
+                    s_keyNavShown = true;
+                    return true;
+                }
+            } else if (s_keyNavShown && (key == K_ENTER || key == K_KP_ENTER || key == K_SPACE)) {
+                if (m_activeControl && m_activeControl != this && m_activeControl->KeyEvent(key, time)) {
+                    return true;
+                }
+                Com_QueueEvent(Sys_Milliseconds(), SE_KEY, K_MOUSE1, qtrue, 0, NULL);
+                s_keyClickUpAt = Sys_Milliseconds() + 110;
+                return true;
+            }
+        }
     }
 
     if (key == K_TAB && uii.Sys_IsKeyDown(K_CTRL)) {
