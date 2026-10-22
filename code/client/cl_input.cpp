@@ -55,6 +55,7 @@ kbutton_t	in_strafe, in_speed;
 qboolean	in_guimouse;
 
 kbutton_t	in_up, in_down;
+kbutton_t	in_peek;      // [HZM padlean] +peek: the left stick leans / rises / ducks while it is held
 
 #ifdef USE_VOIP
 kbutton_t	in_voiprecord;
@@ -226,6 +227,8 @@ float CL_KeyState( kbutton_t *key ) {
 
 
 
+void IN_PeekDown(void) {IN_KeyDown(&in_peek);}
+void IN_PeekUp(void) {IN_KeyUp(&in_peek);}
 void IN_UpDown(void) {IN_KeyDown(&in_up);}
 void IN_UpUp(void) {IN_KeyUp(&in_up);}
 void IN_DownDown(void) {IN_KeyDown(&in_down);}
@@ -630,19 +633,22 @@ void CL_JoystickMove( usercmd_t *cmd ) {
 =================
 CL_PadPeekWanted / CL_PadPeek
 
-[HZM padlean] MOH Airborne style aiming: while ADS (+button13) is held with the pad as the last-used device, the LEFT
+[HZM padlean] MOH Airborne style aiming: while the peek modifier is held (joy_stickPeek 1: +peek, default; 2: ADS +button13 = Airborne style) with the pad as the last-used device, the LEFT
 stick peeks instead of walking. Left / right = lean, proportional to the deflection (the existing BUTTON_LEAN_*
 commands, pulsed against the replicated ps.fLeanAngle so the angle follows the stick); up = rise (stand from a crouch);
 down = duck. Everything is sent as ordinary lean buttons / upmove, so it is predicted and networked exactly like the keys.
-Off for: keyboard / mouse (in_padActive 0), joy_adsPeek 0, mounted guns and vehicles (PMF_TURRET), cover (PMF_COOP_COVER:
+Off for: keyboard / mouse (in_padActive 0), joy_stickPeek 0, mounted guns and vehicles (PMF_TURRET), cover (PMF_COOP_COVER:
 the cover code owns lean and the stick shuffles along the wall), prone, dead, menus.
 =================
 */
 qboolean CL_PadPeekWanted( void ) {
-	if ( !joy_adsPeek || !joy_adsPeek->integer || !cge ) {
+	if ( !joy_stickPeek || joy_stickPeek->integer < 1 || !cge ) {
 		return qfalse;
 	}
-	if ( !Cvar_VariableIntegerValue( "in_padActive" ) || !in_buttons[13].active ) {
+	if ( !Cvar_VariableIntegerValue( "in_padActive" ) ) {
+		return qfalse;
+	}
+	if ( joy_stickPeek->integer == 1 ? !in_peek.active : !in_buttons[13].active ) {   // 1 = +peek held, 2 = ADS held
 		return qfalse;
 	}
 	if ( clc.state != CA_ACTIVE || UI_MenuActive() || UI_ConsoleIsOpen() ) {
@@ -692,7 +698,7 @@ static void CL_PadPeek( usercmd_t *cmd ) {
 			cmd->buttons |= BUTTON_LEAN_RIGHT;
 		}
 	}
-	if ( joy_adsPeek->integer >= 2 ) {
+	if ( Cvar_VariableIntegerValue( "joy_peekDebug" ) ) {
 		Com_Printf( "^~^~^ PADPEEK x %.2f y %.2f want %.1f cur %.1f btn %d up %d\n", x, y, want, cur, ( cmd->buttons >> 4 ) & 3, cmd->upmove );
 	}
 }
@@ -1604,6 +1610,8 @@ void CL_InitInput( void ) {
 	Cmd_AddCommand("-attacksecondary", IN_AttackSecondaryUp);
 	Cmd_AddCommand("+use", IN_Button3Down);
 	Cmd_AddCommand("-use", IN_Button3Up);
+	Cmd_AddCommand("+peek", IN_PeekDown);
+	Cmd_AddCommand("-peek", IN_PeekUp);
 	Cmd_AddCommand("+leanleft", IN_LeanLeftDown);
 	Cmd_AddCommand("-leanleft", IN_LeanLeftUp);
 	Cmd_AddCommand("+leanright", IN_LeanRightDown);

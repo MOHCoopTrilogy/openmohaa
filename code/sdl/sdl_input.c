@@ -1043,6 +1043,15 @@ static void IN_PadService( void )
 			if ( strcmp( Cvar_VariableString( "in_padCurveLabel" ), cl ) ) {
 				Cvar_Set( "in_padCurveLabel", cl );
 			}
+			{   // [HZM padlean] and the stick-peek mode word
+				int         pk = Cvar_VariableIntegerValue( "joy_stickPeek" );
+				const char *pl = pk == 0 ? "Off" : ( pk == 2 ? "While aiming (Airborne)" : "Hold peek button" );
+
+				Cvar_Get( "in_padPeekLabel", "Hold peek button", CVAR_TEMP );
+				if ( strcmp( Cvar_VariableString( "in_padPeekLabel" ), pl ) ) {
+					Cvar_Set( "in_padPeekLabel", pl );
+				}
+			}
 		}
 	}
 	IN_PadTestDrive();
