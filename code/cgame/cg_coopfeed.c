@@ -2652,3 +2652,96 @@ void CG_DrawCoopAct(void)
     }
     cgi.R_SetColor(NULL);
 }
+
+/*
+====================
+CG_DrawLobbyKeys
+
+HZM coop [user 2026-10-21] LOBBY BUTTON KEYS. The lobby's LOADOUT and SERVICE RECORD buttons (scripted ihuddraw, virtual 640 x 480,
+coop_mod/lobbyui.scr: 88,447 140x21 and 244,447 152x21) are mouse buttons; each now also has a key and a pad button, shown on a key cap
+inside the button exactly like the other prompts show theirs: the keyboard key when the keyboard was used last, the pad glyph when the
+pad was (in_padActive). The binds are lobby-only: autoexec binds the keyboard keys and the pad X / Y to "vstr <cvar>" and the lobby
+script fills the cvars (coop_lbLoadout / coop_lbRecord = what the key does; coop_padX / coop_padY = the same, for the pad) and
+sets coop_lbKeys 1; CG_Init puts every one back, so leaving the lobby (map change / disconnect) restores reload / weapnext.
+====================
+*/
+static qboolean CG_LobbyKeyLabel(const char *kbCmd, const char *padCmd, char *out, int outSize)
+{
+    static cvar_t *cvPad = NULL;
+    const char    *cmds[2];
+    int            j;
+
+    if (!cvPad) {
+        cvPad = cgi.Cvar_Get("in_padActive", "0", 0);
+    }
+    cmds[0] = (cvPad && cvPad->integer) ? padCmd : kbCmd;
+    cmds[1] = (cvPad && cvPad->integer) ? kbCmd : padCmd;
+    for (j = 0; j < 2; j++) {
+        int         k1 = -1, k2 = -1;
+        const char *nm;
+
+        cgi.Key_GetKeysForCommand(cmds[j], &k1, &k2);
+        nm = (k1 >= 0) ? CG_CoopPickKeyName(k1, k2) : NULL;
+        if (nm && nm[0] && nm[0] != '?') {
+            CG_CoopItemKeyLabel(nm, out, outSize);
+            out[8] = 0;
+            return qtrue;
+        }
+    }
+    return qfalse;
+}
+
+void CG_DrawLobbyKeys(void)
+{
+    static cvar_t *cvOn = NULL;
+    static const struct {
+        float       x, y, w, h;
+        const char *kb, *pad;
+    } btn[2] = {
+        {88.0f, 447.0f, 140.0f, 21.0f, "vstr coop_lbLoadout", "vstr coop_padX"},
+        {244.0f, 447.0f, 152.0f, 21.0f, "vstr coop_lbRecord", "vstr coop_padY"},
+    };
+    fontheader_t *font;
+    float         W, H, s, capH, textH;
+    int           i;
+
+    if (!cvOn) {
+        cvOn = cgi.Cvar_Get("coop_lbKeys", "0", 0);
+    }
+    if (cvOn->integer <= 0 || !cg.snap || (cg.snap->ps.pm_flags & PMF_INTERMISSION)) {
+        return;
+    }
+    font = CG_FeedFont();
+    if (!font || cgs.uiHiResScale[0] <= 0.0f || cgs.uiHiResScale[1] <= 0.0f) {
+        return;
+    }
+    if (!s_lootKeyShader) {
+        s_lootKeyShader    = cgi.R_RegisterShader("textures/hud/loot/coop_loot_key");
+        s_lootAmmoShader   = cgi.R_RegisterShader("textures/hud/loot/coop_loot_ammo");
+        s_lootSearchShader = cgi.R_RegisterShader("textures/hud/loot/coop_loot_search");
+    }
+    W = (float)cgs.glconfig.vidWidth;
+    H = (float)cgs.glconfig.vidHeight;
+    s = H / 1080.0f;
+    if (s < 0.75f) {
+        s = 0.75f;
+    }
+    textH = 12.0f * cgs.uiHiResScale[1];
+    capH  = (float)((int)(26.0f * s + 0.5f));
+    if (capH < textH + 5.0f) {
+        capH = textH + 5.0f;
+    }
+    for (i = 0; i < 2; i++) {
+        char  lbl[16];
+        float bx = btn[i].x * W / 640.0f, by = btn[i].y * H / 480.0f;
+        float bw = btn[i].w * W / 640.0f, bh = btn[i].h * H / 480.0f;
+        float cy = by + (bh - capH) * 0.5f;
+
+        if (!CG_LobbyKeyLabel(btn[i].kb, btn[i].pad, lbl, sizeof(lbl))) {
+            continue;
+        }
+        // inside the button, left of the centred caption (the cap never reaches the text: caption starts ~30 % in)
+        CG_LootKeycap(font, lbl, (float)((int)(bx + bw * 0.05f)), (float)((int)cy), capH, 1.0f);
+    }
+    cgi.R_SetColor(NULL);
+}
