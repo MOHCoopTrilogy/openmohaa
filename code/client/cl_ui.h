@@ -142,6 +142,11 @@ int      CL_LoadCine_ElapsedMs(void);
 void     CL_LoadCine_PreDraw(void);
 void     CL_LoadCine_SetFadeOut(float a);
 void     CL_LoadCine_Draw(float sw, float sh);
+// HZM coop: loading-screen music (cl_loadmusic.cpp)
+void     CL_LoadMusic_Init(void);
+void     CL_LoadMusic_Begin(const char *mapname);
+void     CL_LoadMusic_Tick(void);
+void     CL_LoadMusic_End(qboolean abort);
 void     UI_LoadCine_DrawWidget(void); // the loading menu's hzm_loadcine widget (UILabel::Draw)
 
 //

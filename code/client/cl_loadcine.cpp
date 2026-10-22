@@ -55,6 +55,7 @@ static cvar_t *cl_loadCinematic;  // 1 = play a clip when the map has one
 static cvar_t *cl_loadCineVsync;  // 1 = swap interval 0 while a clip plays (the load must not wait for the display)
 static cvar_t *cl_loadCineFps;    // draw cadence ceiling during a load (the clip's own rate is in the file)
 static cvar_t *cl_loadCineFadeMs; // fade in and out length
+static cvar_t *cl_loadCineSpeed;  // test aid: clip time runs this many times faster (a 4x clip ends in a quarter of the time), 1 = real
 
 static struct {
     qboolean  active;
@@ -212,6 +213,7 @@ void CL_LoadCine_Init(void)
     cl_loadCineVsync  = Cvar_Get("cl_loadCineVsync", "1", 0);
     cl_loadCineFps    = Cvar_Get("cl_loadCineFps", "30", 0);
     cl_loadCineFadeMs = Cvar_Get("cl_loadCineFadeMs", "450", 0);
+    cl_loadCineSpeed  = Cvar_Get("cl_loadCineSpeed", "1", 0);
     Cvar_Get("ui_loadCineOn", "0", 0);
 }
 
@@ -494,6 +496,13 @@ void CL_LoadCine_Draw(float sw, float sh)
         s_lc.startMs = now;
     }
     t     = now - s_lc.startMs;
+    {
+        float sp = cl_loadCineSpeed ? cl_loadCineSpeed->value : 1.0f;
+
+        if (sp > 1.0f && sp <= 16.0f) {
+            t = (int)((float)t * sp); // test aid: lets a real clip end inside a short load to prove the hold
+        }
+    }
     if (s_lc.flags & LC_FLAG_ONCE) {
         // play once, then hold the last frame; the hold drifts in slowly (about 2% per 10 s) until the load ends
         long long fr = (long long)t * (long long)s_lc.fps / 1000;
@@ -515,9 +524,11 @@ void CL_LoadCine_Draw(float sw, float sh)
         int t0 = Sys_Milliseconds(), dt;
 
         if (!LC_Decode(frame)) {
-            Com_Printf("^~^~^ LOADCINE decode failed frame %d - clip dropped\n", frame);
-            s_lc.active = qfalse; // the next load starts clean
-            return;
+            // HZM coop [loadhold-fix]: a bad frame must not drop the clip (ui_loadCineOn would stay 1 with nothing drawn and the
+            // menu's static art would show through for the rest of the load): hold the buffer as it is and do not retry the frame.
+            Com_Printf("^~^~^ LOADCINE decode failed frame %d - holding frame %d\n", frame, s_lc.cur);
+            s_lc.cur = frame;
+            goto drawn_decode;
         }
         dt       = Sys_Milliseconds() - t0;
         s_lc.cur = frame;
@@ -527,6 +538,7 @@ void CL_LoadCine_Draw(float sw, float sh)
             s_lc.decodeMsMax = dt;
         }
     }
+drawn_decode:
     if (!(s_lc.shown[frame >> 5] & (1 << (frame & 31)))) {
         s_lc.shown[frame >> 5] |= 1 << (frame & 31);
         s_lc.distinct++;

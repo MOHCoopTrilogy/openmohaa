@@ -5917,6 +5917,7 @@ void CL_InitializeUI(void)
     Cvar_Get("ui_loadArtOn", "0", 0);
     Cvar_Get("ui_loadArtShader", "", 0);
     CL_LoadCine_Init(); // HZM coop [user 2026-10-18] cl_loadCinematic: a moving clip behind the tip strip and bar
+    CL_LoadMusic_Init(); // HZM coop: cl_loadMusic
     Cvar_Get("ui_loadIconScale", "1", 0);
     Cvar_Get("ui_signshader", "", 0);
     ui_compass             = Cvar_Get("ui_compass", "1", 0);
@@ -7042,6 +7043,8 @@ void UI_TestUpdateScreen(unsigned int timeout)
     unsigned int startRenderTime, endRenderTime;
     int          probeDraws;
 
+    CL_LoadMusic_Tick(); // HZM coop: keep the loading music stream fed (no-op unless it plays)
+
     if (timeout > 0 && (newTime - lastTime) < (timeout + updateTime)) {
         return;
     }
@@ -7072,6 +7075,27 @@ void UI_TestUpdateScreen(unsigned int timeout)
     s_loadProbe.tickDepth++;
     SCR_UpdateScreen();
     s_loadProbe.tickDepth--;
+    {   // HZM coop test aid: ui_loadShotSeq <prefix> takes a screenshot of the loading screen every ui_loadShotMs (default 1000) ms
+        // while a map loads (prefix_NNN.jpg) and logs ^~^~^ LOADSHOT with the clip state, so a load can be inspected end to end.
+        static int  seqN, seqLast;
+        const char *pre = Cvar_VariableString("ui_loadShotSeq");
+
+        if (pre[0] && cls.loading != SS_DEAD) {
+            int every = Cvar_VariableIntegerValue("ui_loadShotMs"), now = Sys_Milliseconds();
+
+            if (every < 100) {
+                every = 1000;
+            }
+            if (!seqLast || now - seqLast >= every) {
+                seqLast = now;
+                Com_Printf("^~^~^ LOADSHOT %s_%03d cine=%d el=%d\n", pre, seqN, CL_LoadCine_Active() ? 1 : 0, CL_LoadCine_ElapsedMs());
+                Cbuf_ExecuteText(EXEC_NOW, va("screenshotJPEG %s_%03d\n", pre, seqN++));
+                SCR_UpdateScreen();
+            }
+        } else {
+            seqN = seqLast = 0;
+        }
+    }
     {   // [gamepad-next] test aid: ui_loadShot <name> takes ONE screenshot a few frames into a real map load
         static int shotTicks;
         const char *nm = Cvar_VariableString("ui_loadShot");
@@ -7123,6 +7147,7 @@ void UI_LoadResource(const char *name)
     }
 
     UI_LoadProbe_Resource(name); // HZM loading-screen probe
+    CL_LoadMusic_Tick();         // HZM coop: loading music
 
     if (cls.loading == SS_GAME) {
         UI_EndLoadResource();
@@ -7506,6 +7531,8 @@ void UI_BeginLoad(const char *pszMapName)
     // HZM coop [user 2026-10-18] LOADING CINEMATIC: only when the loading menu carries the hzm_loadcine widget
     // (ui/loadingbar.txt of a pak that ships clips); otherwise nothing changes and the art pool above stands.
     CL_LoadCine_End("begin");
+    CL_LoadMusic_End(qtrue);
+    CL_LoadMusic_Begin(pszMapName); // HZM coop: Frontline music for the load (cl_loadMusic)
     if (ui_pLoadingMenu && ui_pLoadingMenu->GetNamedWidget("hzm_loadcine") && CL_LoadCine_Begin(pszMapName)) {
         Cvar_Set("ui_loadArtOn", "0"); // the clip replaces the pool art
     }
@@ -7636,6 +7663,7 @@ void UI_EndLoad(void)
         }
         CL_LoadCine_End("end");
     }
+    CL_LoadMusic_End(qfalse); // HZM coop: fade the loading music out as the map's own score starts
 
     if (cls.loading == SS_GAME) {
         base = (LoadResourceInfo **)Z_Malloc(loadNumber * sizeof(LoadResourceInfo *));
@@ -7702,6 +7730,7 @@ UI_AbortLoad
 void UI_AbortLoad(void)
 {
     CL_LoadCine_End("abort"); // HZM coop [user 2026-10-18]
+    CL_LoadMusic_End(qtrue);
     s_loadHints.active = qfalse; // HZM loading-screen hints
     UI_LoadHints_NavStop();
     UI_LoadProbe_Report("abort"); // HZM loading-screen probe

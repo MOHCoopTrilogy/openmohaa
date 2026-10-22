@@ -58,6 +58,8 @@ static constexpr float s_fVolumeGain = 1.f; // = 84.f;
 void S_MenuMusic_Play_f(void);
 // HZM coop [bug-2576] main-menu theme auto-advance (see S_MenuMusic_Frame)
 static void     S_MenuMusic_Frame(void);
+static void     S_LoadMusic_Frame(void); // HZM coop [user 2026-10-19] loading-screen music fade-out after the load
+void            S_LoadMusic_Stop(int fadeOutMs);
 static qboolean s_menuMusicAuto    = qfalse; // a menu theme started by S_MenuMusic_Start owns chan_trig_music
 static int      s_menuMusicStartMs = 0;
 
@@ -3660,6 +3662,7 @@ void S_OPENAL_Update()
     }
 
     S_MenuMusic_Frame(); // HZM coop [bug-2576] move to the next main-menu theme when one ends
+    S_LoadMusic_Frame();
 }
 
 /*
@@ -5898,6 +5901,217 @@ static void S_MenuMusic_Frame(void)
         Cbuf_AddText("vstr ui_menuMusicNext\n");
     } else {
         S_MenuMusic_Start();
+    }
+}
+
+
+/*
+==============
+HZM coop [user 2026-10-19] LOADING-SCREEN MUSIC (cl_loadplayer.cpp picks the track; this is the stream)
+
+A map load blocks the client frame, and S_Update returns at once while server_loading is set, so nothing feeds a music stream
+during a load. The loading music therefore plays on chan_mp3 (nothing else uses it; the map's own score is chan_trig_music) and is
+fed from the load tick: S_LoadMusic_Tick runs from UI_LoadResource, which is called for every resource the loader registers. A
+two_d_stream queues up to MAX_STREAM_BUFFERS (16) buffers of 16384 samples, so the start pre-fills most of them - a blocking call
+(gl2 R_Init, a big alias parse) then has seconds of audio queued ahead and the source never runs dry. After the load the ordinary
+S_OPENAL_Update keeps feeding the channel and runs the fade-out (S_LoadMusic_Frame), which is the cross-fade with the map's music.
+Volume follows s_musicVolume and the master the same way the triggered music does.
+==============
+*/
+static struct {
+    qboolean on;          // the channel carries load music
+    int      startMs;     // Sys_Milliseconds at start
+    int      fadeInMs;
+    int      fadeOutMs;   // 0 = not fading out
+    int      fadeOutAt;
+    float    fadeOutFrom; // level when the fade-out began
+    float    level;       // current 0..1 envelope
+    float    peak;        // per-track gain (1.0)
+    int      lastTickMs;
+    int      lastLogMs;
+    int      ticks;
+    int      gapMax;
+    int      gaps200;
+    int      starved;     // ticks that found the source not playing
+    int      logMs;       // log a position line every this many ms (0 = never)
+    char     name[96];
+} s_lm;
+
+// Every OpenAL call takes the context lock the (real-time) mixer thread also holds, and the load tick comes ~300 times: the first
+// version of this tick made 8 AL calls each and cost the load ~10%. Now: the gain only when it moved by 1%, AL_MAX_GAIN once, the
+// source state only when a proof line is due.
+static float s_lmLastGain = -1.0f;
+
+static void S_LoadMusic_Gain(qboolean force)
+{
+    float g    = s_lm.level * s_lm.peak;
+    float gain = S_GetBaseVolume() * (g * s_musicVolume->value) * s_fVolumeGain;
+
+    if (!force && s_lmLastGain >= 0.0f && fabsf(gain - s_lmLastGain) < 0.01f * (s_lmLastGain > 0.05f ? s_lmLastGain : 0.05f)) {
+        return;
+    }
+    s_lmLastGain = gain;
+    openal.chan_mp3.set_gain(gain);
+}
+
+qboolean S_LoadMusic_Active(void)
+{
+    return s_lm.on;
+}
+
+// Starts `path` (a sound/music/*.mp3) on chan_mp3 at level 0 and pre-fills the stream. qfalse = nothing started.
+qboolean S_LoadMusic_Start(const char *path, int fadeInMs, int logMs)
+{
+    int i;
+
+    if (!s_bSoundStarted || !path || !path[0]) {
+        return qfalse;
+    }
+    if (s_lm.on) {
+        S_LoadMusic_Stop(0);
+    }
+    if (openal.chan_mp3.is_playing() || openal.chan_mp3.is_paused()) {
+        return qfalse; // a "playmp3" owns it
+    }
+
+    // a menu theme or a leftover score is on chan_trig_music: cut it so the load music never stacks on it
+    S_TriggeredMusic_Stop();
+    memset(&s_lm, 0, sizeof(s_lm));
+    if (!openal.chan_mp3.queue_stream(path)) {
+        S_OPENAL_InitChannel(SOUNDSYSTEM_CHANNEL_MP3_ID, &openal.chan_mp3);
+        Com_Printf("^~^~^ LOADMUS skip why=queue_stream track=%s\n", path);
+        return qfalse;
+    }
+    Q_strncpyz(s_lm.name, path, sizeof(s_lm.name));
+    s_lm.on         = qtrue;
+    s_lm.startMs    = Sys_Milliseconds();
+    s_lm.fadeInMs   = fadeInMs < 0 ? 0 : fadeInMs;
+    s_lm.peak       = 1.0f;
+    s_lm.level      = 0.0f;
+    s_lm.logMs      = logMs;
+    s_lm.lastLogMs  = s_lm.startMs;
+    s_lm.lastTickMs = s_lm.startMs;
+    openal.chan_mp3.set_sample_loop_count(0); // loop if the load outlasts the track
+    qalSourcef(openal.chan_mp3.source, AL_MAX_GAIN, 8.0f);
+    s_lmLastGain = -1.0f;
+    S_LoadMusic_Gain(qtrue);
+    openal.chan_mp3.play();
+    for (i = 0; i < MAX_STREAM_BUFFERS - 2; i++) {
+        openal.chan_mp3.update(); // each call queues one more buffer
+    }
+    Com_Printf("^~^~^ LOADMUS start track=%s fadein=%d prefill=%dms abs=%d\n", path, s_lm.fadeInMs, Sys_Milliseconds() - s_lm.startMs, s_lm.startMs);
+    return qtrue;
+}
+
+static void S_LoadMusic_Report(const char *how)
+{
+    Com_Printf(
+        "^~^~^ LOADMUS end=%s track=%s ms=%d ticks=%d tickgap_max=%d gaps_over200=%d starved=%d\n",
+        how,
+        s_lm.name,
+        Sys_Milliseconds() - s_lm.startMs,
+        s_lm.ticks,
+        s_lm.gapMax,
+        s_lm.gaps200,
+        s_lm.starved
+    );
+}
+
+// fadeOutMs <= 0: stop now. Otherwise the level ramps to 0 over that long (driven by S_LoadMusic_Frame, i.e. the game frame after the load).
+void S_LoadMusic_Stop(int fadeOutMs)
+{
+    if (!s_lm.on) {
+        return;
+    }
+    if (fadeOutMs > 0 && s_bSoundStarted) {
+        if (!s_lm.fadeOutMs) {
+            s_lm.fadeOutMs   = fadeOutMs;
+            s_lm.fadeOutAt   = Sys_Milliseconds();
+            s_lm.fadeOutFrom = s_lm.level;
+            S_LoadMusic_Report("fadeout");
+        }
+        return;
+    }
+    if (s_bSoundStarted) {
+        openal.chan_mp3.stop();
+    }
+    if (!s_lm.fadeOutMs) {
+        S_LoadMusic_Report("stop");
+    }
+    s_lm.on = qfalse;
+}
+
+// One step: feed the stream, apply the fade envelope and the player's volumes. Called from the load tick and every game frame.
+void S_LoadMusic_Tick(void)
+{
+    int now, gap;
+
+    if (!s_lm.on) {
+        return;
+    }
+    if (!s_bSoundStarted) {
+        s_lm.on = qfalse;
+        return;
+    }
+    now = Sys_Milliseconds();
+    gap = now - s_lm.lastTickMs;
+    if (gap < 40 && !s_lm.fadeOutMs) {
+        return; // UI_LoadResource calls this per resource (thousands of times); a buffer is 370 ms of audio, 40 ms is plenty
+    }
+    s_lm.lastTickMs = now;
+    s_lm.ticks++;
+    if (gap > s_lm.gapMax) {
+        s_lm.gapMax = gap;
+    }
+    if (gap > 200) {
+        s_lm.gaps200++;
+    }
+
+    openal.chan_mp3.update();
+
+    if (s_lm.fadeOutMs) {
+        float t = (float)(now - s_lm.fadeOutAt) / (float)s_lm.fadeOutMs;
+
+        if (t >= 1.0f) {
+            S_LoadMusic_Stop(0);
+            return;
+        }
+        s_lm.level = s_lm.fadeOutFrom * (1.0f - t);
+    } else if (s_lm.fadeInMs > 0 && now - s_lm.startMs < s_lm.fadeInMs) {
+        s_lm.level = (float)(now - s_lm.startMs) / (float)s_lm.fadeInMs;
+    } else {
+        s_lm.level = 1.0f;
+    }
+    S_LoadMusic_Gain(qfalse);
+
+    if (s_lm.logMs > 0 && now - s_lm.lastLogMs >= s_lm.logMs - 1) {
+        ALint st = AL_PLAYING, q = 0, pr = 0;
+
+        qalGetSourcei(openal.chan_mp3.source, AL_SOURCE_STATE, &st);
+        qalGetSourcei(openal.chan_mp3.source, AL_BUFFERS_QUEUED, &q);
+        qalGetSourcei(openal.chan_mp3.source, AL_BUFFERS_PROCESSED, &pr);
+        if (st != AL_PLAYING && st != AL_PAUSED) {
+            s_lm.starved++;
+        }
+        if (s_lm.logMs > 0 && now - s_lm.lastLogMs >= s_lm.logMs) {
+            s_lm.lastLogMs = now;
+            Com_Printf(
+                "^~^~^ LOADMUS pos t=%d state=%d queued=%d processed=%d level=%.2f offset=%u\n",
+                now - s_lm.startMs,
+                (int)st,
+                (int)q,
+                (int)pr,
+                s_lm.level,
+                (unsigned)openal.chan_mp3.sample_offset()
+            );
+        }
+    }
+}
+
+static void S_LoadMusic_Frame(void)
+{
+    if (s_lm.on && s_lm.fadeOutMs) {
+        S_LoadMusic_Tick();
     }
 }
 
