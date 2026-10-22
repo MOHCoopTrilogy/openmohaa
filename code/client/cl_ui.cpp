@@ -1546,6 +1546,23 @@ qboolean UI_MenuActive(void)
     return menuManager.CurrentMenu() != NULL;
 }
 
+qboolean CL_UIBindActive(void)
+{
+    return UI_BindActive() ? qtrue : qfalse;
+}
+
+/*
+====================
+CL_PadCursorOnAdjustWidget
+
+[HZM padnav-fix] sdl_input.c asks: is the menu cursor on a slider / check box? (then the left stick navigates focus)
+====================
+*/
+qboolean CL_PadCursorOnAdjustWidget(void)
+{
+    return uWinMan.PadCursorOnAdjustWidget() ? qtrue : qfalse;
+}
+
 /*
 ====================
 UI_FocusMenuIfExists

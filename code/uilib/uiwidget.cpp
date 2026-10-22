@@ -2273,7 +2273,14 @@ bool UIWidget::CanActivate(void)
     }
 
     for (UIWidget *wid = this; wid != NULL; wid = wid->getParent()) {
-        if (!wid->getShow()) {
+        // [HZM menu-next2] same rule as FindResponder: a widget with an enabledcvar is live iff its gate is on. m_visible is only
+        // set when the menu opens, so a widget gated OFF at open stayed "not shown" for good: it drew and clicked once its
+        // gate flipped, but the pad's D-pad / LB / RB (which ask CanActivate) could never reach it.
+        if (wid->m_enabledCvar.length()) {
+            if (!wid->isEnabled()) {
+                return false;
+            }
+        } else if (!wid->getShow()) {
             return false;
         }
     }

@@ -126,6 +126,7 @@ cvar_t	*joy_outerThreshold;  // outer dead-zone: saturate to full past (1 - this
 cvar_t	*joy_lookX;
 cvar_t	*joy_lookY;
 cvar_t	*joy_adsScale;
+cvar_t	*joy_stickPeek;
 cvar_t	*joy_curve;
 cvar_t	*joy_invertY;
 cvar_t	*joy_accel;
@@ -4399,6 +4400,7 @@ void CL_Init( void ) {
 	joy_lookX    = Cvar_Get( "joy_lookX",    "1.0",  CVAR_ARCHIVE );
 	joy_lookY    = Cvar_Get( "joy_lookY",    "0.8",  CVAR_ARCHIVE );
 	joy_adsScale = Cvar_Get( "joy_adsScale", "0.6",  CVAR_ARCHIVE );
+	joy_stickPeek = Cvar_Get( "joy_stickPeek", "2",  CVAR_ARCHIVE );   // [HZM padlean] 0 off, 1 hold +peek, 2 while aiming: left stick = peek (lean / rise / duck)
 	joy_curve    = Cvar_Get( "joy_curve",    "1",    CVAR_ARCHIVE );
 	joy_invertY  = Cvar_Get( "joy_invertY",  "0",    CVAR_ARCHIVE );
 	joy_accel    = Cvar_Get( "joy_accel",    "1",    CVAR_ARCHIVE );

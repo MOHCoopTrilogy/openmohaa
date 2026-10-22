@@ -590,6 +590,9 @@ qboolean UIFakkBindList::KeyEvent(int key, unsigned int time)
         uii.Snd_PlaySound(m_bind->changesound);
         return true;
     case K_RIGHTARROW:
+        if (m_activeitem >= 3 && UI_GetCvarInt("ui_keyNav", 1)) {
+            return false;       // [HZM padnav-fix] last column: give the arrow back so focus can leave the list
+        }
         m_activeitem++;
         if (m_activeitem > 3) {
             m_activeitem = 3;
@@ -597,6 +600,9 @@ qboolean UIFakkBindList::KeyEvent(int key, unsigned int time)
         uii.Snd_PlaySound(m_bind->changesound);
         return true;
     case K_LEFTARROW:
+        if (m_activeitem <= 2 && UI_GetCvarInt("ui_keyNav", 1)) {
+            return false;
+        }
         m_activeitem--;
         if (m_activeitem < 2) {
             m_activeitem = 2;
@@ -605,7 +611,7 @@ qboolean UIFakkBindList::KeyEvent(int key, unsigned int time)
         return true;
     case K_UPARROW:
         if (!m_activerow) {
-            return true;
+            return !UI_GetCvarInt("ui_keyNav", 1);   // [HZM padnav-fix] first row: the arrow leaves the list
         }
         if (m_activerow == m_scroll->getTopItem()) {
             m_scroll->AttemptScrollTo(m_activerow - 1);
@@ -617,7 +623,7 @@ qboolean UIFakkBindList::KeyEvent(int key, unsigned int time)
         return true;
     case K_DOWNARROW:
         if (m_activerow + 1 >= m_scroll->getNumItems()) {
-            return true;
+            return !UI_GetCvarInt("ui_keyNav", 1);   // [HZM padnav-fix] last row: the arrow leaves the list
         }
 
         if (m_activerow - m_scroll->getTopItem() + 1 >= m_scroll->getPageHeight()) {

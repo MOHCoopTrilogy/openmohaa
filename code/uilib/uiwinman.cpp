@@ -26,6 +26,12 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 // Space click the widget under the cursor). ui_keyNav 0 switches it off. Never taken while a text field has focus.
 static bool s_keyNavShown  = false;   // the keyboard has moved the UI cursor: draw it, and Enter / Space may click
 static int  s_keyClickUpAt = 0;       // Sys_Milliseconds() at which the synthetic MOUSE1 is released (0 = none)
+static int  s_keyClickAt   = -100000; // [HZM padnav-fix] when Enter / Space last injected a click (a pull-down it opens stays open)
+
+bool UI_KeyNavClickRecent(void)
+{
+    return Sys_Milliseconds() - s_keyClickAt < 700;
+}
 
 Event W_MouseExited
 (
@@ -619,7 +625,7 @@ bool UIWindowManager::PadNavigate(int dx, int dy)
         UIWidget *w;
         float     x, y;
     };
-    enum { MAXC = 512, MAXSTACK = 1024 };
+    enum { MAXC = 512, MAXSTACK = 16384 };   // [menu-next2] 1024 dropped the last children of a menu with ~1000+ widgets (the War Room OPTIONS station, the Armory)
     static Cand       cand[MAXC];
     static UIWidget  *stack[MAXSTACK];
     int               ncand = 0, sp = 0, i;
@@ -727,6 +733,28 @@ bool UIWindowManager::PadNavigate(int dx, int dy)
 
 /*
 ====================
+UIWindowManager::PadCursorOnAdjustWidget
+
+[HZM padnav-fix] true when the cursor rests on a slider or a check box (or anything inside one). Those widgets give
+no hover feedback and need an exact aim, so the pad's left stick drives FOCUS there (up / down = next row, left /
+right = adjust) instead of a free cursor, exactly like the D-pad (sdl_input.c IN_GamepadUI).
+====================
+*/
+bool UIWindowManager::PadCursorOnAdjustWidget(void)
+{
+    UIPoint2D here((float)uid.mouseX, (float)uid.mouseY);
+    UIWidget *w = getResponder(here);
+
+    for (; w && w != this; w = w->getParent()) {
+        if (w->isSubclassOf(UISlider) || w->isSubclassOf(UICheckBox)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/*
+====================
 UIWindowManager::PadTab
 
 [HZM gamepad-next] LB / RB. Tabs in this UI are plain buttons whose names start with "tab" or "foldertab" (Armory
@@ -740,7 +768,7 @@ bool UIWindowManager::PadTab(int dir)
         UIWidget *w;
         float     x, y;
     };
-    enum { MAXC = 64, MAXSTACK = 1024 };
+    enum { MAXC = 64, MAXSTACK = 16384 };
     static Cand      cand[MAXC];
     static UIWidget *stack[MAXSTACK];
     static float     lastX = -1, lastY = -1;
@@ -764,14 +792,24 @@ bool UIWindowManager::PadTab(int dir)
             if (!nm || (Q_stricmpn(nm, "tab", 3) && Q_stricmpn(nm, "foldertab", 9))) {
                 continue;
             }
+            if (UI_GetCvarInt("ui_clickdebug", 0) >= 3 && !Q_stricmpn(nm, "tabWr", 5)) {
+                uii.Sys_Printf("^~^~^ PADTABSEE %s activ=%d en=%d show=%d w=%d n=%d\n", nm, (int)w->CanActivate(), (int)w->isEnabled(), (int)w->getShow(), (int)w->m_clippedframe.size.width, n);
+            }
         }
         if (!w->CanActivate() || !w->isEnabled() || w->m_clippedframe.size.width < 2) {
+            if (UI_GetCvarInt("ui_clickdebug", 0) >= 2) {
+                uii.Sys_Printf("^~^~^ PADTABSKIP %s activ=%d en=%d w=%d\n", w->getName(), (int)w->CanActivate(), (int)w->isEnabled(),
+                               (int)w->m_clippedframe.size.width);
+            }
             continue;
         }
         {
             float cx, cy;
 
             if (!PadProbe(w, &cx, &cy)) {
+                if (UI_GetCvarInt("ui_clickdebug", 0) >= 2) {
+                    uii.Sys_Printf("^~^~^ PADTABSKIP %s (not hit-testable)\n", w->getName());
+                }
                 continue;
             }
             cand[n].w = w;
@@ -816,6 +854,11 @@ bool UIWindowManager::PadTab(int dir)
                     break;
                 }
             }
+        }
+    }
+    if (UI_GetCvarInt("ui_clickdebug", 0) >= 2) {
+        for (i = 0; i < n; i++) {
+            uii.Sys_Printf("^~^~^ PADTABCAND %d %s x=%d y=%d%s\n", i, cand[i].w->getName(), (int)cand[i].x, (int)cand[i].y, i == cur ? " <cur" : "");
         }
     }
     if (cur < 0) {
@@ -920,16 +963,30 @@ qboolean UIWindowManager::KeyEvent(int key, unsigned int time)
             }
 
             if (nav) {
+                // [HZM padnav-fix] an open pull-down owns the arrows (up / down = highlight, Enter = pick, Esc = close)
+                if (key != K_TAB) {
+                    static const int padOf[4] = {K_PAD0_DPAD_UP, K_PAD0_DPAD_DOWN, K_PAD0_DPAD_LEFT, K_PAD0_DPAD_RIGHT};
+
+                    if (UIPulldownMenu::PadKey(padOf[key == K_UPARROW ? 0 : key == K_DOWNARROW ? 1 : key == K_LEFTARROW ? 2 : 3])) {
+                        return true;
+                    }
+                }
                 if (key != K_TAB) {
                     UIPoint2D here((float)uid.mouseX, (float)uid.mouseY);
                     UIWidget *w = getResponder(here);
 
                     for (; w && w != this; w = w->getParent()) {
                         if (w->isSubclassOf(UISlider) && w->KeyEvent(key, time)) {
+                            if (UI_GetCvarInt("ui_clickdebug", 0)) {
+                                uii.Sys_Printf("^~^~^ PADNAV key %d -> slider '%s'\n", key, w->getName());
+                            }
                             return true;
                         }
                     }
                     if (m_activeControl && m_activeControl != this && m_activeControl->KeyEvent(key, time)) {
+                        if (UI_GetCvarInt("ui_clickdebug", 0)) {
+                            uii.Sys_Printf("^~^~^ PADNAV key %d eaten by '%s'\n", key, m_activeControl->getName());
+                        }
                         return true;
                     }
                 }
@@ -951,6 +1008,7 @@ qboolean UIWindowManager::KeyEvent(int key, unsigned int time)
                 }
                 Com_QueueEvent(Sys_Milliseconds(), SE_KEY, K_MOUSE1, qtrue, 0, NULL);
                 s_keyClickUpAt = Sys_Milliseconds() + 110;
+                s_keyClickAt   = Sys_Milliseconds();
                 return true;
             }
         }

@@ -55,6 +55,7 @@ kbutton_t	in_strafe, in_speed;
 qboolean	in_guimouse;
 
 kbutton_t	in_up, in_down;
+kbutton_t	in_peek;      // [HZM padlean] +peek: the left stick leans / rises / ducks while it is held
 
 #ifdef USE_VOIP
 kbutton_t	in_voiprecord;
@@ -226,6 +227,8 @@ float CL_KeyState( kbutton_t *key ) {
 
 
 
+void IN_PeekDown(void) {IN_KeyDown(&in_peek);}
+void IN_PeekUp(void) {IN_KeyUp(&in_peek);}
 void IN_UpDown(void) {IN_KeyDown(&in_up);}
 void IN_UpUp(void) {IN_KeyUp(&in_up);}
 void IN_DownDown(void) {IN_KeyDown(&in_down);}
@@ -626,6 +629,203 @@ void CL_JoystickMove( usercmd_t *cmd ) {
 	cmd->upmove = ClampChar( cmd->upmove + (int)up );
 }
 
+/*
+=================
+CL_PadPeekWanted / CL_PadPeek
+
+[HZM padlean] MOH Airborne style aiming: while the peek modifier is held (joy_stickPeek 1: +peek, default; 2: ADS +button13 = Airborne style) with the pad as the last-used device, the LEFT
+stick peeks instead of walking. Left / right = lean, proportional to the deflection (the existing BUTTON_LEAN_*
+commands, pulsed against the replicated ps.fLeanAngle so the angle follows the stick); up = rise (stand from a crouch);
+down = duck. Everything is sent as ordinary lean buttons / upmove, so it is predicted and networked exactly like the keys.
+Off for: keyboard / mouse (in_padActive 0), joy_stickPeek 0, mounted guns and vehicles (PMF_TURRET), cover (PMF_COOP_COVER:
+the cover code owns lean and the stick shuffles along the wall), prone, dead, menus.
+=================
+*/
+qboolean CL_PadPeekWanted( void ) {
+	if ( !joy_stickPeek || joy_stickPeek->integer < 1 || !cge ) {
+		return qfalse;
+	}
+	if ( !Cvar_VariableIntegerValue( "in_padActive" ) ) {
+		return qfalse;
+	}
+	if ( joy_stickPeek->integer == 1 ? !in_peek.active : !in_buttons[13].active ) {   // 1 = +peek held, 2 = ADS held
+		return qfalse;
+	}
+	if ( clc.state != CA_ACTIVE || UI_MenuActive() || UI_ConsoleIsOpen() ) {
+		return qfalse;
+	}
+	if ( cl.snap.ps.pm_flags & ( PMF_TURRET | PMF_COOP_COVER | PMF_VIEW_PRONE | PMF_SPECTATING | PMF_INTERMISSION ) ) {
+		return qfalse;
+	}
+	if ( Cvar_VariableIntegerValue( "coop_coverType" ) != 0 ) {   // server-pushed cover state (0 none / 1 wall / 2 low)
+		return qfalse;
+	}
+	if ( cl.snap.ps.stats[STAT_HEALTH] <= 0 ) {
+		return qfalse;
+	}
+	return qtrue;
+}
+
+static float pk_sy;                // smoothed left-stick Y, shared with CL_PadStance
+
+static void CL_PadPeek( usercmd_t *cmd ) {
+	static float sx;              // smoothed stick X
+	static float est;             // local model of ps.fLeanAngle (what pmove makes of the buttons WE send)
+	static int   estOff;          // ms the model has disagreed with the snapshot by more than a few degrees
+	float        dt = cls.frametime * 0.001f, k, x, y, want, cur, err;
+	const float  leanMax = 45.0f, db = 1.5f;
+
+	if ( !in_padPeek ) {
+		sx = pk_sy = 0.0f;
+		est = cl.snap.ps.fLeanAngle;
+		estOff = 0;
+		return;
+	}
+	if ( dt > 0.1f ) dt = 0.1f;
+	k = 1.0f - expf( -dt / 0.06f );              // ~60 ms smoothing
+	sx += ( in_padStick[0] - sx ) * k;
+	pk_sy += ( in_padStick[1] - pk_sy ) * k;
+	x = sx;
+	y = pk_sy;
+
+	// vertical: down = duck, up = rise / stand. Wins when it is the dominant, clearly pushed axis.
+	if ( fabsf( y ) > 0.45f && fabsf( y ) >= fabsf( x ) ) {
+		// the stance itself (duck / rise / restore) is CL_PadStance's job: crouch is a TOGGLE on the press edge in the statemap
+		cmd->buttons &= ~( BUTTON_LEAN_LEFT | BUTTON_LEAN_RIGHT );
+		est -= est * dt * 8.5f;   // no lean button: the model recovers like pmove
+		if ( Cvar_VariableIntegerValue( "joy_peekDebug" ) ) {
+			Com_Printf( "^~^~^ PADPEEK x %.2f y %.2f want 0.0 cur %.1f snap %.1f btn 0 up %d pmf 0x%x ct %d cs %d cv %d\n", x, y, est, cl.snap.ps.fLeanAngle, cmd->upmove, (unsigned)cl.snap.ps.pm_flags, Cvar_VariableIntegerValue( "coop_coverType" ), Cvar_VariableIntegerValue( "coop_coverSide" ), Cvar_VariableIntegerValue( "coop_coverView" ) );
+		}
+		return;
+	}
+	// horizontal: lean toward x * leanMax. pmove ramps toward the max while a lean button is held and recovers to 0 when
+	// none is, so pulse the button against the snapshot's lean angle (dead band + hysteresis = no chatter).
+	want = ( fabsf( x ) < 0.12f ) ? 0.0f : x * leanMax;
+	// The snapshot angle is a round trip old: bang-bang control against it swings +-25 deg at 100 ms of lag. So steer on a
+	// local model that integrates the exact pmove lean ramp (bg_pmove.cpp: toward +-leanMax at leanAdd 6 /s with a button
+	// held, back to 0 at 8.5 /s without) for the commands we send, and only resync it when the snapshot disagrees for 400 ms.
+	cur = est;
+	if ( dt < 0.001f ) dt = 0.001f;
+	err = want - cur;
+	cmd->buttons &= ~( BUTTON_LEAN_LEFT | BUTTON_LEAN_RIGHT );
+	if ( want != 0.0f ) {
+		if ( err < -db ) {
+			cmd->buttons |= BUTTON_LEAN_LEFT;
+		} else if ( err > db ) {
+			cmd->buttons |= BUTTON_LEAN_RIGHT;
+		}
+	}
+	// advance the model with the button just chosen (the same step pmove will take for this command)
+	if ( cmd->buttons & BUTTON_LEAN_LEFT ) {
+		est += dt * ( -leanMax - est ) * 6.0f;
+	} else if ( cmd->buttons & BUTTON_LEAN_RIGHT ) {
+		est += dt * ( leanMax - est ) * 6.0f;
+	} else {
+		est -= est * dt * 8.5f;
+	}
+	if ( fabsf( est - cl.snap.ps.fLeanAngle ) > 8.0f ) {
+		estOff += (int)( dt * 1000.0f );
+		if ( estOff > 400 ) {
+			est    = cl.snap.ps.fLeanAngle;
+			estOff = 0;
+		}
+	} else {
+		estOff = 0;
+	}
+	if ( Cvar_VariableIntegerValue( "joy_peekDebug" ) ) {
+		Com_Printf( "^~^~^ PADPEEK x %.2f y %.2f want %.1f cur %.1f snap %.1f btn %d up %d pmf 0x%x ct %d cs %d cv %d\n", x, y, want, est, cl.snap.ps.fLeanAngle, ( cmd->buttons >> 4 ) & 3, cmd->upmove, (unsigned)cl.snap.ps.pm_flags, Cvar_VariableIntegerValue( "coop_coverType" ), Cvar_VariableIntegerValue( "coop_coverSide" ), Cvar_VariableIntegerValue( "coop_coverView" ) );
+	}
+}
+
+
+/*
+=================
+CL_PadStance
+
+[HZM padlean] The stance half of the peek. Crouch is a TOGGLE on the press edge in the legs statemap (player.cpp
+CoopCrouchSignal): a press from standing crouches at once; a press from a crouch is held back until it is known
+whether it is a tap (stands on release) or a hold of coop_proneHold (0.5 s: prone). So the stick never HOLDS the
+crouch input: every stance change is a ~120 ms tap, which can never become prone.
+  - the stance the stick started from is recorded when it first leaves the vertical neutral zone;
+  - stick down wants ducked, stick up wants standing, back in neutral (or the peek modifier released) wants the
+    recorded stance again; a tap is sent whenever the snapshot stance differs (with a guard of one round trip);
+  - while engaged the crouch KEY is ignored (stick up overrides a held crouch key).
+Cover / prone / turret / dead: disengaged, nothing is sent.
+=================
+*/
+static void CL_PadStance( usercmd_t *cmd ) {
+	static int engaged, s0, zone, nextTap, pulseEnd, tries;
+	const int  now = Sys_Milliseconds();
+	const int  pmf = cl.snap.ps.pm_flags;
+	const int  ducked = ( pmf & PMF_DUCKED ) ? 1 : 0;
+	int        nz = zone, target, guard;
+	float      y = pk_sy;
+
+	if ( clc.state != CA_ACTIVE || cl.snap.ps.stats[STAT_HEALTH] <= 0
+	     || ( pmf & ( PMF_VIEW_PRONE | PMF_TURRET | PMF_COOP_COVER | PMF_SPECTATING | PMF_INTERMISSION ) )
+	     || Cvar_VariableIntegerValue( "coop_coverType" ) != 0 ) {
+		engaged = 0;
+		zone    = 0;
+		pulseEnd = 0;
+		return;
+	}
+	if ( in_padPeek ) {
+		if ( y > 0.45f ) {
+			nz = 1;
+		} else if ( y < -0.45f ) {
+			nz = -1;
+		} else if ( fabsf( y ) < 0.3f ) {
+			nz = 0;
+		}
+	} else {
+		nz = 0;
+	}
+	if ( !engaged && in_padPeek && nz != 0 ) {
+		engaged = 1;
+		s0      = ducked;
+		tries   = 0;
+		nextTap = now + 80;                   // a few commands of upmove 0 first, so the first tap is a fresh press edge (a held key was -127)
+		if ( Cvar_VariableIntegerValue( "joy_peekDebug" ) ) {
+			Com_Printf( "^~^~^ PADSTANCE engage start=%s\n", s0 ? "ducked" : "standing" );
+		}
+	}
+	zone = nz;
+	if ( !engaged ) {
+		return;
+	}
+	target = ( zone == 1 ) ? 1 : ( zone == -1 ) ? 0 : s0;
+	guard  = cl.snap.ping * 2 + 300;
+	if ( guard < 450 ) {
+		guard = 450;
+	}
+	cmd->upmove = 0;                      // keys ignored while engaged
+	if ( pulseEnd > now ) {
+		cmd->upmove = -127;
+	} else if ( ducked != target ) {
+		if ( now >= nextTap ) {
+			if ( tries >= 4 ) {
+				engaged = 0;              // the stance will not change (no headroom, in the air): give up
+				return;
+			}
+			cmd->upmove = -127;
+			pulseEnd    = now + 120;
+			nextTap     = now + guard;
+			tries++;
+			if ( Cvar_VariableIntegerValue( "joy_peekDebug" ) ) {
+				Com_Printf( "^~^~^ PADSTANCE tap have=%s want=%s try %d zone %d\n", ducked ? "ducked" : "standing", target ? "ducked" : "standing", tries, zone );
+			}
+		}
+	} else {
+		tries = 0;
+		if ( zone == 0 ) {
+			engaged = 0;
+			if ( Cvar_VariableIntegerValue( "joy_peekDebug" ) ) {
+				Com_Printf( "^~^~^ PADSTANCE restored %s\n", ducked ? "ducked" : "standing" );
+			}
+		}
+	}
+}
+
 // HZM coop - THIRD-PERSON FREE CAM mouse routing. These are the (previously vestigial - nothing in the
 // engine ever wrote them) client camera-look globals from cl_main.cpp that the cgame already reads every
 // frame through cgi.get_camera_offset() in CG_OffsetThirdPersonView. While the cgame flags the free cam
@@ -1023,6 +1223,8 @@ usercmd_t CL_CreateCmd( void ) {
 
 	Com_Memset( &cmd, 0, sizeof( cmd ) );
 
+	in_padPeek = CL_PadPeekWanted() ? 1 : 0;   // [HZM padlean] decided before the commands are built (sdl_input reads it next frame)
+
 	CL_CmdButtons( &cmd );
 
 	// get basic movement from keyboard
@@ -1033,6 +1235,10 @@ usercmd_t CL_CreateCmd( void ) {
 
 	// get basic movement from joystick
 	CL_JoystickMove( &cmd );
+
+	// [HZM padlean] ADS + left stick = peek (after every other input so it owns lean / upmove)
+	CL_PadPeek( &cmd );
+	CL_PadStance( &cmd );
 
 	// check to make sure the angles haven't wrapped
 	if ( cl.viewangles[PITCH] - oldAngles[PITCH] > 90 ) {
@@ -1528,6 +1734,8 @@ void CL_InitInput( void ) {
 	Cmd_AddCommand("-attacksecondary", IN_AttackSecondaryUp);
 	Cmd_AddCommand("+use", IN_Button3Down);
 	Cmd_AddCommand("-use", IN_Button3Up);
+	Cmd_AddCommand("+peek", IN_PeekDown);
+	Cmd_AddCommand("-peek", IN_PeekUp);
 	Cmd_AddCommand("+leanleft", IN_LeanLeftDown);
 	Cmd_AddCommand("-leanleft", IN_LeanLeftUp);
 	Cmd_AddCommand("+leanright", IN_LeanRightDown);

@@ -92,6 +92,7 @@ UIPulldownMenu::UIPulldownMenu()
 UIPulldownMenu *UIPulldownMenu::s_padOpen = NULL;
 
 extern void CL_SetMousePos(int x, int y);
+extern bool UI_KeyNavClickRecent(void);
 
 bool UIPulldownMenu::PadKey(int key)
 {
@@ -340,8 +341,8 @@ void UIPulldownMenu::MouseReleased(Event *ev)
         UIPopupMenu *menu = MenuFromPoint(point);
         if (menu) {
             menu->MouseReleased(ev);
-        } else if (m_submenu != -1 && UI_GetCvarInt("in_padActive", 0)) {
-            keepOpen = true;    // a pad click released on the button itself: leave the list open for D-pad + A
+        } else if (m_submenu != -1 && (UI_GetCvarInt("in_padActive", 0) || UI_KeyNavClickRecent())) {
+            keepOpen = true;    // a pad click (or keyboard Enter / Space) released on the button itself: leave the list open for D-pad / arrows + A / Enter
         }
     }
     if (keepOpen) {

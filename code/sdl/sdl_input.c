@@ -85,6 +85,9 @@ static qboolean padWantOpen = qfalse;
 static qboolean padWasEnabled = qfalse;
 static int padLastActive = -1;
 static int padMode = 0;                    // 0 game, 1 ui (menu), 2 console
+int   in_padPeek = 0;                      // [HZM padlean] client sets it: left stick = peek, so the stick keys / axes are held at zero here
+float in_padStick[2];                      // [HZM padlean] left stick after the dead zone, -1..1
+static qboolean padBindWasActive = qfalse;   // [HZM padlean] bind row hand-over was active last frame
 static byte padHeldKey[MAX_KEYS];
 static void IN_PadSetStatus( const char *s );
 
@@ -1041,6 +1044,15 @@ static void IN_PadService( void )
 			if ( strcmp( Cvar_VariableString( "in_padCurveLabel" ), cl ) ) {
 				Cvar_Set( "in_padCurveLabel", cl );
 			}
+			{   // [HZM padlean] and the stick-peek mode word
+				int         pk = Cvar_VariableIntegerValue( "joy_stickPeek" );
+				const char *pl = pk == 0 ? "Off" : ( pk == 2 ? "While aiming (Airborne)" : "Hold peek button" );
+
+				Cvar_Get( "in_padPeekLabel", "Hold peek button", CVAR_TEMP );
+				if ( strcmp( Cvar_VariableString( "in_padPeekLabel" ), pl ) ) {
+					Cvar_Set( "in_padPeekLabel", pl );
+				}
+			}
 		}
 	}
 	IN_PadTestDrive();
@@ -1121,6 +1133,56 @@ static void IN_GamepadUI( void )
 	lx  = SDL_GameControllerGetAxis( gamepad, SDL_CONTROLLER_AXIS_LEFTX ) / 32767.0f;
 	ly  = SDL_GameControllerGetAxis( gamepad, SDL_CONTROLLER_AXIS_LEFTY ) / 32767.0f;
 	mag = sqrtf( lx * lx + ly * ly );
+
+	// [HZM padnav-fix] FOCUS mode: a push that STARTS while the cursor rests on a slider / check box (or within 1.5 s of
+	// the last focus step, so the walk down a page does not turn back into a free cursor at the first button) drives
+	// focus like the D-pad instead: up / down = next row, left / right = adjust, held = auto-repeat. A (drag) wins.
+	{
+		static qboolean stickNav = qfalse;
+		static int      navDir = -1, navRepeatAt = 0, navUntil = 0;
+
+		if ( mag <= dz ) {
+			if ( navDir >= 0 ) {
+				IN_PadKey( K_PAD0_DPAD_UP + navDir, qfalse );
+				navDir = -1;
+			}
+			stickNav = qfalse;
+		} else {
+			if ( !stickNav && navDir < 0 && mag > 0.5f
+			     && !SDL_GameControllerGetButton( gamepad, SDL_CONTROLLER_BUTTON_A )
+			     && ( now < navUntil || CL_PadCursorOnAdjustWidget() ) ) {
+				stickNav = qtrue;
+			}
+			if ( stickNav ) {
+				int d = -1;
+
+				if ( fabsf( ly ) >= fabsf( lx ) ) {
+					if ( ly < -0.5f ) d = 0; else if ( ly > 0.5f ) d = 1;
+				} else {
+					if ( lx < -0.5f ) d = 2; else if ( lx > 0.5f ) d = 3;
+				}
+				if ( d != navDir ) {
+					if ( navDir >= 0 ) {
+						IN_PadKey( K_PAD0_DPAD_UP + navDir, qfalse );
+					}
+					navDir = d;
+					if ( d >= 0 ) {
+						IN_PadKey( K_PAD0_DPAD_UP + d, qtrue );
+						navRepeatAt = now + 380;
+						navUntil = now + 1500;
+						IN_PadSetActive( 1 );
+					}
+				} else if ( d >= 0 && now >= navRepeatAt ) {
+					navRepeatAt = now + 140;
+					navUntil = now + 1500;
+					IN_PadKey( K_PAD0_DPAD_UP + d, qfalse );
+					IN_PadKey( K_PAD0_DPAD_UP + d, qtrue );
+				}
+				mag = 0.0f;               // the cursor stays where focus put it
+				lx = ly = 0.0f;
+			}
+		}
+	}
 	if ( mag > dz ) {
 		float m = ( mag - dz ) / ( 1.0f - dz );
 
@@ -1174,6 +1236,46 @@ static void IN_GamepadUI( void )
 	} else {
 		wheelAcc = 0.0f;
 	}
+
+	// [HZM padlean] a bind row is waiting for a key: every pad button, the D-pad, the stick clicks and both triggers are
+	// handed over RAW (K_PAD0_*) so any of them can be bound (Start stays Escape = cancel; the sticks keep the cursor)
+	if ( CL_UIBindActive() ) {
+		static qboolean rawDown[SDL_CONTROLLER_BUTTON_MAX], trigDown[2];
+		int             ti;
+
+		if ( !padBindWasActive ) {
+			// the row was armed by a pad click: that button is still down, and must not count as the key press to bind
+			padBindWasActive = qtrue;
+			for ( i = 0; i < SDL_CONTROLLER_BUTTON_MAX; i++ ) {
+				rawDown[i] = SDL_GameControllerGetButton( gamepad, SDL_CONTROLLER_BUTTON_A + i );
+			}
+			for ( ti = 0; ti < 2; ti++ ) {
+				trigDown[ti] = SDL_GameControllerGetAxis( gamepad, SDL_CONTROLLER_AXIS_TRIGGERLEFT + ti ) > 16000;
+			}
+		}
+		for ( i = 0; i < SDL_CONTROLLER_BUTTON_MAX; i++ ) {
+			qboolean pressed = SDL_GameControllerGetButton( gamepad, SDL_CONTROLLER_BUTTON_A + i );
+			int      key     = i == SDL_CONTROLLER_BUTTON_START ? K_ESCAPE : ( i <= SDL_CONTROLLER_BUTTON_DPAD_RIGHT ? K_PAD0_A + i : ( i >= 15 && i <= 20 ? K_PAD0_MISC1 + ( i - 15 ) : 0 ) );
+
+			if ( pressed != rawDown[i] ) {
+				rawDown[i] = pressed;
+				stick_state.buttons[i] = pressed;
+				if ( key ) {
+					IN_PadKey( key, pressed );
+				}
+			}
+		}
+		for ( ti = 0; ti < 2; ti++ ) {
+			qboolean pressed = SDL_GameControllerGetAxis( gamepad, SDL_CONTROLLER_AXIS_TRIGGERLEFT + ti ) > 16000;
+
+			if ( pressed != trigDown[ti] ) {
+				trigDown[ti] = pressed;
+				IN_PadKey( ti ? K_PAD0_RIGHTTRIGGER : K_PAD0_LEFTTRIGGER, pressed );
+			}
+		}
+		return;
+	}
+	padBindWasActive = qfalse;
 
 	for ( i = 0; i < SDL_CONTROLLER_BUTTON_MAX; i++ ) {
 		qboolean pressed = SDL_GameControllerGetButton( gamepad, SDL_CONTROLLER_BUTTON_A + i );
@@ -1321,6 +1423,13 @@ static void IN_GamepadMove( void )
 			f = 0.0f;
 
 		axis = (int)(32767 * ((axis < 0) ? -f : f));
+
+		if (i < 2) {
+			in_padStick[i] = axis / 32767.0f;
+			if (in_padPeek) {
+				axis = 0;       // [HZM padlean] ADS + peek: the stick does not walk (keyups go out below; it walks again when ADS is released)
+			}
+		}
 
 		if (axis != oldAxis)
 		{
