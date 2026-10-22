@@ -85,6 +85,8 @@ static qboolean padWantOpen = qfalse;
 static qboolean padWasEnabled = qfalse;
 static int padLastActive = -1;
 static int padMode = 0;                    // 0 game, 1 ui (menu), 2 console
+int   in_padPeek = 0;                      // [HZM padlean] client sets it: left stick = peek, so the stick keys / axes are held at zero here
+float in_padStick[2];                      // [HZM padlean] left stick after the dead zone, -1..1
 static byte padHeldKey[MAX_KEYS];
 static void IN_PadSetStatus( const char *s );
 
@@ -1321,6 +1323,13 @@ static void IN_GamepadMove( void )
 			f = 0.0f;
 
 		axis = (int)(32767 * ((axis < 0) ? -f : f));
+
+		if (i < 2) {
+			in_padStick[i] = axis / 32767.0f;
+			if (in_padPeek) {
+				axis = 0;       // [HZM padlean] ADS + peek: the stick does not walk (keyups go out below; it walks again when ADS is released)
+			}
+		}
 
 		if (axis != oldAxis)
 		{
