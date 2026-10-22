@@ -1811,16 +1811,32 @@ bool UIWidget::isEnabled(void)
             }
             memcpy(name, token, nl);
             name[nl]  = '\0';
-            int lhs   = UI_GetCvarInt(name, 0);
-            int rhs   = atoi(op + oplen);
-            if (op[0] == '<') {
-                ok = (oplen == 2) ? (lhs <= rhs) : (lhs < rhs);
-            } else if (op[0] == '>') {
-                ok = (oplen == 2) ? (lhs >= rhs) : (lhs > rhs);
-            } else if (op[0] == '!') {
-                ok = (lhs != rhs);
-            } else { // '='
-                ok = (lhs == rhs);
+            if (strchr(op + oplen, '.')) {
+                // [HZM menu-next2] a literal with a decimal point compares as FLOATS (volume knobs: s_volume>0.0499 s_volume<0.15).
+                // Integer literals keep the original int comparison, so every existing gate is unchanged.
+                float lf = UI_GetCvarFloat(name, 0.0f);
+                float rf = (float)atof(op + oplen);
+                if (op[0] == '<') {
+                    ok = (oplen == 2) ? (lf <= rf) : (lf < rf);
+                } else if (op[0] == '>') {
+                    ok = (oplen == 2) ? (lf >= rf) : (lf > rf);
+                } else if (op[0] == '!') {
+                    ok = (lf != rf);
+                } else { // '='
+                    ok = (lf == rf);
+                }
+            } else {
+                int lhs = UI_GetCvarInt(name, 0);
+                int rhs = atoi(op + oplen);
+                if (op[0] == '<') {
+                    ok = (oplen == 2) ? (lhs <= rhs) : (lhs < rhs);
+                } else if (op[0] == '>') {
+                    ok = (oplen == 2) ? (lhs >= rhs) : (lhs > rhs);
+                } else if (op[0] == '!') {
+                    ok = (lhs != rhs);
+                } else { // '='
+                    ok = (lhs == rhs);
+                }
             }
         } else if (token[0] == '!') {
             ok = (UI_GetCvarInt(token + 1, 0) == 0);
