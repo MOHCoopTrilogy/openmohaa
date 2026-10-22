@@ -7078,8 +7078,13 @@ void UI_TestUpdateScreen(unsigned int timeout)
     {   // HZM coop test aid: ui_loadShotSeq <prefix> takes a screenshot of the loading screen every ui_loadShotMs (default 1000) ms
         // while a map loads (prefix_NNN.jpg) and logs ^~^~^ LOADSHOT with the clip state, so a load can be inspected end to end.
         static int  seqN, seqLast;
+        static char seqPre[64];
         const char *pre = Cvar_VariableString("ui_loadShotSeq");
 
+        if (Q_stricmp(pre, seqPre)) {
+            Q_strncpyz(seqPre, pre, sizeof(seqPre));
+            seqN = 0; // a new prefix starts a new series; the same prefix keeps counting across loads
+        }
         if (pre[0] && cls.loading != SS_DEAD) {
             int every = Cvar_VariableIntegerValue("ui_loadShotMs"), now = Sys_Milliseconds();
 
@@ -7093,7 +7098,7 @@ void UI_TestUpdateScreen(unsigned int timeout)
                 SCR_UpdateScreen();
             }
         } else {
-            seqN = seqLast = 0;
+            seqLast = 0;
         }
     }
     {   // [gamepad-next] test aid: ui_loadShot <name> takes ONE screenshot a few frames into a real map load

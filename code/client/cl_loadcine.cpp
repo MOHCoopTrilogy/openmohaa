@@ -87,9 +87,12 @@ static struct {
     unsigned rng;
     char     last[LC_TOKLEN];
     int      savedSwap; // -1 = not changed by us
-    char     played[LC_TOKLEN]; // the clip of the last MISSION load (a transit load keeps its last frame on screen)
-    int      playedHoldMs;
-} s_lcKeep = {0, "", -1, "", 0};
+    char     played[LC_TOKLEN];   // the clip of the last load that showed one (the fallback picture of a transit load)
+    char     weak[LC_TOKLEN];     // a MISSION load played this clip (it may be followed by the lobby of the same mission: session start)
+    char     strong[LC_TOKLEN];   // a lobby / briefing load showed this clip: the mission load that follows holds its last frame
+    char     holdClip[LC_TOKLEN]; // hold zoom carry-over: the clip and the hold time it had reached
+    int      holdMs;
+} s_lcKeep = {0, "", -1, "", "", "", "", 0};
 
 typedef struct {
     struct jpeg_error_mgr pub;
@@ -298,8 +301,12 @@ void CL_LoadCine_End(const char *how)
             s_lc.gaps200
         );
     }
+    if (s_lc.active && strcmp(how, "end")) {
+        s_lcKeep.weak[0] = 0; // cut short (a redirect: the picked mission was replaced by the lobby after a few seconds): not seen
+    }
     if (s_lc.active && (s_lc.flags & LC_FLAG_ONCE)) {
-        s_lcKeep.playedHoldMs = s_lc.holdNowMs; // the next transit load carries the picture on
+        Q_strncpyz(s_lcKeep.holdClip, s_lc.name, sizeof(s_lcKeep.holdClip));
+        s_lcKeep.holdMs = s_lc.holdNowMs; // a later load of the same picture carries the zoom drift on
     }
     LC_RestoreSwap();
     LC_Free();
@@ -386,18 +393,82 @@ bad:
     return qfalse;
 }
 
+// Reads ui/loadclips.txt for `mapname`: the clips of its first matching rule (return = count), -1 no rule, -2 an explicit "-".
+// Also collects the `transit` clip list (the fallback picture of a lobby / briefing load that knows nothing else).
+static int LC_RuleClips(const char *buf, long len, const char *mapname, char clips[][LC_TOKLEN], char transit[][LC_TOKLEN], int *nTransit)
+{
+    const char *p = buf, *end = buf + len;
+    char        tok[LC_TOKS][LC_TOKLEN];
+    int         nClips = -1, n, i;
+
+    while (p < end) {
+        const char *ls = p;
+        const char *le;
+
+        while (p < end && *p != '\n') {
+            p++;
+        }
+        le = p;
+        if (p < end) {
+            p++;
+        }
+        n = LC_Tokens(ls, le, tok, LC_TOKS);
+        if (transit && nTransit && n >= 2 && !Q_stricmp(tok[0], "transit") && !*nTransit) {
+            for (i = 1; i < n; i++) {
+                Q_strncpyz(transit[(*nTransit)++], tok[i], LC_TOKLEN);
+            }
+        } else if (nClips == -1 && mapname && n >= 3 && !Q_stricmp(tok[0], "map") && LC_MapMatches(tok[1], mapname)) {
+            nClips = 0;
+            for (i = 2; i < n; i++) {
+                if (!strcmp(tok[i], "-")) {
+                    nClips = 0;
+                    break;
+                }
+                Q_strncpyz(clips[nClips++], tok[i], LC_TOKLEN);
+            }
+            if (!nClips) {
+                nClips = -2; // an explicit "-": no clip for this map
+            }
+        }
+    }
+    return nClips;
+}
+
+static qboolean LC_IsTransitMap(const char *m)
+{
+    return (m && (!Q_stricmpn(m, "co_lobby", 8) || !Q_stricmpn(m, "briefing", 8))) ? qtrue : qfalse;
+}
+
+static int LC_Find(char clips[][LC_TOKLEN], int n, const char *name)
+{
+    int i;
+
+    for (i = 0; i < n; i++) {
+        if (name[0] && !Q_stricmp(clips[i], name)) {
+            return i;
+        }
+    }
+    return -1;
+}
+
 // Called by UI_BeginLoad. Returns qtrue when a clip will play (ui_loadCineOn 1).
+//
+// HZM coop [loadhold-fix]: a coop session start is THREE loads (the picked mission, the lobby co_lobby1, the mission again) and a level change
+// TWO (lobby, next mission). The lobby / briefing loads have no rule of their own and used to show the static art pool. The clip of a mission
+// plays ONCE, on whichever of its loads comes first; the following loads of the same mission hold its last frame:
+//   mission load  : plays the clip (weak = it), unless a lobby already showed it (strong): then it holds the last frame
+//   lobby/briefing: the UPCOMING mission is the server cvar coop_campaignNext (readable on a listen host); its clip plays unless this
+//                   session's mission load just played it (weak) or a lobby showed it (strong): then the last frame holds
+//   target unknown (a remote client has no such cvar): the last frame of the clip shown last, else of the first `transit` clip
 qboolean CL_LoadCine_Begin(const char *mapname)
 {
     char       *buf = NULL;
-    const char *p, *end;
     long        len;
-    char        tok[LC_TOKS][LC_TOKLEN];
-    char        clips[LC_TOKS][LC_TOKLEN];
-    int         nClips = -1, n, pick, i;
-    char        transit[LC_TOKS][LC_TOKLEN];
-    int         nTransit = 0;
+    char        clips[LC_TOKS][LC_TOKLEN], tclips[LC_TOKS][LC_TOKLEN], transit[LC_TOKS][LC_TOKLEN];
+    int         nClips, nT = -1, nTransit = 0, pick = 0, i;
     qboolean    isTransit, held = qfalse;
+    const char *chosen;
+    char        target[MAX_QPATH];
 
     if (s_lc.active) {
         CL_LoadCine_End("restart");
@@ -414,71 +485,64 @@ qboolean CL_LoadCine_Begin(const char *mapname)
         Com_Printf("^~^~^ LOADCINE skip map=%s why=no ui/loadclips.txt\n", mapname);
         return qfalse;
     }
-    p   = buf;
-    end = buf + len;
-    while (p < end) {
-        const char *ls = p;
-        const char *le;
-
-        while (p < end && *p != '\n') {
-            p++;
-        }
-        le = p;
-        if (p < end) {
-            p++;
-        }
-        n = LC_Tokens(ls, le, tok, LC_TOKS);
-        if (n >= 2 && !Q_stricmp(tok[0], "transit") && !nTransit) {
-            for (i = 1; i < n; i++) {
-                Q_strncpyz(transit[nTransit++], tok[i], LC_TOKLEN);
-            }
-        } else if (nClips == -1 && n >= 3 && !Q_stricmp(tok[0], "map") && LC_MapMatches(tok[1], mapname)) {
-            nClips = 0;
-            for (i = 2; i < n; i++) {
-                if (!strcmp(tok[i], "-")) {
-                    nClips = 0;
-                    break;
-                }
-                Q_strncpyz(clips[nClips++], tok[i], LC_TOKLEN);
-            }
-            if (!nClips) {
-                nClips = -2; // an explicit "-": no clip for this map (and no later rule is read)
-            }
+    nClips    = LC_RuleClips(buf, len, mapname, clips, transit, &nTransit);
+    isTransit = LC_IsTransitMap(mapname);
+    target[0] = 0;
+    if (isTransit && nClips == -1) {
+        Q_strncpyz(target, Cvar_VariableString("coop_campaignNext"), sizeof(target));
+        if (target[0] && !LC_IsTransitMap(target)) {
+            nT = LC_RuleClips(buf, len, target, tclips, NULL, NULL);
+        } else {
+            target[0] = 0;
         }
     }
     FS_FreeFile(buf);
-    // HZM coop [loadhold-fix]: every coop mission start / level change goes through LOBBY (co_lobby*) and, for a chapter opener, BRIEFING
-    // (briefing/*) loads. They have no clip of their own, and used to show the static art pool between two clips. A rule-less transit
-    // load now keeps the LAST frame of the clip that played last (its title card complete; the slow zoom carries on), or, before any
-    // clip has played this session, the last frame of the first `transit` clip of ui/loadclips.txt. "map co_lobby1 -" still opts out.
-    isTransit = (!Q_stricmpn(mapname, "co_lobby", 8) || !Q_stricmpn(mapname, "briefing", 8)) ? qtrue : qfalse;
-    if (nClips == -1 && isTransit) {
-        if (s_lcKeep.played[0]) {
-            Q_strncpyz(clips[0], s_lcKeep.played, LC_TOKLEN);
-            nClips = 1;
-            held   = qtrue;
-        } else if (nTransit > 0) {
-            Q_strncpyz(clips[0], transit[0], LC_TOKLEN);
-            nClips = 1;
-            held   = qtrue;
+
+    s_lcKeep.rng ^= (unsigned)Sys_Milliseconds() * 2654435761u;
+    s_lcKeep.rng = s_lcKeep.rng * 1664525u + 1013904223u;
+
+    if (!isTransit || nClips != -1) {
+        // a mission load (or a transit map that has a rule / "-" of its own: used as written)
+        if (nClips <= 0) {
+            Com_Printf("^~^~^ LOADCINE skip map=%s why=no rule (nClips=%d)\n", mapname, nClips);
+            return qfalse;
         }
-    }
-    if (nClips <= 0) {
+        pick = (int)((s_lcKeep.rng >> 8) % (unsigned)nClips);
+        if (nClips > 1 && !Q_stricmp(clips[pick], s_lcKeep.last)) {
+            pick = (pick + 1) % nClips;
+        }
+        if (!isTransit && (i = LC_Find(clips, nClips, s_lcKeep.strong)) >= 0) {
+            pick = i; // a lobby already showed this mission's clip: hold its last frame
+            held = qtrue;
+            s_lcKeep.strong[0] = 0;
+        } else if (!isTransit) {
+            s_lcKeep.strong[0] = 0; // a stale lobby picture of some other mission
+        }
+        chosen = clips[pick];
+    } else if (nT > 0) {
+        // lobby / briefing with a known target mission: that mission's clip
+        pick = (int)((s_lcKeep.rng >> 8) % (unsigned)nT);
+        if ((i = LC_Find(tclips, nT, s_lcKeep.weak)) >= 0 || (i = LC_Find(tclips, nT, s_lcKeep.strong)) >= 0) {
+            pick = i;
+            held = qtrue; // seen on the mission load that just played (session start) or on the previous transit load
+        }
+        chosen = tclips[pick];
+    } else if (s_lcKeep.strong[0]) {
+        chosen = s_lcKeep.strong;
+        held   = qtrue;
+    } else if (s_lcKeep.played[0]) {
+        chosen = s_lcKeep.played;
+        held   = qtrue;
+    } else if (nTransit > 0) {
+        chosen = transit[0];
+        held   = qtrue;
+    } else {
         Com_Printf("^~^~^ LOADCINE skip map=%s why=no rule (nClips=%d)\n", mapname, nClips);
         return qfalse;
     }
 
-    s_lcKeep.rng ^= (unsigned)Sys_Milliseconds() * 2654435761u;
-    s_lcKeep.rng = s_lcKeep.rng * 1664525u + 1013904223u;
-    pick         = (int)((s_lcKeep.rng >> 8) % (unsigned)nClips);
-    if (nClips > 1 && !Q_stricmp(clips[pick], s_lcKeep.last)) {
-        pick = (pick + 1) % nClips;
-    }
-    if (held) {
-        pick = 0;
-    }
-    if (!LC_Open(clips[pick], mapname)) {
-        Com_Printf("^~^~^ LOADCINE skip map=%s why=clip %s did not open\n", mapname, clips[pick]);
+    if (!LC_Open(chosen, mapname)) {
+        Com_Printf("^~^~^ LOADCINE skip map=%s why=clip %s did not open\n", mapname, chosen);
         return qfalse;
     }
     if (held && !(s_lc.flags & LC_FLAG_ONCE)) {
@@ -486,24 +550,35 @@ qboolean CL_LoadCine_Begin(const char *mapname)
     }
     if (held) {
         s_lc.heldStart  = qtrue;
-        s_lc.baseHoldMs = s_lcKeep.played[0] ? s_lcKeep.playedHoldMs : 0;
-    } else if (!isTransit) {
-        Q_strncpyz(s_lcKeep.played, clips[pick], sizeof(s_lcKeep.played));
-        s_lcKeep.playedHoldMs = 0;
+        s_lc.baseHoldMs = !Q_stricmp(s_lcKeep.holdClip, s_lc.name) ? s_lcKeep.holdMs : 0;
     }
-    Q_strncpyz(s_lcKeep.last, clips[pick], sizeof(s_lcKeep.last));
+    // book-keeping of what the viewer has now seen
+    if (!isTransit) {
+        if (!held) {
+            Q_strncpyz(s_lcKeep.weak, s_lc.name, sizeof(s_lcKeep.weak));
+        } else {
+            s_lcKeep.weak[0] = 0;
+        }
+    } else if (nT > 0) {
+        Q_strncpyz(s_lcKeep.strong, s_lc.name, sizeof(s_lcKeep.strong));
+        s_lcKeep.weak[0] = 0;
+    }
+    Q_strncpyz(s_lcKeep.played, s_lc.name, sizeof(s_lcKeep.played));
+    Q_strncpyz(s_lcKeep.last, s_lc.name, sizeof(s_lcKeep.last));
     s_lc.active  = qtrue;
     s_lc.beginMs = Sys_Milliseconds();
     Cvar_Set("ui_loadCineOn", "1");
     Com_Printf(
-        "^~^~^ LOADCINE begin map=%s clip=%s %ux%u %ufps %u frames %.1f MB\n",
+        "^~^~^ LOADCINE begin map=%s clip=%s %ux%u %ufps %u frames %.1f MB held=%d target=%s\n",
         mapname,
         s_lc.name,
         s_lc.w,
         s_lc.h,
         s_lc.fps,
         s_lc.frames,
-        (double)s_lc.fileLen / 1048576.0
+        (double)s_lc.fileLen / 1048576.0,
+        held ? 1 : 0,
+        target[0] ? target : "-"
     );
     return qtrue;
 }
