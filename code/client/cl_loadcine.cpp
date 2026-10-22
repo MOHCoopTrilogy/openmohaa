@@ -451,6 +451,46 @@ static int LC_Find(char clips[][LC_TOKLEN], int n, const char *name)
     return -1;
 }
 
+// Own \keyalue scan: Info_ValueForKey returns one of two static ring buffers, and the caller's `mapname` (CL_ParseGamestate) is one of them.
+#define LC_SEP 0x5C // the info-string separator, a backslash
+static void LC_InfoValue(const char *info, const char *key, char *out, int size)
+{
+    size_t klen = strlen(key);
+
+    out[0] = 0;
+    if (!info) {
+        return;
+    }
+    while (*info) {
+        const char *k, *v;
+        size_t      vl;
+
+        if (*info == LC_SEP) {
+            info++;
+        }
+        k = info;
+        while (*info && *info != LC_SEP) {
+            info++;
+        }
+        if (!*info) {
+            return;
+        }
+        v = ++info;
+        while (*info && *info != LC_SEP) {
+            info++;
+        }
+        vl = (size_t)(info - v);
+        if ((size_t)(v - 1 - k) == klen && !Q_stricmpn(k, key, (int)klen)) {
+            if (vl >= (size_t)size) {
+                vl = (size_t)size - 1;
+            }
+            memcpy(out, v, vl);
+            out[vl] = 0;
+            return;
+        }
+    }
+}
+
 // Called by UI_BeginLoad. Returns qtrue when a clip will play (ui_loadCineOn 1).
 //
 // HZM coop [loadhold-fix]: a coop session start is THREE loads (the picked mission, the lobby co_lobby1, the mission again) and a level change
@@ -489,7 +529,13 @@ qboolean CL_LoadCine_Begin(const char *mapname)
     isTransit = LC_IsTransitMap(mapname);
     target[0] = 0;
     if (isTransit && nClips == -1) {
-        Q_strncpyz(target, Cvar_VariableString("coop_campaignNext"), sizeof(target));
+        if (com_sv_running && com_sv_running->integer) {
+            Q_strncpyz(target, Cvar_VariableString("coop_campaignNext"), sizeof(target)); // listen host: the server's own cvar
+        } else {
+            // remote client: the game publishes it as a CVAR_SERVERINFO key; the gamestate that starts this load carries it
+            // (CL_ParseGamestate calls UI_BeginLoad after the configstrings are in). Old servers have no such key = unknown.
+            LC_InfoValue(cl.gameState.stringData + cl.gameState.stringOffsets[CS_SERVERINFO], "coop_campaignNext", target, sizeof(target));
+        }
         if (target[0] && !LC_IsTransitMap(target)) {
             nT = LC_RuleClips(buf, len, target, tclips, NULL, NULL);
         } else {
