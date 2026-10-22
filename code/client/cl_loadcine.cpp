@@ -66,6 +66,9 @@ static struct {
     byte     *rgba; // w * h * 4
     int       cur;  // frame currently in rgba, -1 none
     float     lastZoom; // zoom of the last drawn frame (play-once hold)
+    qboolean  heldStart; // a transit (lobby / briefing) load: shows the clip's LAST frame from the first draw, no replay
+    int       baseHoldMs; // hold time already spent on this picture by the previous transit load (the zoom drift carries on)
+    int       holdNowMs;  // hold time at the last draw
     char      name[LC_TOKLEN];
     char      map[MAX_QPATH];
     int       startMs; // Sys_Milliseconds at the first draw; 0 until then
@@ -84,7 +87,9 @@ static struct {
     unsigned rng;
     char     last[LC_TOKLEN];
     int      savedSwap; // -1 = not changed by us
-} s_lcKeep = {0, "", -1};
+    char     played[LC_TOKLEN]; // the clip of the last MISSION load (a transit load keeps its last frame on screen)
+    int      playedHoldMs;
+} s_lcKeep = {0, "", -1, "", 0};
 
 typedef struct {
     struct jpeg_error_mgr pub;
@@ -293,6 +298,9 @@ void CL_LoadCine_End(const char *how)
             s_lc.gaps200
         );
     }
+    if (s_lc.active && (s_lc.flags & LC_FLAG_ONCE)) {
+        s_lcKeep.playedHoldMs = s_lc.holdNowMs; // the next transit load carries the picture on
+    }
     LC_RestoreSwap();
     LC_Free();
     if (cl_loadCinematic) {
@@ -387,6 +395,9 @@ qboolean CL_LoadCine_Begin(const char *mapname)
     char        tok[LC_TOKS][LC_TOKLEN];
     char        clips[LC_TOKS][LC_TOKLEN];
     int         nClips = -1, n, pick, i;
+    char        transit[LC_TOKS][LC_TOKLEN];
+    int         nTransit = 0;
+    qboolean    isTransit, held = qfalse;
 
     if (s_lc.active) {
         CL_LoadCine_End("restart");
@@ -405,7 +416,7 @@ qboolean CL_LoadCine_Begin(const char *mapname)
     }
     p   = buf;
     end = buf + len;
-    while (p < end && nClips < 0) {
+    while (p < end) {
         const char *ls = p;
         const char *le;
 
@@ -417,7 +428,11 @@ qboolean CL_LoadCine_Begin(const char *mapname)
             p++;
         }
         n = LC_Tokens(ls, le, tok, LC_TOKS);
-        if (n >= 3 && !Q_stricmp(tok[0], "map") && LC_MapMatches(tok[1], mapname)) {
+        if (n >= 2 && !Q_stricmp(tok[0], "transit") && !nTransit) {
+            for (i = 1; i < n; i++) {
+                Q_strncpyz(transit[nTransit++], tok[i], LC_TOKLEN);
+            }
+        } else if (nClips == -1 && n >= 3 && !Q_stricmp(tok[0], "map") && LC_MapMatches(tok[1], mapname)) {
             nClips = 0;
             for (i = 2; i < n; i++) {
                 if (!strcmp(tok[i], "-")) {
@@ -432,6 +447,22 @@ qboolean CL_LoadCine_Begin(const char *mapname)
         }
     }
     FS_FreeFile(buf);
+    // HZM coop [loadhold-fix]: every coop mission start / level change goes through LOBBY (co_lobby*) and, for a chapter opener, BRIEFING
+    // (briefing/*) loads. They have no clip of their own, and used to show the static art pool between two clips. A rule-less transit
+    // load now keeps the LAST frame of the clip that played last (its title card complete; the slow zoom carries on), or, before any
+    // clip has played this session, the last frame of the first `transit` clip of ui/loadclips.txt. "map co_lobby1 -" still opts out.
+    isTransit = (!Q_stricmpn(mapname, "co_lobby", 8) || !Q_stricmpn(mapname, "briefing", 8)) ? qtrue : qfalse;
+    if (nClips == -1 && isTransit) {
+        if (s_lcKeep.played[0]) {
+            Q_strncpyz(clips[0], s_lcKeep.played, LC_TOKLEN);
+            nClips = 1;
+            held   = qtrue;
+        } else if (nTransit > 0) {
+            Q_strncpyz(clips[0], transit[0], LC_TOKLEN);
+            nClips = 1;
+            held   = qtrue;
+        }
+    }
     if (nClips <= 0) {
         Com_Printf("^~^~^ LOADCINE skip map=%s why=no rule (nClips=%d)\n", mapname, nClips);
         return qfalse;
@@ -443,9 +474,22 @@ qboolean CL_LoadCine_Begin(const char *mapname)
     if (nClips > 1 && !Q_stricmp(clips[pick], s_lcKeep.last)) {
         pick = (pick + 1) % nClips;
     }
+    if (held) {
+        pick = 0;
+    }
     if (!LC_Open(clips[pick], mapname)) {
         Com_Printf("^~^~^ LOADCINE skip map=%s why=clip %s did not open\n", mapname, clips[pick]);
         return qfalse;
+    }
+    if (held && !(s_lc.flags & LC_FLAG_ONCE)) {
+        held = qfalse; // a looping clip has no "last frame" to keep: it plays as a normal clip
+    }
+    if (held) {
+        s_lc.heldStart  = qtrue;
+        s_lc.baseHoldMs = s_lcKeep.played[0] ? s_lcKeep.playedHoldMs : 0;
+    } else if (!isTransit) {
+        Q_strncpyz(s_lcKeep.played, clips[pick], sizeof(s_lcKeep.played));
+        s_lcKeep.playedHoldMs = 0;
     }
     Q_strncpyz(s_lcKeep.last, clips[pick], sizeof(s_lcKeep.last));
     s_lc.active  = qtrue;
@@ -505,12 +549,13 @@ void CL_LoadCine_Draw(float sw, float sh)
     }
     if (s_lc.flags & LC_FLAG_ONCE) {
         // play once, then hold the last frame; the hold drifts in slowly (about 2% per 10 s) until the load ends
-        long long fr = (long long)t * (long long)s_lc.fps / 1000;
+        long long fr = (long long)(s_lc.heldStart ? t + (int)((long long)s_lc.frames * 1000 / s_lc.fps) + 1 : t) * (long long)s_lc.fps / 1000;
 
         frame = fr >= (long long)s_lc.frames ? (int)s_lc.frames - 1 : (int)fr;
         if (fr >= (long long)s_lc.frames) {
-            int holdMs = t - (int)((long long)s_lc.frames * 1000 / s_lc.fps);
+            int holdMs = (s_lc.heldStart ? t + 1 : t - (int)((long long)s_lc.frames * 1000 / s_lc.fps)) + s_lc.baseHoldMs;
 
+            s_lc.holdNowMs = holdMs;
             zoom = 1.0f + 0.002f * (float)holdMs / 1000.0f;
             if (zoom > 1.2f) {
                 zoom = 1.2f;
