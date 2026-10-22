@@ -2663,6 +2663,13 @@ bool UIWidget::DeliverEventByName(const str& name, const Event& ev)
         return true;
     }
 
+    // [HZM menu-next2] at the TOP level (the window manager, whose children are the menus) a hit in one menu no longer ends the
+    // search: a themed menu (hzm_coopstart) carries the same mission-tile / mission-name widgets the classic menu (coop_start)
+    // has, and the mission cfgs address them with globalwidgetcommand. Until now only the first menu in load order got the
+    // event, so the themed twin never saw its tile commands. Inside a menu the old rule (first enabled match + gated twins) holds.
+    const bool top = (this == (UIWidget *)&uWinMan);
+    bool       any = false;
+
     n = m_children.NumObjects();
     for (i = 1; i <= n; i++) {
         UIWidget *child = m_children.ObjectAt(i);
@@ -2677,14 +2684,21 @@ bool UIWidget::DeliverEventByName(const str& name, const Event& ev)
                     twin->ProcessEvent(ev);
                 }
             }
-            return true;
+            if (!top) {
+                return true;
+            }
+            any = true;
+            continue;
         }
         if (child->DeliverEventByName(name, ev)) {
-            return true;
+            if (!top) {
+                return true;
+            }
+            any = true;
         }
     }
 
-    return false;
+    return any;
 }
 
 UIFont *UIWidget::getFont() const
