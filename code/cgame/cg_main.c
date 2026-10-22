@@ -1006,6 +1006,13 @@ void CG_Init(clientGameImport_t *imported, int serverMessageNum, int serverComma
         // the next map's water throbbing at 5% air.
         cgi.Cvar_Set("coop_uwAir", "1");
         cgi.Cvar_Set("r_ppUnderwaterAir", "1");
+        // HZM coop [user 2026-10-21] lobby-only binds (cg_coopfeed.c CG_DrawLobbyKeys): back to the in-game meaning on every map
+        // change / reconnect; the lobby script sets them after this point
+        cgi.Cvar_Set("coop_lbKeys", "0");
+        cgi.Cvar_Set("coop_lbLoadout", "");
+        cgi.Cvar_Set("coop_lbRecord", "");
+        cgi.Cvar_Set("coop_padX", "reload");
+        cgi.Cvar_Set("coop_padY", "weapnext");
     }
 
     // HZM coop [per-map grade] reset the renderer PER-MAP grade LAYER to identity on every cgame
