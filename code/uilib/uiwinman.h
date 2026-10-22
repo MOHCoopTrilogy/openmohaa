@@ -74,6 +74,7 @@ public:
     virtual qboolean  KeyEvent(int key, unsigned int time) override;
     bool              PadNavigate(int dx, int dy);
     bool              PadTab(int dir);
+    bool              PadCursorOnAdjustWidget(void);
     bool              PadProbe(UIWidget *w, float *outX, float *outY);
     int               m_padClick;
     void              CreateMenus(void);

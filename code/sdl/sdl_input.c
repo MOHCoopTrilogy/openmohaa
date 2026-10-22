@@ -1121,6 +1121,56 @@ static void IN_GamepadUI( void )
 	lx  = SDL_GameControllerGetAxis( gamepad, SDL_CONTROLLER_AXIS_LEFTX ) / 32767.0f;
 	ly  = SDL_GameControllerGetAxis( gamepad, SDL_CONTROLLER_AXIS_LEFTY ) / 32767.0f;
 	mag = sqrtf( lx * lx + ly * ly );
+
+	// [HZM padnav-fix] FOCUS mode: a push that STARTS while the cursor rests on a slider / check box (or within 1.5 s of
+	// the last focus step, so the walk down a page does not turn back into a free cursor at the first button) drives
+	// focus like the D-pad instead: up / down = next row, left / right = adjust, held = auto-repeat. A (drag) wins.
+	{
+		static qboolean stickNav = qfalse;
+		static int      navDir = -1, navRepeatAt = 0, navUntil = 0;
+
+		if ( mag <= dz ) {
+			if ( navDir >= 0 ) {
+				IN_PadKey( K_PAD0_DPAD_UP + navDir, qfalse );
+				navDir = -1;
+			}
+			stickNav = qfalse;
+		} else {
+			if ( !stickNav && navDir < 0 && mag > 0.5f
+			     && !SDL_GameControllerGetButton( gamepad, SDL_CONTROLLER_BUTTON_A )
+			     && ( now < navUntil || CL_PadCursorOnAdjustWidget() ) ) {
+				stickNav = qtrue;
+			}
+			if ( stickNav ) {
+				int d = -1;
+
+				if ( fabsf( ly ) >= fabsf( lx ) ) {
+					if ( ly < -0.5f ) d = 0; else if ( ly > 0.5f ) d = 1;
+				} else {
+					if ( lx < -0.5f ) d = 2; else if ( lx > 0.5f ) d = 3;
+				}
+				if ( d != navDir ) {
+					if ( navDir >= 0 ) {
+						IN_PadKey( K_PAD0_DPAD_UP + navDir, qfalse );
+					}
+					navDir = d;
+					if ( d >= 0 ) {
+						IN_PadKey( K_PAD0_DPAD_UP + d, qtrue );
+						navRepeatAt = now + 380;
+						navUntil = now + 1500;
+						IN_PadSetActive( 1 );
+					}
+				} else if ( d >= 0 && now >= navRepeatAt ) {
+					navRepeatAt = now + 140;
+					navUntil = now + 1500;
+					IN_PadKey( K_PAD0_DPAD_UP + d, qfalse );
+					IN_PadKey( K_PAD0_DPAD_UP + d, qtrue );
+				}
+				mag = 0.0f;               // the cursor stays where focus put it
+				lx = ly = 0.0f;
+			}
+		}
+	}
 	if ( mag > dz ) {
 		float m = ( mag - dz ) / ( 1.0f - dz );
 

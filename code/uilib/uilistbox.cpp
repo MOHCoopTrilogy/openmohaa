@@ -95,11 +95,20 @@ qboolean UIListBase::KeyEvent(int key, unsigned int time)
     switch (key) {
     case K_UPARROW:
     case K_LEFTARROW:
+        // [HZM padnav-fix] a list gives the arrow back at its first row (and a sideways arrow always) so focus can leave it
+        // with the D-pad / keyboard; the window manager then moves focus (PadNavigate). ui_keyNav 0 = the retail behaviour.
+        if (UI_GetCvarInt("ui_keyNav", 1) && (key == K_LEFTARROW || getCurrentItem() <= 1)) {
+            break;
+        }
         offsetitem = -1;
         key_rec    = qtrue;
         break;
     case K_DOWNARROW:
     case K_RIGHTARROW:
+        if (UI_GetCvarInt("ui_keyNav", 1)
+            && (key == K_RIGHTARROW || (getNumItems() >= 0 && getCurrentItem() >= getNumItems()))) {
+            break;
+        }
         offsetitem = 1;
         key_rec    = qtrue;
         break;
