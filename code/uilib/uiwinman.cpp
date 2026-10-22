@@ -619,7 +619,7 @@ bool UIWindowManager::PadNavigate(int dx, int dy)
         UIWidget *w;
         float     x, y;
     };
-    enum { MAXC = 512, MAXSTACK = 1024 };
+    enum { MAXC = 512, MAXSTACK = 16384 };   // [menu-next2] 1024 dropped the last children of a menu with ~1000+ widgets (the War Room OPTIONS station, the Armory)
     static Cand       cand[MAXC];
     static UIWidget  *stack[MAXSTACK];
     int               ncand = 0, sp = 0, i;
@@ -740,7 +740,7 @@ bool UIWindowManager::PadTab(int dir)
         UIWidget *w;
         float     x, y;
     };
-    enum { MAXC = 64, MAXSTACK = 1024 };
+    enum { MAXC = 64, MAXSTACK = 16384 };
     static Cand      cand[MAXC];
     static UIWidget *stack[MAXSTACK];
     static float     lastX = -1, lastY = -1;
@@ -764,14 +764,24 @@ bool UIWindowManager::PadTab(int dir)
             if (!nm || (Q_stricmpn(nm, "tab", 3) && Q_stricmpn(nm, "foldertab", 9))) {
                 continue;
             }
+            if (UI_GetCvarInt("ui_clickdebug", 0) >= 3 && !Q_stricmpn(nm, "tabWr", 5)) {
+                uii.Sys_Printf("^~^~^ PADTABSEE %s activ=%d en=%d show=%d w=%d n=%d\n", nm, (int)w->CanActivate(), (int)w->isEnabled(), (int)w->getShow(), (int)w->m_clippedframe.size.width, n);
+            }
         }
         if (!w->CanActivate() || !w->isEnabled() || w->m_clippedframe.size.width < 2) {
+            if (UI_GetCvarInt("ui_clickdebug", 0) >= 2) {
+                uii.Sys_Printf("^~^~^ PADTABSKIP %s activ=%d en=%d w=%d\n", w->getName(), (int)w->CanActivate(), (int)w->isEnabled(),
+                               (int)w->m_clippedframe.size.width);
+            }
             continue;
         }
         {
             float cx, cy;
 
             if (!PadProbe(w, &cx, &cy)) {
+                if (UI_GetCvarInt("ui_clickdebug", 0) >= 2) {
+                    uii.Sys_Printf("^~^~^ PADTABSKIP %s (not hit-testable)\n", w->getName());
+                }
                 continue;
             }
             cand[n].w = w;
@@ -816,6 +826,11 @@ bool UIWindowManager::PadTab(int dir)
                     break;
                 }
             }
+        }
+    }
+    if (UI_GetCvarInt("ui_clickdebug", 0) >= 2) {
+        for (i = 0; i < n; i++) {
+            uii.Sys_Printf("^~^~^ PADTABCAND %d %s x=%d y=%d%s\n", i, cand[i].w->getName(), (int)cand[i].x, (int)cand[i].y, i == cur ? " <cur" : "");
         }
     }
     if (cur < 0) {
