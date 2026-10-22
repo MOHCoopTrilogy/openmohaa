@@ -87,6 +87,7 @@ static int padLastActive = -1;
 static int padMode = 0;                    // 0 game, 1 ui (menu), 2 console
 int   in_padPeek = 0;                      // [HZM padlean] client sets it: left stick = peek, so the stick keys / axes are held at zero here
 float in_padStick[2];                      // [HZM padlean] left stick after the dead zone, -1..1
+static qboolean padBindWasActive = qfalse;   // [HZM padlean] bind row hand-over was active last frame
 static byte padHeldKey[MAX_KEYS];
 static void IN_PadSetStatus( const char *s );
 
@@ -1192,6 +1193,16 @@ static void IN_GamepadUI( void )
 		static qboolean rawDown[SDL_CONTROLLER_BUTTON_MAX], trigDown[2];
 		int             ti;
 
+		if ( !padBindWasActive ) {
+			// the row was armed by a pad click: that button is still down, and must not count as the key press to bind
+			padBindWasActive = qtrue;
+			for ( i = 0; i < SDL_CONTROLLER_BUTTON_MAX; i++ ) {
+				rawDown[i] = SDL_GameControllerGetButton( gamepad, SDL_CONTROLLER_BUTTON_A + i );
+			}
+			for ( ti = 0; ti < 2; ti++ ) {
+				trigDown[ti] = SDL_GameControllerGetAxis( gamepad, SDL_CONTROLLER_AXIS_TRIGGERLEFT + ti ) > 16000;
+			}
+		}
 		for ( i = 0; i < SDL_CONTROLLER_BUTTON_MAX; i++ ) {
 			qboolean pressed = SDL_GameControllerGetButton( gamepad, SDL_CONTROLLER_BUTTON_A + i );
 			int      key     = i == SDL_CONTROLLER_BUTTON_START ? K_ESCAPE : ( i <= SDL_CONTROLLER_BUTTON_DPAD_RIGHT ? K_PAD0_A + i : ( i >= 15 && i <= 20 ? K_PAD0_MISC1 + ( i - 15 ) : 0 ) );
@@ -1214,6 +1225,7 @@ static void IN_GamepadUI( void )
 		}
 		return;
 	}
+	padBindWasActive = qfalse;
 
 	for ( i = 0; i < SDL_CONTROLLER_BUTTON_MAX; i++ ) {
 		qboolean pressed = SDL_GameControllerGetButton( gamepad, SDL_CONTROLLER_BUTTON_A + i );
