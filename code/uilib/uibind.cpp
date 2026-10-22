@@ -24,6 +24,54 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 #include "uibindlist.h"
 #include "../qcommon/localization.h"
 
+// [HZM menu-next2] the bind list printed the engine's key names for pad buttons ("PAD0_RIGHTSHOULDER", "PAD0_RIGHTSTICK_CLICK"):
+// too wide for the key column and unreadable. Show the button as the player knows it. Keys with no entry print as before.
+static const char *UI_BindKeyLabel(const char *name)
+{
+    static const struct {
+        const char *key;
+        const char *label;
+    } t[] = {{"PAD0_A", "A"},
+             {"PAD0_B", "B"},
+             {"PAD0_X", "X"},
+             {"PAD0_Y", "Y"},
+             {"PAD0_BACK", "View"},
+             {"PAD0_GUIDE", "Guide"},
+             {"PAD0_START", "Menu"},
+             {"PAD0_LEFTSTICK_CLICK", "L3"},
+             {"PAD0_RIGHTSTICK_CLICK", "R3"},
+             {"PAD0_LEFTSHOULDER", "LB"},
+             {"PAD0_RIGHTSHOULDER", "RB"},
+             {"PAD0_DPAD_UP", "D-pad Up"},
+             {"PAD0_DPAD_DOWN", "D-pad Down"},
+             {"PAD0_DPAD_LEFT", "D-pad Left"},
+             {"PAD0_DPAD_RIGHT", "D-pad Right"},
+             {"PAD0_LEFTSTICK_LEFT", "LS Left"},
+             {"PAD0_LEFTSTICK_RIGHT", "LS Right"},
+             {"PAD0_LEFTSTICK_UP", "LS Up"},
+             {"PAD0_LEFTSTICK_DOWN", "LS Down"},
+             {"PAD0_RIGHTSTICK_LEFT", "RS Left"},
+             {"PAD0_RIGHTSTICK_RIGHT", "RS Right"},
+             {"PAD0_RIGHTSTICK_UP", "RS Up"},
+             {"PAD0_RIGHTSTICK_DOWN", "RS Down"},
+             {"PAD0_LEFTTRIGGER", "LT"},
+             {"PAD0_RIGHTTRIGGER", "RT"},
+             {"PAD0_MISC1", "Share"},
+             {"PAD0_PADDLE1", "Paddle 1"},
+             {"PAD0_PADDLE2", "Paddle 2"},
+             {"PAD0_PADDLE3", "Paddle 3"},
+             {"PAD0_PADDLE4", "Paddle 4"},
+             {"PAD0_TOUCHPAD", "Touchpad"}};
+    size_t i;
+
+    for (i = 0; i < sizeof(t) / sizeof(t[0]); i++) {
+        if (!Q_stricmp(name, t[i].key)) {
+            return t[i].label;
+        }
+    }
+    return name;
+}
+
 Event EV_UIBindButton_Command
 (
     "bindcommand",
@@ -207,7 +255,7 @@ void UIBindButton::DrawUnpressed(void)
         UIRect2D(clientFrame.pos.x + 1, clientFrame.pos.y + 1, clientFrame.size.width, clientFrame.size.height),
         m_iFontAlignmentHorizontal,
         m_iFontAlignmentVertical,
-        Sys_LV_CL_ConvertString(s),
+        Sys_LV_CL_ConvertString(UI_BindKeyLabel(s.c_str())),   // [HZM menu-next2] friendly pad names
         m_bVirtual ? m_vVirtualScale : NULL
     );
 }
