@@ -468,6 +468,9 @@ extern	cvar_t	*joy_outerThreshold;  // [controller feel] outer dead-zone
 extern	cvar_t	*joy_lookX;           // horizontal look speed multiplier
 extern	cvar_t	*joy_lookY;           // vertical look speed multiplier
 extern	cvar_t	*joy_adsScale;        // extra look multiplier while aiming down sights (+button13)
+extern	cvar_t	*joy_stickPeek;       // [HZM padlean] left-stick peek (lean / rise / duck) instead of walking: 0 off, 1 while +peek is held (default), 2 while ADS is held (Airborne)
+extern	int		in_padPeek;           // [HZM padlean] set by the client each command: the left stick is in peek mode (sdl_input.c stops moving)
+extern	float	in_padStick[2];       // [HZM padlean] left stick X / Y after the dead zone, -1..1 (written by sdl_input.c every frame)
 extern	cvar_t	*joy_curve;           // 0 linear, 1 exponential (joy_response), 2 dynamic (smooth S-curve)
 extern	cvar_t	*joy_invertY;         // 1 = push up to look down
 extern	cvar_t	*joy_accel;           // 1 = look speeds up while the stick is held fully over

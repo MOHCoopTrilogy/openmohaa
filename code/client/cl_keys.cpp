@@ -769,7 +769,7 @@ static const char *CL_KeyTokenText(int key)
              {"PAD0_RIGHTSHOULDER", "RB"}, {"PAD0_LEFTTRIGGER", "LT"}, {"PAD0_RIGHTTRIGGER", "RT"},
              {"PAD0_DPAD_UP", "D-pad Up"}, {"PAD0_DPAD_DOWN", "D-pad Down"}, {"PAD0_DPAD_LEFT", "D-pad Left"},
              {"PAD0_DPAD_RIGHT", "D-pad Right"}, {"PAD0_LEFTSTICK_CLICK", "L3"}, {"PAD0_RIGHTSTICK_CLICK", "R3"},
-             {"PAD0_BACK", "View"}, {"PAD0_START", "Menu"}};
+             {"PAD0_BACK", "View"}, {"PAD0_START", "Menu"}, {"PAD0_MISC1", "Share"}};
     const char *nm = Key_KeynumToBindString(key);
     int         i;
 
@@ -799,7 +799,7 @@ const char *CL_ExpandKeyTokens(const char *in)
     } al[] = {{"use", "+use"}, {"fire", "+attackprimary"}, {"jump", "+moveup"}, {"crouch", "+movedown"},
               {"reload", "reload"}, {"scores", "+scores"}, {"medkit", "append name ,8mk"},
               {"cover", "append name ,9cv"}, {"ammobox", "append name ,abx"}, {"grenade", "+coopnade"},
-              {"ads", "+button13"}};
+              {"ads", "+button13"}, {"peek", "+peek"}};
     char       *out;
     const char *p = in, *q;
     int         n = 0;

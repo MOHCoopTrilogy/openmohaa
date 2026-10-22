@@ -85,6 +85,8 @@ static qboolean padWantOpen = qfalse;
 static qboolean padWasEnabled = qfalse;
 static int padLastActive = -1;
 static int padMode = 0;                    // 0 game, 1 ui (menu), 2 console
+int   in_padPeek = 0;                      // [HZM padlean] client sets it: left stick = peek, so the stick keys / axes are held at zero here
+float in_padStick[2];                      // [HZM padlean] left stick after the dead zone, -1..1
 static byte padHeldKey[MAX_KEYS];
 static void IN_PadSetStatus( const char *s );
 
@@ -1041,6 +1043,15 @@ static void IN_PadService( void )
 			if ( strcmp( Cvar_VariableString( "in_padCurveLabel" ), cl ) ) {
 				Cvar_Set( "in_padCurveLabel", cl );
 			}
+			{   // [HZM padlean] and the stick-peek mode word
+				int         pk = Cvar_VariableIntegerValue( "joy_stickPeek" );
+				const char *pl = pk == 0 ? "Off" : ( pk == 2 ? "While aiming (Airborne)" : "Hold peek button" );
+
+				Cvar_Get( "in_padPeekLabel", "Hold peek button", CVAR_TEMP );
+				if ( strcmp( Cvar_VariableString( "in_padPeekLabel" ), pl ) ) {
+					Cvar_Set( "in_padPeekLabel", pl );
+				}
+			}
 		}
 	}
 	IN_PadTestDrive();
@@ -1371,6 +1382,13 @@ static void IN_GamepadMove( void )
 			f = 0.0f;
 
 		axis = (int)(32767 * ((axis < 0) ? -f : f));
+
+		if (i < 2) {
+			in_padStick[i] = axis / 32767.0f;
+			if (in_padPeek) {
+				axis = 0;       // [HZM padlean] ADS + peek: the stick does not walk (keyups go out below; it walks again when ADS is released)
+			}
+		}
 
 		if (axis != oldAxis)
 		{
