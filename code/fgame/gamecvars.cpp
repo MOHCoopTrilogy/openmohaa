@@ -361,6 +361,12 @@ void CVAR_Init(void)
     // inherits it. Registered here - before any script - so a script setcvar cannot create it flag-less (TRAPS T7).
     gi.Cvar_Get("g_coopHardcore", "0", CVAR_SERVERINFO | CVAR_ROM);
 
+    // HZM coop [loadhold-fix] - the UPCOMING mission, published to clients. coop_mod/lobby.scr / main.scr / missioncomplete set it (script
+    // setcvar) to the next map before `map co_lobby1`; the client reads it from the serverinfo of the gamestate that starts the lobby load
+    // (cl_loadcine.cpp) and plays THAT mission's loading clip there. Not ROM (a dedicated server operator may rcon it; a client cannot set server cvars); registered here, before any script, so
+    // a script setcvar cannot create it flag-less (TRAPS T7). The game never reads it.
+    gi.Cvar_Get("coop_campaignNext", "", CVAR_SERVERINFO);
+
     flood_msgs      = gi.Cvar_Get("flood_msgs", "4", 0);
     flood_persecond = gi.Cvar_Get("flood_persecond", "4", 0);
     flood_waitdelay = gi.Cvar_Get("flood_waitdelay", "10", 0);
