@@ -665,11 +665,15 @@ qboolean CL_PadPeekWanted( void ) {
 
 static void CL_PadPeek( usercmd_t *cmd ) {
 	static float sx, sy;          // smoothed stick
+	static float est;             // local model of ps.fLeanAngle (what pmove makes of the buttons WE send)
+	static int   estOff;          // ms the model has disagreed with the snapshot by more than a few degrees
 	float        dt = cls.frametime * 0.001f, k, x, y, want, cur, err;
-	const float  leanMax = 45.0f, db = 3.0f;
+	const float  leanMax = 45.0f, db = 1.5f;
 
 	if ( !in_padPeek ) {
 		sx = sy = 0.0f;
+		est = cl.snap.ps.fLeanAngle;
+		estOff = 0;
 		return;
 	}
 	if ( dt > 0.1f ) dt = 0.1f;
@@ -683,13 +687,21 @@ static void CL_PadPeek( usercmd_t *cmd ) {
 	if ( fabsf( y ) > 0.45f && fabsf( y ) >= fabsf( x ) ) {
 		cmd->upmove = ( y > 0.0f ) ? -127 : 0;   // y > 0 = stick down. Up: no crouch input = standing (a crouch held on B is overridden)
 		cmd->buttons &= ~( BUTTON_LEAN_LEFT | BUTTON_LEAN_RIGHT );
+		est -= est * dt * 8.5f;   // no lean button: the model recovers like pmove
+		if ( Cvar_VariableIntegerValue( "joy_peekDebug" ) ) {
+			Com_Printf( "^~^~^ PADPEEK x %.2f y %.2f want 0.0 cur %.1f snap %.1f btn 0 up %d pmf 0x%x\n", x, y, est, cl.snap.ps.fLeanAngle, cmd->upmove, (unsigned)cl.snap.ps.pm_flags );
+		}
 		return;
 	}
 	// horizontal: lean toward x * leanMax. pmove ramps toward the max while a lean button is held and recovers to 0 when
 	// none is, so pulse the button against the snapshot's lean angle (dead band + hysteresis = no chatter).
 	want = ( fabsf( x ) < 0.12f ) ? 0.0f : x * leanMax;
-	cur  = cl.snap.ps.fLeanAngle;
-	err  = want - cur;
+	// The snapshot angle is a round trip old: bang-bang control against it swings +-25 deg at 100 ms of lag. So steer on a
+	// local model that integrates the exact pmove lean ramp (bg_pmove.cpp: toward +-leanMax at leanAdd 6 /s with a button
+	// held, back to 0 at 8.5 /s without) for the commands we send, and only resync it when the snapshot disagrees for 400 ms.
+	cur = est;
+	if ( dt < 0.001f ) dt = 0.001f;
+	err = want - cur;
 	cmd->buttons &= ~( BUTTON_LEAN_LEFT | BUTTON_LEAN_RIGHT );
 	if ( want != 0.0f ) {
 		if ( err < -db ) {
@@ -698,8 +710,25 @@ static void CL_PadPeek( usercmd_t *cmd ) {
 			cmd->buttons |= BUTTON_LEAN_RIGHT;
 		}
 	}
+	// advance the model with the button just chosen (the same step pmove will take for this command)
+	if ( cmd->buttons & BUTTON_LEAN_LEFT ) {
+		est += dt * ( -leanMax - est ) * 6.0f;
+	} else if ( cmd->buttons & BUTTON_LEAN_RIGHT ) {
+		est += dt * ( leanMax - est ) * 6.0f;
+	} else {
+		est -= est * dt * 8.5f;
+	}
+	if ( fabsf( est - cl.snap.ps.fLeanAngle ) > 8.0f ) {
+		estOff += (int)( dt * 1000.0f );
+		if ( estOff > 400 ) {
+			est    = cl.snap.ps.fLeanAngle;
+			estOff = 0;
+		}
+	} else {
+		estOff = 0;
+	}
 	if ( Cvar_VariableIntegerValue( "joy_peekDebug" ) ) {
-		Com_Printf( "^~^~^ PADPEEK x %.2f y %.2f want %.1f cur %.1f btn %d up %d\n", x, y, want, cur, ( cmd->buttons >> 4 ) & 3, cmd->upmove );
+		Com_Printf( "^~^~^ PADPEEK x %.2f y %.2f want %.1f cur %.1f snap %.1f btn %d up %d pmf 0x%x\n", x, y, want, est, cl.snap.ps.fLeanAngle, ( cmd->buttons >> 4 ) & 3, cmd->upmove, (unsigned)cl.snap.ps.pm_flags );
 	}
 }
 
