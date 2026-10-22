@@ -1186,6 +1186,35 @@ static void IN_GamepadUI( void )
 		wheelAcc = 0.0f;
 	}
 
+	// [HZM padlean] a bind row is waiting for a key: every pad button, the D-pad, the stick clicks and both triggers are
+	// handed over RAW (K_PAD0_*) so any of them can be bound (Start stays Escape = cancel; the sticks keep the cursor)
+	if ( CL_UIBindActive() ) {
+		static qboolean rawDown[SDL_CONTROLLER_BUTTON_MAX], trigDown[2];
+		int             ti;
+
+		for ( i = 0; i < SDL_CONTROLLER_BUTTON_MAX; i++ ) {
+			qboolean pressed = SDL_GameControllerGetButton( gamepad, SDL_CONTROLLER_BUTTON_A + i );
+			int      key     = i == SDL_CONTROLLER_BUTTON_START ? K_ESCAPE : ( i <= SDL_CONTROLLER_BUTTON_DPAD_RIGHT ? K_PAD0_A + i : ( i >= 15 && i <= 20 ? K_PAD0_MISC1 + ( i - 15 ) : 0 ) );
+
+			if ( pressed != rawDown[i] ) {
+				rawDown[i] = pressed;
+				stick_state.buttons[i] = pressed;
+				if ( key ) {
+					IN_PadKey( key, pressed );
+				}
+			}
+		}
+		for ( ti = 0; ti < 2; ti++ ) {
+			qboolean pressed = SDL_GameControllerGetAxis( gamepad, SDL_CONTROLLER_AXIS_TRIGGERLEFT + ti ) > 16000;
+
+			if ( pressed != trigDown[ti] ) {
+				trigDown[ti] = pressed;
+				IN_PadKey( ti ? K_PAD0_RIGHTTRIGGER : K_PAD0_LEFTTRIGGER, pressed );
+			}
+		}
+		return;
+	}
+
 	for ( i = 0; i < SDL_CONTROLLER_BUTTON_MAX; i++ ) {
 		qboolean pressed = SDL_GameControllerGetButton( gamepad, SDL_CONTROLLER_BUTTON_A + i );
 		int      key     = IN_PadMenuKey( SDL_CONTROLLER_BUTTON_A + i );

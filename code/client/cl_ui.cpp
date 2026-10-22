@@ -1546,6 +1546,11 @@ qboolean UI_MenuActive(void)
     return menuManager.CurrentMenu() != NULL;
 }
 
+qboolean CL_UIBindActive(void)
+{
+    return UI_BindActive() ? qtrue : qfalse;
+}
+
 /*
 ====================
 UI_FocusMenuIfExists

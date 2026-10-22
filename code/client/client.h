@@ -623,6 +623,7 @@ void Key_GetKeysForCommand( const char *command, int *key1, int *key2 );
 void Key_GetKeysForCommandDev( const char *command, int *key1, int *key2 );
 int Key_GetCatcher( void );
 void CL_PadMoveCursor( int dx, int dy );
+qboolean CL_UIBindActive( void );   // [HZM padlean] a Controls-page bind row is waiting for a key: the pad hands over RAW buttons / triggers
 void CL_SetMousePos( int x, int y );
 void Key_SetCatcher( int catcher );
 
