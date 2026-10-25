@@ -64,6 +64,26 @@ static struct {
     int lastPrint;
 } s_tempLeafStat;
 
+//=============
+// HZM coop [brass depth 2026-10-25] A tempmodel spawned from the FIRST-PERSON gun (casing, gun smoke) inherited the view
+// weapon's RF_DEPTHHACK, so its depth was compressed into the weapon range and it was drawn in front of every wall and crate
+// (and for the 45 s coop_brassLife that the brass now stays). A free tempmodel is a WORLD object: it keeps the weapon treatment
+// only while the weapon projection really differs from the world one (ADS zoom: r_weaponfovx / shift) AND it is younger than
+// 250 ms (still at the port), and then only while the eye can see it.
+//=============
+static qboolean CG_HzmWeaponProjSame(void)
+{
+    return (fabsf(cg_fAdsWeaponFov - cg.refdef.fov_x) < 0.05f && CG_AdsPoseFactor() < 0.001f) ? qtrue : qfalse;
+}
+
+static qboolean CG_HzmFreeTempVisible(const vec3_t org)
+{
+    trace_t tr;
+
+    CG_Trace(&tr, cg.refdef.vieworg, vec3_origin, vec3_origin, org, ENTITYNUM_NONE, CONTENTS_SOLID, qfalse, qfalse, "BrassVis");
+    return tr.fraction > 0.98f ? qtrue : qfalse;
+}
+
 static qboolean CG_HzmTempModelInView(ctempmodel_t *p, int viewLeafNum, const vec3_t org)
 {
     int      mode = cg_hzmTempLeaf->integer;
@@ -861,6 +881,17 @@ qboolean ClientGameCommandManager::TempModelPhysics(ctempmodel_t *p, float ftime
             p->cgd.velocity  = Vector(0, 0, 0);
             p->cgd.avelocity = Vector(0, 0, 0);
             p->cgd.flags &= ~T_WAVE;
+
+            // HZM coop [brass rest 2026-10-25] a spent case that has stopped on a floor STAYS stopped: gravity and the angular
+            // motion are switched off (the old code re-accelerated it every tick and re-traced it into the floor for the
+            // whole 45 s of coop_brassLife), and it lies on its side (the case's long axis is the model z) at floor height.
+            if (trace.plane.normal[2] > 0.5f && p->modelname.length() && strstr(p->modelname.c_str(), "shell")) {
+                p->cgd.angles[PITCH] = 0;
+                p->cgd.angles[ROLL]  = 90;
+                p->cgd.flags |= T_ANGLES;
+                p->cgd.origin[2] += 0.26f * (p->ent.scale > 0.0f ? p->ent.scale : 1.0f);
+                p->cgd.flags2 &= ~(T2_ACCEL | T2_MOVE | T2_AMOVE);
+            }
         } else {
             if (p->cgd.flags & T_BOUNCESOUNDONCE) {
                 vec3_t org;
@@ -1169,7 +1200,22 @@ void ClientGameCommandManager::AddTempModels(void)
             );
         } else if (!cg_cullTempModels->integer || CG_HzmTempModelInView(p, viewLeafNum, newEnt.origin)) {
             // HZM coop - only draw when the tempmodel's leaf is in the view PVS (no through-wall casings)
-            if (p->ent.reType == RT_SPRITE) {
+            qboolean bHzmDraw = qtrue;
+
+            // HZM coop [brass depth 2026-10-25] see CG_HzmWeaponProjSame
+            if ((newEnt.renderfx & RF_DEPTHHACK) && !(p->cgd.flags & (T_PARENTLINK | T_HARDLINK))) {
+                if (CG_HzmWeaponProjSame() || (cg.time - p->cgd.createTime) >= 250) {
+                    // hip / not zoomed: one projection, so it is simply a world object; ADS zoom: the weapon projection
+                    // is kept only for the first 250 ms (the case is still leaving the port), then it is a world object
+                    newEnt.renderfx &= ~RF_DEPTHHACK;
+                } else {
+                    bHzmDraw = CG_HzmFreeTempVisible(newEnt.origin);
+                }
+            }
+
+            if (!bHzmDraw) {
+                // behind a wall / crate while the weapon projection is kept: not drawn
+            } else if (p->ent.reType == RT_SPRITE) {
                 vec3_t vTestAngles;
                 cgi.R_AddRefSpriteToScene(&newEnt); // Sprite
                 MatrixToEulerAngles(newEnt.axis, vTestAngles);
