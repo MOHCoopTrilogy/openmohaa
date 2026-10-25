@@ -414,7 +414,8 @@ static const char *HEATHAZE_FS =
 	"uniform float u_time;\n"     // seconds, animates the ripple
 	"uniform float u_muzHeat;\n"  // LOCALIZED gun-muzzle heat 0..1
 	"uniform vec2  u_muzCtr;\n"   // muzzle point on screen (UV)
-	"uniform float u_muzRad;\n"   // localized falloff radius (UV)
+	"uniform float u_muzRad;\n"   // localized falloff radius (fraction of screen HEIGHT; circular)
+	"uniform float u_muzAsp;\n"   // width/height, so the falloff is a circle not an ellipse
 	"varying vec2 v_uv;\n"
 	"void main(){\n"
 	"  float amp = u_heat * 0.030;\n"                             // fullscreen warp (explosions)
@@ -425,7 +426,7 @@ static const char *HEATHAZE_FS =
 	// LOCALIZED MUZZLE SHIMMER: a tight, fast heat ripple concentrated around the gun's muzzle point on
 	// screen, so gunfire heat reads as rising OFF THE BARREL instead of warping the whole frame. The warp
 	// fades to nothing past u_muzRad (squared falloff keeps it tight around the barrel).
-	"  float md = distance(v_uv, u_muzCtr);\n"
+	"  float md = length((v_uv - u_muzCtr) * vec2(u_muzAsp, 1.0));\n"
 	"  float mf = u_muzHeat * clamp(1.0 - md / max(u_muzRad, 0.001), 0.0, 1.0);\n"
 	"  mf = mf * mf;\n"
 	"  float mamp = mf * 0.045;\n"
@@ -1159,6 +1160,7 @@ void RB_PostFxApply( void ) {
 		loc = qglGetUniformLocation( s.heatHazeProgram, "u_muzHeat" ); if ( loc >= 0 ) qglUniform1f( loc, muzHeat );
 		loc = qglGetUniformLocation( s.heatHazeProgram, "u_muzCtr" );  if ( loc >= 0 ) qglUniform2f( loc, muzX, muzY );
 		loc = qglGetUniformLocation( s.heatHazeProgram, "u_muzRad" );  if ( loc >= 0 ) qglUniform1f( loc, muzR );
+		loc = qglGetUniformLocation( s.heatHazeProgram, "u_muzAsp" );  if ( loc >= 0 ) qglUniform1f( loc, (float)glConfig.vidWidth / (float)( glConfig.vidHeight > 0 ? glConfig.vidHeight : 1 ) );
 		qglBindTexture( GL_TEXTURE_2D, s.sceneColor );
 		R_PostFx_FSQuad();
 	}

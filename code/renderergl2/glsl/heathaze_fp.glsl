@@ -11,7 +11,7 @@
 
 uniform sampler2D u_TextureMap;
 uniform vec4      u_Color;      // (heat, time seconds, muzzleHeat, muzzleRadius)
-uniform vec4      u_HzmParams;  // (muzzleX, muzzleY, unused, unused) in UV
+uniform vec4      u_HzmParams;  // (muzzleX, muzzleY, aspect w/h, unused); centre in UV, radius = fraction of height
 
 varying vec2      var_TexCoords;
 
@@ -31,7 +31,7 @@ void main()
 	uv.x += sin(var_TexCoords.y * 17.0 - t * 4.5) * amp * 0.5;   // slower second wave
 
 	// localized muzzle shimmer - squared falloff keeps it tight around the barrel
-	float md = distance(var_TexCoords, muzCtr);
+	float md = length((var_TexCoords - muzCtr) * vec2(max(u_HzmParams.z, 0.1), 1.0));
 	float mf = muzHeat * clamp(1.0 - md / max(muzRad, 0.001), 0.0, 1.0);
 	mf = mf * mf;
 

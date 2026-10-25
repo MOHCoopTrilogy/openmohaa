@@ -1285,7 +1285,7 @@ void RB_HZMScreenFx(FBO_t *srcFbo, ivec4_t srcBox)
 			{
 				vec4_t muz;
 
-				VectorSet4(muz, r_ppMuzzleX->value, r_ppMuzzleY->value, 0.0f, 0.0f);
+				VectorSet4(muz, r_ppMuzzleX->value, r_ppMuzzleY->value, (float)glConfig.vidWidth / (float)(glConfig.vidHeight > 0 ? glConfig.vidHeight : 1), 0.0f);
 				FBO_SetHzmParams(muz);
 
 				color[0] = heat;

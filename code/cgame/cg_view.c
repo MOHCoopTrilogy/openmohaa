@@ -7966,7 +7966,26 @@ static int CG_CalcFov(void)
             s_coopMuzzleHeat -= dt2 / fMzFade;
         }
         if (s_coopMuzzleHeat < 0.0f) { s_coopMuzzleHeat = 0.0f; }
-        cgi.Cvar_Set("r_ppMuzzleHeat", va("%g", s_coopMuzzleHeat));
+        // HZM coop [haze-muzzle 2026-10-25] the hot spot FOLLOWS THE BARREL: the rendered view-weapon's tag_barrel is
+        // projected to screen UV each frame (cg_modelanim.c) and published as r_ppMuzzleX/Y/Radius. No valid barrel
+        // point this frame (scoped, third person, off-screen, behind the camera, no gun) -> the muzzle term is zeroed
+        // rather than left over the sights. coop_muzzleHazeFollow 0 restores the old fixed-point behaviour.
+        {
+            static cvar_t *pFollow = NULL;
+            float          mu, mv, mr, mh = s_coopMuzzleHeat;
+
+            if (!pFollow) { pFollow = cgi.Cvar_Get("coop_muzzleHazeFollow", "1", CVAR_ARCHIVE); }
+            if (pFollow->integer) {
+                if (CG_CoopMuzzleHazePoint(&mu, &mv, &mr)) {
+                    cgi.Cvar_Set("r_ppMuzzleX", va("%g", mu));
+                    cgi.Cvar_Set("r_ppMuzzleY", va("%g", mv));
+                    cgi.Cvar_Set("r_ppMuzzleRadius", va("%g", mr));
+                } else {
+                    mh = 0.0f;
+                }
+            }
+            cgi.Cvar_Set("r_ppMuzzleHeat", va("%g", mh));
+        }
     }
 
     // HZM coop - RAIN ON LENS: publish r_ppRainWet (0..1) to the renderer's rain-droplet pass. Wetness =
