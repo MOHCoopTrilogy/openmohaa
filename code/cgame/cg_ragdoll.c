@@ -184,6 +184,7 @@ struct ragSim_s {
     int      armTime;    // cg.time at arm (for the 500ms seed timeout)
     int      accumMs;
     int      sleepMs;    // time below the sleep speed
+    int      calmMs;     // [bug-4212] sim time since the last disturbance (impulse / toss / mover wake)
     int      lifeMs;     // total sim time
 
     vec3_t   entOrigin;  // entity placement at capture (server corpse is static post-impulse)
@@ -271,6 +272,7 @@ struct ragSim_s {
 
     // ragdoll_2026-09-27 latches (set once in RagCapture, never re-read from the cvars during this life)
     byte     fxCarry;              // coop_ragdollCarryWake
+    byte     fxSettle;             // [bug-4212] coop_ragdollSettle: progressive damping once calm
     byte     fxRest;               // coop_ragdollRestFix (only with fxCarry: a sleeping body must still ride tosses)
     byte     fxFace;               // coop_ragdollFaceFix actually applied (human rig)
     byte     fxCap;                // coop_ragdollKeepCap
@@ -372,6 +374,7 @@ static cvar_t  *rag_rearmgate = NULL; // bug-3132: re-arm-on-impact obeys the se
 static cvar_t  *rag_carrywake = NULL; // bug-3133: toss carry + wake run BEFORE the sleep early-out
 static cvar_t  *rag_facefix   = NULL; // bug-3127: faceSign = +1 on human rigs (the entity-forward test is noise lying)
 static cvar_t  *rag_keepcap   = NULL; // bug-3129: keep the capture-widened limit range for the corpse's life
+static cvar_t  *rag_settle    = NULL; // bug-4212: after 1.5 s without a hit, ramp the damping up so a body that is still twitching comes to rest
 static cvar_t  *rag_restfix   = NULL; // bug-3128: windowed sleep (0.5u / 300 ms) - needs coop_ragdollCarryWake
 
 static void RagCvars(void)
@@ -444,6 +447,7 @@ static void RagCvars(void)
         rag_facefix   = cgi.Cvar_Get("coop_ragdollFaceFix", "1", 0);
         rag_keepcap   = cgi.Cvar_Get("coop_ragdollKeepCap", "1", 0);
         rag_restfix   = cgi.Cvar_Get("coop_ragdollRestFix", "1", 0);
+        rag_settle    = cgi.Cvar_Get("coop_ragdollSettle", "1", 0);
     }
 }
 
@@ -897,6 +901,8 @@ static qboolean RagCapture(centity_t *cent, entityState_t *ns, ragSim_t *s)
     // latch the A/B switches for this corpse's whole life (vet V17)
     s->fxCarry      = rag_carrywake->integer ? 1 : 0;
     s->fxRest       = (rag_restfix->integer && s->fxCarry) ? 1 : 0;
+    s->fxSettle     = rag_settle->integer ? 1 : 0;
+    s->calmMs       = 0;
     s->fxCap        = rag_keepcap->integer ? 1 : 0;
     s->fxFace       = 0;
     s->restRefValid = 0;
@@ -1562,12 +1568,28 @@ static void RagStep(ragSim_t *s, float dt)
 {
     int   i, it;
     float g = RagGravity() * dt * dt * (s->branch ? s->gravScale : 1.0f);
+    float damp = RAG_DAMPING;
+
+    // [bug-4212] "limbs spaz instead of settling after being shot". The constraint set (shape-match, 18 joint limits, self
+    // collision, braces, floor) can fight each other into a limit cycle that never lets the 0.5u / 300 ms rest window close
+    // (live: 12% of shot corpses rode the 6 s cap with joint limits saturating). Once a body has been left alone for 1.5 s,
+    // ramp the per-substep velocity damping from 0.98 to 0.30 over the next 1.5 s: a body that is still twitching loses
+    // its inertia and relaxes onto the constraints, a body already at rest is unchanged. A new hit resets calmMs, so the
+    // first 1.5 s after every shot (the visible reaction) is untouched.
+    s->calmMs += RAG_SUBSTEP_MS;
+    if (s->fxSettle && s->calmMs > 1500) {
+        float t = (float)(s->calmMs - 1500) / 1500.0f;
+        if (t > 1.0f) {
+            t = 1.0f;
+        }
+        damp = RAG_DAMPING + (0.30f - RAG_DAMPING) * t;
+    }
 
     for (i = 0; i < RAG_PTS; i++) {
         vec3_t vel, next;
         float  vlen;
         VectorSubtract(s->pt[i], s->ptPrev[i], vel);
-        VectorScale(vel, RAG_DAMPING, vel);
+        VectorScale(vel, damp, vel);
         vlen = VectorLength(vel);
         {
             float vcap = rag_velcap->value;
@@ -2344,6 +2366,7 @@ void CG_RagdollImpulse(const vec3_t pos, const vec3_t dir, float force, float ra
             continue;
         }
     ragImpulseWake:
+        s->calmMs = 0; // [bug-4212] a hit restarts the calm clock
         if (s->state == 2) { // wake: same recipe as the mover-wake, including the fresh life
             s->state   = 1;  // budget - the 6s cap is per-wake, not a retirement, so a corpse
             s->sleepMs = 0;  // shot 30 seconds after death still reacts
@@ -2395,6 +2418,7 @@ static void RagTossCarry(ragSim_t *s)
             }
             if (s->state == 2 && !sink) { // being thrown wakes it, same as a mover
                 s->state     = 1;
+                s->calmMs    = 0;
                 s->sleepMs   = 0;
                 s->lifeMs    = 0;
                 s->accumMs   = 0;
@@ -2458,6 +2482,7 @@ void CG_RagdollFrame(void)
             // sleeping: last pushed pose stands - unless a bmodel under/over it moved
             if (RagMoverHash(s) != s->moverHash) {
                 s->state   = 1;
+                s->calmMs  = 0;
                 s->sleepMs = 0;
                 s->lifeMs  = 0; // ride the mover as long as it moves
                 s->accumMs = 0;
@@ -2652,7 +2677,11 @@ void CG_RagdollFrame(void)
                     s->restRefMs = s->lifeMs;
                 }
             }
-            if ((s->fxRest ? (s->lifeMs - s->restRefMs >= 300) : (s->sleepMs > 1000)) || s->lifeMs > 6000) {
+            // [bug-4212] ...and a hard stop: 3 s after the last hit / toss a body that is STILL not at rest (measured: a corpse blown over
+            // by a grenade and propped on cover thrashed its limbs for the whole 6 s cap, joint limits saturating 4-15 thousand times)
+            // is put to sleep in the pose it has. The old cap only bounded it at 6 s of life, and a new shot re-armed that clock.
+            if ((s->fxRest ? (s->lifeMs - s->restRefMs >= 300) : (s->sleepMs > 1000)) || s->lifeMs > 6000
+                || (s->fxSettle && s->calmMs > 3000)) {
                 s->state     = 2;
                 s->moverHash = RagMoverHash(s); // baseline for the mover-wake detector
                 if (rag_debug->integer) {
@@ -2691,10 +2720,10 @@ void CG_RagdollFrame(void)
                         // at rest so sleepMs accrues from frame 1. Judge drift/span/maxspd.
                         float rawNow[3][3], tr3, rotDeg = 0;
                         cgi.Printf("^~^~^ RAGDOLL sleep ent=%d life=%dms span=(%.0f %.0f %.0f) branch=%s "
-                                   "drift=%.1f maxspd=%.0f contacts=%d alpha=%.2f drive=%d worldtr=%d\n",
+                                   "drift=%.1f maxspd=%.0f contacts=%d alpha=%.2f drive=%d worldtr=%d calm=%d settle=%d\n",
                                    s->entnum, s->lifeMs, bmx[0] - bmn[0], bmx[1] - bmn[1], bmx[2] - bmn[2],
                                    s->branch ? "settle" : "free", drift, s->maxSpeed, nContacts,
-                                   rag_stiff->value, rag_drive->integer, s_ragWorldTraces);
+                                   rag_stiff->value, rag_drive->integer, s_ragWorldTraces, s->calmMs, (int)s->fxSettle);
                         // total rotation since capture: valid because RagRawFit is exactly I there
                         if (RagRawFit(s, rawNow)) {
                             tr3 = rawNow[0][0] + rawNow[1][1] + rawNow[2][2];

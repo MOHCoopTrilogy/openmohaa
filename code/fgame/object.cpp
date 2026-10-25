@@ -422,7 +422,13 @@ HelmetObject::HelmetObject()
     setSolidType(SOLID_NOT);
     setMoveType(MOVETYPE_TOSS);
     setSize(Vector(-2, -2, -2), Vector(2, 2, 2));
-    edict->clipmask = MASK_VIEWSOLID;
+    // HZM coop [2026-10-25, bug-4211] "helmets sometimes still float in the air after someone is killed". MASK_VIEWSOLID carries
+    // CONTENTS_TRIGGER and CONTENTS_PLAYERCLIP, so a popped helmet stops (EV_Stop -> parked MOVETYPE_NONE) on any invisible clip
+    // brush or trigger volume it meets, which maps are carpeted in - the very defect that froze severed heads in mid-air
+    // (HeadGibObject, bug-1915) and stranded magazines (CoopMagObject). Same recipe as the magazine: real world + fence only,
+    // and not a walking soldier's body either. NOT plain MASK_SOLID: a live actor carries CONTENTS_NOBOTCLIP, so a helmet popped
+    // inside the head of a man who has not finished dying would start solid and never fall (measured: 34 of 40 hung at head height).
+    edict->clipmask = MASK_SOLID & ~(CONTENTS_BODY | CONTENTS_BBOX | CONTENTS_NOBOTCLIP);
 
     if (!g_helmetlife) {
         g_helmetlife = gi.Cvar_Get("g_helmetlife", "30", 0);
