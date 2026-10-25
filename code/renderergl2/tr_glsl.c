@@ -1940,6 +1940,7 @@ void GLSL_InitGPUShaders(void)
 
 	GLSL_InitUniforms(&tr.heatHazeShader);
 	GLSL_SetUniformInt(&tr.heatHazeShader, UNIFORM_TEXTUREMAP, TB_COLORMAP);
+	GLSL_SetUniformInt(&tr.heatHazeShader, UNIFORM_LEVELSMAP,  TB_LEVELSMAP);   // view-weapon depth mask (muzzle shimmer)
 	GLSL_FinishGPUShader(&tr.heatHazeShader);
 
 	numEtcShaders++;

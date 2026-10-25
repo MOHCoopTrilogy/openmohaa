@@ -415,6 +415,8 @@ static const char *HEATHAZE_FS =
 	"uniform float u_muzHeat;\n"  // LOCALIZED gun-muzzle heat 0..1
 	"uniform vec2  u_muzCtr;\n"   // muzzle point on screen (UV)
 	"uniform float u_muzRad;\n"   // localized falloff radius (fraction of screen HEIGHT; circular)
+	"uniform sampler2D u_depth;\n"  // scene depth (unit 1); view-weapon mask
+	"uniform float u_muzDepth;\n"  // 1 = u_depth is valid
 	"uniform float u_muzAsp;\n"   // width/height, so the falloff is a circle not an ellipse
 	"varying vec2 v_uv;\n"
 	"void main(){\n"
@@ -426,13 +428,22 @@ static const char *HEATHAZE_FS =
 	// LOCALIZED MUZZLE SHIMMER: a tight, fast heat ripple concentrated around the gun's muzzle point on
 	// screen, so gunfire heat reads as rising OFF THE BARREL instead of warping the whole frame. The warp
 	// fades to nothing past u_muzRad (squared falloff keeps it tight around the barrel).
-	"  float md = length((v_uv - u_muzCtr) * vec2(u_muzAsp, 1.0));\n"
-	"  float mf = u_muzHeat * clamp(1.0 - md / max(u_muzRad, 0.001), 0.0, 1.0);\n"
+	"  vec2 dm = (v_uv - u_muzCtr) * vec2(u_muzAsp, 1.0);\n"
+	"  float R = max(u_muzRad, 0.001);\n"
+	"  float wy = smoothstep(0.0, R, dm.y) * (1.0 - smoothstep(R, 2.2 * R, dm.y));\n"
+	"  float wx = clamp(1.0 - abs(dm.x) / (0.8 * R), 0.0, 1.0);\n"   // ONE-SIDED: zero at/below the muzzle, rises upward
+	"  float mf = u_muzHeat * wx * wy;\n"
 	"  mf = mf * mf;\n"
 	"  float mamp = mf * 0.045;\n"
-	"  uv.x += sin(v_uv.y * 95.0 + u_time * 17.0) * mamp;\n"
-	"  uv.y += sin(v_uv.x * 85.0 + u_time * 14.0) * mamp;\n"
-	"  uv.x += sin(v_uv.y * 50.0 - u_time * 11.0) * mamp * 0.6;\n"
+	"  vec2 dd = vec2(0.0);\n"
+	"  dd.x += sin(v_uv.y * 95.0 + u_time * 17.0) * mamp;\n"
+	"  dd.y += sin(v_uv.x * 85.0 + u_time * 14.0) * mamp;\n"
+	"  dd.x += sin(v_uv.y * 50.0 - u_time * 11.0) * mamp * 0.6;\n"
+	// view-weapon mask: the viewmodel is in depth range 0..0.3 - gun pixels are never displaced or pulled in
+	"  if (mf > 0.0 && u_muzDepth > 0.5) {\n"
+	"    if (texture2D(u_depth, v_uv).r < 0.2995 || texture2D(u_depth, uv + dd).r < 0.2995) dd = vec2(0.0);\n"
+	"  }\n"
+	"  uv += dd;\n"
 	"  gl_FragColor = vec4(texture2D(u_tex, uv).rgb, 1.0);\n"
 	"}\n";
 
@@ -741,6 +752,7 @@ void RB_PostFxApply( void ) {
 	float    suppress = 0.0f;
 	float    heat = 0.0f;
 	float    muzHeat = 0.0f, muzX = 0.5f, muzY = 0.6f, muzR = 0.28f;
+	qboolean needMuzDepth = qfalse;   // the muzzle shimmer samples scene depth to keep the view weapon crisp
 	float    rainWet = 0.0f;
 	float    sunU = 0.5f, sunV = 0.5f;
 	if ( !R_PostFxActive() ) return;
@@ -813,11 +825,14 @@ void RB_PostFxApply( void ) {
 		// so gunfire heat reads as rising off the gun instead of the whole screen. Scaled by the same master
 		// r_ppHeatAmount dial. Tunable: r_ppMuzzleX/Y move the hot-spot, r_ppMuzzleRadius sizes it.
 		{
-			static cvar_t *pMuzH = NULL, *pMuzX = NULL, *pMuzY = NULL, *pMuzR = NULL;
+			static cvar_t *pMuzH = NULL, *pMuzX = NULL, *pMuzY = NULL, *pMuzR = NULL, *pMuzAx = NULL, *pMuzAy = NULL, *pMuzAs = NULL;
 			if ( !pMuzH ) pMuzH = ri.Cvar_Get( "r_ppMuzzleHeat",   "0",    CVAR_ARCHIVE );
 			if ( !pMuzX ) pMuzX = ri.Cvar_Get( "r_ppMuzzleX",      "0.5",  CVAR_ARCHIVE );
 			if ( !pMuzY ) pMuzY = ri.Cvar_Get( "r_ppMuzzleY",      "0.6",  CVAR_ARCHIVE );
 			if ( !pMuzR ) pMuzR = ri.Cvar_Get( "r_ppMuzzleRadius", "0.28", CVAR_ARCHIVE );
+			if ( !pMuzAx ) pMuzAx = ri.Cvar_Get( "r_ppMuzzleAx", "0.5", 0 );   // cgame-owned barrel anchor, NOT archived
+			if ( !pMuzAy ) pMuzAy = ri.Cvar_Get( "r_ppMuzzleAy", "0.5", 0 );
+			if ( !pMuzAs ) pMuzAs = ri.Cvar_Get( "r_ppMuzzleAs", "0", 0 );
 			muzHeat = ( pMuzH ? pMuzH->value : 0.0f ) * amt;
 			if ( muzHeat < 0.0f ) muzHeat = 0.0f;
 			if ( muzHeat > 1.0f ) muzHeat = 1.0f;
@@ -825,7 +840,12 @@ void RB_PostFxApply( void ) {
 			muzY = pMuzY ? pMuzY->value : 0.6f;
 			muzR = pMuzR ? pMuzR->value : 0.28f;
 			if ( muzR < 0.02f ) muzR = 0.02f;
-			if ( muzHeat > 0.001f ) doHeatHaze = qtrue;
+			if ( pMuzAs && pMuzAs->value > 0.01f ) {   // anchored to the barrel: its point, the user radius scaled
+				muzX = pMuzAx->value;
+				muzY = pMuzAy->value;
+				muzR *= pMuzAs->value;
+			}
+			if ( muzHeat > 0.001f ) { doHeatHaze = qtrue; needMuzDepth = qtrue; }
 		}
 	}
 
@@ -871,7 +891,7 @@ void RB_PostFxApply( void ) {
 	glState.currenttextures[0] = s.sceneColor;	// keep the GL_Bind cache consistent
 	qglCopyTexSubImage2D( GL_TEXTURE_2D, 0, 0, 0, 0, 0, s.width, s.height );
 
-	if ( doSSAO || doDoF ) {
+	if ( doSSAO || doDoF || needMuzDepth ) {
 		qglBindTexture( GL_TEXTURE_2D, s.sceneDepth );
 		glState.currenttextures[0] = s.sceneDepth;
 		qglCopyTexSubImage2D( GL_TEXTURE_2D, 0, 0, 0, 0, 0, s.width, s.height );
@@ -1161,6 +1181,12 @@ void RB_PostFxApply( void ) {
 		loc = qglGetUniformLocation( s.heatHazeProgram, "u_muzCtr" );  if ( loc >= 0 ) qglUniform2f( loc, muzX, muzY );
 		loc = qglGetUniformLocation( s.heatHazeProgram, "u_muzRad" );  if ( loc >= 0 ) qglUniform1f( loc, muzR );
 		loc = qglGetUniformLocation( s.heatHazeProgram, "u_muzAsp" );  if ( loc >= 0 ) qglUniform1f( loc, (float)glConfig.vidWidth / (float)( glConfig.vidHeight > 0 ? glConfig.vidHeight : 1 ) );
+		loc = qglGetUniformLocation( s.heatHazeProgram, "u_depth" );    if ( loc >= 0 ) qglUniform1i( loc, 1 );
+		loc = qglGetUniformLocation( s.heatHazeProgram, "u_muzDepth" ); if ( loc >= 0 ) qglUniform1f( loc, ( needMuzDepth && s.sceneDepth ) ? 1.0f : 0.0f );
+		GL_SelectTexture( 1 );
+		qglBindTexture( GL_TEXTURE_2D, s.sceneDepth );
+		glState.currenttextures[1] = s.sceneDepth;
+		GL_SelectTexture( 0 );
 		qglBindTexture( GL_TEXTURE_2D, s.sceneColor );
 		R_PostFx_FSQuad();
 	}

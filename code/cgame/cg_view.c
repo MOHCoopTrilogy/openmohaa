@@ -7977,12 +7977,17 @@ static int CG_CalcFov(void)
             if (!pFollow) { pFollow = cgi.Cvar_Get("coop_muzzleHazeFollow", "1", CVAR_ARCHIVE); }
             if (pFollow->integer) {
                 if (CG_CoopMuzzleHazePoint(&mu, &mv, &mr)) {
-                    cgi.Cvar_Set("r_ppMuzzleX", va("%g", mu));
-                    cgi.Cvar_Set("r_ppMuzzleY", va("%g", mv));
-                    cgi.Cvar_Set("r_ppMuzzleRadius", va("%g", mr));
+                    // NON-archived anchor cvars (a per-frame value must never reach the user's config); the
+                    // archived r_ppMuzzleX/Y/Radius stay the user's own settings (menu slider) and are the
+                    // fallback when As is 0
+                    cgi.Cvar_Set("r_ppMuzzleAx", va("%g", mu));
+                    cgi.Cvar_Set("r_ppMuzzleAy", va("%g", mv));
+                    cgi.Cvar_Set("r_ppMuzzleAs", va("%g", mr));
                 } else {
                     mh = 0.0f;
                 }
+            } else {
+                cgi.Cvar_Set("r_ppMuzzleAs", "0");
             }
             cgi.Cvar_Set("r_ppMuzzleHeat", va("%g", mh));
         }

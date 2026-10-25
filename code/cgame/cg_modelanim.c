@@ -2916,7 +2916,7 @@ qboolean CG_CoopMuzzleHazePoint(float *u, float *v, float *r)
 
 static void CG_CoopMuzzleHazeProbe(const refEntity_t *model)
 {
-    static cvar_t *pWFov = NULL, *pBase = NULL, *pDbg = NULL;
+    static cvar_t *pWFov = NULL, *pDbg = NULL;
     static void   *s_pTiki = NULL;
     static int     s_iTag  = -1;
     refEntity_t   *pm = (refEntity_t *)model;
@@ -2926,7 +2926,6 @@ static void CG_CoopMuzzleHazeProbe(const refEntity_t *model)
 
     if (!pWFov) {
         pWFov = cgi.Cvar_Get("r_weaponfovx", "0", 0);
-        pBase = cgi.Cvar_Get("coop_muzzleHazeRadius", "0.09", CVAR_ARCHIVE);
         pDbg  = cgi.Cvar_Get("coop_muzzleHazeDbg", "0", 0);
     }
     if (cg.renderingThirdPerson || cg.snap->ps.stats[STAT_INZOOM] || CG_HzmScopeActive() || cg.refdef.width <= 0) {
@@ -2973,9 +2972,9 @@ static void CG_CoopMuzzleHazeProbe(const refEntity_t *model)
     }
     depthScale = 40.0f / fwd;
     if (depthScale < 0.6f) { depthScale = 0.6f; } else if (depthScale > 2.0f) { depthScale = 2.0f; }
-    R = (pBase->value > 0.005f ? pBase->value : 0.09f) * depthScale * (0.84f / tx);
+    R = depthScale * (0.84f / tx); // a SCALE on the user's r_ppMuzzleRadius (the menu slider), not a radius
     s_fMzU    = 0.5f + 0.5f * sx;
-    s_fMzV    = 0.5f + 0.5f * sy + 0.25f * R; // heat rises: centre it just above the muzzle
+    s_fMzV    = 0.5f + 0.5f * sy + 0.015f * R; // origin a hair above the muzzle; the shader only rises UP from here
     s_fMzR    = R;
     s_iMzTime = cg.time;
     if (pDbg->integer) {
