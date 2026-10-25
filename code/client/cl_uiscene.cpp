@@ -17,6 +17,27 @@
  */
 
 #include "cl_ui.h"
+#ifdef _WIN32
+#include <windows.h>
+// [spike diagnostic] log the faulting address + stack of the first access violation to a file (resolved offline against the PDB)
+static LONG WINAPI Scene3D_VEH(EXCEPTION_POINTERS *ep)
+{
+    if (ep->ExceptionRecord->ExceptionCode == 0xC0000005 || ep->ExceptionRecord->ExceptionCode == 0xC0000094) {
+        FILE *f = fopen("G:\\mohaa-hudfeed3\\menus3d\\crash.txt", "a");
+        if (f) {
+            void *st[48];
+            USHORT n = RtlCaptureStackBackTrace(0, 48, st, NULL);
+            fprintf(f, "code %08lx addr %p base %p\n", ep->ExceptionRecord->ExceptionCode, ep->ExceptionRecord->ExceptionAddress, (void *)GetModuleHandleA(NULL));
+            for (USHORT i = 0; i < n; i++) {
+                fprintf(f, "  %p\n", st[i]);
+            }
+            fclose(f);
+        }
+    }
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+#endif
+#include "../qcommon/tiki.h"
 
 class UIScene3D : public UIWidget
 {
@@ -25,6 +46,9 @@ class UIScene3D : public UIWidget
         qhandle_t handle;
         vec3_t    origin;
         float     yaw;
+        str       anim;      // optional: loop this TIKI animation (actors)
+        str       hide;      // optional: comma list of surface names to nodraw (helmet indoors)
+        int       animStart;
     };
     struct sceneHot_t {
         str    name;
@@ -67,9 +91,9 @@ Event EV_Scene_Model
 (
     "scenemodel",
     EV_DEFAULT,
-    "sffff",
-    "model x y z yaw",
-    "Scene3D: add a static model (tik) at an origin and yaw."
+    "sffffSS",
+    "model x y z yaw [anim] [hidesurfaces]",
+    "Scene3D: add a model (tik) at an origin and yaw; optional looping animation and a comma list of surfaces to hide."
 );
 Event EV_Scene_Cam
 (
@@ -107,6 +131,9 @@ CLASS_DECLARATION(UIWidget, UIScene3D, NULL) {
 
 UIScene3D::UIScene3D()
 {
+#ifdef _WIN32
+    AddVectoredExceptionHandler(1, Scene3D_VEH);
+#endif
     memset(&m_cur, 0, sizeof(m_cur));
     m_cur.fov = 60;
     m_from = m_to = m_home = m_cur;
@@ -126,6 +153,9 @@ void UIScene3D::SceneModel(Event *ev)
     m->origin[1]    = ev->GetFloat(3);
     m->origin[2]    = ev->GetFloat(4);
     m->yaw          = ev->GetFloat(5);
+    m->anim         = ev->NumArgs() >= 6 ? ev->GetString(6) : "";
+    m->hide         = ev->NumArgs() >= 7 ? ev->GetString(7) : "";
+    m->animStart    = 0;
     m_models.AddObject(m);
 }
 
@@ -269,8 +299,44 @@ void UIScene3D::Draw(void)
         vec3_t a = {0, m->yaw, 0};
         AnglesToAxis(a, ent.axis);
         ent.shaderRGBA[0] = ent.shaderRGBA[1] = ent.shaderRGBA[2] = ent.shaderRGBA[3] = 255;
+        if (m->anim.length()) {
+            ent.shaderRGBA[0] = ent.shaderRGBA[1] = ent.shaderRGBA[2] = 150;   // actors are fullbright without a world: pull them down to the room's exposure
+            const int idx = TIKI_Anim_NumForName(ent.tiki, m->anim.c_str());
+            if (idx >= 0) {
+                if (!m->animStart) {
+                    m->animStart = uid.time;
+                }
+                float t   = (uid.time - m->animStart) * 0.001f;
+                float len = TIKI_Anim_Time(ent.tiki, idx);
+                if (len > 0.05f) {
+                    t = t - len * floor(t / len);
+                }
+                ent.frameInfo[0].index  = idx;
+                ent.frameInfo[0].time   = t;
+                ent.frameInfo[0].weight = 1.0f;
+                ent.actionWeight        = 1.0f;
+            }
+        }
+        if (m->hide.length() && ent.tiki->num_surfaces > 0) {
+            for (int sidx = 0; sidx < ent.tiki->num_surfaces && sidx < MAX_MODEL_SURFACES; sidx++) {
+                const char *sn = ent.tiki->surfaces[sidx].name;
+                const char *h  = m->hide.c_str();
+                const size_t L = strlen(sn);
+                while (*h) {
+                    const char *e = strchr(h, ',');
+                    const size_t n = e ? (size_t)(e - h) : strlen(h);
+                    if (n == L && !Q_stricmpn(sn, h, (int)n)) {
+                        ent.surfaces[sidx] |= TIKI_SURF_NODRAW;
+                    }
+                    h += n + (e ? 1 : 0);
+                }
+            }
+        }
+        if (dbg && m->anim.length()) Com_Printf("^~^~^ SCENE3D actor add idx tiki=%p surfs=%d\n", (void *)ent.tiki, ent.tiki->num_surfaces);
         re.AddRefEntityToScene(&ent, ENTITYNUM_NONE);
+        if (dbg && m->anim.length()) Com_Printf("^~^~^ SCENE3D actor added\n");
     }
+    if (dbg) Com_Printf("^~^~^ SCENE3D render begin\n");
     const int tr0 = Sys_Milliseconds();
     re.RenderScene(&rd);
     if (dbg) {

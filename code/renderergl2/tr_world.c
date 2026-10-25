@@ -979,6 +979,11 @@ int R_SphereInLeafs(const vec3_t p, float r, mnode_t** nodes, int nMaxNodes) {
 	mnode_t* pCurNode;
 	int nFoundNodes;
 
+	// [HZM menus3d] menu scenes (RDF_NOWORLDMODEL, no map loaded) have no world: character spherical lighting must not walk it
+	if (!tr.world || !tr.world->nodes) {
+		return 0;
+	}
+
 	iNodeStackPos = 0;
 	pCurNode = tr.world->nodes;
 	nFoundNodes = 0;
