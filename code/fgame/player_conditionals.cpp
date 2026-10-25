@@ -1136,6 +1136,12 @@ qboolean Player::CondCoopLimping(Conditional& condition)
     return m_bCoopLimping;
 }
 
+// HZM coop [stress reload] COOP_RELOAD_VAR <n>: the variant Player::CoopReloadPick chose for this reload (0 calm)
+qboolean Player::CondCoopReloadVar(Conditional& condition)
+{
+    return (m_iCoopReloadVar == atoi(condition.getParm(1))) ? qtrue : qfalse;
+}
+
 qboolean Player::CondCoopAds(Conditional& condition)
 {
     Weapon *weapon;
@@ -2311,6 +2317,7 @@ Condition<Player> Player::m_conditions[] = {
     }, // Checks to see if there is an active weapon as well as the button being pressed
     {"ATTACK_PRIMARY_BUTTON",           &Player::CondAttackButtonPrimary     }, // Checks to see if the left attack button is pressed
     {"ATTACK_SECONDARY_BUTTON",         &Player::CondAttackButtonSecondary   },
+    {"COOP_RELOAD_VAR",                 &Player::CondCoopReloadVar           }, // HZM coop [stress reload] the picked reload variant
     {"COOP_ADS",                        &Player::CondCoopAds                 }, // HZM coop - aim down sights (dedicated bind), see CondCoopAds
     {"COOP_SPRINTING",                  &Player::CondCoopSprinting           }, // HZM coop - sprint state for the legs statemap
     {"COOP_PRONE",                      &Player::CondCoopProne               }, // HZM coop - hold-crouch prone [user 2026-08-24]

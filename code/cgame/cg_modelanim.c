@@ -146,6 +146,23 @@ void CG_CoopNoteOtherShot(const vec3_t org)
     }
 }
 
+// HZM coop [stress reload 2026-10-25] the client clip `<base>_s` / `<base>_m` for a stressed / fumbled reload when the tik
+// has it, else `<base>` (a gun whose variant is not baked keeps the calm client clip). Index or -1.
+static int s_coopRowVar = 0; // which server reload row shows on the held gun: 0 reload, 1 reload_s, 2 reload_m
+static int CoopVarRow(dtiki_t *tiki, const char *base, int var)
+{
+    if (var > 0) {
+        char nm[MAX_QPATH];
+        int  i;
+        Com_sprintf(nm, sizeof(nm), "%s_%s", base, var == 2 ? "m" : "s");
+        i = cgi.Anim_NumForName(tiki, nm);
+        if (i != -1) {
+            return i;
+        }
+    }
+    return cgi.Anim_NumForName(tiki, base);
+}
+
 // is player `num`'s torso in a reload animation (its alias name carries "reload")?
 static qboolean CoopPlayerEntReloading(int num)
 {
@@ -3484,6 +3501,28 @@ coopOthersDone:;
             }
         }
         iRel = pAimedGun->integer ? cgi.Anim_NumForName(model.tiki, "reload") : -1;
+        // HZM coop [stress reload 2026-10-25] the server plays `reload_s` / `reload_m` for a stressed / fumbled reload
+        // (Weapon::StartReloading): from here on that row stands where `reload` stands, and the client clips below
+        // are the variant's (`reload_empty_s` ...) - see CoopVarRow.
+        s_coopRowVar = 0;
+        if (pAimedGun->integer) {
+            int iVs = cgi.Anim_NumForName(model.tiki, "reload_s"), iVm = cgi.Anim_NumForName(model.tiki, "reload_m");
+            for (k = 0; k < MAX_FRAMEINFOS; k++) {
+                if (!model.frameInfo[k].weight) {
+                    continue;
+                }
+                if (iVs != -1 && model.frameInfo[k].index == iVs) {
+                    iRel = iVs;
+                    s_coopRowVar = 1;
+                    break;
+                }
+                if (iVm != -1 && model.frameInfo[k].index == iVm) {
+                    iRel = iVm;
+                    s_coopRowVar = 2;
+                    break;
+                }
+            }
+        }
         for (k = 0; k < MAX_FRAMEINFOS && iRel != -1; k++) {
             if (model.frameInfo[k].weight && model.frameInfo[k].index == iRel) {
                 bPlaying = qtrue;
@@ -3607,8 +3646,8 @@ coopOthersDone:;
             }
             s_lastEnt  = s1->number;
             s_lastSeen = cg.time;
-            iSwap      = s_choice ? cgi.Anim_NumForName(model.tiki, s_choice == 2 ? "reload_ads_empty"
-                                                                        : (s_choice == 3 ? "reload_empty" : "reload_ads_loaded"))
+            iSwap      = s_choice ? CoopVarRow(model.tiki, s_choice == 2 ? "reload_ads_empty"
+                                                                        : (s_choice == 3 ? "reload_empty" : "reload_ads_loaded"), s_coopRowVar)
                                   : -1;
             {
                 int   iRelSlot = -1;
@@ -3660,8 +3699,8 @@ coopOthersDone:;
                 && !(s_coopGunLatch.ent == s1->number && s_coopGunLatch.kind == 1
                      && s_coopGunLatch.start >= s_hStart - 300)) {
                 const char *szTag = cgi.Tag_NameForNum(cg.pLastPlayerWorldModel, s1->tag_num & TAG_MASK);
-                int         iClip = cgi.Anim_NumForName(model.tiki, s_hChoice == 2 ? "reload_ads_empty"
-                                                                     : (s_hChoice == 3 ? "reload_empty" : "reload_ads_loaded"));
+                int         iClip = CoopVarRow(model.tiki, s_hChoice == 2 ? "reload_ads_empty"
+                                                                     : (s_hChoice == 3 ? "reload_empty" : "reload_ads_loaded"), CG_CoopReloadVar());
                 if (iClip != -1 && szTag && (!Q_stricmp(szTag, "tag_weapon_right") || !Q_stricmp(szTag, "tag_weapon_left"))) {
                     int iSlot = 0;
                     for (k = 0; k < MAX_FRAMEINFOS; k++) {

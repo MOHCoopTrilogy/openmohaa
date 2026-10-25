@@ -517,6 +517,31 @@ static qboolean s_coopReloadFromEmpty = qtrue;
 // HZM coop [heavy lane 2026-10-13, shotgun] the end row now starting is a BREAK-OFF with a round chambered: the server
 // stepped the view-anim change counter by two (state RELOAD_SHOTGUN_BREAK_QUICK, apply_sgbreak.py)
 static qboolean s_coopReloadBreak = qfalse;
+// HZM coop [stress reload 2026-10-25, README item 6] WHICH RELOAD IS RUNNING. The server picks calm / stress / mishap once
+// per reload (Player::CoopReloadPick) and publishes it in STAT_MGHEAT bits 8-9 for the length of the torso reload; the
+// view model latches it on the frame the reload row starts, so the hands row and the gun's client clips of one reload
+// agree for its whole length. coop_vmReloadVar 0 = always calm (off switch).
+static int s_coopRelVar = 0;
+int        CG_CoopReloadVar(void)
+{
+    return s_coopRelVar;
+}
+static void CoopLatchReloadVar(void)
+{
+    static cvar_t *pOn = NULL;
+    int            v = 0;
+    if (!pOn) {
+        pOn = cgi.Cvar_Get("coop_vmReloadVar", "1", 0);
+    }
+    if (pOn->integer && cg.snap && !(cg.snap->ps.pm_flags & PMF_TURRET)) {
+        v = (cg.snap->ps.stats[STAT_MGHEAT] >> 8) & 3;
+        if (v > 2) {
+            v = 0;
+        }
+    }
+    s_coopRelVar = v;
+}
+
 qboolean        CG_CoopReloadFromEmpty(void)
 {
     return s_coopReloadFromEmpty;
@@ -1166,6 +1191,26 @@ void CG_ViewModelAnimation(refEntity_t *pModel)
             Com_sprintf(szEmpty, sizeof(szEmpty), "%s_empty", szAnimName);
             if (pEmptyRows->integer && cgi.Anim_NumForName(pTiki, szEmpty) != -1) {
                 Q_strncpyz(szAnimName, szEmpty, sizeof(szAnimName));
+            }
+        }
+        // HZM coop [stress reload 2026-10-25] THE HANDS OF A STRESSED / FUMBLED RELOAD: `cv_<key>_reload[_empty]_s` (stress)
+        // or `_m` (mishap) in place of the calm `coopr_<key>_reload[_empty]` when the hands tiki has it (the `_ads` step below
+        // then looks for `..._s_ads`). Same choreography, other timing, so a gun whose rows are not baked yet keeps the
+        // calm clip. (`cv_`, not `coopr_`: a tiki alias holds 47 characters and the long skin keys need the three.)
+        if (cgi.anim->g_iLastVMAnim == VM_ANIM_RELOAD) {
+            CoopLatchReloadVar();
+            if (s_coopRelVar) {
+                char szVar[MAX_QPATH];
+                if (!Q_strncmp(szAnimName, "coopr_", 6)) {
+                    Com_sprintf(szVar, sizeof(szVar), "cv_%s_%s", szAnimName + 6, s_coopRelVar == 2 ? "m" : "s");
+                } else {
+                    Com_sprintf(szVar, sizeof(szVar), "%s_%s", szAnimName, s_coopRelVar == 2 ? "m" : "s"); /* a prefix row: kar98_reload_s */
+                }
+                if (cgi.Anim_NumForName(pTiki, szVar) != -1) {
+                    Q_strncpyz(szAnimName, szVar, sizeof(szAnimName));
+                } else if (cgi.Cvar_Get("coop_vmTrace", "0", 0)->integer) {
+                    cgi.Printf("^~^~^ RELVAR no hands row %s\n", szVar);
+                }
             }
         }
         // HZM coop [adsanim 2026-10-04 / adsbolt] AIMED BOLT: a reload or bolt that starts while aiming plays the

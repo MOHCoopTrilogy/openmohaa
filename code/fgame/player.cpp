@@ -616,6 +616,18 @@ Event EV_Player_SafeHolster
     "preserves state, so it will not holster or unholster unless necessary",
     EV_NORMAL
 );
+Event EV_Player_CoopReloadPick
+(
+    "coopreloadpick",
+    EV_DEFAULT,
+    NULL,
+    NULL,
+    "HZM coop [stress reload]: picks this reload's variant (0 calm, 1 stress, 2 mishap) from the server stress score\n"
+    "(Player::CoopStress) and the rows the held gun's tik has (reload_s / reload_m). Run from the entrycommands of a\n"
+    "RELOAD_* torso state, before `viewmodelanim reload`; the torso alias (COOP_RELOAD_VAR), Weapon::StartReloading and\n"
+    "the cgame (STAT_MGHEAT bits 8-9) all read the one pick.",
+    EV_NORMAL
+);
 Event EV_Player_CoopLobbyPose
 (
     "coop_lobbypose",
@@ -2092,6 +2104,7 @@ CLASS_DECLARATION(Sentient, Player, "player") {
     {&EV_Player_FinishUseAnim,            &Player::FinishUseAnim                },
     {&EV_Player_Holster,                  &Player::HolsterToggle                },
     {&EV_Player_SafeHolster,              &Player::Holster                      },
+    {&EV_Player_CoopReloadPick,          &Player::CoopReloadPick               },
     {&EV_Player_CoopLobbyPose,           &Player::CoopLobbyPose                },
     {&EV_Player_CoopLobbyUnpose,         &Player::CoopLobbyUnpose              },
     {&EV_Player_CoopLobbyRepose,         &Player::CoopLobbyRepose              },
@@ -2336,6 +2349,7 @@ Player::Player()
     m_szCoopFireLast[0]     = 0;
     m_fCoopStamina    = 9999.0f;
     m_fCoopStress     = 0.0f;
+    m_iCoopReloadVar  = 0;
     m_iCoopSuppHits   = 0;
     m_bCoopSprinting  = false;
     m_bCoopSprintSpent    = false;
@@ -9512,7 +9526,8 @@ void Player::UpdateStats(void)
         if (iStam > 100) { iStam = 100; }
         // [bug-3372] bit 128 = the sprint EXHAUSTION LATCH (m_bCoopSprintSpent), so the 1P gun-lower
         // follows the server's decision instead of re-deriving it. Readers mask with & 127 (1..101 below).
-        client->ps.stats[STAT_MGHEAT] = (iStam + 1) | (m_bCoopSprintSpent ? 128 : 0);
+        client->ps.stats[STAT_MGHEAT] = (iStam + 1) | (m_bCoopSprintSpent ? 128 : 0)
+            | ((m_iCoopReloadVar > 0 && m_iCoopReloadVar < 3 && CoopQDrawTorsoReloading()) ? (m_iCoopReloadVar << 8) : 0); // [stress reload] bits 8-9; readers mask & 127
     }
 
     TickCoopBleed(); // HZM coop [user 2026-10-05] bleed-out ring
@@ -10225,6 +10240,53 @@ void Player::Holster(Event *ev)
 //      ever fire again: the rifle can't be redrawn and the pose can't be twitched.
 // Paired with coop_lobbyunpose to release before the mission launches.
 //
+// HZM coop [stress reload 2026-10-25, README item 6] WHICH RELOAD THIS IS. One pick per reload, made where the torso
+// state is entered, so that everything that has to agree reads the same number: the torso alias (COOP_RELOAD_VAR in
+// player_Torso.st: its notetracks end the reload), Weapon::StartReloading (the gun row `reload_s` / `reload_m` holds
+// WEAPON_RELOADING) and the cgame (STAT_MGHEAT bits 8-9: the hands row and the gun's client clips).
+//   stress < 0.3        calm
+//   0.3 .. 0.7          stress
+//   > 0.7              stress, or with probability (stress - 0.4) the mishap
+// A gun without the sibling rows picks 0 and plays `reload` exactly as before. coop_reloadVar 1/2/3 forces calm /
+// stress / mishap (tests); coop_reloadVariants 0 switches the lot off.
+void Player::CoopReloadPick(Event *ev)
+{
+    static cvar_t *pOn = NULL, *pForce = NULL, *pDbg = NULL;
+    Weapon        *w;
+    int            v = 0, force;
+    qboolean       hasS, hasM;
+
+    if (!pOn)    { pOn    = gi.Cvar_Get("coop_reloadVariants", "1", CVAR_ARCHIVE); }
+    if (!pForce) { pForce = gi.Cvar_Get("coop_reloadVar", "0", 0); }
+    if (!pDbg)   { pDbg   = gi.Cvar_Get("coop_reloadVarDebug", "0", 0); }
+
+    m_iCoopReloadVar = 0;
+    w = GetActiveWeapon(WEAPON_MAIN);
+    if (!w || !pOn->integer || !w->edict || !w->edict->tiki) {
+        return;
+    }
+    hasS = gi.Anim_NumForName(w->edict->tiki, "reload_s") != -1;
+    hasM = gi.Anim_NumForName(w->edict->tiki, "reload_m") != -1;
+    force = pForce->integer;
+    if (force) {
+        v = (force == 2) ? 1 : ((force == 3) ? 2 : 0);
+    } else {
+        float s = m_fCoopStress;
+        if (s >= 0.3f) {
+            v = 1;
+            if (s > 0.7f && G_Random() < (s - 0.4f)) {
+                v = 2;
+            }
+        }
+    }
+    if (v == 2 && !hasM) { v = hasS ? 1 : 0; }
+    if (v == 1 && !hasS) { v = 0; }
+    m_iCoopReloadVar = v;
+    if (pDbg->integer) {
+        gi.Printf("^~^~^ RELOADVAR v=%d stress=%.2f wpn=%s rows=%d%d\n", v, m_fCoopStress, w->getName().c_str(), hasS ? 1 : 0, hasM ? 1 : 0);
+    }
+}
+
 void Player::CoopLobbyPose(Event *ev)
 {
     // The forced-respawn lobby deploy can leave the player noclip-flying: InitEdict sets MOVETYPE_NOCLIP
