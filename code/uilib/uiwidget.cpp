@@ -506,6 +506,32 @@ Event EV_Layout_FadeSequence
     "Set up for a delay/fadein/hold/fadeout"
 );
 
+// [HZM menu-next2, E5] menu camera: a picture widget is drawn as seen by a camera that glides over the 640x480 menu plane
+Event EV_Widget_ZoomCam
+(
+    "zoomcam",
+    EV_DEFAULT,
+    "fffffffFFFF",
+    "cx0 cy0 k0 cx1 cy1 k1 seconds [a0 a1 u0 u1]",
+    "Camera move for a picture widget, in 640x480 menu units: the view is centred on (cx,cy) at magnification k (1 = normal, the"
+    " identity is `320 240 1`). Glides from (cx0,cy0,k0) to (cx1,cy1,k1) over `seconds` (smoothstep; k eases exponentially). Any key,"
+    " click or pad button skips the move to its end (see `uiafter`). The end state holds until the widget is shown again after"
+    " being hidden, then it falls back to the identity. The optional a0 a1 u0 u1 also ramps the widget's alpha from a0 to a1 while"
+    " the move's progress runs u0..u1 (0..1): a dissolve, e.g. `320 240 1 320 240 1 0.5 0 1 0.5 1` fades a picture in over the"
+    " second half."
+);
+
+// [HZM menu-next2, E5] on a menu: what ESC / the pad B button runs INSTEAD of popping the menu (a radio's BACK with its camera pull-back)
+Event EV_Widget_EscapeCommand
+(
+    "escapecommand",
+    EV_DEFAULT,
+    "s",
+    "command",
+    "On a menu: ESC (and the pad B button) runs this console command instead of the plain pop. Give it the same command as the"
+    " menu's BACK button. While a menu camera move runs, ESC skips the move first."
+);
+
 Event EV_Layout_BGFill
 (
     "bgfill",
@@ -577,6 +603,8 @@ CLASS_DECLARATION(USignal, UIWidget, NULL) {
 
     {&EV_Layout_DontLocalize,       &UIWidget::SetDontLocalize         },
     {&EV_Layout_FadeSequence,       &UIWidget::EventFadeSequence       },
+    {&EV_Widget_ZoomCam,            &UIWidget::SetZoomCam              },
+    {&EV_Widget_EscapeCommand,      &UIWidget::SetEscapeCommand        },
 
     {NULL,                          NULL                               }
 };
@@ -835,6 +863,16 @@ UIWidget::UIWidget()
     m_enabledCvar              = "";
 
     m_fadeSequenceDelay    = 0;
+    m_camOn                = false;
+    m_camDone              = false;
+    m_camK0 = m_camK1 = 1.0f;
+    m_camX0 = m_camX1 = 320.0f;
+    m_camY0 = m_camY1 = 240.0f;
+    m_camDur = 0.0f;
+    m_camA0 = m_camA1 = 1.0f;
+    m_camAU0 = 0.0f;
+    m_camAU1 = 1.0f;
+    m_camStartMs = m_camLastDrawMs = 0;
     m_fadeSequenceFadeIn   = 0;
     m_fadeSequenceHold     = 0;
     m_fadeSequenceFadeOut  = 0;
@@ -2209,6 +2247,14 @@ void UIWidget::Display(const UIRect2D& drawframe, float parent_alpha)
         );
     }
 
+    if (m_camOn) {
+        // a finished camera move holds only while the widget stays on screen: shown again after a gap, it is the identity
+        if (m_camDone && m_camLastDrawMs && uid.time - m_camLastDrawMs > 250) {
+            m_camOn = false;
+        }
+        m_camLastDrawMs = uid.time;
+    }
+
     if (m_material) {
         col[0] = m_foreground_color.r;
         col[1] = m_foreground_color.g;
@@ -2236,6 +2282,41 @@ void UIWidget::Display(const UIRect2D& drawframe, float parent_alpha)
             } else {
                 uii.Rend_DrawPicTiled(0, 0, m_frame.size.width, m_frame.size.height, m_material->GetMaterial());
             }
+        } else if (m_camOn) {
+            // [HZM menu-next2, E5] camera: menu point p lands at screen-menu (320,240) + (p - c) * k. This widget's frame (virtual
+            // units f) is drawn at the mapped place; the widget's local origin is its own frame corner.
+            const float vsx = m_vVirtualScale[0] > 0.0f ? m_vVirtualScale[0] : 1.0f;
+            const float vsy = m_vVirtualScale[1] > 0.0f ? m_vVirtualScale[1] : 1.0f;
+            const bool  skipped = UIWidget::s_camSkipMs >= m_camStartMs;
+            float       u = (m_camDur > 0.0f && !skipped) ? (uid.time - m_camStartMs) / (1000.0f * m_camDur) : 1.0f;
+            if (u < 0.0f) u = 0.0f;
+            if (u > 1.0f) u = 1.0f;
+            m_camDone = (u >= 1.0f);
+            float af = 1.0f;
+            if (m_camA0 != 1.0f || m_camA1 != 1.0f) {
+                float w = m_camAU1 > m_camAU0 ? (u - m_camAU0) / (m_camAU1 - m_camAU0) : 1.0f;
+                w       = w < 0.0f ? 0.0f : (w > 1.0f ? 1.0f : w);
+                af      = m_camA0 + (m_camA1 - m_camA0) * w;
+                col[3] *= af;
+                uii.Rend_SetColor(col);
+            }
+            const float e  = u * u * (3.0f - 2.0f * u);
+            const float k  = m_camK0 * powf(m_camK1 / m_camK0, e);
+            const float cx = m_camX0 + (m_camX1 - m_camX0) * e;
+            const float cy = m_camY0 + (m_camY1 - m_camY0) * e;
+            {
+                static int s_nextDbg = 0;
+                cvar_t    *dbg       = uii.Cvar_Find("ui_camdebug");
+                if (dbg && dbg->integer && uid.time >= s_nextDbg) {
+                    s_nextDbg = uid.time + 150;
+                    uii.Sys_Printf("^~^~^ CAM %s t=%d u=%.3f e=%.3f k=%.3f c=%.1f,%.1f vs=%.3f,%.3f frame=%.0f,%.0f %.0fx%.0f\n", getName() ? getName() : "?", uid.time, u, e, k, cx, cy, vsx, vsy, m_frame.pos.x, m_frame.pos.y, m_frame.size.width, m_frame.size.height);
+                }
+            }
+            const float fx = m_frame.pos.x / vsx, fy = m_frame.pos.y / vsy;
+            uii.Rend_DrawPicStretched(
+                (320.0f + (fx - cx) * k - fx) * vsx, (240.0f + (fy - cy) * k - fy) * vsy,
+                m_frame.size.width * k, m_frame.size.height * k, 0, 0, 1, 1, m_material->GetMaterial()
+            );
         } else {
             uii.Rend_DrawPicStretched(
                 0, 0, m_frame.size.width, m_frame.size.height, 0, 0, 1, 1, m_material->GetMaterial()
@@ -2790,6 +2871,60 @@ void UIWidget::SetVirtualScale(vec2_t out)
 void UIWidget::SetDontLocalize(Event *ev)
 {
     SetDontLocalize();
+}
+
+// debug: `ui_camslow 10` plays every menu camera move (and its uiafter timers) ten times slower, so a capture can sample it finely
+float UIWidget::CamSlow()
+{
+    cvar_t *c = uii.Cvar_Find("ui_camslow");
+    return (c && c->value > 0.0f) ? c->value : 1.0f;
+}
+
+int UIWidget::s_camEndMs  = 0;
+int UIWidget::s_camSkipMs = -1;
+
+void UIWidget::SetEscapeCommand(Event *ev)
+{
+    m_escapeCommand = ev->GetString(1);
+}
+
+void UIWidget::SetZoomCam(Event *ev)
+{
+    m_camX0       = ev->GetFloat(1);
+    m_camY0       = ev->GetFloat(2);
+    m_camK0       = ev->GetFloat(3) > 0.01f ? ev->GetFloat(3) : 1.0f;
+    m_camX1       = ev->GetFloat(4);
+    m_camY1       = ev->GetFloat(5);
+    m_camK1       = ev->GetFloat(6) > 0.01f ? ev->GetFloat(6) : 1.0f;
+    m_camDur      = ev->GetFloat(7) * CamSlow();
+    m_camA0       = ev->NumArgs() >= 8 ? ev->GetFloat(8) : 1.0f;
+    m_camA1       = ev->NumArgs() >= 9 ? ev->GetFloat(9) : 1.0f;
+    m_camAU0      = ev->NumArgs() >= 10 ? ev->GetFloat(10) : 0.0f;
+    m_camAU1      = ev->NumArgs() >= 11 ? ev->GetFloat(11) : 1.0f;
+    m_camStartMs  = uid.time;
+    m_camDone     = false;
+    m_camOn       = true;
+    m_camLastDrawMs = 0;
+    NoteCamMove(m_camDur);
+}
+
+void UIWidget::NoteCamMove(float seconds)
+{
+    const int end = uid.time + (int)(seconds * 1000.0f) + 1;
+    if (end > s_camEndMs) {
+        s_camEndMs = end;
+    }
+}
+
+bool UIWidget::CamMoveActive()
+{
+    return uid.time < s_camEndMs;
+}
+
+void UIWidget::CamMoveSkip()
+{
+    s_camSkipMs = uid.time;
+    s_camEndMs  = 0;
 }
 
 void UIWidget::EventFadeSequence(Event *ev)

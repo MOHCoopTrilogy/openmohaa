@@ -76,6 +76,11 @@ public:
     bool              PadTab(int dir);
     bool              PadProbe(UIWidget *w, float *outX, float *outY);
     int               m_padClick;
+    // [HZM menu-next2, E5] `uiafter <seconds> <command...>`: a command that runs after a menu camera move. Any key / click / pad
+    // button while one is pending (or a zoomcam runs) skips ahead: the pending commands run NOW and the key is eaten.
+    void              QueueAfter(float seconds, const char *cmd);
+    void              RunAfterDue(bool all);
+    int               m_afterPrevButtons;
     void              CreateMenus(void);
     UIReggedMaterial *RegisterShader(const str& name);
     UIReggedMaterial *RefreshShader(const str& name);

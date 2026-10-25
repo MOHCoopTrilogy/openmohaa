@@ -152,6 +152,12 @@ protected:
     float                 m_local_alpha;
     float                 m_motiontime;
     float                 m_fadeSequenceDelay;
+    // [HZM menu-next2, E5] zoomcam: a picture widget drawn through a camera gliding over the 640x480 menu plane
+    str                   m_escapeCommand;
+    bool                  m_camOn, m_camDone;
+    float                 m_camX0, m_camY0, m_camK0, m_camX1, m_camY1, m_camK1, m_camDur;
+    float                 m_camA0, m_camA1, m_camAU0, m_camAU1;   // alpha ramp a0 -> a1 over u in [u0,u1] (a dissolve)
+    int                   m_camStartMs, m_camLastDrawMs;
     float                 m_fadeSequenceFadeIn;
     float                 m_fadeSequenceHold;
     float                 m_fadeSequenceFadeOut;
@@ -262,6 +268,15 @@ public:
     //====
     void SetDontLocalize(Event *ev);
     void EventFadeSequence(Event *ev);
+    void SetZoomCam(Event *ev);
+    // [HZM menu-next2, E5] menu camera moves are global: while one runs, a key / click / pad button skips it (see uiafter)
+    static void NoteCamMove(float seconds);
+    static bool CamMoveActive();
+    static float CamSlow();
+    void SetEscapeCommand(Event *ev);
+    const str& GetEscapeCommand() const { return m_escapeCommand; }
+    static void CamMoveSkip();
+    static int  s_camEndMs, s_camSkipMs;
     //====
 
     void            SetVirtualScale(vec2_t out);

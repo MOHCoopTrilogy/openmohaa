@@ -3194,6 +3194,23 @@ void UI_GlobalWidgetCommand_f(void)
 
 /*
 ====================
+UI_After_f - [HZM menu-next2, E5] uiafter <seconds> <command...>
+Runs <command> after <seconds>; any key / click / pad button before then runs it at once (skipping a menu camera
+move). Pairs with the widget event `zoomcam`: zoom the backdrop, THEN open the menu.
+====================
+*/
+void UI_After_f(void)
+{
+    if (Cmd_Argc() < 3) {
+        Com_Printf("Usage: uiafter <seconds> <command...>\n");
+        return;
+    }
+
+    uWinMan.QueueAfter((float)atof(Cmd_Argv(1)), Cmd_Argc() == 3 ? Cmd_Argv(2) : Cmd_ArgsFrom(2));
+}
+
+/*
+====================
 UI_ListMenus_f
 ====================
 */
@@ -3301,6 +3318,20 @@ void UI_MenuEscape(const char *name)
 
     if (uWinMan.DialogExists()) {
         uWinMan.RemoveAllDialogBoxes();
+        return;
+    }
+
+    // [HZM menu-next2, E5] a menu camera move is running: ESC / pad B skips it (to its end) instead of popping anything
+    if (UIWidget::CamMoveActive()) {
+        UIWidget::CamMoveSkip();
+        uWinMan.RunAfterDue(true);
+        return;
+    }
+
+    // [HZM menu-next2, E5] a menu may name its own ESC command (a radio: BACK with the camera pull-back)
+    if (menuManager.CurrentMenu() && menuManager.CurrentMenu()->GetContainerWidget()
+        && menuManager.CurrentMenu()->GetContainerWidget()->GetEscapeCommand().length()) {
+        Cbuf_AddText(va("%s\n", menuManager.CurrentMenu()->GetContainerWidget()->GetEscapeCommand().c_str()));
         return;
     }
 
@@ -5686,6 +5717,7 @@ void CL_ShutdownUI(void)
     Cmd_RemoveCommand("popmenu");
     Cmd_RemoveCommand("showmenu");
     Cmd_RemoveCommand("widgetcommand");
+    Cmd_RemoveCommand("uiafter");
     Cmd_RemoveCommand("listmenus");
     Cmd_RemoveCommand("togglemenu");
     Cmd_RemoveCommand("loadmenu");
@@ -5991,6 +6023,7 @@ void CL_InitializeUI(void)
     Cmd_AddCommand("hidemenu", UI_HideMenu_f);
     Cmd_AddCommand("widgetcommand", UI_WidgetCommand_f);
     Cmd_AddCommand("globalwidgetcommand", UI_GlobalWidgetCommand_f);
+    Cmd_AddCommand("uiafter", UI_After_f);
     Cmd_AddCommand("listmenus", UI_ListMenus_f);
     Cmd_AddCommand("togglemenu", UI_ToggleMenu_f);
     Cmd_AddCommand("loadmenu", UI_LoadMenu_f);
