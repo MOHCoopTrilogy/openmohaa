@@ -1119,8 +1119,25 @@ void RB_Sphere_BuildDLights()
 
 void RB_Sphere_SetupEntity()
 {
-    if (r_light_nolight->integer || !tr.world) {   // [HZM menus3d] no world (menu scene): nothing to light from -> fullbright
+    if (r_light_nolight->integer) {
         backEnd.currentSphere->TessFunction = &RB_Light_Fullbright;
+    } else if (!tr.world) {
+        // [HZM menus3d] menu scene (no map loaded): there is no light grid / leaves, so a character is lit by a fixed cool ambient plus the scene's own
+        // dynamic lights (AddLightToScene: the room's "fake light set"), through the normal sphere-light path.
+        sphereor_t *sp = backEnd.currentSphere;
+        VectorCopy(backEnd.currentEntity->e.origin, sp->worldOrigin);
+        VectorClear(sp->origin);
+        sp->radius = 2.0f;
+        for (int i = 0; i < 8; i++) {
+            sp->leaves[i] = 0;
+        }
+        sp->ambient.level[0] = 58;
+        sp->ambient.level[1] = 62;
+        sp->ambient.level[2] = 72;
+        sp->ambient.level[3] = 0xff;
+        sp->numRealLights = 0;
+        RB_Sphere_BuildDLights();
+        RB_OptimizeLights();
     } else if (RB_Sphere_SetupGlobals() && RB_Sphere_ResetPointColors()) {
         backEnd.currentSphere->numRealLights = 0;
         RB_Sphere_Light_Sun();

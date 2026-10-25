@@ -273,6 +273,7 @@ public:
     static void NoteCamMove(float seconds);
     static bool CamMoveActive();
     static float CamSlow();
+    UIWidget    *FindWidgetByName(const char *name);   // depth-first over this widget's children (menu focus proxies)
     void SetEscapeCommand(Event *ev);
     const str& GetEscapeCommand() const { return m_escapeCommand; }
     static void CamMoveSkip();

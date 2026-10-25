@@ -2880,6 +2880,22 @@ float UIWidget::CamSlow()
     return (c && c->value > 0.0f) ? c->value : 1.0f;
 }
 
+UIWidget *UIWidget::FindWidgetByName(const char *name)
+{
+    const int n = m_children.NumObjects();
+    for (int i = 1; i <= n; i++) {
+        UIWidget *c = m_children.ObjectAt(i);
+        if (c->m_name.length() && !str::cmp(c->m_name, name)) {
+            return c;
+        }
+        UIWidget *r = c->FindWidgetByName(name);
+        if (r) {
+            return r;
+        }
+    }
+    return NULL;
+}
+
 int UIWidget::s_camEndMs  = 0;
 int UIWidget::s_camSkipMs = -1;
 

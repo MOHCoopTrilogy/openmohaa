@@ -55,6 +55,14 @@ class UIScene3D : public UIWidget
         vec3_t pos;
         float  radius;
         str    command;
+        str    caption;
+        str    widget;                 // optional: name of a sibling Button that is re-framed to this hotspot every frame (mouse / keyboard / pad focus all work on it)
+        SafePtr<UIWidget> w;
+    };
+    struct sceneLight_t {
+        vec3_t org;
+        float  radius;
+        vec3_t color;
     };
     struct cam_t {
         vec3_t org;
@@ -64,6 +72,8 @@ class UIScene3D : public UIWidget
 
     Container<sceneModel_t *> m_models;
     Container<sceneHot_t *>   m_hots;
+    Container<sceneLight_t *> m_lights;
+    int                       m_drawn;
     cam_t                     m_cur, m_from, m_to, m_home;
     int                       m_flyStart;
     float                     m_flyDur;
@@ -79,6 +89,7 @@ public:
     void SceneCam(Event *ev);
     void SceneFly(Event *ev);
     void SceneHot(Event *ev);
+    void SceneLight(Event *ev);
     void OnClick(Event *ev);
     void Draw(void) override;
 
@@ -115,9 +126,17 @@ Event EV_Scene_Hot
 (
     "scenehot",
     EV_DEFAULT,
-    "sffffs",
-    "name x y z radius command",
-    "Scene3D: a clickable sphere in the scene; hover sets ui_scene_hot (1-based index, 0 = none), a click stuffs the command."
+    "sffffsSS",
+    "name x y z radius command [caption] [focuswidget]",
+    "Scene3D: a clickable sphere in the scene; hover sets ui_scene_hot (1-based index, 0 = none) and prints the caption beside the object, a click stuffs the command."
+);
+Event EV_Scene_Light
+(
+    "scenelight",
+    EV_DEFAULT,
+    "fffffff",
+    "x y z radius r g b",
+    "Scene3D: a dynamic light of the scene's fake light set (lights characters; baked models ignore it)."
 );
 
 CLASS_DECLARATION(UIWidget, UIScene3D, NULL) {
@@ -125,6 +144,7 @@ CLASS_DECLARATION(UIWidget, UIScene3D, NULL) {
     {&EV_Scene_Cam,    &UIScene3D::SceneCam  },
     {&EV_Scene_Fly,    &UIScene3D::SceneFly  },
     {&EV_Scene_Hot,    &UIScene3D::SceneHot  },
+    {&EV_Scene_Light,  &UIScene3D::SceneLight},
     {&W_LeftMouseDown, &UIScene3D::OnClick   },
     {NULL,             NULL                  }
 };
@@ -142,6 +162,7 @@ UIScene3D::UIScene3D()
     m_flying   = false;
     m_lastDraw = 0;
     m_hover    = -1;
+    m_drawn    = 0;
 }
 
 void UIScene3D::SceneModel(Event *ev)
@@ -200,7 +221,20 @@ void UIScene3D::SceneHot(Event *ev)
     h->pos[2]     = ev->GetFloat(4);
     h->radius     = ev->GetFloat(5);
     h->command    = ev->GetString(6);
+    h->caption    = ev->NumArgs() >= 7 ? ev->GetString(7) : "";
+    h->widget     = ev->NumArgs() >= 8 ? ev->GetString(8) : "";
     m_hots.AddObject(h);
+}
+
+void UIScene3D::SceneLight(Event *ev)
+{
+    sceneLight_t *l = new sceneLight_t;
+    for (int i = 0; i < 3; i++) {
+        l->org[i]   = ev->GetFloat(1 + i);
+        l->color[i] = ev->GetFloat(5 + i);
+    }
+    l->radius = ev->GetFloat(4);
+    m_lights.AddObject(l);
 }
 
 void UIScene3D::Project(const vec3_t p, const vec3_t org, vec3_t axis[3], float w, float h, float fovx, float fovy, float *sx, float *sy, float *depth) const
@@ -270,10 +304,18 @@ void UIScene3D::Draw(void)
     VectorCopy(m_cur.org, rd.vieworg);
     AnglesToAxis(m_cur.ang, rd.viewaxis);
 
+    m_drawn++;
     re.ClearScene();
+    for (int i = 1; i <= m_lights.NumObjects(); i++) {
+        sceneLight_t *l = m_lights.ObjectAt(i);
+        re.AddLightToScene(l->org, l->radius, l->color[0], l->color[1], l->color[2], 0);
+    }
     const bool dbg = Cvar_VariableIntegerValue("ui_scene_debug") != 0;
     for (int i = 1; i <= m_models.NumObjects(); i++) {
         sceneModel_t *m = m_models.ObjectAt(i);
+        if (!m->handle && m->anim.length() && m_drawn < 45) {
+            continue;       // actors load lazily, a moment after the menu is up
+        }
         if (!m->handle) {
             const int t0 = Sys_Milliseconds();
             m->handle = re.RegisterModel(m->name.c_str());
@@ -348,26 +390,80 @@ void UIScene3D::Draw(void)
         }
     }
 
-    // hotspots follow the camera: nearest hit under the cursor wins
-    int    hover = -1;
-    float  best  = 1e9f;
+    // hotspots follow the camera. A hotspot with a focus widget re-frames that sibling Button to its projected rect, so the stock input stack (mouse hover/click,
+    // keyboard + D-pad focus moves the cursor onto it, A/Enter) drives it; the button's own hovercommand sets ui_scene_hot. Unbound hotspots use a plain cursor test.
+    int   hover = -1;
+    float best  = 1e9f;
+    const bool cvarDriven = Cvar_VariableIntegerValue("ui_scene_hot") > 0;
     for (int i = 1; i <= m_hots.NumObjects(); i++) {
         sceneHot_t *h = m_hots.ObjectAt(i);
         float       sx, sy, depth;
         Project(h->pos, rd.vieworg, rd.viewaxis, W, H, fovx, fovy, &sx, &sy, &depth);
+        const float rpx = depth > 1.0f ? h->radius / depth * (H * 0.5f) / tan(fovy * M_PI / 360.0) : 0.0f;
+        if (h->widget.length()) {
+            if (!h->w && m_parent) {
+                h->w = m_parent->FindWidgetByName(h->widget.c_str());
+            }
+            if (h->w) {
+                const bool live = depth > 1.0f && !m_flying;
+                // frame is relative to the parent container, whose origin is this widget's screen origin
+                h->w->setFrame(UIRect2D(live ? sx - rpx - m_screenframe.pos.x : -9999.0f, live ? sy - rpx - m_screenframe.pos.y : -9999.0f, live ? rpx * 2.0f : 1.0f, live ? rpx * 2.0f : 1.0f));
+            }
+            continue;
+        }
         if (depth < 1.0f) {
             continue;
         }
-        const float rpx = h->radius / depth * (H * 0.5f) / tan(fovy * M_PI / 360.0);
         const float dx = uid.mouseX - sx, dy = uid.mouseY - sy;
         if (dx * dx + dy * dy <= rpx * rpx && depth < best) {
             best  = depth;
             hover = i - 1;
         }
     }
-    if (hover != m_hover) {
+    bool anyBound = false;
+    for (int i = 1; i <= m_hots.NumObjects(); i++) {
+        if (m_hots.ObjectAt(i)->widget.length()) {
+            anyBound = true;
+        }
+    }
+    if (anyBound) {
+        hover = m_flying ? -1 : Cvar_VariableIntegerValue("ui_scene_hot") - 1;          // set by the proxy button's hover / focus commands
+        if (hover >= m_hots.NumObjects()) {
+            hover = -1;
+        }
+        m_hover = hover;
+    } else if (hover != m_hover) {
         m_hover = hover;
         Cvar_Set("ui_scene_hot", va("%d", hover + 1));    // 1-based hotspot index, 0 = none (enabledcvar compares numerically)
     }
+    (void)cvarDriven;
     set2D();
+    if (m_hover >= 0 && m_hover < m_hots.NumObjects() && !m_flying) {
+        static UIReggedMaterial *s_ring = NULL;
+        if (!s_ring) {
+            s_ring = uWinMan.RegisterShader("hzm_hot_ring");
+        }
+        sceneHot_t *h = m_hots.ObjectAt(m_hover + 1);
+        float       sx, sy, depth;
+        Project(h->pos, rd.vieworg, rd.viewaxis, W, H, fovx, fovy, &sx, &sy, &depth);
+        if (s_ring && depth > 1.0f) {
+            const float rpx   = h->radius / depth * (H * 0.5f) / tan(fovy * M_PI / 360.0) * (1.12f + 0.04f * sin(uid.time * 0.006f));
+            vec4_t      col   = {1.0f, 0.82f, 0.45f, 0.85f};
+            uii.Rend_SetColor(col);
+            uii.Rend_DrawPicStretched(sx - rpx, sy - rpx, rpx * 2.0f, rpx * 2.0f, 0, 0, 1, 1, s_ring->GetMaterial());
+        }
+    }
+    if (m_hover >= 0 && m_hover < m_hots.NumObjects() && !m_flying && m_font) {
+        sceneHot_t *h = m_hots.ObjectAt(m_hover + 1);
+        if (h->caption.length()) {
+            float sx, sy, depth;
+            Project(h->pos, rd.vieworg, rd.viewaxis, W, H, fovx, fovy, &sx, &sy, &depth);
+            if (depth > 1.0f) {
+                const float sc[2] = {H / 480.0f, H / 480.0f};
+                const int   tw    = m_font->getWidth(h->caption.c_str(), -1);
+                const float rpx   = h->radius / depth * (H * 0.5f) / tan(fovy * M_PI / 360.0);
+                m_font->Print(sx - tw * sc[0] * 0.5f, sy + rpx * 0.55f, h->caption.c_str(), (size_t)-1, sc);
+            }
+        }
+    }
 }
