@@ -733,6 +733,7 @@ typedef struct shader_s {
 	int			hzmWetBits;				// HZM rain wetness: BSP surface-type bits OR-ed at load (tr_hzm_wet.c)
 	int			hzmWater;				// HZM water pass: hzm_waterwet.h allowlist slot + 1, 0 = never (tr_hzm_water.c)
 	float		hzmWaterLmRef;			// HZM water pass: p90 lightmap luminance of this shader name, 0 = no glint gate
+	int			hzmWaterLazy;			// HZM water pass: model/entity shader (not a BSP surface) already checked against the allowlist
 	int			hzmWaterPreset;			// HZM water pass: HZM_WPRESET_* for the loaded map (0 = the plain reflection layer)
 	int			hzmGvClass;				// HZM ground variety: 0 none, 1 macro, 2 macro + hex (tr_hzm_groundvar.c)
 	float		hzmGvPeriod;			// HZM ground variety: world units per texture repeat (generated list)
@@ -4896,6 +4897,8 @@ void RB_HZM_GroundVarUniforms( shaderProgram_t *sp, const shaderCommands_t *inpu
 // HZM water pass - tr_hzm_water.c
 void R_HZMWaterBuild( void );
 void R_HZM_RenderWaterPlanar( viewParms_t *mainParms, const refdef_t *fd );
+void RB_HZMWaterDbg( const char *why );
+void R_HZMWaterLazyTag( shader_t *sh );
 void RB_HZMWaterPass( int deformGen, const vec5_t deformParams );
 void RB_HZMWaterDepthSnapshot( void );
 extern qboolean hzmWaterSnapValid;

@@ -48,6 +48,7 @@ void RB_HZM_BindSceneDepth( void );
 #define HZM_WATER_TIMEWRAP  1000.0      // every scroll speed x 1000 s is a whole number of tiles: the wrap is seamless
 
 static cvar_t *r_hzmWater;
+static cvar_t *r_hzmWaterDbg;
 static cvar_t *r_hzmWaterPlanar;     // 1 = render the planar reflection of COLD preset water; 0 (default, until proven) = sky probe only
 static cvar_t *r_hzmWaterPlanarDbg;  // debug bits: 1 no oblique clip, 4 isMirror off, 8 no axis reflection, 16 render without VPF_NOVIEWMODEL
 qboolean hzmWaterSnapValid;          // the scene-depth snapshot of THIS view was taken at its first preset water batch (reset in RB_DrawSurfs)
@@ -686,6 +687,7 @@ R_HZMWaterBuild - from R_HZMWetBuild (tr_hzm_wet.c), after the occlusion maps; n
 void R_HZMWaterBuild( void )
 {
 	r_hzmWater = ri.Cvar_Get( "r_hzmWater", "-1", 0 );
+	r_hzmWaterDbg = ri.Cvar_Get( "r_hzmWaterDbg", "0", 0 );
 	r_hzmWaterPreset = ri.Cvar_Get( "r_hzmWaterPreset", "1", 0 );
 	r_hzmWaterPlanar = ri.Cvar_Get( "r_hzmWaterPlanar", "0", 0 );     // OFF until the planar view is proven (user 2026-10-25)
 	r_hzmWaterBody = ri.Cvar_Get( "r_hzmWaterBody", "2.0", 0 );
@@ -763,6 +765,67 @@ static qboolean HZM_WaterEntityAtOrigin( void )
 	return qtrue;
 }
 
+
+/*
+================
+R_HZMWaterLazyTag - shaders that never come from a BSP surface (a script_model's skin, e.g. coop_sea_deep) are tagged
+at first draw: the same allowlist and preset rule R_HZMWetTagShader / R_HZMWetBuild apply to world surfaces
+================
+*/
+void R_HZMWaterLazyTag( shader_t *sh )
+{
+	int idx;
+
+	sh->hzmWaterLazy = 1;
+	if ( !tr.world ) {
+		return;
+	}
+	idx = HZM_WaterAllowIndex( sh->name );
+	if ( idx >= 0 ) {
+		sh->hzmWater = idx + 1;
+		sh->hzmWaterPreset = HZM_WaterPresetFor( sh->name, tr.world->baseName );
+		ri.Printf( PRINT_ALL, "^~^~^ HZMWATER lazy-tag %s preset %d\n", sh->name, sh->hzmWaterPreset );
+	}
+}
+
+/*
+================
+RB_HZMWaterDbg - r_hzmWaterDbg 2: every distinct water-ish shader (and the entity drawing it) once per ~2 s, with the pass decision
+================
+*/
+void RB_HZMWaterDbg( const char *why )
+{
+	static struct { char key[160]; int t; } seen[48];
+	static int next;
+	char key[160];
+	int i, now = ri.Milliseconds();
+	const char *n = tess.shader ? tess.shader->name : "?";
+
+	if ( !r_hzmWaterDbg || !( r_hzmWaterDbg->integer & 2 ) ) {
+		return;
+	}
+	if ( !( tess.shader->hzmWater || strstr( n, "sea" ) || strstr( n, "water" ) || strstr( n, "surf" ) || strstr( n, "wave" ) || strstr( n, "foam" )
+	        || strstr( n, "wake" ) || strstr( n, "shore" ) || strstr( n, "ocean" ) || strstr( n, "splash" ) || strstr( n, "runup" ) || strstr( n, "blood" ) ) ) {
+		return;
+	}
+	Com_sprintf( key, sizeof( key ), "%s ent=%d tag=%d pre=%d %s", n, (int)( backEnd.currentEntity == &tr.worldEntity ? -1 : backEnd.currentEntity - backEnd.refdef.entities ),
+	             tess.shader->hzmWater, tess.shader->hzmWaterPreset, why );
+	for ( i = 0; i < 48; i++ ) {
+		if ( !strcmp( seen[i].key, key ) ) {
+			if ( now - seen[i].t < 2000 ) {
+				return;
+			}
+			break;
+		}
+	}
+	if ( i == 48 ) {
+		i = next++ % 48;
+		Q_strncpyz( seen[i].key, key, sizeof( seen[i].key ) );
+	}
+	seen[i].t = now;
+	ri.Printf( PRINT_ALL, "^~^~^ HZMWDBG %s org=%.0f,%.0f,%.0f n=%d\n", key, backEnd.or.origin[0], backEnd.or.origin[1], backEnd.or.origin[2], tess.numIndexes );
+}
+
 /*
 ================
 RB_HZMWaterPass - RB_StageIteratorGeneric, after the retail stages and dynamic lights, before the fog pass, for a
@@ -777,9 +840,15 @@ void RB_HZMWaterPass( int deformGen, const vec5_t deformParams )
 	image_t			*lm = NULL;
 	qboolean		contactOn;
 
+	if ( r_hzmWaterDbg && ( r_hzmWaterDbg->integer & 4 ) ) {
+		return;     // instant retail bypass for before/after captures (no 1.5 s fade)
+	}
 	fade = HZM_WaterFade();
+	if ( fade > 0.0f && backEnd.currentEntity != &tr.worldEntity && !HZM_WaterEntityAtOrigin() ) {
+		RB_HZMWaterDbg( "entity-transform(now handled by u_ModelMatrix)" );
+	}
 	if ( fade <= 0.0f
-	     || ( backEnd.currentEntity != &tr.worldEntity && !HZM_WaterEntityAtOrigin() )
+	     || ( backEnd.currentEntity != &tr.worldEntity && !tess.shader->hzmWaterPreset )
 	     || backEnd.depthFill
 	     || backEnd.projection2D
 	     || ( backEnd.viewParms.flags & ( VPF_SHADOWMAP | VPF_DEPTHSHADOW ) )
@@ -805,6 +874,7 @@ void RB_HZMWaterPass( int deformGen, const vec5_t deformParams )
 	GLSL_BindProgram( sp );
 
 	GLSL_SetUniformMat4( sp, UNIFORM_MODELVIEWPROJECTIONMATRIX, glState.modelviewProjection );
+	GLSL_SetUniformMat4( sp, UNIFORM_MODELMATRIX, backEnd.or.transformMatrix );   // moving / rotated wave sheets: world position in the vp
 	GLSL_SetUniformInt( sp, UNIFORM_DEFORMGEN, deformGen );
 	if ( deformGen != DGEN_NONE ) {
 		GLSL_SetUniformFloat5( sp, UNIFORM_DEFORMPARAMS, deformParams );

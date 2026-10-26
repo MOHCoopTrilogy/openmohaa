@@ -15,6 +15,7 @@ uniform float   u_Time;
 #endif
 
 uniform mat4    u_ModelViewProjectionMatrix;
+uniform mat4    u_ModelMatrix;
 
 varying vec3    var_Position;
 varying vec2    var_LightTex;
@@ -85,8 +86,8 @@ void main()
 #endif
 
 	gl_Position  = u_ModelViewProjectionMatrix * vec4(position, 1.0);
-	var_Position = position;
+	var_Position = (u_ModelMatrix * vec4(position, 1.0)).xyz;
 	var_LightTex = attr_TexCoord1.xy;
 	var_St       = attr_TexCoord0.xy;
-	var_NormalZ  = attr_Normal.z;
+	var_NormalZ  = (u_ModelMatrix * vec4(attr_Normal, 0.0)).z;
 }

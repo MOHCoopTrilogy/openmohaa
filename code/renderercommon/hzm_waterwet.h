@@ -65,7 +65,7 @@ static ID_INLINE qboolean HZM_WaterWetOmahaMap( const char *mapName ) {
 // purpose (plan D3 / docs/proposals/water_wetness_2026-09-27/research.md 1.1): deepbluesea*, northafrika_shoreline,
 // omaha_set4_shoreline, frozenriver (ice), t2fogplane (a fog plane), river floors, waterclip. tools/ww_scope.py ALLOW
 // is the same list; lookdev/data/scope.md is the per-map result (33 maps).
-#define HZM_WATER_NUM_ALLOW 22
+#define HZM_WATER_NUM_ALLOW 23
 
 // the allowlist slot of a shader name, -1 = not water we touch (tr_hzm_water.c keys its per-shader lightmap reference on it)
 static ID_INLINE int HZM_WaterAllowIndex( const char *shaderName ) {
@@ -83,6 +83,9 @@ static ID_INLINE int HZM_WaterAllowIndex( const char *shaderName ) {
 		"textures/misc_outside/deepbluesea", "textures/misc_outside/deepbluesea_runup", "textures/misc_outside/deepbluesea_runup_nowave",
 		// [2026-10-25, user: Omaha WATER layers incl. the shoreline sheet are in scope; sand, seabed and sky are not]
 		"textures/misc_outside/deepbluesea_shoreline", "textures/misc_outside/northafrika_shoreline",
+		// [2026-10-26, user playtest: the ride flipped back to retail water] the dense travelling-wave sea mesh the coop m3l1a spawns
+		// as a script_model during the landing (zz_coop_sea.shader); a moving entity, handled through u_ModelMatrix
+		"coop_sea_deep",
 	};
 	int i;
 
@@ -214,7 +217,8 @@ static ID_INLINE int HZM_WaterRampFor( const char *shaderName, float *rmin, floa
 static ID_INLINE int HZM_WaterPresetFor( const char *shaderName, const char *mapName ) {
 	static const char *const cold[] = { "m2l2a", "m2l2b", "m2l2c", "co_lobby7" };
 	static const char *const channel[] = { "textures/misc_outside/deepbluesea", "textures/misc_outside/deepbluesea_runup",
-	                                       "textures/misc_outside/deepbluesea_runup_nowave", "textures/misc_outside/deepbluesea_shoreline" };
+	                                       "textures/misc_outside/deepbluesea_runup_nowave", "textures/misc_outside/deepbluesea_shoreline",
+	                                       "coop_sea_deep" };
 	static const char *const harbour[] = { "textures/choppywater/tehao_choppywater", "textures/choppywater/tehao_indoorwater",
 	                                       "textures/choppywater/subpen_opaque_chop", "textures/choppywater/mp_stuckguter_lib",
 	                                       "textures/misc_outside/northafrika_shoreline" };

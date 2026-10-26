@@ -24,6 +24,7 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 #include "tr_local.h" 
 #include "tr_hzm_framegen.h" // HZM frame generation: the motion-vector pass (r_fgVelPass)
 #include "../renderercommon/hzm_storm.h" // HZM coop [2026-09-28] storm darkness
+#include "../renderercommon/hzm_waterwet.h" // HZM water presets (RB_IterateStagesGeneric mid-pass)
 
 /*
 
@@ -1855,6 +1856,8 @@ float RB_HZM_SkyFogFraction( void )
 	return f > 1.0f ? 1.0f : f;
 }
 
+static qboolean hzmWaterMidDone;
+
 static void RB_IterateStagesGeneric( shaderCommands_t *input )
 {
 	int stage;
@@ -1871,6 +1874,11 @@ static void RB_IterateStagesGeneric( shaderCommands_t *input )
 
 	ComputeFogValues(fogDistanceVector, fogDepthVector, &eyeT);
 
+	// HZM water pass, Omaha shoreline sheet: the retail base stage, THEN our water, THEN the retail foam / wash / blood-in-the-surf /
+	// crest stages, so the surf effects of the sheet draw on top of the new material instead of under it
+	qboolean hzmWaterMid = ( input->shader && input->shader->hzmWater && input->shader->hzmWaterPreset == HZM_WPRESET_CHANNEL
+	                         && strstr( input->shader->name, "shoreline" ) ) ? qtrue : qfalse;
+
 	for ( stage = 0; stage < MAX_SHADER_STAGES; stage++ )
 	{
 		shaderStage_t *pStage = input->xstages[stage];
@@ -1883,6 +1891,12 @@ static void RB_IterateStagesGeneric( shaderCommands_t *input )
 		if ( !pStage )
 		{
 			break;
+		}
+
+		if ( hzmWaterMid && stage > 0 && !hzmWaterMidDone && ( pStage->stateBits & GLS_DSTBLEND_BITS ) == GLS_DSTBLEND_ONE )
+		{
+			hzmWaterMidDone = qtrue;
+			RB_HZMWaterPass( deformGen, deformParams );
 		}
 
 		// HZM gl2 volumetric clouds: the profile sky's (single) talonclouds stage goes through the composite when this
@@ -3191,6 +3205,8 @@ void RB_StageIteratorGeneric( void )
 	shaderCommands_t *input;
 	unsigned int vertexAttribs = 0;
 
+	hzmWaterMidDone = qfalse;
+
 	input = &tess;
 
 	if (!input->numVertexes || !input->numIndexes)
@@ -3646,7 +3662,11 @@ void RB_StageIteratorGeneric( void )
 	// HZM water pass (r_hzmWater, tr_hzm_water.c): allowlisted water only, the fog pass's deform recipe. With the
 	// switch off RB_HZMWaterPass returns before touching any GL state.
 	//
-	if ( tess.shader->hzmWater ) {
+	RB_HZMWaterDbg( "seen" );
+	if ( !tess.shader->hzmWater && !tess.shader->hzmWaterLazy ) {
+		R_HZMWaterLazyTag( tess.shader );
+	}
+	if ( tess.shader->hzmWater && !hzmWaterMidDone ) {
 		int		hzmDeformGen;
 		vec5_t	hzmDeformParams;
 
