@@ -34,7 +34,7 @@ vec2 hzSpot(vec4 sp, float t, float aspect)
 	if (f <= 0.0) {
 		return vec2(0.0);
 	}
-	float a = f * 0.020;
+	float a = f * 0.032;
 	vec2  d;
 	d.x = sin(var_TexCoords.y * 120.0 + t * 15.0 + sp.x * 40.0) * a + sin(var_TexCoords.y * 61.0 - t * 9.0) * a * 0.6;
 	d.y = sin(var_TexCoords.x * 100.0 + t * 12.0) * a * 0.7;

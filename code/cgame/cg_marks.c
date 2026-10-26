@@ -925,7 +925,7 @@ void CG_AddMarks(void)
         return;
     }
 
-    int scorchSeen = 0, scorchMax, scorchTotal;
+    int scorchSeen = 0, scorchMax, scorchTotal, lastScorchTime = -1;
     {
         static cvar_t *pMax = NULL, *pTime = NULL;
         if (!pMax) {
@@ -947,7 +947,11 @@ void CG_AddMarks(void)
             int total = MARK_TOTAL_TIME;
             if (CG_IsScorchShader(pMark->markShader)) {
                 total = scorchTotal;
-                if (++scorchSeen > scorchMax && !pMark->killTime) {
+                if (pMark->time != lastScorchTime) {   // one decal can be several mark objects (one per surface fragment group): count decals
+                    lastScorchTime = pMark->time;
+                    scorchSeen++;
+                }
+                if (scorchSeen > scorchMax && !pMark->killTime) {
                     pMark->killTime = cg.time;
                 }
                 if (pMark->killTime && cg.time > pMark->killTime + 2000) {
