@@ -103,7 +103,7 @@ static void R_HzmLensCvars(void)
 		r_ppScopePipLive = ri.Cvar_Get("r_ppScopePipLive", "0", 0);
 		r_ppScopeWide    = ri.Cvar_Get("r_ppScopeWide", "1", 0);
 		r_ppScopeShadows = ri.Cvar_Get("r_ppScopeShadows", "0", 0);
-		r_ppScopeOutside = ri.Cvar_Get("r_ppScopeOutside", "0.75", 0);
+		r_ppScopeOutside = ri.Cvar_Get("r_ppScopeOutside", "0.9", 0);
 		r_ppScopeBlur    = ri.Cvar_Get("r_ppScopeBlur", "1", 0);
 		r_ppScopeCA      = ri.Cvar_Get("r_ppScopeCA", "1", 0);
 	}

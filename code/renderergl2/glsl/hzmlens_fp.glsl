@@ -39,7 +39,9 @@ void main()
 	vec3  wide   = texture2D(u_LevelsMap, var_TexCoords).rgb;        // the wide world (no rifle)
 	float gunDepth = texture2D(u_ScreenDepthMap, var_TexCoords).r;
 	float gunA   = 1.0 - smoothstep(0.9990, 0.99995, gunDepth);       // rifle coverage
-	vec3  gunCol = texture2D(u_ScreenImageMap, var_TexCoords).rgb;
+	vec4  gunTex = texture2D(u_ScreenImageMap, var_TexCoords);
+	vec3  gunCol = gunTex.rgb;
+	gunA        *= smoothstep(0.05, 0.60, gunTex.a);                    // the translucent glass writes depth but not full alpha: it keeps the world behind it
 	vec3  sharp  = mix(wide, gunCol, gunA);                            // the plain wide view with the rifle in it
 
 	// ---- inside the lens: the magnified main picture
@@ -69,7 +71,7 @@ void main()
 			b += texture2D(u_LevelsMap, var_TexCoords + dir * vec2(0.028 / aspect, 0.028)).rgb * 0.0375;
 			b += texture2D(u_LevelsMap, var_TexCoords + dir * vec2(0.050 / aspect, 0.050)).rgb * 0.0375;
 		}
-		float rimShade = mix(0.42, 1.0, smoothstep(1.0, 1.9, r));   // the tube shadow: deepest at the ring, gone toward the screen edge
+		float rimShade = mix(0.62, 1.0, smoothstep(1.0, 1.9, r));   // the tube shadow: deepest at the ring, gone toward the screen edge
 		outside = b * clamp(u_HzmParams.w, 0.0, 1.0) * rimShade;
 	}
 	float gunDim = mix(0.50, 0.92, smoothstep(1.0, 1.7, r));           // the bell right around the lens is in shadow, the rifle body below it is lit
@@ -90,7 +92,7 @@ void main()
 	// the world / rifle layer cross-fades with the whole amount; the LENS picture saturates earlier, so a steady scope never shows a trace of
 	// the wide view through the glass
 	vec3 ring      = mix(sharp, outside, amt);
-	float lensFade = smoothstep(0.35, 0.80, amt) * lens;
+	float lensFade = smoothstep(0.55, 0.92, amt) * lens;
 	vec3 col       = mix(ring, lensCol, lensFade);
 
 	gl_FragColor   = vec4(col, 1.0);

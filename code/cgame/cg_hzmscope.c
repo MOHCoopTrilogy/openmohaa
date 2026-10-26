@@ -325,7 +325,7 @@ static void CG_HzmScopeFrame(float camFov)
         hs.lensK = CG_HzmSmooth((g - 0.15f) / 0.6f);
         // the lens only shows once the rifle has ARRIVED at the eye (ADS pose 0.65 .. 0.95): the rifle body carries the raise, and the
         // short fade then goes from the dark ocular straight into the lens - no long ghosted double image of two views. Out is the reverse.
-        hs.lensK *= CG_HzmSmooth((CG_AdsPoseFactor() - 0.65f) / 0.30f);
+        hs.lensK *= CG_HzmSmooth((CG_AdsPoseFactor() - 0.84f) / 0.14f);
     }
     if (hs.pip && hs.optic >= 0) {
         // the lens square: the lens circle (cg_scopeRadius of the screen height) plus a 4 percent margin, at the optic's magnification
