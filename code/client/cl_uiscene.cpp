@@ -532,7 +532,7 @@ void UIScene3D::Draw(void)
             const float rpx   = h->radius / depth * (H * 0.5f) / tan(fovy * M_PI / 360.0) * (1.12f + 0.04f * sin(uid.time * 0.006f));
             vec4_t      col   = {0.45f, 0.82f, 1.0f, 0.85f};     // the 2D path takes the vertex colour as B,G,R,A: this reads amber
             uii.Rend_SetColor(col);
-            uii.Rend_DrawPicStretched(sx - rpx, sy - rpx, rpx * 2.0f, rpx * 2.0f, 0, 0, 1, 1, s_ring->GetMaterial());
+            uii.Rend_DrawPicStretched(sx - m_screenframe.pos.x - rpx, sy - m_screenframe.pos.y - rpx, rpx * 2.0f, rpx * 2.0f, 0, 0, 1, 1, s_ring->GetMaterial());   // 2D coords are relative to the widget origin (pillarbox offset in the centred layout)
         }
     }
     if (m_hover >= 0 && m_hover < m_hots.NumObjects() && !m_flying && m_font) {
@@ -544,7 +544,7 @@ void UIScene3D::Draw(void)
                 const float sc[2] = {H / 480.0f, H / 480.0f};
                 const int   tw    = m_font->getWidth(h->caption.c_str(), -1);
                 const float rpx   = h->radius / depth * (H * 0.5f) / tan(fovy * M_PI / 360.0);
-                m_font->Print((sx - tw * sc[0] * 0.5f) / sc[0], (sy + rpx * 0.75f) / sc[1], h->caption.c_str(), (size_t)-1, sc);     // Print takes virtual units when a scale is given
+                m_font->Print((sx - m_screenframe.pos.x - tw * sc[0] * 0.5f) / sc[0], (sy - m_screenframe.pos.y + rpx * 0.75f) / sc[1], h->caption.c_str(), (size_t)-1, sc);     // Print takes virtual units when a scale is given
             }
         }
     }
