@@ -4898,6 +4898,7 @@ void R_HZMWaterBuild( void );
 void R_HZM_RenderWaterPlanar( viewParms_t *mainParms, const refdef_t *fd );
 void RB_HZMWaterPass( int deformGen, const vec5_t deformParams );
 void RB_HZMWaterDepthSnapshot( void );
+extern qboolean hzmWaterSnapValid;
 
 #ifdef __cplusplus
 }

@@ -201,6 +201,21 @@ void main()
 		vec2  sw = d1 * (0.027 * c1s) + d2 * (0.019 * c2s * am) + d3 * (0.013 * c3s) + d4 * (0.009 * c4s * am) + d5 * (0.006 * c5s);
 		sw *= -u_HzmCold0.z;
 		float crest = 0.5 + 0.5 * (0.40 * c1s + 0.28 * c2s * am + 0.17 * c3s + 0.10 * c4s + 0.05 * c5s);
+		// what lies BELOW this water pixel (the scene-depth snapshot holds the opaque scene; the water itself is not in it):
+		// shallow water over a hull, a hedgehog, the seabed becomes see-through instead of a milky sheet over it
+		vec2  suv    = gl_FragCoord.xy * u_HzmCont3.zw;
+		float myD    = dot(P - u_ViewOrigin, u_HzmCont0.xyz);
+		float gapOwn = 1.0e4;
+		float shallowK = 1.0;
+		if (u_HzmCont2.w > 0.5)
+		{
+			float zs = texelFetch(u_HzmDepthMap, ivec2(gl_FragCoord.xy), 0).r;
+			if (zs < 0.9999)
+			{
+				gapOwn = u_HzmCont3.y / (u_HzmCont3.x + (2.0 * zs - 1.0)) - myD;
+				shallowK = mix(0.35, 1.0, smoothstep(10.0, 60.0, gapOwn));     // only things right at the surface show through; the seabed 100 u down must not make the sea transparent
+			}
+		}
 		float calm  = smoothstep(0.45, 0.62, 0.5 + 0.28 * sin(P.x / 430.0 + 1.3) * sin(P.y / 390.0) + 0.22 * sin((P.x + P.y) / 610.0 + 0.4));
 		float fadeC = clamp(1.0 - dist / 2600.0, 0.12, 1.0);
 		// chop: the two legacy ripple layers + a third, larger and rotated one (no visible tile on calm water) and a
@@ -225,7 +240,7 @@ void main()
 
 		vec3 body = mix(u_HzmCold1.rgb, u_HzmCold2.rgb, pow(ndvC, 2.2)) + u_HzmWetSkyZ.rgb * 0.025;
 		body *= 0.55 + 0.45 * lmb;           // the baked light: lamp pools lift it, baked shadow keeps it dark
-		body *= mix(1.0, 0.62 + 0.76 * crest, clamp(u_HzmCold0.z, 0.0, 1.0));     // crests a little lighter than the troughs: the swell reads as rolling
+		body *= mix(1.0, 0.62 + 0.76 * crest, clamp(u_HzmCold0.z, 0.0, 1.0) * ((u_HzmCold0.x < 1.5) ? 0.0 : 1.0));     // the swell shading is for open water; the pens keep their flat dark body     // crests a little lighter than the troughs: the swell reads as rolling
 		body *= 0.92 + 0.16 * (macro - 0.5) * 4.0 * 0.5 + 0.0;
 
 		vec3 Rc = reflect(-E, Nn);
@@ -327,31 +342,31 @@ void main()
 			float fthr   = 0.50 + 0.40 * h1;
 			wcap = max(wcap, band * smoothstep(fthr, fthr + 0.16, lines) * life * smoothstep(0.38, 0.62, nS2 + (nS - 0.5)) * u_HzmCold6.y * clamp(1.0 - dist / 7000.0, 0.0, 1.0));
 		}
-		if (u_HzmCont2.w > 0.5)
+		if (u_HzmCont2.w > 0.5 && u_HzmCold6.w > 0.0)
 		{
-			// contact foam: where something solid that stands near the waterline is next to this water pixel on the screen
-			// (hedgehogs, posts, hulls, quay walls), foam gathers around it. Eight taps on a ring whose pixel radius is the foam
-			// width in world units; a tap only counts when the occluder it finds is within 80 u of the waterline.
-			vec2  suv = gl_FragCoord.xy * u_HzmCont3.zw;
-			float myD = dot(P - u_ViewOrigin, u_HzmCont0.xyz);
-			float rpx = clamp(u_HzmCont4.y * u_HzmCont4.x / max(myD, 1.0), 2.0, 48.0);
+			// contact foam: a thin ring on the WATER next to something solid that stands at the waterline (a hedgehog, a post, a
+			// hull, a quay wall). Eight exact-texel taps on a ring whose radius is the foam width in pixels; a tap counts only if the
+			// occluder is clearly nearer than this water pixel AND its world position is within 50 u of the waterline and within
+			// 100 u of this pixel on the ground - tall objects above the waterline never reach out sideways. No foam where this very
+			// pixel has something just below the surface (that is the object itself showing through).
+			float rpx = clamp(u_HzmCont4.y * u_HzmCont4.x / max(myD, 1.0), 2.0, 40.0);
 			float acc = 0.0;
 			for (int k = 0; k < 8; k++)
 			{
 				float ang = 0.7853982 * float(k) + 0.3;
 				vec2  nuv = suv + vec2(cos(ang), sin(ang)) * rpx * u_HzmCont3.zw;
-				float zn  = texture2D(u_HzmDepthMap, nuv).r;
+				float zn  = texelFetch(u_HzmDepthMap, ivec2(nuv / u_HzmCont3.zw), 0).r;
 				float dn  = u_HzmCont3.y / (u_HzmCont3.x + (2.0 * zn - 1.0));
-				if (zn < 0.9999 && dn < myD - 5.0)
+				if (zn < 0.9999 && dn < myD - 24.0)
 				{
 					vec2 ndc = nuv * 2.0 - vec2(1.0);
 					vec3 Wp  = u_ViewOrigin + (u_HzmCont0.xyz + u_HzmCont1.xyz * ndc.x * u_HzmCont0.w + u_HzmCont2.xyz * ndc.y * u_HzmCont1.w) * dn;
-					acc += step(abs(Wp.z - P.z), 80.0);
+					acc += step(abs(Wp.z - P.z), 50.0) * step(length(Wp.xy - P.xy), 100.0);
 				}
 			}
 			float nC = texture2D(u_HzmFloeMap, P.xy / 150.0 + vec2(0.27, 0.64)).g;
-			float cf = smoothstep(0.12, 0.62, acc / 8.0) * smoothstep(0.25, 0.60, nC + 0.35) * ((u_HzmCold0.x < 1.5) ? 0.55 : 0.85);
-			wcap = max(wcap, cf * clamp(1.0 - dist / 5000.0, 0.0, 1.0));
+			float cf = smoothstep(0.15, 0.65, acc / 8.0) * smoothstep(0.25, 0.60, nC + 0.35) * smoothstep(10.0, 60.0, gapOwn) * u_HzmCold6.w;
+			wcap = max(wcap, cf * clamp(1.0 - dist / 3500.0, 0.0, 1.0));
 		}
 		wcol = mix(wcol, vec3(0.74, 0.80, 0.82) * (0.40 + 0.60 * min(lmb * 1.3, 1.2)), wcap * 0.9);
 		vec3  col  = mix(wcol + u_HzmWetSunCol.rgb * gc * 0.6 * (1.0 - wcap), iceCol, iceA);
@@ -362,7 +377,7 @@ void main()
 			float rc = (u_HzmCold5.w < 1.5) ? var_St.x : var_St.y;
 			ramp = clamp((u_HzmCold5.z - u_HzmCold5.y) * rc + u_HzmCold5.y, 0.0, 1.0);
 		}
-		float ac2 = u_HzmCold0.y * u_HzmWater.x * ramp;
+		float ac2 = u_HzmCold0.y * u_HzmWater.x * ramp * ((u_HzmCold0.x < 1.5) ? 1.0 : shallowK);     // the pens' water is opaque by design; only open water lets things at the surface show through
 		gl_FragColor = vec4(col * ac2, ac2);
 		return;
 	}

@@ -50,6 +50,7 @@ void RB_HZM_BindSceneDepth( void );
 static cvar_t *r_hzmWater;
 static cvar_t *r_hzmWaterPlanar;     // 1 = render the planar reflection of COLD preset water; 0 (default, until proven) = sky probe only
 static cvar_t *r_hzmWaterPlanarDbg;  // debug bits: 1 no oblique clip, 4 isMirror off, 8 no axis reflection, 16 render without VPF_NOVIEWMODEL
+qboolean hzmWaterSnapValid;          // the scene-depth snapshot of THIS view was taken at its first preset water batch (reset in RB_DrawSurfs)
 int hzmPlanarNoOblique;              // read by R_SetupProjection (tr_main.c)
 static cvar_t *r_hzmWaterBody;       // tuning: multiplies the preset body colours (default 2.0)
 static cvar_t *r_hzmWaterIce;        // tuning: ICE preset lightmap gain multiplier (default 0.7)
@@ -800,7 +801,7 @@ void RB_HZMWaterPass( int deformGen, const vec5_t deformParams )
 	}
 	// contact foam needs the scene-depth snapshot RB_HZMWaterDepthSnapshot took at the first preset water batch of this view
 	contactOn = ( tess.shader->hzmWaterPreset && tess.shader->hzmWaterPreset != HZM_WPRESET_ICE && r_hzmWaterContact && r_hzmWaterContact->integer
-	              && tr.hdrDepthImage && backEnd.softDepthValid ) ? qtrue : qfalse;
+	              && tr.hdrDepthImage && hzmWaterSnapValid ) ? qtrue : qfalse;
 	GLSL_BindProgram( sp );
 
 	GLSL_SetUniformMat4( sp, UNIFORM_MODELVIEWPROJECTIONMATRIX, glState.modelviewProjection );
@@ -875,7 +876,7 @@ void RB_HZMWaterPass( int deformGen, const vec5_t deformParams )
 			GLSL_SetUniformVec4( sp, UNIFORM_HZMCOLD5, c5 );
 			{
 				vec4_t c6, c7;
-				HZM_V4( c6, pr->yaw, pr->shore, pr->flow, 0.0f );
+				HZM_V4( c6, pr->yaw, pr->shore, pr->flow, pr->contact );
 				HZM_V4( c7, tr.hzmFlowDir[0], tr.hzmFlowDir[1], 0.0f, 0.0f );
 				GLSL_SetUniformVec4( sp, UNIFORM_HZMCOLD6, c6 );
 				GLSL_SetUniformVec4( sp, UNIFORM_HZMCOLD7, c7 );
@@ -889,7 +890,7 @@ void RB_HZMWaterPass( int deformGen, const vec5_t deformParams )
 				HZM_V4( k1, ax[1][0] * -1.0f, ax[1][1] * -1.0f, ax[1][2] * -1.0f, 1.0f / pm[5] );     // axis[1] is LEFT in this engine
 				HZM_V4( k2, ax[2][0], ax[2][1], ax[2][2], contactOn ? 1.0f : 0.0f );
 				HZM_V4( k3, pm[10], pm[14], 1.0f / vw, 1.0f / vh );
-				HZM_V4( k4, 0.5f * vh * pm[5], 46.0f, 0.0f, 0.0f );
+				HZM_V4( k4, 0.5f * vh * pm[5], 34.0f, 0.0f, 0.0f );
 				GLSL_SetUniformVec4( sp, UNIFORM_HZMCONT0, k0 );
 				GLSL_SetUniformVec4( sp, UNIFORM_HZMCONT1, k1 );
 				GLSL_SetUniformVec4( sp, UNIFORM_HZMCONT2, k2 );
@@ -1004,6 +1005,6 @@ void RB_HZMWaterDepthSnapshot( void )
 		return;
 	}
 	Mat4Copy( glState.projection, projection );
-	RB_HZM_SceneDepthSnapshot();
+	hzmWaterSnapValid = RB_HZM_SceneDepthSnapshot();
 	GL_SetProjectionMatrix( projection );
 }
