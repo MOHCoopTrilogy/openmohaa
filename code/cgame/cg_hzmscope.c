@@ -637,6 +637,21 @@ qboolean CG_HzmScopeDraw2D(void)
     if (hRet) {
         // [scopes1025] the reticle sits on the lens centre, which follows the eyepiece a little (the scope axis); screen centre otherwise
         const float rx = hs.pip ? cx + hs.lcX * H : cx, ry = hs.pip ? cy + hs.lcY * H : cy;
+        if (hs.pip) {
+            // a light halo first (four offset copies), then the black lines twice 0.7 px apart: a thin real reticle that still reads on dark foliage
+            const float k = hs.ease * hs.ease * hs.ease * hs.lensK, hl = 1.6f * (H / 720.0f), th = 0.7f * (H / 720.0f);
+            const float ofs[4][2] = {{hl, 0.0f}, {-hl, 0.0f}, {0.0f, hl}, {0.0f, -hl}};
+            int         q;
+            VectorSet4(col, 1.0f, 1.0f, 1.0f, 0.55f * k);
+            cgi.R_SetColor(col);
+            for (q = 0; q < 4; q++) {
+                cgi.R_DrawStretchPic(rx - R + ofs[q][0], ry - R + ofs[q][1], 2.0f * R, 2.0f * R, 0.0f, 0.0f, 1.0f, 1.0f, hRet);
+            }
+            VectorSet4(col, 0.0f, 0.0f, 0.0f, k);
+            cgi.R_SetColor(col);
+            cgi.R_DrawStretchPic(rx - R + th, ry - R, 2.0f * R, 2.0f * R, 0.0f, 0.0f, 1.0f, 1.0f, hRet);
+            cgi.R_DrawStretchPic(rx - R, ry - R + th, 2.0f * R, 2.0f * R, 0.0f, 0.0f, 1.0f, 1.0f, hRet);
+        }
         cgi.R_DrawStretchPic(rx - R, ry - R, 2.0f * R, 2.0f * R, 0.0f, 0.0f, 1.0f, 1.0f, hRet);
     }
     cgi.R_SetColor(NULL);

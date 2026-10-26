@@ -773,6 +773,7 @@ RB_RenderDrawSurfList
 ==================
 */
 void RB_RenderDrawSurfList( drawSurf_t *drawSurfs, int numDrawSurfs ) {
+	qboolean skipScopeGlass = qfalse;   // [scopes1025]
 	shader_t		*shader = NULL, *oldShader;
 	int				fogNum, oldFogNum;
 	int				entityNum, oldEntityNum;
@@ -854,6 +855,9 @@ void RB_RenderDrawSurfList( drawSurf_t *drawSurfs, int numDrawSurfs ) {
 
 	for (i = 0, drawSurf = drawSurfs ; i < numDrawSurfs ; i++, drawSurf++) {
 		if ( drawSurf->sort == oldSort && drawSurf->cubemapIndex == oldCubemapIndex) {
+			if (skipScopeGlass) {
+				continue;   // [scopes1025] the rifle layer leaves the ocular glass out
+			}
 			// see RB_DepthFillSkip: bug-gl2-foliage-white + bug-gl2-invisible-live-char-depthprepass
 			// stay in force for the MAIN-view prepass; a VPF_DEPTHSHADOW cascade lets casters through.
 			if (backEnd.depthFill && RB_DepthFillSkip(shader, entityNum, allowChars, allowCutout)) {
@@ -884,6 +888,12 @@ void RB_RenderDrawSurfList( drawSurf_t *drawSurfs, int numDrawSurfs ) {
 			bStaticModel = qfalse;
         }
         //=========================
+		// HZM coop [scopes1025] the rifle layer (the scope's real body around the lens) never draws the ocular GLASS surface: it is a translucent sheen
+		// that showed as grey haze over the world, and the lens picture replaces it anyway
+		skipScopeGlass = (tr.hzmGunFbo && backEnd.viewParms.targetFbo == tr.hzmGunFbo && shader && !Q_stricmpn(shader->name, "lens", 4)) ? qtrue : qfalse;
+		if (skipScopeGlass) {
+			continue;
+		}
 		cubemapIndex = drawSurf->cubemapIndex;
 
 		//

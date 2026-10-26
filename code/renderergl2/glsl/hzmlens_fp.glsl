@@ -42,8 +42,7 @@ void main()
 	float gunA   = 1.0 - smoothstep(0.9990, 0.99995, gunDepth);       // rifle coverage
 	vec4  gunTex = texture2D(u_ScreenImageMap, var_TexCoords);
 	vec3  gunCol = gunTex.rgb;
-	gunA        *= smoothstep(0.55, 0.97, gunTex.a);                    // the translucent glass writes depth but not full alpha: it keeps the world behind it
-	vec3  sharp  = mix(wide, gunCol, gunA);                            // the plain wide view with the rifle in it
+		vec3  sharp  = mix(wide, gunCol, gunA);                            // the plain wide view with the rifle in it
 
 	// ---- inside the lens: the magnified main picture
 	float r2   = min(r * r, 1.0);
@@ -65,12 +64,12 @@ void main()
 		// a 32-tap Vogel disk (5 percent of the screen height), rotated per pixel by interleaved gradient noise: a smooth out-of-focus blur,
 		// the 24 fixed taps of the first version drew streaks and ghost copies at this radius
 		float ign = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));
-		vec3  b   = wide * 0.04;
+		vec3  b   = min(wide, vec3(1.0)) * 0.04;
 		for (int k = 0; k < 32; k++)
 		{
 			float rr = sqrt((float(k) + 0.5) / 32.0);
 			float th = float(k) * 2.39996323 + ign * 6.2831853;
-			b += texture2D(u_LevelsMap, var_TexCoords + vec2(cos(th) / aspect, sin(th)) * rr * 0.055).rgb * 0.03;
+			b += min(texture2D(u_LevelsMap, var_TexCoords + vec2(cos(th) / aspect, sin(th)) * rr * 0.055).rgb, vec3(1.0)) * 0.03;   // HDR clamp: a few very bright sky texels would survive the average as speckle
 		}
 		float rimShade = mix(0.62, 1.0, smoothstep(1.0, 1.9, r));   // the tube shadow: deepest at the ring, gone toward the screen edge
 		outside = b * clamp(u_HzmParams.w, 0.0, 1.0) * rimShade;
@@ -84,7 +83,10 @@ void main()
 		if (u_HzmParams.z < 15.0) { gl_FragColor = vec4(wide, 1.0); return; }
 		if (u_HzmParams.z < 25.0) { gl_FragColor = vec4(outside, 1.0); return; }
 		if (u_HzmParams.z < 35.0) { gl_FragColor = vec4(sharp, 1.0); return; }
-		gl_FragColor = vec4(scope, 1.0); return;
+		if (u_HzmParams.z < 45.0) { gl_FragColor = vec4(scope, 1.0); return; }
+		if (u_HzmParams.z < 55.0) { gl_FragColor = vec4(gunCol, 1.0); return; }
+		if (u_HzmParams.z < 65.0) { gl_FragColor = vec4(vec3(gunA), 1.0); return; }
+		gl_FragColor = vec4(gunTex.a, gunTex.a, gunTex.a, 1.0); return;
 	}
 
 	vec3 shadowCol = vec3(0.012);                                     // the pupil shadow is the dark inside of the tube, never the world
@@ -97,10 +99,10 @@ void main()
 	vec3 col       = mix(ring, lensCol, lensFade);
 
 	// the eyepiece rim as a TRUE circle: dark anodised metal with a soft highlight arc and a soft outer falloff, over the faceted rifle mesh
-	float band  = smoothstep(0.995, 1.004, r) * (1.0 - smoothstep(1.14, 1.26, r));
+	float band  = smoothstep(0.995, 1.004, r) * (1.0 - smoothstep(1.395, 1.445, r));   // out to the bell's outer radius: its faceted silhouette is covered, the outline is a circle
 	vec2  qn    = q / max(r, 0.0001);
 	float arc   = pow(max(dot(qn, normalize(vec2(-0.55, -0.83))), 0.0), 6.0);
-	vec3  metal = vec3(0.018, 0.019, 0.022) + vec3(0.07) * arc * smoothstep(1.0, 1.06, r) * (1.0 - smoothstep(1.06, 1.16, r));
+	vec3  metal = vec3(0.016, 0.017, 0.020) * mix(1.6, 0.6, smoothstep(1.0, 1.4, r)) + vec3(0.075) * arc * smoothstep(1.02, 1.10, r) * (1.0 - smoothstep(1.22, 1.38, r));
 	col = mix(col, metal, band * smoothstep(0.55, 0.92, amt));
 
 	gl_FragColor   = vec4(col, 1.0);

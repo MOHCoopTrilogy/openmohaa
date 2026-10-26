@@ -6218,6 +6218,14 @@ void Player::ClientThink(void)
     }
     server_new_buttons |= current_ucmd->buttons & ~buttons;
     buttons = current_ucmd->buttons;
+    {   // [scopes1025] trace: every change of the ADS / fire bits as the server sees them
+        static cvar_t *pTr = gi.Cvar_Get("coop_zoomTrace", "0", 0);
+        static int     prevB = -1;
+        if (pTr->integer && prevB != -1 && ((prevB ^ (int)buttons) & (BUTTON_COOPADS | BUTTON_ATTACKLEFT | BUTTON_ATTACKRIGHT))) {
+            gi.Printf("^~^~^ ZOOMTRACE buttons 0x%x -> 0x%x torso=%s t=%.2f\n", prevB, (int)buttons, GetTorsoStateName(), level.time);
+        }
+        prevB = (int)buttons;
+    }
 
     if (camera) {
         m_vViewPos = camera->origin;
@@ -10698,6 +10706,12 @@ void Player::GetMovementForScript(Event *ev)
 
 void Player::ToggleZoom(int iZoom)
 {
+    {   // [scopes1025] trace: who flips the scope
+        static cvar_t *pTr = gi.Cvar_Get("coop_zoomTrace", "0", 0);
+        if (pTr->integer) {
+            gi.Printf("^~^~^ ZOOMTRACE toggle iZoom=%d mode=%d torso=%s buttons=0x%x new=0x%x t=%.2f\n", iZoom, m_iInZoomMode, GetTorsoStateName(), buttons, new_buttons, level.time);
+        }
+    }
     if (iZoom && m_iInZoomMode == -1) {
         SetFov(selectedfov);
         m_iInZoomMode = 0;
@@ -10709,6 +10723,12 @@ void Player::ToggleZoom(int iZoom)
 
 void Player::ZoomOff(void)
 {
+    {   // [scopes1025] trace
+        static cvar_t *pTr = gi.Cvar_Get("coop_zoomTrace", "0", 0);
+        if (pTr->integer) {
+            gi.Printf("^~^~^ ZOOMTRACE zoomoff mode=%d torso=%s t=%.2f\n", m_iInZoomMode, GetTorsoStateName(), level.time);
+        }
+    }
     SetFov(selectedfov);
     m_iInZoomMode = 0;
 }
@@ -10725,6 +10745,12 @@ qboolean Player::IsZoomed(void)
 
 void Player::SafeZoomed(Event *ev)
 {
+    {   // [scopes1025] trace
+        static cvar_t *pTr = gi.Cvar_Get("coop_zoomTrace", "0", 0);
+        if (pTr->integer) {
+            gi.Printf("^~^~^ ZOOMTRACE safezoom arg=%d mode=%d torso=%s t=%.2f\n", ev->GetInteger(1), m_iInZoomMode, GetTorsoStateName(), level.time);
+        }
+    }
     if (ev->GetInteger(1)) {
         if (m_iInZoomMode > 0) {
             SetFov(m_iInZoomMode);
