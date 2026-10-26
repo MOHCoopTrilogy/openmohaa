@@ -262,6 +262,14 @@ static void CG_HzmScopeFrame(float camFov)
     float    dt, k, tx, ty, yawVel, pitchVel, t, m;
 
     zoomed = CG_HzmScopeZoomed(&optic, &known);
+    if (cg_scopeDebug->integer && cg.snap) {   // [scopes1025] probe: when does the server drop the zoom (fire? rechamber? reload?)
+        static int s_lastZoom = -1;
+        int        zs = cg.snap->ps.stats[STAT_INZOOM];
+        if (zs != s_lastZoom) {
+            cgi.Printf("^~^~^ SCOPEZOOM stat=%d (was %d) anim=%d time=%d\n", zs, s_lastZoom, cg.snap->ps.iViewModelAnim, cg.time);
+            s_lastZoom = zs;
+        }
+    }
     dt     = (cg.time - hs.lastTime) * 0.001f;
     if (dt < 0.0f || dt > 0.1f) {
         dt = 0.0f;

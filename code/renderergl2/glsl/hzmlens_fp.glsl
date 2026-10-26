@@ -62,15 +62,15 @@ void main()
 	vec3  outside = wide;
 	if (amt > 0.0)
 	{
-		// three rings of 8 taps (1.2, 2.8 and 5 percent of the screen height): a real out-of-focus blur, not a smear
-		vec3  b   = wide * 0.10;
-		for (int k = 0; k < 8; k++)
+		// a 32-tap Vogel disk (5 percent of the screen height), rotated per pixel by interleaved gradient noise: a smooth out-of-focus blur,
+		// the 24 fixed taps of the first version drew streaks and ghost copies at this radius
+		float ign = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));
+		vec3  b   = wide * 0.04;
+		for (int k = 0; k < 32; k++)
 		{
-			float an = 0.7853982 * float(k);
-			vec2  dir = vec2(cos(an), sin(an));
-			b += texture2D(u_LevelsMap, var_TexCoords + dir * vec2(0.012 / aspect, 0.012)).rgb * 0.0375;
-			b += texture2D(u_LevelsMap, var_TexCoords + dir * vec2(0.028 / aspect, 0.028)).rgb * 0.0375;
-			b += texture2D(u_LevelsMap, var_TexCoords + dir * vec2(0.050 / aspect, 0.050)).rgb * 0.0375;
+			float rr = sqrt((float(k) + 0.5) / 32.0);
+			float th = float(k) * 2.39996323 + ign * 6.2831853;
+			b += texture2D(u_LevelsMap, var_TexCoords + vec2(cos(th) / aspect, sin(th)) * rr * 0.055).rgb * 0.03;
 		}
 		float rimShade = mix(0.62, 1.0, smoothstep(1.0, 1.9, r));   // the tube shadow: deepest at the ring, gone toward the screen edge
 		outside = b * clamp(u_HzmParams.w, 0.0, 1.0) * rimShade;
