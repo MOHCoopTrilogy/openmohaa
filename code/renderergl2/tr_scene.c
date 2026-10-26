@@ -968,6 +968,9 @@ void RE_RenderScene( const refdef_t *fd ) {
 	if (!( fd->rdflags & RDF_NOWORLDMODEL )) {
 		R_GfxProbe_ViewBegin(GFXVIEW_MAIN);
 	}
+	if (!( fd->rdflags & RDF_NOWORLDMODEL )) {
+		R_HZM_RenderWaterPlanar( &parms, fd );     // water presets: the planar reflection view, BEFORE the main view
+	}
 	R_RenderView( &parms );
 	if (!( fd->rdflags & RDF_NOWORLDMODEL )) {
 		R_GfxProbe_ViewEnd(GFXVIEW_MAIN);

@@ -247,6 +247,16 @@ static uniformInfo_t uniformsInfo[] =
 	// HZM water pass - see UNIFORM_HZMWATER. Kept LAST, in enum order.
 	{ "u_HzmWater",        GLSL_VEC4 },
 	{ "u_HzmRippleMap",    GLSL_INT },
+	{ "u_HzmCold0",        GLSL_VEC4 },
+	{ "u_HzmCold1",        GLSL_VEC4 },
+	{ "u_HzmCold2",        GLSL_VEC4 },
+	{ "u_HzmCold3",        GLSL_VEC4 },
+	{ "u_HzmCold4",        GLSL_VEC4 },
+	{ "u_HzmCold5",        GLSL_VEC4 },
+	{ "u_HzmQuayMap",      GLSL_INT },
+	{ "u_HzmFloeMap",      GLSL_INT },
+	{ "u_HzmIceMap",       GLSL_INT },
+	{ "u_HzmPlanarMap",    GLSL_INT },
 	// HZM ground variety - see UNIFORM_HZMGROUNDVAR. In enum order (after the water rows, not at the end).
 	{ "u_HzmGroundVar",    GLSL_VEC4 },
 	{ "u_HzmGroundVar2",   GLSL_VEC4 },
@@ -1922,6 +1932,10 @@ void GLSL_InitGPUShaders(void)
 		GLSL_SetUniformInt(&tr.hzmWaterShader[i], UNIFORM_LIGHTMAP,     TB_LIGHTMAP);
 		GLSL_SetUniformInt(&tr.hzmWaterShader[i], UNIFORM_HZMOCCMAP,    TB_HZMRAINOCC);
 		GLSL_SetUniformInt(&tr.hzmWaterShader[i], UNIFORM_HZMRIPPLEMAP, TB_HZMWETNOISE);
+		GLSL_SetUniformInt(&tr.hzmWaterShader[i], UNIFORM_HZMQUAYMAP,   TB_HZMQUAY);
+		GLSL_SetUniformInt(&tr.hzmWaterShader[i], UNIFORM_HZMFLOEMAP,   TB_HZMFLOE);
+		GLSL_SetUniformInt(&tr.hzmWaterShader[i], UNIFORM_HZMICEMAP,    TB_HZMICE);
+		GLSL_SetUniformInt(&tr.hzmWaterShader[i], UNIFORM_HZMPLANARMAP, TB_HZMPLANAR);
 		GLSL_FinishGPUShader(&tr.hzmWaterShader[i]);
 		numEtcShaders++;
 	}

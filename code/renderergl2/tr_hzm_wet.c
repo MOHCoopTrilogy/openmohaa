@@ -659,16 +659,39 @@ void R_HZMWetBuild( dheader_t *header )
 	tr.hzmRainOccImage = NULL;
 	tr.hzmWetNoiseImage = NULL;
 	tr.hzmWaterWorld = 0;
+	tr.hzmWaterPresetWorld = 0;
+	tr.hzmColdWorld = qfalse;
+	tr.hzmPlanarLive = qfalse;
 	tr.hzmOmahaWorld = HZM_WaterWetOmahaMap( tr.world->baseName );
-	if ( tr.hzmOmahaWorld ) {
-		R_HZMWaterBuild();     // registers r_hzmWater and leaves the water pass off
-		ri.Printf( PRINT_DEVELOPER, "^~^~^ HZMWET off: %s is on the Omaha list\n", tr.world->baseName );
-		return;
-	}
+	// water presets (hzm_waterwet.h): by shader name + this map's base name; set per shader, so every surface of a shader
+	// agrees. Omaha: the WATER presets only (user 2026-10-25) - the wet film, puddles and everything else stay off there.
 	for ( i = 0; i < tr.world->numsurfaces; i++ ) {
-		if ( tr.world->surfaces[i].shader && tr.world->surfaces[i].shader->hzmWater ) {
+		shader_t *wsh = tr.world->surfaces[i].shader;
+		if ( wsh && wsh->hzmWater ) {
 			tr.hzmWaterWorld++;
+			wsh->hzmWaterPreset = HZM_WaterPresetFor( wsh->name, tr.world->baseName );
+			if ( wsh->hzmWaterPreset ) {
+				tr.hzmWaterPresetWorld++;
+			}
 		}
+	}
+	if ( tr.hzmOmahaWorld ) {
+		if ( tr.hzmWaterPresetWorld ) {
+			// Omaha water: only the sky colours, the sun and the ripple map are needed; no occlusion map, no wet noise
+			R_HZMWetBuildSky();
+			VectorCopy( tr.sunDirection, tr.hzmWetSun );
+			tr.hzmWetSun[3] = s_sun.exists ? 1.0f : 0.0f;
+			m = MAX( tr.sunLight[0], MAX( tr.sunLight[1], tr.sunLight[2] ) );
+			if ( m > 1e-4f ) {
+				VectorScale( tr.sunLight, MIN( m, 1.0f ) / m, tr.hzmWetSunCol );
+			} else {
+				VectorClear( tr.hzmWetSunCol );
+			}
+			tr.hzmWetSunCol[3] = 0.0f;
+		}
+		R_HZMWaterBuild();     // registers r_hzmWater; builds the water pass only when there is preset water
+		ri.Printf( PRINT_DEVELOPER, "^~^~^ HZMWET off: %s is on the Omaha list (water presets %d)\n", tr.world->baseName, tr.hzmWaterPresetWorld );
+		return;
 	}
 
 	R_HZMWetBuildOcclusion( header );

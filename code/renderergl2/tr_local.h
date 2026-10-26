@@ -586,7 +586,12 @@ enum
 	// bind cache (tr_dsa.c); GL 3.x guarantees 16 fragment units.
 	TB_HZMRAINOCC  = 9,
 	TB_HZMWETNOISE = 10,
-	NUM_TEXTURE_UNITS = 11
+	// HZM water presets (tr_hzm_water.c): quay-distance map, floe noise, ice colour, planar reflection
+	TB_HZMQUAY     = 11,
+	TB_HZMFLOE     = 12,
+	TB_HZMICE      = 13,
+	TB_HZMPLANAR   = 14,
+	NUM_TEXTURE_UNITS = 15
 };
 
 typedef enum
@@ -728,6 +733,7 @@ typedef struct shader_s {
 	int			hzmWetBits;				// HZM rain wetness: BSP surface-type bits OR-ed at load (tr_hzm_wet.c)
 	int			hzmWater;				// HZM water pass: hzm_waterwet.h allowlist slot + 1, 0 = never (tr_hzm_water.c)
 	float		hzmWaterLmRef;			// HZM water pass: p90 lightmap luminance of this shader name, 0 = no glint gate
+	int			hzmWaterPreset;			// HZM water pass: HZM_WPRESET_* for the loaded map (0 = the plain reflection layer)
 	int			hzmGvClass;				// HZM ground variety: 0 none, 1 macro, 2 macro + hex (tr_hzm_groundvar.c)
 	float		hzmGvPeriod;			// HZM ground variety: world units per texture repeat (generated list)
 	int			hzmGvWorld;				// HZM ground variety: the world load that tagged it (stale tags never count)
@@ -1103,6 +1109,16 @@ typedef enum
 	// HZM water pass (tr_hzm_water.c). Appended LAST, rows in the same order in uniformsInfo[].
 	UNIFORM_HZMWATER,       // (fade, time mod 1000, lightmap reference or 0, glint on)
 	UNIFORM_HZMRIPPLEMAP,   // sampler, TB_HZMWETNOISE (the water program has no puddle noise)
+	UNIFORM_HZMCOLD0,       // water preset: (mode 0/1, cover, swell gain, chop gain)
+	UNIFORM_HZMCOLD1,       // deep rgb, floe amount
+	UNIFORM_HZMCOLD2,       // shallow rgb, planar mix
+	UNIFORM_HZMCOLD3,       // quay map world->uv (x0, y0, 1/width, 1/height)
+	UNIFORM_HZMCOLD4,       // (quay map max distance in u, drift in u, 0, 0)
+	UNIFORM_HZMCOLD5,       // (whitecap amount, 0, 0, 0)
+	UNIFORM_HZMQUAYMAP,     // sampler, TB_HZMQUAY
+	UNIFORM_HZMFLOEMAP,     // sampler, TB_HZMFLOE
+	UNIFORM_HZMICEMAP,      // sampler, TB_HZMICE
+	UNIFORM_HZMPLANARMAP,   // sampler, TB_HZMPLANAR
 	// HZM ground variety (tr_hzm_groundvar.c). Inserted here, rows in the same place in uniformsInfo[] (the table
 	// length is checked at compile time); kept off the enum's end, where the gfx tree appends. ALL ZERO = inert.
 	//   u_HzmGroundVar  = (mode 0/1/2, macro strength, 1 / hex cell in world units, blend sharpness)
@@ -1356,7 +1372,10 @@ typedef enum {
 	// HZM gl2 stable sun shadows (plan P3, tr_hzm_sunstable.c). Set only while r_shadowStable resolves on, so with
 	// the switch at 0 no view carries either bit and every test on them is dead.
 	VPF_SUNWORLD        = 0x200,    // the W bake (static world cascade, own arrays)
-	VPF_SUNSTABLE       = 0x400     // a per-frame radial entity-only cascade
+	VPF_SUNSTABLE       = 0x400,    // a per-frame radial entity-only cascade
+	// HZM water presets (tr_hzm_water.c): the planar reflection view of the cold harbour water. Mirrored camera, oblique
+	// clip at the waterline (portalPlane), the water-pass shaders themselves are not drawn in it.
+	VPF_HZMPLANAR       = 0x800
 } viewParmFlags_t;
 
 typedef struct {
@@ -2868,6 +2887,17 @@ typedef struct {
     qboolean hzmWaterReady;
     int hzmWaterWorld;					// allowlisted water surfaces in the loaded BSP (0 = build nothing)
     image_t *hzmRippleImage;
+    image_t *hzmQuayImage;				// water presets: R8 distance to the nearest quay wall (tr_hzm_water.c)
+    image_t *hzmFloeImage;				// 256^2 tileable fbm noise (RGB), generated
+    image_t *hzmIceImage;				// ice colour tile (textures/hzm/ice_floe, else generated)
+    vec4_t hzmQuayXform;				// world -> quay uv (x0, y0, 1/w, 1/h)
+    float hzmQuayMax;					// distance represented by 1.0 in the quay map
+    int hzmWaterPresetWorld;			// non-zero: this map has preset water
+    qboolean hzmColdWorld;				// this map has COLD preset water (planar reflection candidate)
+    float hzmColdZ;						// its waterline
+    image_t *hzmPlanarImage;			// planar reflection colour (half scene size, scene format)
+    FBO_t *hzmPlanarFbo;
+    qboolean hzmPlanarLive;				// the planar view was rendered THIS frame
     shaderProgram_t hzmWaterShader[2];	// [1] = USE_DEFORM_VERTEXES, the fogShader split
     // HZM coop [2026-09-27] realistic lightning (tr_hzm_lightning.c). In tr so R_Init's memset clears all of it: the
     // program and the bolt image are created on the first lit frame and GLSL_ShutdownGPUShaders / the image shutdown
@@ -4856,6 +4886,7 @@ void RB_HZM_GroundVarUniforms( shaderProgram_t *sp, const shaderCommands_t *inpu
 
 // HZM water pass - tr_hzm_water.c
 void R_HZMWaterBuild( void );
+void R_HZM_RenderWaterPlanar( viewParms_t *mainParms, const refdef_t *fd );
 void RB_HZMWaterPass( int deformGen, const vec5_t deformParams );
 
 #ifdef __cplusplus
