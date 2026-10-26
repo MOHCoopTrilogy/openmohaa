@@ -58,6 +58,7 @@ class UIScene3D : public UIWidget
         float  radius;
         str    command;
         str    caption;
+        int    stop;                   // optional: the hotspot is live only while cvar ui_atcStop == stop (-1 = always)
         str    widget;                 // optional: name of a sibling Button that is re-framed to this hotspot every frame (mouse / keyboard / pad focus all work on it)
         SafePtr<UIWidget> w;
     };
@@ -76,7 +77,8 @@ class UIScene3D : public UIWidget
     Container<sceneHot_t *>   m_hots;
     Container<sceneLight_t *> m_lights;
     int                       m_drawn;
-    cam_t                     m_cur, m_from, m_to, m_home;
+    cam_t                     m_cur, m_from, m_to, m_home, m_ret;
+    bool                      m_retSet;
     int                       m_flyStart;
     float                     m_flyDur;
     bool                      m_flying;
@@ -90,6 +92,8 @@ public:
     void SceneModel(Event *ev);
     void SceneCam(Event *ev);
     void SceneFly(Event *ev);
+    void SceneReturn(Event *ev);
+    void SceneBack(Event *ev);
     void SceneHot(Event *ev);
     void SceneLight(Event *ev);
     void OnClick(Event *ev);
@@ -124,12 +128,30 @@ Event EV_Scene_Fly
     "seconds x y z pitch yaw roll fov_y",
     "Scene3D: fly the camera to a pose, smoothstep eased; any key / click / pad button skips to the end."
 );
+Event EV_Scene_Return
+(
+    "scenereturn",
+    EV_DEFAULT,
+    "fffffff",
+    "x y z pitch yaw roll fov_y",
+    "Scene3D: the pose the camera flies to by itself when the widget is shown again (BACK from an opened menu); default = the home pose."
+);
+
+Event EV_Scene_Back
+(
+    "sceneback",
+    EV_DEFAULT,
+    NULL,
+    NULL,
+    "Scene3D: ESC. When ui_atcStop is above 0 the camera flies back to the home pose (ui_atcStop 0, the return pose is dropped); otherwise the menu is popped."
+);
+
 Event EV_Scene_Hot
 (
     "scenehot",
     EV_DEFAULT,
-    "sffffsSS",
-    "name x y z radius command [caption] [focuswidget]",
+    "sffffsSSF",
+    "name x y z radius command [caption] [focuswidget] [stop]",
     "Scene3D: a clickable sphere in the scene; hover sets ui_scene_hot (1-based index, 0 = none) and prints the caption beside the object, a click stuffs the command."
 );
 Event EV_Scene_Light
@@ -146,6 +168,8 @@ CLASS_DECLARATION(UIWidget, UIScene3D, NULL) {
     {&EV_Scene_Cam,    &UIScene3D::SceneCam  },
     {&EV_Scene_Fly,    &UIScene3D::SceneFly  },
     {&EV_Scene_Hot,    &UIScene3D::SceneHot  },
+    {&EV_Scene_Return, &UIScene3D::SceneReturn},
+    {&EV_Scene_Back,   &UIScene3D::SceneBack},
     {&EV_Scene_Light,  &UIScene3D::SceneLight},
     {&W_LeftMouseDown, &UIScene3D::OnClick   },
     {NULL,             NULL                  }
@@ -158,7 +182,8 @@ UIScene3D::UIScene3D()
 #endif
     memset(&m_cur, 0, sizeof(m_cur));
     m_cur.fov = 60;
-    m_from = m_to = m_home = m_cur;
+    m_from = m_to = m_home = m_ret = m_cur;
+    m_retSet = false;
     m_flyStart = 0;
     m_flyDur   = 0;
     m_flying   = false;
@@ -216,6 +241,27 @@ void UIScene3D::SceneFly(Event *ev)
     StartFly(to, ev->GetFloat(1));
 }
 
+void UIScene3D::SceneReturn(Event *ev)
+{
+    for (int i = 0; i < 3; i++) {
+        m_ret.org[i] = ev->GetFloat(1 + i);
+        m_ret.ang[i] = ev->GetFloat(4 + i);
+    }
+    m_ret.fov = ev->GetFloat(7);
+    m_retSet  = true;
+}
+
+void UIScene3D::SceneBack(Event *ev)
+{
+    if (Cvar_VariableIntegerValue("ui_atcStop") > 0) {
+        Cvar_Set("ui_atcStop", "0");
+        m_retSet = false;
+        StartFly(m_home, 0.6f);
+    } else {
+        Cbuf_AddText("popmenu 1\n");
+    }
+}
+
 void UIScene3D::SceneHot(Event *ev)
 {
     sceneHot_t *h = new sceneHot_t;
@@ -227,6 +273,7 @@ void UIScene3D::SceneHot(Event *ev)
     h->command    = ev->GetString(6);
     h->caption    = ev->NumArgs() >= 7 ? ev->GetString(7) : "";
     h->widget     = ev->NumArgs() >= 8 ? ev->GetString(8) : "";
+    h->stop       = ev->NumArgs() >= 9 ? (int)ev->GetFloat(9) : -1;
     m_hots.AddObject(h);
 }
 
@@ -270,9 +317,11 @@ void UIScene3D::Draw(void)
     const float W = (float)uid.vidWidth, H = (float)uid.vidHeight;
 
     // BACK from the opened menu: the widget is shown again away from home -> fly home by itself
-    if (m_lastDraw && uid.time - m_lastDraw > 250 && !m_flying
-        && (VectorCompare(m_cur.org, m_home.org) == 0 || m_cur.fov != m_home.fov)) {
-        StartFly(m_home, 0.6f);
+    {
+        const cam_t& tgt = m_retSet ? m_ret : m_home;
+        if (m_lastDraw && uid.time - m_lastDraw > 250 && !m_flying && (VectorCompare(m_cur.org, tgt.org) == 0 || m_cur.fov != tgt.fov)) {
+            StartFly(tgt, 0.6f);
+        }
     }
     m_lastDraw = uid.time;
 
@@ -412,6 +461,18 @@ void UIScene3D::Draw(void)
         if (dbg && m->anim.length()) Com_Printf("^~^~^ SCENE3D actor added\n");
     }
     if (dbg) Com_Printf("^~^~^ SCENE3D render begin\n");
+    if (dbg) {
+        static int lastMs = 0, nf = 0, accMs = 0;
+        const int  nowMs = Sys_Milliseconds();
+        if (lastMs) {
+            accMs += nowMs - lastMs;
+            if (++nf == 240) {
+                Com_Printf("^~^~^ SCENE3D frame %.2f ms avg (%.0f fps) over 240 frames, %dx%d\n", accMs / 240.0f, 240000.0f / accMs, (int)W, (int)H);
+                nf = accMs = 0;
+            }
+        }
+        lastMs = nowMs;
+    }
     const int tr0 = Sys_Milliseconds();
     re.RenderScene(&rd);
     if (dbg) {
@@ -432,19 +493,20 @@ void UIScene3D::Draw(void)
         sceneHot_t *h = m_hots.ObjectAt(i);
         float       sx, sy, depth;
         Project(h->pos, rd.vieworg, rd.viewaxis, W, H, fovx, fovy, &sx, &sy, &depth);
+        const bool  stopOk = h->stop < 0 || Cvar_VariableIntegerValue("ui_atcStop") == h->stop;
         const float rpx = depth > 1.0f ? h->radius / depth * (H * 0.5f) / tan(fovy * M_PI / 360.0) : 0.0f;
         if (h->widget.length()) {
             if (!h->w && m_parent) {
                 h->w = m_parent->FindWidgetByName(h->widget.c_str());
             }
             if (h->w) {
-                const bool live = depth > 1.0f && !m_flying;
+                const bool live = depth > 1.0f && !m_flying && stopOk;
                 // frame is relative to the parent container, whose origin is this widget's screen origin
                 h->w->setFrame(UIRect2D(live ? sx - rpx - m_screenframe.pos.x : -9999.0f, live ? sy - rpx - m_screenframe.pos.y : -9999.0f, live ? rpx * 2.0f : 1.0f, live ? rpx * 2.0f : 1.0f));
             }
             continue;
         }
-        if (depth < 1.0f) {
+        if (depth < 1.0f || !stopOk) {
             continue;
         }
         const float dx = uid.mouseX - sx, dy = uid.mouseY - sy;
@@ -481,7 +543,7 @@ void UIScene3D::Draw(void)
         Project(h->pos, rd.vieworg, rd.viewaxis, W, H, fovx, fovy, &sx, &sy, &depth);
         if (s_ring && depth > 1.0f) {
             const float rpx   = h->radius / depth * (H * 0.5f) / tan(fovy * M_PI / 360.0) * (1.12f + 0.04f * sin(uid.time * 0.006f));
-            vec4_t      col   = {1.0f, 0.82f, 0.45f, 0.85f};
+            vec4_t      col   = {0.45f, 0.82f, 1.0f, 0.85f};     // the 2D path takes the vertex colour as B,G,R,A: this reads amber
             uii.Rend_SetColor(col);
             uii.Rend_DrawPicStretched(sx - rpx, sy - rpx, rpx * 2.0f, rpx * 2.0f, 0, 0, 1, 1, s_ring->GetMaterial());
         }
@@ -495,7 +557,7 @@ void UIScene3D::Draw(void)
                 const float sc[2] = {H / 480.0f, H / 480.0f};
                 const int   tw    = m_font->getWidth(h->caption.c_str(), -1);
                 const float rpx   = h->radius / depth * (H * 0.5f) / tan(fovy * M_PI / 360.0);
-                m_font->Print(sx - tw * sc[0] * 0.5f, sy + rpx * 0.55f, h->caption.c_str(), (size_t)-1, sc);
+                m_font->Print((sx - tw * sc[0] * 0.5f) / sc[0], (sy + rpx * 0.75f) / sc[1], h->caption.c_str(), (size_t)-1, sc);     // Print takes virtual units when a scale is given
             }
         }
     }
