@@ -255,6 +255,12 @@ static uniformInfo_t uniformsInfo[] =
 	{ "u_HzmCold5",        GLSL_VEC4 },
 	{ "u_HzmCold6",        GLSL_VEC4 },
 	{ "u_HzmCold7",        GLSL_VEC4 },
+	{ "u_HzmCont0",        GLSL_VEC4 },
+	{ "u_HzmCont1",        GLSL_VEC4 },
+	{ "u_HzmCont2",        GLSL_VEC4 },
+	{ "u_HzmCont3",        GLSL_VEC4 },
+	{ "u_HzmCont4",        GLSL_VEC4 },
+	{ "u_HzmDepthMap",     GLSL_INT },
 	{ "u_HzmQuayMap",      GLSL_INT },
 	{ "u_HzmFloeMap",      GLSL_INT },
 	{ "u_HzmIceMap",       GLSL_INT },
@@ -1938,6 +1944,7 @@ void GLSL_InitGPUShaders(void)
 		GLSL_SetUniformInt(&tr.hzmWaterShader[i], UNIFORM_HZMFLOEMAP,   TB_HZMFLOE);
 		GLSL_SetUniformInt(&tr.hzmWaterShader[i], UNIFORM_HZMICEMAP,    TB_HZMICE);
 		GLSL_SetUniformInt(&tr.hzmWaterShader[i], UNIFORM_HZMPLANARMAP, TB_HZMPLANAR);
+		GLSL_SetUniformInt(&tr.hzmWaterShader[i], UNIFORM_HZMDEPTHMAP,  TB_SCREENDEPTH);
 		GLSL_FinishGPUShader(&tr.hzmWaterShader[i]);
 		numEtcShaders++;
 	}

@@ -39,6 +39,8 @@ BUILT ONCE PER MAP LOAD (R_HZMWaterBuild, from R_HZMWetBuild), only on a non-Oma
 #include "../renderercommon/hzm_waterwet.h"
 #include "../renderercommon/hzm_storm.h" // HZM coop [2026-09-28] storm darkness
 void R_HZM_StormWetUniforms( shaderProgram_t *sp );   // tr_hzm_wet.c
+qboolean RB_HZM_SceneDepthSnapshot( void );           // tr_backend.c
+void RB_HZM_BindSceneDepth( void );
 
 #define HZM_V4(v, a, b, c, d) ( (v)[0] = (a), (v)[1] = (b), (v)[2] = (c), (v)[3] = (d) )
 #define HZM_RIPPLE_SIZE     256         // power of two: the FFT below
@@ -52,6 +54,7 @@ int hzmPlanarNoOblique;              // read by R_SetupProjection (tr_main.c)
 static cvar_t *r_hzmWaterBody;       // tuning: multiplies the preset body colours (default 2.0)
 static cvar_t *r_hzmWaterIce;        // tuning: ICE preset lightmap gain multiplier (default 0.7)
 static cvar_t *r_hzmWaterFloe;       // tuning: multiplies the floe amount (default 1.0)
+static cvar_t *r_hzmWaterContact;    // contact foam / darkening around geometry that meets the water (needs the scene-depth snapshot); default 1
 static cvar_t *r_hzmWaterPreset;     // 1 (default) = the map's water preset, 0 = the plain reflection layer (A/B captures)
 
 /*
@@ -686,6 +689,7 @@ void R_HZMWaterBuild( void )
 	r_hzmWaterPlanar = ri.Cvar_Get( "r_hzmWaterPlanar", "0", 0 );     // OFF until the planar view is proven (user 2026-10-25)
 	r_hzmWaterBody = ri.Cvar_Get( "r_hzmWaterBody", "2.0", 0 );
 	r_hzmWaterFloe = ri.Cvar_Get( "r_hzmWaterFloe", "1.0", 0 );
+	r_hzmWaterContact = ri.Cvar_Get( "r_hzmWaterContact", "1", 0 );
 	r_hzmWaterIce = ri.Cvar_Get( "r_hzmWaterIce", "0.7", 0 );
 	r_hzmWaterPlanarDbg = ri.Cvar_Get( "r_hzmWaterPlanarDbg", "0", 0 );
 
@@ -770,6 +774,7 @@ void RB_HZMWaterPass( int deformGen, const vec5_t deformParams )
 	vec4_t			water, occz;
 	float			fade;
 	image_t			*lm = NULL;
+	qboolean		contactOn;
 
 	fade = HZM_WaterFade();
 	if ( fade <= 0.0f
@@ -793,6 +798,9 @@ void RB_HZMWaterPass( int deformGen, const vec5_t deformParams )
 	if ( !sp->program ) {
 		return;
 	}
+	// contact foam needs the scene-depth snapshot RB_HZMWaterDepthSnapshot took at the first preset water batch of this view
+	contactOn = ( tess.shader->hzmWaterPreset && tess.shader->hzmWaterPreset != HZM_WPRESET_ICE && r_hzmWaterContact && r_hzmWaterContact->integer
+	              && tr.hdrDepthImage && backEnd.softDepthValid ) ? qtrue : qfalse;
 	GLSL_BindProgram( sp );
 
 	GLSL_SetUniformMat4( sp, UNIFORM_MODELVIEWPROJECTIONMATRIX, glState.modelviewProjection );
@@ -871,6 +879,25 @@ void RB_HZMWaterPass( int deformGen, const vec5_t deformParams )
 				HZM_V4( c7, tr.hzmFlowDir[0], tr.hzmFlowDir[1], 0.0f, 0.0f );
 				GLSL_SetUniformVec4( sp, UNIFORM_HZMCOLD6, c6 );
 				GLSL_SetUniformVec4( sp, UNIFORM_HZMCOLD7, c7 );
+			}
+			{
+				const float	*pm = backEnd.viewParms.projectionMatrix;
+				const vec3_t *ax = (const vec3_t *)backEnd.viewParms.or.axis;
+				vec4_t		k0, k1, k2, k3, k4;
+				float		vw = (float)MAX( 1, backEnd.viewParms.viewportWidth ), vh = (float)MAX( 1, backEnd.viewParms.viewportHeight );
+				HZM_V4( k0, ax[0][0], ax[0][1], ax[0][2], 1.0f / pm[0] );
+				HZM_V4( k1, ax[1][0] * -1.0f, ax[1][1] * -1.0f, ax[1][2] * -1.0f, 1.0f / pm[5] );     // axis[1] is LEFT in this engine
+				HZM_V4( k2, ax[2][0], ax[2][1], ax[2][2], contactOn ? 1.0f : 0.0f );
+				HZM_V4( k3, pm[10], pm[14], 1.0f / vw, 1.0f / vh );
+				HZM_V4( k4, 0.5f * vh * pm[5], 46.0f, 0.0f, 0.0f );
+				GLSL_SetUniformVec4( sp, UNIFORM_HZMCONT0, k0 );
+				GLSL_SetUniformVec4( sp, UNIFORM_HZMCONT1, k1 );
+				GLSL_SetUniformVec4( sp, UNIFORM_HZMCONT2, k2 );
+				GLSL_SetUniformVec4( sp, UNIFORM_HZMCONT3, k3 );
+				GLSL_SetUniformVec4( sp, UNIFORM_HZMCONT4, k4 );
+				if ( contactOn ) {
+					RB_HZM_BindSceneDepth();
+				}
 			}
 		}
 		GL_BindToTMU( tr.hzmQuayImage ? tr.hzmQuayImage : tr.whiteImage, TB_HZMQUAY );
@@ -959,4 +986,24 @@ void R_HZM_RenderWaterPlanar( viewParms_t *mainParms, const refdef_t *fd )
 			           tr.viewParms.projectionMatrix[0], tr.viewParms.projectionMatrix[5], tr.viewParms.projectionMatrix[10], tr.viewParms.projectionMatrix[14] );
 		}
 	}
+}
+
+
+/*
+================
+RB_HZMWaterDepthSnapshot - called from RB_RenderDrawSurfList between batches, at the first preset water surface of a view
+================
+*/
+void RB_HZMWaterDepthSnapshot( void )
+{
+	mat4_t	projection;
+
+	if ( !r_hzmWaterContact || !r_hzmWaterContact->integer || !tr.hdrDepthFbo || !tr.hdrDepthImage || backEnd.projection2D
+	     || backEnd.viewParms.targetFbo || ( backEnd.viewParms.flags & ( VPF_DEPTHSHADOW | VPF_SHADOWMAP | VPF_PSHADOW ) )
+	     || ( backEnd.refdef.rdflags & RDF_NOWORLDMODEL ) ) {
+		return;
+	}
+	Mat4Copy( glState.projection, projection );
+	RB_HZM_SceneDepthSnapshot();
+	GL_SetProjectionMatrix( projection );
 }

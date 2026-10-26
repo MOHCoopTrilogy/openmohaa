@@ -24,6 +24,13 @@ uniform vec4      u_HzmCold4;       // quay map max distance, drift
 uniform vec4      u_HzmCold5;       // whitecap amount, shoreline alpha ramp (min, max, axis 0/1 S/2 T)
 uniform vec4      u_HzmCold6;       // swell yaw (rad), shore foam amount, flow 0/1
 uniform vec4      u_HzmCold7;       // flow direction xy
+// contact foam (scene-depth snapshot): view basis, projection terms, foam size; u_HzmCont2.w = 0 switches it off
+uniform vec4      u_HzmCont0;       // forward xyz, tan half fov x
+uniform vec4      u_HzmCont1;       // right xyz, tan half fov y
+uniform vec4      u_HzmCont2;       // up xyz, on
+uniform vec4      u_HzmCont3;       // proj[10], proj[14], 1/viewport w, 1/viewport h
+uniform vec4      u_HzmCont4;       // focal px, foam width (world units)
+uniform sampler2D u_HzmDepthMap;
 uniform sampler2D u_HzmQuayMap;     // R: distance to the nearest quay wall / max distance
 uniform sampler2D u_HzmFloeMap;     // 256^2 tileable fbm, one field per channel, mean 0.5 sd 0.11
 uniform sampler2D u_HzmIceMap;      // ice colour tile
@@ -175,20 +182,25 @@ void main()
 	{
 		const float TAU = 6.28318531;
 		const float TW  = TAU / 1000.0;      // every phase speed below is a whole number of cycles per 1000 s: seamless wrap
-		vec2  d1 = vec2(0.93, 0.37);
-		vec2  d2 = vec2(-0.55, 0.83);
-		vec2  d3 = vec2(0.20, -0.98);
+		// five crossing wave trains: directions spread +-60 deg around the main one, wavelengths 230..900 u that are not
+		// multiples of each other, amplitude modulated by a slow noise so no train runs unbroken to the horizon (that read as
+		// radial light rays toward the camera). Every phase speed is a whole number of cycles per 1000 s.
 		float cyw = cos(u_HzmCold6.x);
 		float syw = sin(u_HzmCold6.x);
-		d1 = vec2(d1.x * cyw - d1.y * syw, d1.x * syw + d1.y * cyw);
-		d2 = vec2(d2.x * cyw - d2.y * syw, d2.x * syw + d2.y * cyw);
-		d3 = vec2(d3.x * cyw - d3.y * syw, d3.x * syw + d3.y * cyw);
+		vec2  d1 = vec2(0.93 * cyw - 0.37 * syw, 0.93 * syw + 0.37 * cyw);
+		vec2  d2 = vec2(0.70 * cyw + 0.71 * syw, 0.70 * syw - 0.71 * cyw);
+		vec2  d3 = vec2(0.75 * cyw - 0.66 * syw, 0.75 * syw + 0.66 * cyw);
+		vec2  d4 = vec2(0.30 * cyw + 0.95 * syw, 0.30 * syw - 0.95 * cyw);
+		vec2  d5 = vec2(0.43 * cyw - 0.90 * syw, 0.43 * syw + 0.90 * cyw);
+		float am = 0.55 + 0.9 * texture2D(u_HzmFloeMap, P.xy / 3100.0 + vec2(0.44, 0.09)).r;      // 0.65 .. 1.15 around the mean
 		float c1s = cos(TAU / 900.0 * dot(d1, P.xy) + 43.0 * TW * t);
-		float c2s = cos(TAU / 520.0 * dot(d2, P.xy) + 67.0 * TW * t);
-		float c3s = cos(TAU / 310.0 * dot(d3, P.xy) + 95.0 * TW * t);
-		vec2  sw = d1 * (0.030 * c1s) + d2 * (0.022 * c2s) + d3 * (0.016 * c3s);
+		float c2s = cos(TAU / 610.0 * dot(d2, P.xy) + 67.0 * TW * t + 1.3);
+		float c3s = cos(TAU / 430.0 * dot(d3, P.xy) + 95.0 * TW * t + 2.1);
+		float c4s = cos(TAU / 300.0 * dot(d4, P.xy) + 131.0 * TW * t + 0.7);
+		float c5s = cos(TAU / 230.0 * dot(d5, P.xy) + 173.0 * TW * t + 4.0);
+		vec2  sw = d1 * (0.027 * c1s) + d2 * (0.019 * c2s * am) + d3 * (0.013 * c3s) + d4 * (0.009 * c4s * am) + d5 * (0.006 * c5s);
 		sw *= -u_HzmCold0.z;
-		float crest = 0.5 + 0.5 * (0.5 * c1s + 0.35 * c2s + 0.15 * c3s);
+		float crest = 0.5 + 0.5 * (0.40 * c1s + 0.28 * c2s * am + 0.17 * c3s + 0.10 * c4s + 0.05 * c5s);
 		float calm  = smoothstep(0.45, 0.62, 0.5 + 0.28 * sin(P.x / 430.0 + 1.3) * sin(P.y / 390.0) + 0.22 * sin((P.x + P.y) / 610.0 + 0.4));
 		float fadeC = clamp(1.0 - dist / 2600.0, 0.12, 1.0);
 		// chop: the two legacy ripple layers + a third, larger and rotated one (no visible tile on calm water) and a
@@ -314,6 +326,32 @@ void main()
 			float lines  = 0.5 + 0.5 * cos(ph);
 			float fthr   = 0.50 + 0.40 * h1;
 			wcap = max(wcap, band * smoothstep(fthr, fthr + 0.16, lines) * life * smoothstep(0.38, 0.62, nS2 + (nS - 0.5)) * u_HzmCold6.y * clamp(1.0 - dist / 7000.0, 0.0, 1.0));
+		}
+		if (u_HzmCont2.w > 0.5)
+		{
+			// contact foam: where something solid that stands near the waterline is next to this water pixel on the screen
+			// (hedgehogs, posts, hulls, quay walls), foam gathers around it. Eight taps on a ring whose pixel radius is the foam
+			// width in world units; a tap only counts when the occluder it finds is within 80 u of the waterline.
+			vec2  suv = gl_FragCoord.xy * u_HzmCont3.zw;
+			float myD = dot(P - u_ViewOrigin, u_HzmCont0.xyz);
+			float rpx = clamp(u_HzmCont4.y * u_HzmCont4.x / max(myD, 1.0), 2.0, 48.0);
+			float acc = 0.0;
+			for (int k = 0; k < 8; k++)
+			{
+				float ang = 0.7853982 * float(k) + 0.3;
+				vec2  nuv = suv + vec2(cos(ang), sin(ang)) * rpx * u_HzmCont3.zw;
+				float zn  = texture2D(u_HzmDepthMap, nuv).r;
+				float dn  = u_HzmCont3.y / (u_HzmCont3.x + (2.0 * zn - 1.0));
+				if (zn < 0.9999 && dn < myD - 5.0)
+				{
+					vec2 ndc = nuv * 2.0 - vec2(1.0);
+					vec3 Wp  = u_ViewOrigin + (u_HzmCont0.xyz + u_HzmCont1.xyz * ndc.x * u_HzmCont0.w + u_HzmCont2.xyz * ndc.y * u_HzmCont1.w) * dn;
+					acc += step(abs(Wp.z - P.z), 80.0);
+				}
+			}
+			float nC = texture2D(u_HzmFloeMap, P.xy / 150.0 + vec2(0.27, 0.64)).g;
+			float cf = smoothstep(0.12, 0.62, acc / 8.0) * smoothstep(0.25, 0.60, nC + 0.35) * ((u_HzmCold0.x < 1.5) ? 0.55 : 0.85);
+			wcap = max(wcap, cf * clamp(1.0 - dist / 5000.0, 0.0, 1.0));
 		}
 		wcol = mix(wcol, vec3(0.74, 0.80, 0.82) * (0.40 + 0.60 * min(lmb * 1.3, 1.2)), wcap * 0.9);
 		vec3  col  = mix(wcol + u_HzmWetSunCol.rgb * gc * 0.6 * (1.0 - wcap), iceCol, iceA);

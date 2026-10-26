@@ -1117,6 +1117,12 @@ typedef enum
 	UNIFORM_HZMCOLD5,       // (whitecap amount, 0, 0, 0)
 	UNIFORM_HZMCOLD6,       // (swell yaw rad, shore foam, flow 0/1, 0)
 	UNIFORM_HZMCOLD7,       // (flow direction xy, 0, 0)
+	UNIFORM_HZMCONT0,       // contact foam: view forward xyz, tan(half fov x)
+	UNIFORM_HZMCONT1,       // view right xyz, tan(half fov y)
+	UNIFORM_HZMCONT2,       // view up xyz, contact amount (0 = off)
+	UNIFORM_HZMCONT3,       // proj[10], proj[14], 1/viewport w, 1/viewport h
+	UNIFORM_HZMCONT4,       // focal length in pixels, foam width in world units
+	UNIFORM_HZMDEPTHMAP,    // sampler, TB_SCREENDEPTH: the scene-depth snapshot
 	UNIFORM_HZMQUAYMAP,     // sampler, TB_HZMQUAY
 	UNIFORM_HZMFLOEMAP,     // sampler, TB_HZMFLOE
 	UNIFORM_HZMICEMAP,      // sampler, TB_HZMICE
@@ -4891,6 +4897,7 @@ void RB_HZM_GroundVarUniforms( shaderProgram_t *sp, const shaderCommands_t *inpu
 void R_HZMWaterBuild( void );
 void R_HZM_RenderWaterPlanar( viewParms_t *mainParms, const refdef_t *fd );
 void RB_HZMWaterPass( int deformGen, const vec5_t deformParams );
+void RB_HZMWaterDepthSnapshot( void );
 
 #ifdef __cplusplus
 }
