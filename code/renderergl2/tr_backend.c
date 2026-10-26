@@ -26,6 +26,13 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 #include "tr_hzm_framegen.h" // HZM frame generation (r_hzmFrameGen)
 #include "../renderercommon/hzm_storm.h" // HZM coop [2026-09-28] storm darkness
 
+// HZM coop [scopes1025] the scope picture-in-picture's two auxiliary colour views (the magnified lens scene, the rifle layer) render into their own
+// targets: they skip the scene-depth copies, the sun-ray mask and the flare tests that belong to the main view
+static qboolean RB_IsScopeAuxView(void)
+{
+	return (backEnd.viewParms.targetFbo != NULL && (backEnd.viewParms.targetFbo == tr.hzmLensFbo || backEnd.viewParms.targetFbo == tr.hzmGunFbo)) ? qtrue : qfalse;
+}
+
 backEndData_t	*backEndData;
 backEndState_t	backEnd;
 
@@ -447,6 +454,11 @@ void RB_BeginDrawingView (void) {
 	{
 		clearBits |= GL_COLOR_BUFFER_BIT;
 		qglClearColor( 0.0f, 0.0f, 0.0f, 1.0f );
+	}
+	if ( tr.hzmGunFbo && backEnd.viewParms.targetFbo == tr.hzmGunFbo )
+	{
+		clearBits |= GL_COLOR_BUFFER_BIT;   // the rifle layer starts empty (alpha 0) whatever the fog clear above chose
+		qglClearColor( 0.0f, 0.0f, 0.0f, 0.0f );
 	}
 
 	qglClear( clearBits );
@@ -1691,7 +1703,7 @@ const void	*RB_DrawSurfs( const void *data ) {
 
 		// HZM coop [scopes1025] the PiP lens view needs none of the scene-depth copies / shadow mask below (no sun shadow receive, no soft
 		// edges); skipping them keeps the main scene's depth snapshot untouched and saves two full-scene copies
-		if (!isShadowView && !(tr.hzmLensFbo && backEnd.viewParms.targetFbo == tr.hzmLensFbo))
+		if (!isShadowView && !RB_IsScopeAuxView())
 		{
 			if (R_MsaaResolvesActive() && backEnd.viewParms.targetFbo == NULL)
 			{
@@ -1897,7 +1909,7 @@ const void	*RB_DrawSurfs( const void *data ) {
 		}
 
 		if (glRefConfig.framebufferObject && r_drawSunRays->integer
-		    && !(tr.hzmLensFbo && backEnd.viewParms.targetFbo == tr.hzmLensFbo)) // [scopes1025] the lens view leaves the sun-ray mask / flare queries to the main view
+		    && !RB_IsScopeAuxView()) // [scopes1025] the lens view leaves the sun-ray mask / flare queries to the main view
 		{
 			FBO_t *oldFbo = glState.currentFBO;
 			FBO_Bind(tr.sunRaysFbo);
@@ -1925,7 +1937,7 @@ const void	*RB_DrawSurfs( const void *data ) {
 		RB_ShadowFinish();		
 
 		// add light flares on lights that aren't obscured
-		if (!(tr.hzmLensFbo && backEnd.viewParms.targetFbo == tr.hzmLensFbo)) { // [scopes1025] flares test main-view depth: not in the lens
+		if (!RB_IsScopeAuxView()) { // [scopes1025] flares test main-view depth: not in the lens
 			RB_RenderFlares();
 		}
 	}

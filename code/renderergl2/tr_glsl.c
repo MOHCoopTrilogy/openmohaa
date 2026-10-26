@@ -2000,6 +2000,8 @@ void GLSL_InitGPUShaders(void)
 		GLSL_InitUniforms(&tr.hzmLensShader);
 		GLSL_SetUniformInt(&tr.hzmLensShader, UNIFORM_TEXTUREMAP, TB_COLORMAP);
 		GLSL_SetUniformInt(&tr.hzmLensShader, UNIFORM_LEVELSMAP,  TB_LEVELSMAP);
+		GLSL_SetUniformInt(&tr.hzmLensShader, UNIFORM_SCREENIMAGEMAP, TB_NORMALMAP);   // the rifle layer colour
+		GLSL_SetUniformInt(&tr.hzmLensShader, UNIFORM_SCREENDEPTHMAP, TB_DELUXEMAP);   // ...and its depth
 		GLSL_FinishGPUShader(&tr.hzmLensShader);
 	}
 	else

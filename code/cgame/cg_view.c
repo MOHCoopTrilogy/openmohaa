@@ -2263,7 +2263,12 @@ static void CG_AdsRigSolve(refEntity_t *pREnt)
             // cg_adsRigReliefBias: a live offset on top (units, + = eye further back from the rear sight) - used by the
             // harness to measure the sight-window clutter at several eye reliefs in-engine, hands included
             s_rigTgt[7] += cgi.Cvar_Get("cg_adsRigReliefBias", "0", 0)->value;
-            if (s_rigTgt[7] > 4.0f) { s_rigTgt[7] = 4.0f; } else if (s_rigTgt[7] < -4.0f) { s_rigTgt[7] = -4.0f; }
+            {
+                // [scopes1025] a scoped rifle's ocular has to come right up to the eye (tens of units back along the view), far past the +-4 u an
+                // iron sight needs; the near plane is the weapon one (r_weaponznear)
+                const float lim = (s >= s_adsSightsScope && s < s_adsSightsScope + sizeof(s_adsSightsScope) / sizeof(s_adsSightsScope[0])) ? 40.0f : 4.0f;
+                if (s_rigTgt[7] > lim) { s_rigTgt[7] = lim; } else if (s_rigTgt[7] < -lim) { s_rigTgt[7] = -lim; }
+            }
             if (!s_rigTgtOk && s_rigFreshGun && s_rigW >= 0.001f) {
                 // [quick-draw motion] the new gun's first aim pose: nothing applied yet, so ease in from zero
                 for (k = 0; k < 8; k++) {

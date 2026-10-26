@@ -94,6 +94,7 @@ static struct {
     qboolean holdHip;   // this frame: keep the hip fov (the zoom fov is still only in the next snapshot)
     qboolean pip;       // [scopes1025] this scope is shown as a picture-in-picture lens (kept through the scope-out ease)
     float    lensFov;   // [scopes1025] square lens-scene fov (degrees) published to the renderer
+    float    lensK;     // [scopes1025] how much of the lens shows (1 aimed; falls while a reload / switch takes the gun off the eye)
     int      lastTime;
     float    lens;      // published lens radius (fraction of screen height)
     float    eye;       // published pupil radius (lens radii)
@@ -316,6 +317,16 @@ static void CG_HzmScopeFrame(float camFov)
         hs.pip = qfalse;
     }
     hs.lensFov = 0.0f;
+    hs.lensK   = 1.0f;
+    if (hs.pip) {
+        // the aim pose's share of what is on screen (cg_view.c CG_AdsAnimGate: 1 aimed / fire / bolt, falls to 0 for a reload or a
+        // switch): the lens fades out with it, so the hands and the parts read in the wide view and come back to the eye with the pose
+        float g = CG_AdsAnimGate();
+        hs.lensK = CG_HzmSmooth((g - 0.15f) / 0.6f);
+        // the lens only shows once the rifle has ARRIVED at the eye (ADS pose 0.65 .. 0.95): the rifle body carries the raise, and the
+        // short fade then goes from the dark ocular straight into the lens - no long ghosted double image of two views. Out is the reverse.
+        hs.lensK *= CG_HzmSmooth((CG_AdsPoseFactor() - 0.65f) / 0.30f);
+    }
     if (hs.pip && hs.optic >= 0) {
         // the lens square: the lens circle (cg_scopeRadius of the screen height) plus a 4 percent margin, at the optic's magnification
         // (vertical half-tan of the old full-screen scope view = 0.75 * tan(scopeFov / 2), 4:3 reference)
@@ -385,7 +396,7 @@ static void CG_HzmScopeFrame(float camFov)
                 buf,
                 sizeof(buf),
                 "%.4f %.4f %.4f %.4f %.3f %.3f %.3f",
-                hs.ease,
+                hs.ease * hs.lensK,
                 hs.lens,
                 hs.sx,
                 hs.sy,
@@ -573,7 +584,7 @@ qboolean CG_HzmScopeDraw2D(void)
     // Drawn black through rgbGen global (white read as a faint purple, 13/6/13, against bright walls - s2)
     // It fades in late (ease^3): mid-ease the lens is still wider than the screen and only half dark, and a full-strength
     // reticle there read as lines drawn outside the scope (review 1).
-    VectorSet4(col, 0.0f, 0.0f, 0.0f, hs.ease * hs.ease * hs.ease);
+    VectorSet4(col, 0.0f, 0.0f, 0.0f, hs.ease * hs.ease * hs.ease * hs.lensK);
     cgi.R_SetColor(col);
     if (hRet) {
         cgi.R_DrawStretchPic(cx - R, cy - R, 2.0f * R, 2.0f * R, 0.0f, 0.0f, 1.0f, 1.0f, hRet);

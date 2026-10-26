@@ -13,8 +13,8 @@ A lens fov > 0 means "picture-in-picture": the MAIN view stays at the wide hip f
      world, blurred and darkened; so exposure, bloom and grade treat both as one picture.
 A fov of 0 (or amount 0) leaves everything to the old bug-3462 pass (tr_hzm_scope.c).
 
-Cvars (flags 0): r_ppScopePip (1; 0 = never), r_ppScopeRes (1024: lens N cap, 512..1024), r_ppScopeShadows (0),
-r_ppScopeOutside (0.42: brightness of the world around the lens), r_ppScopeBlur (1: blur radius scale), r_ppScopeCA (shared).
+Cvars (flags 0): r_ppScopePip (1; 0 = never), r_ppScopeRes (1536: lens N cap, 512..2048; the lens is rendered at 1.5x its on-screen size and box-filtered down in the composite), r_ppScopeShadows (0),
+r_ppScopeOutside (0.75: brightness of the world around the lens), r_ppScopeBlur (1: blur radius scale), r_ppScopeCA (shared).
 r_ppScopePipLive is renderer-published: 1 while this path can run, so cgame never selects it when it cannot.
 ===========================================================================
 */
@@ -98,9 +98,9 @@ static void R_HzmLensCvars(void)
 		r_ppScopeState   = ri.Cvar_Get("r_ppScopeState", "0", 0);
 		r_ppScopePip     = ri.Cvar_Get("r_ppScopePip", "1", 0);
 		r_ppScopePipLive = ri.Cvar_Get("r_ppScopePipLive", "0", 0);
-		r_ppScopeRes     = ri.Cvar_Get("r_ppScopeRes", "1024", 0);
+		r_ppScopeRes     = ri.Cvar_Get("r_ppScopeRes", "1536", 0);
 		r_ppScopeShadows = ri.Cvar_Get("r_ppScopeShadows", "0", 0);
-		r_ppScopeOutside = ri.Cvar_Get("r_ppScopeOutside", "0.42", 0);
+		r_ppScopeOutside = ri.Cvar_Get("r_ppScopeOutside", "0.75", 0);
 		r_ppScopeBlur    = ri.Cvar_Get("r_ppScopeBlur", "1", 0);
 		r_ppScopeCA      = ri.Cvar_Get("r_ppScopeCA", "1", 0);
 	}
@@ -148,14 +148,36 @@ void R_HzmLensPublishLive(qboolean live)
 static int R_HzmLensSizeFor(void)
 {
 	float side = 2.0f * 0.465f * LENS_MARGIN * (float)glConfig.vidHeight;
-	int   n    = (int)(side + 7.0f) & ~7;
+	int   n    = (int)(side * 1.5f + 7.0f) & ~7;   // 1.5x supersample: the composite box-filters it (foliage speckle)
 	int   cap  = r_ppScopeRes->integer;
 
 	if (cap < 512) cap = 512;
-	if (cap > 1024) cap = 1024;
+	if (cap > 2048) cap = 2048;
 	if (n > cap) n = cap;
 	if (n < 512) n = 512;
 	return n;
+}
+
+static qboolean R_HzmLensEnsureGun(void)
+{
+	int fmt;
+
+	if (tr.hzmGunFbo) {
+		return (tr.hzmGunW == tr.sceneWidth && tr.hzmGunH == tr.sceneHeight) ? qtrue : qfalse;
+	}
+	if (!glRefConfig.framebufferObject || tr.sceneWidth <= 0) {
+		return qfalse;
+	}
+	fmt = (r_hdr->integer && glRefConfig.textureFloat) ? GL_RGBA16F_ARB : GL_RGBA8;
+	tr.hzmGunW = tr.sceneWidth;
+	tr.hzmGunH = tr.sceneHeight;
+	tr.hzmGunColor = R_CreateImage("*hzmGun", NULL, tr.hzmGunW, tr.hzmGunH, IMGTYPE_COLORALPHA, IMGFLAG_NO_COMPRESSION | IMGFLAG_CLAMPTOEDGE, fmt);
+	tr.hzmGunDepth = R_CreateImage("*hzmGunDepth", NULL, tr.hzmGunW, tr.hzmGunH, IMGTYPE_COLORALPHA, IMGFLAG_NO_COMPRESSION | IMGFLAG_CLAMPTOEDGE, GL_DEPTH_COMPONENT24);
+	tr.hzmGunFbo   = FBO_Create("_hzmGun", tr.hzmGunW, tr.hzmGunH);
+	FBO_AttachImage(tr.hzmGunFbo, tr.hzmGunColor, GL_COLOR_ATTACHMENT0, 0);
+	FBO_AttachImage(tr.hzmGunFbo, tr.hzmGunDepth, GL_DEPTH_ATTACHMENT, 0);
+	R_CheckFBO(tr.hzmGunFbo);
+	return qtrue;
 }
 
 static qboolean R_HzmLensEnsureFbo(void)
@@ -185,7 +207,7 @@ static qboolean R_HzmLensEnsureFbo(void)
 Front end. Called from RE_RenderScene with the MAIN view's parms (already complete), right before the main
 R_RenderView, so tr.viewParms ends the frame as the main view. A world scene only.
 */
-void R_HzmLensRenderView(const viewParms_t *mainParms)
+void R_HzmLensRenderView(viewParms_t *mainParms)
 {
 	const float *st;
 	viewParms_t  lens;
@@ -230,6 +252,28 @@ void R_HzmLensRenderView(const viewParms_t *mainParms)
 	R_RenderView(&lens);
 	LENS_STAGE(11);
 	tr.hzmLensValid = qtrue;
+
+	// the RIFLE LAYER: the view weapon and arms alone, at the main view's size and projection, into their own target - the composite keeps them
+	// crisp over the blurred world (the real scope body around the lens). The main view then leaves them out.
+	tr.hzmGunValid = qfalse;
+	if (R_HzmLensEnsureGun()) {
+		viewParms_t gun = *mainParms;
+
+		gun.viewportX = 0;
+		gun.viewportY = 0;
+		gun.viewportWidth  = tr.hzmGunW;
+		gun.viewportHeight = tr.hzmGunH;
+		gun.targetFbo      = tr.hzmGunFbo;
+		gun.targetFboLayer = 0;
+		gun.targetFboCubemapIndex = 0;
+		gun.isPortal       = qfalse;
+		gun.flags          = VPF_ONLYVIEWMODEL | VPF_NOCUBEMAPS;
+		LENS_STAGE(12);
+		R_RenderView(&gun);
+		LENS_STAGE(13);
+		tr.hzmGunValid = qtrue;
+		mainParms->flags |= VPF_NOVIEWMODEL;
+	}
 }
 
 static qboolean R_HzmLensEnsureScratch(void)
@@ -283,7 +327,21 @@ void RB_HZMLensComposite(FBO_t *srcFbo, ivec4_t srcBox)
 	VectorSet4(params, st[4], st[5], r_ppScopeCA->value, r_ppScopeOutside->value);
 
 	LENS_STAGE(20);
+	{
+		vec4_t vi;
+		VectorSet4(vi, 1.0f / (float)tr.hzmLensSize, 0.0f, 0.0f, 0.0f);   // lens texel size, for the box filter
+		GLSL_BindProgram(&tr.hzmLensShader);
+		GLSL_SetUniformVec4(&tr.hzmLensShader, UNIFORM_VIEWINFO, vi);
+	}
 	GL_BindToTMU(tr.hzmLensColor, TB_LEVELSMAP);
+	if (tr.hzmGunValid && tr.hzmGunColor && tr.hzmGunDepth) {   // the rifle layer (colour + depth = its coverage mask)
+		GL_BindToTMU(tr.hzmGunColor, TB_NORMALMAP);
+		GL_BindToTMU(tr.hzmGunDepth, TB_DELUXEMAP);
+	} else {
+		GL_BindToTMU(tr.whiteImage, TB_NORMALMAP);
+		GL_BindToTMU(tr.whiteImage, TB_DELUXEMAP);   // depth 1 everywhere = no rifle
+	}
+	tr.hzmGunValid = qfalse;
 	FBO_SetHzmParams(params);
 	FBO_Blit(srcFbo, srcBox, NULL, tr.hzmLensScratchFbo, srcBox, &tr.hzmLensShader, color, 0);
 	FBO_SetHzmParams(NULL);

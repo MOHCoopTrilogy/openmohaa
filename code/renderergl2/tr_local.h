@@ -1356,7 +1356,8 @@ typedef enum {
 	// HZM gl2 stable sun shadows (plan P3, tr_hzm_sunstable.c). Set only while r_shadowStable resolves on, so with
 	// the switch at 0 no view carries either bit and every test on them is dead.
 	VPF_SUNWORLD        = 0x200,    // the W bake (static world cascade, own arrays)
-	VPF_SUNSTABLE       = 0x400     // a per-frame radial entity-only cascade
+	VPF_SUNSTABLE       = 0x400,    // a per-frame radial entity-only cascade
+	VPF_ONLYVIEWMODEL   = 0x800     // HZM coop [scopes1025] the scope PiP's rifle layer: only RF_FIRST_PERSON entities, no world, no sprites
 } viewParmFlags_t;
 
 typedef struct {
@@ -1405,7 +1406,7 @@ typedef struct {
     qboolean	farplane_cull;
     qboolean	renderTerrain; // added in 2.0
 } viewParms_t;
-void R_HzmLensRenderView(const viewParms_t *mainParms);   // HZM coop [scopes1025] the picture-in-picture lens scene (tr_hzm_lens.c)
+void R_HzmLensRenderView(viewParms_t *mainParms);      // HZM coop [scopes1025] the picture-in-picture lens scene (tr_hzm_lens.c)
 
 
 /*
@@ -2718,6 +2719,11 @@ typedef struct {
 	int             hzmLensSize;
 	int             hzmLensScratchW, hzmLensScratchH;
 	qboolean        hzmLensValid;       // the lens view was queued this frame: the composite may run
+	FBO_t          *hzmGunFbo;          // HZM coop [scopes1025] the rifle layer (scene-sized, HDR + depth texture): view weapon only
+	image_t        *hzmGunColor;
+	image_t        *hzmGunDepth;
+	int             hzmGunW, hzmGunH;
+	qboolean        hzmGunValid;        // the rifle layer was queued this frame
 	shaderProgram_t heatHazeShader;     // HZM gl1-parity heat haze + localized muzzle shimmer
 	shaderProgram_t dofShader;          // HZM gl1-parity depth of field (r_ppDoF)
 	shaderProgram_t underwaterShader;   // HZM NEW: underwater/slime/lava screen distortion (r_ppUnderwaterFx)
