@@ -455,6 +455,11 @@ void RB_BeginDrawingView (void) {
 		clearBits |= GL_COLOR_BUFFER_BIT;
 		qglClearColor( 0.0f, 0.0f, 0.0f, 1.0f );
 	}
+	if ( tr.hzmLensFbo && backEnd.viewParms.targetFbo == tr.hzmLensFbo && ri.Cvar_Get("r_ppScopeClearDbg", "0", 0)->integer )
+	{
+		clearBits |= GL_COLOR_BUFFER_BIT;   // debug: a magenta lens clear shows which pixels the lens view never drew
+		qglClearColor( 1.0f, 0.0f, 1.0f, 1.0f );
+	}
 	if ( tr.hzmGunFbo && backEnd.viewParms.targetFbo == tr.hzmGunFbo )
 	{
 		clearBits |= GL_COLOR_BUFFER_BIT;   // the rifle layer starts empty (alpha 0) whatever the fog clear above chose

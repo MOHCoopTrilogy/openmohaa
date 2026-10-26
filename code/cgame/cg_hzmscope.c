@@ -330,9 +330,7 @@ static void CG_HzmScopeFrame(float camFov)
     if (hs.pip && hs.optic >= 0) {
         // the lens square: the lens circle (cg_scopeRadius of the screen height) plus a 4 percent margin, at the optic's magnification
         // (vertical half-tan of the old full-screen scope view = 0.75 * tan(scopeFov / 2), 4:3 reference)
-        float scopeHalfTan = (float)tan(DEG2RAD(hs.scopeFov * 0.5f));
-        float halfTan      = 1.04f * 2.0f * cg_scopeRadius->value * 0.75f * scopeHalfTan;
-        hs.lensFov         = 2.0f * RAD2DEG((float)atan(halfTan));
+        hs.lensFov = hs.hipFov;   // [scopes1025] published: the WIDE (hip) fov the renderer's second view uses, pre-aspect like every fov here
     }
 
     // ---- scope shadow: where the eye sits behind the eyepiece
@@ -414,7 +412,7 @@ static void CG_HzmScopeFrame(float camFov)
     if (cg_scopeDebug->integer && hs.frac > 0.0f && (cg_scopeDebug->integer > 1 || cg.time - hs.dbgTime > 1000)) {
         hs.dbgTime = cg.time;
         cgi.Printf(
-            "^~^~^ SCOPE optic=%s remap=%d frac=%.2f fov=%.1f hip=%.1f pupil=%.3f,%.3f live=%d\n",
+            "^~^~^ SCOPE optic=%s remap=%d frac=%.2f fov=%.1f hip=%.1f pupil=%.3f,%.3f live=%d pip=%d lensK=%.2f pose=%.2f gate=%.2f\n",
             s_hzmOptics[hs.optic >= 0 ? hs.optic : HO_M73B1].tex,
             hs.remap,
             hs.frac,
@@ -422,7 +420,11 @@ static void CG_HzmScopeFrame(float camFov)
             hs.hipFov,
             hs.sx,
             hs.sy,
-            r_ppScopeLive->integer
+            r_ppScopeLive->integer,
+            (int)hs.pip,
+            hs.lensK,
+            CG_AdsPoseFactor(),
+            CG_AdsAnimGate()
         );
     }
 }
@@ -442,8 +444,11 @@ qboolean CG_HzmScopeWorldFov(float camFov, float *outFov)
         *outFov = hs.hipFov;
         return qtrue;
     }
-    if (hs.pip && hs.frac > 0.0f && hs.hipFov > 1.0f) {
-        *outFov = hs.hipFov; // [scopes1025] the MAIN view stays wide; the zoom is the lens scene (renderer)
+    if (hs.pip && hs.frac > 0.0f && hs.hipFov > 1.0f && hs.scopeFov > 1.0f) {
+        // [scopes1025] ROLE SWAP: the MAIN view is the magnified lens picture (MSAA, sun shadows, everything - exactly the bug-3462 scope
+        // picture) the moment the lens starts to show, and the renderer adds the WIDE world as a second, blurred view around it. Until then
+        // (the rifle still rising) the main view is the plain hip view, so a raise needs no second scene at all.
+        *outFov = (hs.ease * hs.lensK > 0.001f) ? hs.scopeFov : hs.hipFov;
         return qtrue;
     }
     if (hs.frac <= 0.0f || (hs.ease >= 0.9999f && !hs.remap)) {
@@ -474,14 +479,7 @@ qboolean CG_HzmScopeRaiseOwns(void)
 // mouse sensitivity scale of the lens against the wide view, eased with the scope (1 outside PiP)
 float CG_HzmScopeSensScale(void)
 {
-    float a, b;
-
-    if (!CG_HzmScopePipActive() || hs.hipFov < 1.0f || hs.scopeFov < 1.0f) {
-        return 1.0f;
-    }
-    a = (float)tan(DEG2RAD(hs.scopeFov * 0.5f)) / (float)tan(DEG2RAD(hs.hipFov * 0.5f));
-    b = (float)exp(log(a) * hs.ease);
-    return b;
+    return 1.0f;   // [scopes1025] the main view carries the scope fov itself (role swap), so CG_CalcFov's own sensitivity scale is already right
 }
 
 qboolean CG_HzmScopeActive(void)

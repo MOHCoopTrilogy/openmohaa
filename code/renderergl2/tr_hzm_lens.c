@@ -1,20 +1,23 @@
 /*
 ===========================================================================
-HZM coop [scopes1025] PICTURE-IN-PICTURE SCOPE LENS - the gl2 side.
+HZM coop [scopes1025] PICTURE-IN-PICTURE SCOPE - the gl2 side.
 
 cgame (cg_hzmscope.c) publishes ONE state cvar, r_ppScopeState (shared with the bug-3462 pass):
-    "<amount> <lens radius / screen height> <pupil x> <pupil y> <pupil radius> <glass warmth> <lens fov>"
-A lens fov > 0 means "picture-in-picture": the MAIN view stays at the wide hip fov and this file adds
-  1. R_HzmLensRenderView (front end, from RE_RenderScene, BEFORE the main R_RenderView): a second world view along the
-     SAME ray at the magnified fov, 1:1, into the lens FBO (N x N, HDR) - shares the scene lists exactly as a mirror /
-     portal sub-view does. No viewmodel, no cubemaps, no dynamic sun-shadow receive (r_ppScopeShadows 0, default).
-  2. RB_HZMLensComposite (back end, top of the post chain, on the HDR scene, before bloom / tone map): inside the lens
-     circle the lens picture (barrel, chromatic fringe, glass tint, rim, pupil shadow); outside it the real wide-angle
-     world, blurred and darkened; so exposure, bloom and grade treat both as one picture.
-A fov of 0 (or amount 0) leaves everything to the old bug-3462 pass (tr_hzm_scope.c).
+    "<amount> <lens radius / screen height> <pupil x> <pupil y> <pupil radius> <glass warmth> <wide fov>"
+A wide fov > 0 means "picture-in-picture". ROLE SWAP: the MAIN view is the magnified scope picture (cgame gives it the optic's fov, so it
+gets MSAA, sun shadows, SSAO - everything the bug-3462 scope picture always had) and this file adds, before it in RE_RenderScene:
+  1. the WIDE view (R_HzmLensRenderView): the same ray at the hip fov, into its own FBO (scene size x r_ppScopeWide). It shares the scene
+     lists exactly as a mirror / portal sub-view does. No viewmodel, no cubemaps, no dynamic sun-shadow receive. It is blurred and dimmed
+     in the composite, so it needs no MSAA and no extras.
+  2. the RIFLE LAYER: the view weapon and arms alone (VPF_ONLYVIEWMODEL) at the wide weapon projection into a second FBO (colour + depth).
+  The main view then leaves the rifle out.
+  RB_HZMLensComposite (back end, top of the post chain, on the HDR scene, before bloom / tone map): inside the lens circle the main (scope)
+  picture with barrel / fringe / tint / inner shadow; outside it the wide world, blurred and darkened; the rifle layer crisp over it - the
+  real scope body is the frame around the lens. Exposure, bloom and grade treat it all as one picture.
+A wide fov of 0 (or amount 0) leaves everything to the old bug-3462 pass (tr_hzm_scope.c).
 
-Cvars (flags 0): r_ppScopePip (1; 0 = never), r_ppScopeRes (1536: lens N cap, 512..2048; the lens is rendered at 1.5x its on-screen size and box-filtered down in the composite), r_ppScopeShadows (0),
-r_ppScopeOutside (0.75: brightness of the world around the lens), r_ppScopeBlur (1: blur radius scale), r_ppScopeCA (shared).
+Cvars (flags 0): r_ppScopePip (1; 0 = never), r_ppScopeWide (1: wide view size relative to the scene), r_ppScopeShadows (0),
+r_ppScopeOutside (0.75: brightness of the world around the lens), r_ppScopeCA (shared; 10 / 20 / 30 = debug views).
 r_ppScopePipLive is renderer-published: 1 while this path can run, so cgame never selects it when it cannot.
 ===========================================================================
 */
@@ -28,7 +31,7 @@ r_ppScopePipLive is renderer-published: 1 while this path can run, so cgame neve
 static cvar_t *r_ppScopeState   = NULL;
 static cvar_t *r_ppScopePip     = NULL;
 static cvar_t *r_ppScopePipLive = NULL;
-static cvar_t *r_ppScopeRes     = NULL;
+static cvar_t *r_ppScopeWide    = NULL;   // size of the wide view relative to the scene (1 = full)
 static cvar_t *r_ppScopeShadows = NULL;
 static cvar_t *r_ppScopeOutside = NULL;
 static cvar_t *r_ppScopeBlur    = NULL;
@@ -98,7 +101,7 @@ static void R_HzmLensCvars(void)
 		r_ppScopeState   = ri.Cvar_Get("r_ppScopeState", "0", 0);
 		r_ppScopePip     = ri.Cvar_Get("r_ppScopePip", "1", 0);
 		r_ppScopePipLive = ri.Cvar_Get("r_ppScopePipLive", "0", 0);
-		r_ppScopeRes     = ri.Cvar_Get("r_ppScopeRes", "1536", 0);
+		r_ppScopeWide    = ri.Cvar_Get("r_ppScopeWide", "1", 0);
 		r_ppScopeShadows = ri.Cvar_Get("r_ppScopeShadows", "0", 0);
 		r_ppScopeOutside = ri.Cvar_Get("r_ppScopeOutside", "0.75", 0);
 		r_ppScopeBlur    = ri.Cvar_Get("r_ppScopeBlur", "1", 0);
@@ -145,19 +148,6 @@ void R_HzmLensPublishLive(qboolean live)
 	}
 }
 
-static int R_HzmLensSizeFor(void)
-{
-	float side = 2.0f * 0.465f * LENS_MARGIN * (float)glConfig.vidHeight;
-	int   n    = (int)(side * 1.5f + 7.0f) & ~7;   // 1.5x supersample: the composite box-filters it (foliage speckle)
-	int   cap  = r_ppScopeRes->integer;
-
-	if (cap < 512) cap = 512;
-	if (cap > 2048) cap = 2048;
-	if (n > cap) n = cap;
-	if (n < 512) n = 512;
-	return n;
-}
-
 static qboolean R_HzmLensEnsureGun(void)
 {
 	int fmt;
@@ -182,24 +172,31 @@ static qboolean R_HzmLensEnsureGun(void)
 
 static qboolean R_HzmLensEnsureFbo(void)
 {
-	int n, fmt;
+	int w, h, fmt;
 
 	if (tr.hzmLensFbo) {
 		return qtrue;
 	}
-	if (!glRefConfig.framebufferObject) {
+	if (!glRefConfig.framebufferObject || tr.sceneWidth <= 0) {
 		return qfalse;
 	}
-	n   = R_HzmLensSizeFor();
+	w = (int)(tr.sceneWidth  * r_ppScopeWide->value + 0.5f) & ~1;
+	h = (int)(tr.sceneHeight * r_ppScopeWide->value + 0.5f) & ~1;
+	if (w < 256 || h < 144) {
+		w = tr.sceneWidth;
+		h = tr.sceneHeight;
+	}
 	fmt = (r_hdr->integer && glRefConfig.textureFloat) ? GL_RGBA16F_ARB : GL_RGBA8;
 
-	tr.hzmLensColor = R_CreateImage("*hzmLens", NULL, n, n, IMGTYPE_COLORALPHA, IMGFLAG_NO_COMPRESSION | IMGFLAG_CLAMPTOEDGE, fmt);
-	tr.hzmLensDepth = R_CreateImage("*hzmLensDepth", NULL, n, n, IMGTYPE_COLORALPHA, IMGFLAG_NO_COMPRESSION | IMGFLAG_CLAMPTOEDGE, GL_DEPTH_COMPONENT24);
-	tr.hzmLensFbo   = FBO_Create("_hzmLens", n, n);
+	tr.hzmLensColor = R_CreateImage("*hzmWide", NULL, w, h, IMGTYPE_COLORALPHA, IMGFLAG_NO_COMPRESSION | IMGFLAG_CLAMPTOEDGE, fmt);
+	tr.hzmLensDepth = R_CreateImage("*hzmWideDepth", NULL, w, h, IMGTYPE_COLORALPHA, IMGFLAG_NO_COMPRESSION | IMGFLAG_CLAMPTOEDGE, GL_DEPTH_COMPONENT24);
+	tr.hzmLensFbo   = FBO_Create("_hzmWide", w, h);
 	FBO_AttachImage(tr.hzmLensFbo, tr.hzmLensColor, GL_COLOR_ATTACHMENT0, 0);
 	FBO_AttachImage(tr.hzmLensFbo, tr.hzmLensDepth, GL_DEPTH_ATTACHMENT, 0);
 	R_CheckFBO(tr.hzmLensFbo);
-	tr.hzmLensSize = n;
+	tr.hzmLensW = w;
+	tr.hzmLensH = h;
+	tr.hzmLensSize = w;
 	return qtrue;
 }
 
@@ -211,7 +208,7 @@ void R_HzmLensRenderView(viewParms_t *mainParms)
 {
 	const float *st;
 	viewParms_t  lens;
-	float        tanHalf, fov;
+	float        wideTanY, aspect, fov;
 
 	tr.hzmLensValid = qfalse;
 	R_HzmLensCvars();
@@ -226,19 +223,22 @@ void R_HzmLensRenderView(viewParms_t *mainParms)
 	LENS_STAGE(2);
 	st  = R_HzmLensState();
 	fov = st[6];
-	if (fov < 2.0f || fov > 120.0f) {
+	if (fov < 20.0f || fov > 130.0f) {
 		return;
 	}
-	tanHalf = (float)tan(fov * (M_PI / 360.0));
+	// ROLE SWAP: the MAIN view is the magnified scope picture (cgame gives it the optic's fov); this second view is the WIDE hip-fov world
+	// around it, along the same ray, same aspect. st[6] is the pre-aspect hip fov (cgame fov_x convention: the 4:3 reference, vertical
+	// half-tan = 0.75 x tan(fov / 2)); the main view's own fovX / fovY give the aspect.
+	aspect   = (float)tan(mainParms->fovX * (M_PI / 360.0)) / (float)tan(mainParms->fovY * (M_PI / 360.0));
+	wideTanY = 0.75f * (float)tan(fov * (M_PI / 360.0));
 
 	lens = *mainParms;
 	lens.viewportX      = 0;
 	lens.viewportY      = 0;
-	lens.viewportWidth  = tr.hzmLensSize;
-	lens.viewportHeight = tr.hzmLensSize;
-	lens.fovX           = fov;
-	lens.fovY           = fov;
-	(void)tanHalf;
+	lens.viewportWidth  = tr.hzmLensW;
+	lens.viewportHeight = tr.hzmLensH;
+	lens.fovX           = 2.0f * (float)atan(wideTanY * aspect) * (180.0f / (float)M_PI);
+	lens.fovY           = 2.0f * (float)atan(wideTanY) * (180.0f / (float)M_PI);
 	lens.targetFbo      = tr.hzmLensFbo;
 	lens.targetFboLayer = 0;
 	lens.targetFboCubemapIndex = 0;
@@ -327,12 +327,6 @@ void RB_HZMLensComposite(FBO_t *srcFbo, ivec4_t srcBox)
 	VectorSet4(params, st[4], st[5], r_ppScopeCA->value, r_ppScopeOutside->value);
 
 	LENS_STAGE(20);
-	{
-		vec4_t vi;
-		VectorSet4(vi, 1.0f / (float)tr.hzmLensSize, 0.0f, 0.0f, 0.0f);   // lens texel size, for the box filter
-		GLSL_BindProgram(&tr.hzmLensShader);
-		GLSL_SetUniformVec4(&tr.hzmLensShader, UNIFORM_VIEWINFO, vi);
-	}
 	GL_BindToTMU(tr.hzmLensColor, TB_LEVELSMAP);
 	if (tr.hzmGunValid && tr.hzmGunColor && tr.hzmGunDepth) {   // the rifle layer (colour + depth = its coverage mask)
 		GL_BindToTMU(tr.hzmGunColor, TB_NORMALMAP);

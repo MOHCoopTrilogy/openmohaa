@@ -6,5 +6,5 @@
 #pragma once
 
 static const adsSight_t s_adsSightsScope[] = {
-    {"models/weapons/springfield.tik", "Springfield '03 Sniper", {16.9100f, -0.8700f, -5.2400f}, {2.5860f, -0.8660f, -5.2340f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 1.500f},
+    {"models/weapons/springfield.tik", "Springfield '03 Sniper", {16.9100f, -0.8700f, -5.2400f}, {2.5860f, -0.8660f, -5.2340f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 1.200f},
 };

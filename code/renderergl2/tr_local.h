@@ -2717,6 +2717,7 @@ typedef struct {
 	image_t        *hzmLensDepth;
 	FBO_t          *hzmLensScratchFbo;  // scene-sized HDR scratch the composite writes (screenScratch is RGBA8)
 	int             hzmLensSize;
+	int             hzmLensW, hzmLensH;   // the WIDE view's target size (scene size x r_ppScopeWide)
 	int             hzmLensScratchW, hzmLensScratchH;
 	qboolean        hzmLensValid;       // the lens view was queued this frame: the composite may run
 	FBO_t          *hzmGunFbo;          // HZM coop [scopes1025] the rifle layer (scene-sized, HDR + depth texture): view weapon only
