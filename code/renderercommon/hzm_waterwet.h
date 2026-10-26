@@ -244,7 +244,7 @@ static ID_INLINE int HZM_WaterPresetFor( const char *shaderName, const char *map
 	}
 	// RIVER stays OFF (plain reflection layer) until its look is approved: the t13 captures read as a flat dark sheet
 	// (no flow, no reflections at bank angles). Set HZM_RIVER_PRESET_ON to 1 to try it.
-#define HZM_RIVER_PRESET_ON 1     // off until a river view is captured: m5l2b's teleport box keeps cameras off the water
+#define HZM_RIVER_PRESET_ON 0     // off until a river view is captured: m5l2b's teleport box keeps cameras off the water
 #if HZM_RIVER_PRESET_ON
 	for ( i = 0; i < (int)( sizeof( river ) / sizeof( river[0] ) ); i++ ) {
 		if ( !Q_stricmp( shaderName, river[i] ) ) return HZM_WPRESET_RIVER;
