@@ -149,23 +149,27 @@ typedef struct {
 	float	drift;          // world units from a quay wall over which crust / floes thicken
 	float	lmgain;         // ICE: lightmap rgb gain for the diffuse term (retail multiplies texture x lightmap x ~2)
 	float	whitecap;       // crest foam amount (0 = none)
+	float	yaw;            // rotation (rad) of the swell directions: waves run toward the shore (Omaha: the beach is +y)
+	float	shore;          // foam bands along the shoreline ramp (shoreline sheets only)
+	float	flow;           // 1 = river: ripples stretch along the water's own long axis and drift downstream
 } hzmWaterPreset_t;
 
 static const hzmWaterPreset_t hzmWaterPresets[] = {
 	{ 0.0f },
 	// COLD: dark green-grey-black (tools/water_look.py: deep 0.012 0.034 0.036, shallow 0.045 0.100 0.095)
-	{ 0.97f, 1.0f, 1.0f, 1.0f, 1.0f, { 0.012f, 0.034f, 0.036f }, { 0.045f, 0.100f, 0.095f }, 330.0f, 0.0f, 0.0f },
+	{ 0.97f, 1.0f, 1.0f, 1.0f, 1.0f, { 0.012f, 0.034f, 0.036f }, { 0.045f, 0.100f, 0.095f }, 330.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f },
 	// ICE: deep = clear ice (dark cold blue), shallow = white (bubbles / cracks), cover 1 (frost patches cut it away in the shader)
-	{ 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, { 0.035f, 0.110f, 0.200f }, { 0.640f, 0.740f, 0.860f }, 170.0f, 2.0f, 0.0f },
+	{ 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, { 0.035f, 0.110f, 0.200f }, { 0.640f, 0.740f, 0.860f }, 170.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f },
 	// the water presets below are defined at body gain 1; r_hzmWaterBody (default 2.0) scales them all
-	// CHANNEL: grey-green open sea, heavy swell, whitecaps. cover < 1 keeps some of the retail foam / wake stages.
-	{ 0.65f, 1.8f, 1.3f, 0.0f, 0.0f, { 0.009f, 0.026f, 0.029f }, { 0.035f, 0.080f, 0.075f }, 0.0f, 0.0f, 0.70f },
+	// CHANNEL: coherent grey-green-blue sea. cover is UNIFORM (no blotchy mix with the retail stages); the retail foam and wash
+	// come back only where the shoreline sheet's own alpha ramp fades our coverage out. Swell runs at the beach (+y, yaw 63.7 deg).
+	{ 0.93f, 2.6f, 1.0f, 0.0f, 0.0f, { 0.013f, 0.030f, 0.036f }, { 0.040f, 0.085f, 0.095f }, 0.0f, 0.0f, 0.80f, 1.112f, 0.6f, 0.0f },
 	// HARBOUR: clear Mediterranean teal, light chop, a few whitecaps
-	{ 0.92f, 0.8f, 1.1f, 0.0f, 0.0f, { 0.005f, 0.035f, 0.045f }, { 0.025f, 0.100f, 0.108f }, 0.0f, 0.0f, 0.25f },
-	// RIVER: muddy green, calm, 40 % of the retail stages (the riverbed, foam streaks) still shows - shallow water must stay readable
-	{ 0.30f, 0.22f, 1.2f, 0.0f, 0.0f, { 0.040f, 0.060f, 0.034f }, { 0.100f, 0.145f, 0.085f }, 0.0f, 0.0f, 0.0f },
+	{ 0.92f, 1.0f, 2.8f, 0.0f, 0.0f, { 0.005f, 0.035f, 0.045f }, { 0.025f, 0.100f, 0.108f }, 0.0f, 0.0f, 0.30f, 0.0f, 0.0f, 0.0f },
+	// RIVER: muddy green with a downstream drift; 35 % of the retail stages (the riverbed) shows - shallow water must stay readable
+	{ 0.65f, 0.15f, 1.6f, 0.0f, 0.0f, { 0.035f, 0.055f, 0.030f }, { 0.095f, 0.140f, 0.080f }, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f },
 	// POND: calm dark green
-	{ 0.60f, 0.08f, 0.55f, 0.0f, 0.0f, { 0.014f, 0.030f, 0.024f }, { 0.040f, 0.075f, 0.055f }, 0.0f, 0.0f, 0.0f },
+	{ 0.60f, 0.08f, 0.70f, 0.0f, 0.0f, { 0.014f, 0.030f, 0.024f }, { 0.040f, 0.075f, 0.055f }, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f },
 };
 
 // the BSP base names a preset applies to: the exact name or "<name>_..." (_sml copies), like HZM_WaterWetOmahaMap
@@ -239,7 +243,7 @@ static ID_INLINE int HZM_WaterPresetFor( const char *shaderName, const char *map
 	}
 	// RIVER stays OFF (plain reflection layer) until its look is approved: the t13 captures read as a flat dark sheet
 	// (no flow, no reflections at bank angles). Set HZM_RIVER_PRESET_ON to 1 to try it.
-#define HZM_RIVER_PRESET_ON 0
+#define HZM_RIVER_PRESET_ON 0     // off until a river view is captured: m5l2b's teleport box keeps cameras off the water
 #if HZM_RIVER_PRESET_ON
 	for ( i = 0; i < (int)( sizeof( river ) / sizeof( river[0] ) ); i++ ) {
 		if ( !Q_stricmp( shaderName, river[i] ) ) return HZM_WPRESET_RIVER;

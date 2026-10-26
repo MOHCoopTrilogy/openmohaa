@@ -622,6 +622,39 @@ static void R_HZMWaterBuildPlanar( void )
 	ri.Printf( PRINT_DEVELOPER, "^~^~^ HZMWATER planar %dx%d waterline %.1f fbo %d\n", w, h, tr.hzmColdZ, tr.hzmPlanarFbo ? 1 : 0 );
 }
 
+// RIVER preset: the principal axis (PCA of the vertex xy) of the surfaces that carry it - the way the water runs
+static void R_HZMWaterBuildFlow( void )
+{
+	double	n = 0, mx = 0, my = 0, sxx = 0, syy = 0, sxy = 0;
+	int		i, k;
+
+	tr.hzmFlowDir[0] = 1.0f;
+	tr.hzmFlowDir[1] = 0.0f;
+	for ( i = 0; i < tr.world->numsurfaces; i++ ) {
+		msurface_t *surf = &tr.world->surfaces[i];
+		srfBspSurface_t *srf;
+		if ( !surf->shader || surf->shader->hzmWaterPreset != HZM_WPRESET_RIVER || !surf->data ) {
+			continue;
+		}
+		if ( *surf->data != SF_FACE && *surf->data != SF_GRID && *surf->data != SF_TRIANGLES ) {
+			continue;
+		}
+		srf = (srfBspSurface_t *)surf->data;
+		for ( k = 0; k < srf->numVerts; k++ ) {
+			double x = srf->verts[k].xyz[0], y = srf->verts[k].xyz[1];
+			n += 1; mx += x; my += y; sxx += x * x; syy += y * y; sxy += x * y;
+		}
+	}
+	if ( n > 3 ) {
+		double vx, vy, cxy, th;
+		mx /= n; my /= n;
+		vx = sxx / n - mx * mx; vy = syy / n - my * my; cxy = sxy / n - mx * my;
+		th = 0.5 * atan2( 2.0 * cxy, vx - vy );
+		tr.hzmFlowDir[0] = (float)cos( th );
+		tr.hzmFlowDir[1] = (float)sin( th );
+	}
+}
+
 static void R_HZMWaterBuildPresets( void )
 {
 	tr.hzmQuayImage = NULL;
@@ -632,6 +665,7 @@ static void R_HZMWaterBuildPresets( void )
 	if ( !tr.hzmWaterPresetWorld ) {
 		return;
 	}
+	R_HZMWaterBuildFlow();
 	R_HZMWaterBuildFloeNoise();
 	R_HZMWaterBuildIce();
 	R_HZMWaterBuildPlanar();      // finds the COLD waterline (tr.hzmColdWorld) and makes the planar target
@@ -698,6 +732,32 @@ static float HZM_WaterFade( void )
 	return tr.hzmWaterReady ? s_fade : 0.0f;
 }
 
+
+/*
+the Omaha sea is drawn by brush-model entities (script_object ocean sheets at origin 0 0 0, LANE-A in water_omaha_2026-09-05): the
+pass must not skip them, but only when the entity transform is the identity (the vertex shader reads model-space positions as
+world positions) and the shader carries a preset
+*/
+static qboolean HZM_WaterEntityAtOrigin( void )
+{
+	int i, j;
+
+	if ( !tess.shader || !tess.shader->hzmWaterPreset ) {
+		return qfalse;
+	}
+	for ( i = 0; i < 3; i++ ) {
+		if ( fabsf( backEnd.or.origin[i] ) > 0.5f ) {
+			return qfalse;
+		}
+		for ( j = 0; j < 3; j++ ) {
+			if ( fabsf( backEnd.or.axis[i][j] - ( i == j ? 1.0f : 0.0f ) ) > 1e-3f ) {
+				return qfalse;
+			}
+		}
+	}
+	return qtrue;
+}
+
 /*
 ================
 RB_HZMWaterPass - RB_StageIteratorGeneric, after the retail stages and dynamic lights, before the fog pass, for a
@@ -713,7 +773,7 @@ void RB_HZMWaterPass( int deformGen, const vec5_t deformParams )
 
 	fade = HZM_WaterFade();
 	if ( fade <= 0.0f
-	     || backEnd.currentEntity != &tr.worldEntity
+	     || ( backEnd.currentEntity != &tr.worldEntity && !HZM_WaterEntityAtOrigin() )
 	     || backEnd.depthFill
 	     || backEnd.projection2D
 	     || ( backEnd.viewParms.flags & ( VPF_SHADOWMAP | VPF_DEPTHSHADOW ) )
@@ -805,6 +865,13 @@ void RB_HZMWaterPass( int deformGen, const vec5_t deformParams )
 			int raxis = HZM_WaterRampFor( tess.shader->name, &rmin, &rmax );
 			HZM_V4( c5, pr->whitecap, rmin, rmax, (float)raxis );
 			GLSL_SetUniformVec4( sp, UNIFORM_HZMCOLD5, c5 );
+			{
+				vec4_t c6, c7;
+				HZM_V4( c6, pr->yaw, pr->shore, pr->flow, 0.0f );
+				HZM_V4( c7, tr.hzmFlowDir[0], tr.hzmFlowDir[1], 0.0f, 0.0f );
+				GLSL_SetUniformVec4( sp, UNIFORM_HZMCOLD6, c6 );
+				GLSL_SetUniformVec4( sp, UNIFORM_HZMCOLD7, c7 );
+			}
 		}
 		GL_BindToTMU( tr.hzmQuayImage ? tr.hzmQuayImage : tr.whiteImage, TB_HZMQUAY );
 		GL_BindToTMU( tr.hzmFloeImage ? tr.hzmFloeImage : tr.whiteImage, TB_HZMFLOE );

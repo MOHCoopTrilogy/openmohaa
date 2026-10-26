@@ -253,6 +253,8 @@ static uniformInfo_t uniformsInfo[] =
 	{ "u_HzmCold3",        GLSL_VEC4 },
 	{ "u_HzmCold4",        GLSL_VEC4 },
 	{ "u_HzmCold5",        GLSL_VEC4 },
+	{ "u_HzmCold6",        GLSL_VEC4 },
+	{ "u_HzmCold7",        GLSL_VEC4 },
 	{ "u_HzmQuayMap",      GLSL_INT },
 	{ "u_HzmFloeMap",      GLSL_INT },
 	{ "u_HzmIceMap",       GLSL_INT },

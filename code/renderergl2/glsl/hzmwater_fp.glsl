@@ -22,6 +22,8 @@ uniform vec4      u_HzmCold2;       // shallow rgb, planar mix
 uniform vec4      u_HzmCold3;       // quay map world->uv (x0, y0, 1/w, 1/h)
 uniform vec4      u_HzmCold4;       // quay map max distance, drift
 uniform vec4      u_HzmCold5;       // whitecap amount, shoreline alpha ramp (min, max, axis 0/1 S/2 T)
+uniform vec4      u_HzmCold6;       // swell yaw (rad), shore foam amount, flow 0/1
+uniform vec4      u_HzmCold7;       // flow direction xy
 uniform sampler2D u_HzmQuayMap;     // R: distance to the nearest quay wall / max distance
 uniform sampler2D u_HzmFloeMap;     // 256^2 tileable fbm, one field per channel, mean 0.5 sd 0.11
 uniform sampler2D u_HzmIceMap;      // ice colour tile
@@ -176,20 +178,43 @@ void main()
 		vec2  d1 = vec2(0.93, 0.37);
 		vec2  d2 = vec2(-0.55, 0.83);
 		vec2  d3 = vec2(0.20, -0.98);
+		float cyw = cos(u_HzmCold6.x);
+		float syw = sin(u_HzmCold6.x);
+		d1 = vec2(d1.x * cyw - d1.y * syw, d1.x * syw + d1.y * cyw);
+		d2 = vec2(d2.x * cyw - d2.y * syw, d2.x * syw + d2.y * cyw);
+		d3 = vec2(d3.x * cyw - d3.y * syw, d3.x * syw + d3.y * cyw);
 		float c1s = cos(TAU / 900.0 * dot(d1, P.xy) + 43.0 * TW * t);
 		float c2s = cos(TAU / 520.0 * dot(d2, P.xy) + 67.0 * TW * t);
 		float c3s = cos(TAU / 310.0 * dot(d3, P.xy) + 95.0 * TW * t);
 		vec2  sw = d1 * (0.030 * c1s) + d2 * (0.022 * c2s) + d3 * (0.016 * c3s);
 		sw *= -u_HzmCold0.z;
+		float crest = 0.5 + 0.5 * (0.5 * c1s + 0.35 * c2s + 0.15 * c3s);
 		float calm  = smoothstep(0.45, 0.62, 0.5 + 0.28 * sin(P.x / 430.0 + 1.3) * sin(P.y / 390.0) + 0.22 * sin((P.x + P.y) / 610.0 + 0.4));
 		float fadeC = clamp(1.0 - dist / 2600.0, 0.12, 1.0);
-		vec2  ch    = (s1.xy * 0.55 + s2.xy * 0.40) * 0.10 * u_HzmCold0.w * fadeC * (1.0 - ((u_HzmCold0.x < 1.5) ? 0.6 : 0.0) * calm);     // oily slicks only in the cold harbour
+		// chop: the two legacy ripple layers + a third, larger and rotated one (no visible tile on calm water) and a
+		// large-scale amplitude variation; rivers stretch the ripples along the water's own axis and drift them downstream
+		vec2  chopv = s1.xy * 0.55 + s2.xy * 0.40;
+		vec2  s3v   = texture2D(u_HzmRippleMap, vec2(P.x * 0.8660 - P.y * 0.5, P.x * 0.5 + P.y * 0.8660) / 1150.0 + vec2(0.031, -0.017) * t).xy * 2.0 - vec2(1.0);
+		chopv += s3v * 0.45;
+		float macro = texture2D(u_HzmFloeMap, P.xy / 2300.0 + vec2(0.13, 0.71)).r;
+		float mm    = clamp(1.0 + (macro - 0.5) * 4.0, 0.5, 1.5);
+		if (u_HzmCold6.z > 0.5)
+		{
+			vec2 fd  = u_HzmCold7.xy;
+			vec2 fpp = vec2(-fd.y, fd.x);
+			vec2 f1  = texture2D(u_HzmRippleMap, vec2(dot(P.xy, fd) / 1300.0 - 0.009 * t, dot(P.xy, fpp) / 240.0)).xy * 2.0 - vec2(1.0);
+			vec2 f2  = texture2D(u_HzmRippleMap, vec2(dot(P.xy, fd) / 520.0 - 0.023 * t, dot(P.xy, fpp) / 130.0)).xy * 2.0 - vec2(1.0);
+			chopv = f1 * 0.6 + f2 * 0.4;
+		}
+		vec2  ch    = chopv * 0.10 * u_HzmCold0.w * fadeC * mm * (1.0 - ((u_HzmCold0.x < 1.5) ? 0.6 : 0.0) * calm);     // oily slicks only in the cold harbour
 		vec3  Nn    = normalize(vec3(sw + ch, 1.0));
 		float ndvC  = max(dot(Nn, E), 0.02);
 		float Fc    = min(0.02 + 0.98 * pow(1.0 - ndvC, 5.0), 0.80);
 
 		vec3 body = mix(u_HzmCold1.rgb, u_HzmCold2.rgb, pow(ndvC, 2.2)) + u_HzmWetSkyZ.rgb * 0.025;
 		body *= 0.55 + 0.45 * lmb;           // the baked light: lamp pools lift it, baked shadow keeps it dark
+		body *= mix(1.0, 0.62 + 0.76 * crest, clamp(u_HzmCold0.z, 0.0, 1.0));     // crests a little lighter than the troughs: the swell reads as rolling
+		body *= 0.92 + 0.16 * (macro - 0.5) * 4.0 * 0.5 + 0.0;
 
 		vec3 Rc = reflect(-E, Nn);
 		Rc.z = max(Rc.z, 0.03);
@@ -265,11 +290,32 @@ void main()
 		float wcap = 0.0;
 		if (u_HzmCold5.x > 0.0)
 		{
-			float crest = 0.5 + 0.5 * (0.5 * c1s + 0.35 * c2s + 0.15 * c3s);
-			float nW = texture2D(u_HzmFloeMap, P.xy / 310.0 + vec2(0.19, 0.43)).b;
-			wcap = smoothstep(0.72, 0.98, crest + (nW - 0.5) * 3.0) * u_HzmCold5.x * clamp(u_HzmCold0.z / 1.8, 0.2, 1.0) * fadeC;
-			wcol = mix(wcol, vec3(0.74, 0.80, 0.82) * (0.40 + 0.60 * min(lmb * 1.3, 1.2)), wcap * 0.9);
+			// crest lines: foam only on the swell crests, in streaks along the wave front (noise stretched along it)
+			vec2  dpw = vec2(-d1.y, d1.x);
+			float nW  = texture2D(u_HzmFloeMap, vec2(dot(P.xy, dpw) / 4200.0, dot(P.xy, d1) / 150.0) + vec2(0.19, 0.43)).b;
+			float nH  = texture2D(u_HzmFloeMap, vec2(dot(P.xy, dpw) / 900.0, dot(P.xy, d1) / 70.0) + vec2(0.71, 0.29)).g;     // fine breakup: thin broken lines, not blobs
+			wcap = 0.8 * smoothstep(0.86, 0.99, crest + (nW - 0.5) * 1.3) * smoothstep(0.42, 0.62, nH) * u_HzmCold5.x * clamp(u_HzmCold0.z / 1.8, 0.2, 1.0) * fadeC;
 		}
+		if (u_HzmCold6.y > 0.0 && u_HzmCold5.w > 0.5)
+		{
+			// surf lines parallel to the shore: where the shoreline sheet fades toward the sand, bands of foam run along it
+			float rcoord = (u_HzmCold5.w < 1.5) ? var_St.x : var_St.y;
+			float rampv  = clamp((u_HzmCold5.z - u_HzmCold5.y) * rcoord + u_HzmCold5.y, 0.0, 1.0);
+			float band   = smoothstep(0.97, 0.62, rampv) * smoothstep(0.02, 0.28, rampv);
+			float nS     = texture2D(u_HzmFloeMap, P.xy / 640.0 + vec2(0.52, 0.07)).r;
+			float nS2    = texture2D(u_HzmFloeMap, P.xy / 210.0 + vec2(0.33, 0.58)).g;
+			float nL     = texture2D(u_HzmFloeMap, P.xy / 1900.0 + vec2(0.81, 0.27)).b;
+			// bands of uneven spacing; every band has its own thickness and a slow fade-out / re-form of its own
+			float ph     = rcoord * (70.0 + 130.0 * (nL - 0.5) + 55.0) + (nS - 0.5) * 22.0 - 95.0 * TW * t;
+			float bid    = floor((ph + 3.14159265) / TAU);
+			float h1     = fract(sin(bid * 12.9898) * 43758.5453);
+			float h2     = fract(sin(bid * 78.233 + 1.7) * 24634.6345);
+			float life   = smoothstep(0.15, 0.60, 0.5 + 0.5 * sin(TW * (30.0 + floor(h2 * 40.0)) * t + bid * 2.3));
+			float lines  = 0.5 + 0.5 * cos(ph);
+			float fthr   = 0.50 + 0.40 * h1;
+			wcap = max(wcap, band * smoothstep(fthr, fthr + 0.16, lines) * life * smoothstep(0.38, 0.62, nS2 + (nS - 0.5)) * u_HzmCold6.y * clamp(1.0 - dist / 7000.0, 0.0, 1.0));
+		}
+		wcol = mix(wcol, vec3(0.74, 0.80, 0.82) * (0.40 + 0.60 * min(lmb * 1.3, 1.2)), wcap * 0.9);
 		vec3  col  = mix(wcol + u_HzmWetSunCol.rgb * gc * 0.6 * (1.0 - wcap), iceCol, iceA);
 		col = mix(col, u_GlobalFogColor.rgb, fC);
 		float ramp = 1.0;

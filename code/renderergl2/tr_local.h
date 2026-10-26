@@ -1115,6 +1115,8 @@ typedef enum
 	UNIFORM_HZMCOLD3,       // quay map world->uv (x0, y0, 1/width, 1/height)
 	UNIFORM_HZMCOLD4,       // (quay map max distance in u, drift in u, 0, 0)
 	UNIFORM_HZMCOLD5,       // (whitecap amount, 0, 0, 0)
+	UNIFORM_HZMCOLD6,       // (swell yaw rad, shore foam, flow 0/1, 0)
+	UNIFORM_HZMCOLD7,       // (flow direction xy, 0, 0)
 	UNIFORM_HZMQUAYMAP,     // sampler, TB_HZMQUAY
 	UNIFORM_HZMFLOEMAP,     // sampler, TB_HZMFLOE
 	UNIFORM_HZMICEMAP,      // sampler, TB_HZMICE
@@ -2895,6 +2897,7 @@ typedef struct {
     int hzmWaterPresetWorld;			// non-zero: this map has preset water
     qboolean hzmColdWorld;				// this map has COLD preset water (planar reflection candidate)
     float hzmColdZ;						// its waterline
+    vec2_t hzmFlowDir;					// RIVER preset: principal axis of its water surfaces (world xy)
     image_t *hzmPlanarImage;			// planar reflection colour (half scene size, scene format)
     FBO_t *hzmPlanarFbo;
     qboolean hzmPlanarLive;				// the planar view was rendered THIS frame
