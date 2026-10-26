@@ -38,6 +38,7 @@ static void RB_HZMScopeCvars(void)
 void RB_HZMScopeLive(qboolean live)
 {
 	RB_HZMScopeCvars();
+	R_HzmLensPublishLive(live);   // HZM coop [scopes1025] the PiP composite runs in the same chain
 	live = (live && tr.hzmScopeShader.program && tr.screenScratchFbo) ? qtrue : qfalse;
 	if ((r_ppScopeLive->integer != 0) != (live != qfalse)) {
 		ri.Cvar_Set("r_ppScopeLive", live ? "1" : "0");
@@ -64,6 +65,9 @@ void RB_HZMScope(FBO_t *srcFbo, ivec4_t srcBox)
 	}
 	if (s_st[0] <= 0.001f || s_st[1] <= 0.01f) {
 		return;
+	}
+	if (R_HzmLensStateWantsPip() && tr.hzmLensFbo) {
+		return;   // HZM coop [scopes1025] picture-in-picture: RB_HZMLensComposite already drew the optics
 	}
 
 	VectorSet4(color, s_st[0] > 1.0f ? 1.0f : s_st[0], s_st[1], s_st[2], s_st[3]);

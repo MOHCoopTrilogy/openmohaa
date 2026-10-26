@@ -64,6 +64,7 @@ extern const char *fallbackShader_lowhealth_fp;
 extern const char *fallbackShader_suppression_fp;
 extern const char *fallbackShader_hitblood_fp;
 extern const char *fallbackShader_hzmscope_fp;   // HZM coop [bug-3462]
+extern const char *fallbackShader_hzmlens_fp;    // HZM coop [scopes1025]
 extern const char *fallbackShader_heathaze_fp;
 extern const char *fallbackShader_dof_fp;
 extern const char *fallbackShader_underwater_fp;
@@ -1992,6 +1993,20 @@ void GLSL_InitGPUShaders(void)
 		ri.Printf(PRINT_WARNING, "hzmscope shader failed to build - scope optics pass disabled\n");
 	}
 
+	// HZM coop [scopes1025] picture-in-picture scope composite. TRY-built: a driver that rejects it costs the PiP (cgame reads
+	// r_ppScopePipLive 0 and keeps the bug-3462 view), never the session.
+	if (GLSL_TryInitGPUShader(&tr.hzmLensShader, "hzmlens", attribs, qtrue, extradefines, qtrue, fallbackShader_tonemap_vp, fallbackShader_hzmlens_fp))
+	{
+		GLSL_InitUniforms(&tr.hzmLensShader);
+		GLSL_SetUniformInt(&tr.hzmLensShader, UNIFORM_TEXTUREMAP, TB_COLORMAP);
+		GLSL_SetUniformInt(&tr.hzmLensShader, UNIFORM_LEVELSMAP,  TB_LEVELSMAP);
+		GLSL_FinishGPUShader(&tr.hzmLensShader);
+	}
+	else
+	{
+		ri.Printf(PRINT_WARNING, "hzmlens shader failed to build - picture-in-picture scope disabled\n");
+	}
+
 	numEtcShaders++;
 
 	// HZM gl2 POST-FX PORT (bug-1157): depth of field. Two samplers - the blurred colour on
@@ -2421,6 +2436,7 @@ void GLSL_ShutdownGPUShaders(void)
 	GLSL_DeleteGPUShader(&tr.suppressionShader);
 	GLSL_DeleteGPUShader(&tr.hitBloodShader);   // HZM coop [user 08-02]
 	GLSL_DeleteGPUShader(&tr.hzmScopeShader);   // HZM coop [bug-3462] (zeroed struct when it never built: no-op)
+	GLSL_DeleteGPUShader(&tr.hzmLensShader);    // HZM coop [scopes1025]
 	GLSL_DeleteGPUShader(&tr.dofShader);
 	GLSL_DeleteGPUShader(&tr.underwaterShader);
 	if (tr.hzmLtSkyShaderOk) {

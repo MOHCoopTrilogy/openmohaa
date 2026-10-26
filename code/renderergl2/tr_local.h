@@ -1405,6 +1405,7 @@ typedef struct {
     qboolean	farplane_cull;
     qboolean	renderTerrain; // added in 2.0
 } viewParms_t;
+void R_HzmLensRenderView(const viewParms_t *mainParms);   // HZM coop [scopes1025] the picture-in-picture lens scene (tr_hzm_lens.c)
 
 
 /*
@@ -2709,6 +2710,14 @@ typedef struct {
 	shaderProgram_t suppressionShader;  // HZM gl1-parity suppression tunnel-vignette
 	shaderProgram_t hitBloodShader;     // HZM coop [user 08-02] on-hit blood splatter
 	shaderProgram_t hzmScopeShader;     // HZM coop [bug-3462] modern scope optics (TRY-built: 0 = pass off)
+	shaderProgram_t hzmLensShader;      // HZM coop [scopes1025] picture-in-picture lens composite (TRY-built: 0 = PiP off)
+	FBO_t          *hzmLensFbo;         // lens scene target (N x N, HDR), lazily created
+	image_t        *hzmLensColor;
+	image_t        *hzmLensDepth;
+	FBO_t          *hzmLensScratchFbo;  // scene-sized HDR scratch the composite writes (screenScratch is RGBA8)
+	int             hzmLensSize;
+	int             hzmLensScratchW, hzmLensScratchH;
+	qboolean        hzmLensValid;       // the lens view was queued this frame: the composite may run
 	shaderProgram_t heatHazeShader;     // HZM gl1-parity heat haze + localized muzzle shimmer
 	shaderProgram_t dofShader;          // HZM gl1-parity depth of field (r_ppDoF)
 	shaderProgram_t underwaterShader;   // HZM NEW: underwater/slime/lava screen distortion (r_ppUnderwaterFx)

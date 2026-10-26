@@ -1952,6 +1952,7 @@ reproduces the shipped picture and reports its error). cg_adsSightDebug 1 prints
 =================================================================================================
 */
 #include "cg_adssights.h"
+#include "cg_adssights_scope.h" // [scopes1025]
 
 static const adsSight_t *CG_FindAdsSight(const char *tikiName)
 {
@@ -1963,6 +1964,11 @@ static const adsSight_t *CG_FindAdsSight(const char *tikiName)
     for (i = 0; i < (int)(sizeof(s_adsSights) / sizeof(s_adsSights[0])); i++) {
         if (!Q_stricmp(tikiName, s_adsSights[i].tiki)) {
             return &s_adsSights[i];
+        }
+    }
+    for (i = 0; i < (int)(sizeof(s_adsSightsScope) / sizeof(s_adsSightsScope[0])); i++) { // [scopes1025]
+        if (!Q_stricmp(tikiName, s_adsSightsScope[i].tiki)) {
+            return &s_adsSightsScope[i];
         }
     }
     return NULL;
@@ -4302,8 +4308,8 @@ coopOthersDone:;
     // viewmodel/zoom behaviour this block exists for is unchanged; it simply stops firing in 3P,
     // where there is no viewmodel to hide.
     if (!(s1->renderfx & RF_ALWAYSDRAW) && s1->parent != ENTITYNUM_NONE && s1->parent == cg.snap->ps.clientNum
-        && !bThirdPerson && (!cg_drawviewmodel->integer || cg.snap->ps.stats[STAT_INZOOM]
-                             || CG_HzmScopeActive())) { // [bug-3462] and through the scope-out ease
+        && !bThirdPerson && (!cg_drawviewmodel->integer
+                             || (!CG_HzmScopeRaiseOwns() && (cg.snap->ps.stats[STAT_INZOOM] || CG_HzmScopeActive())))) { // [bug-3462] and through the scope-out ease; [scopes1025] the raised rifle stays
         // hide all surfaces while zooming or if the viewmodel shouldn't be shown
         for (i = 0; i < MAX_MODEL_SURFACES; i++) {
             model.surfaces[i] |= MDL_SURFACE_NODRAW;
@@ -4584,8 +4590,8 @@ coopOthersDone:;
             cgi.ForceUpdatePose(&model);
 
             if ((cent->currentState.eFlags & EF_UNARMED) || cg_drawviewmodel->integer <= 1
-                || cg.snap->ps.stats[STAT_INZOOM] || cg.snap->ps.stats[STAT_HEALTH] <= 0
-                || CG_HzmScopeActive()) { // [bug-3462] the gun stays down while the scope view eases out
+                || (!CG_HzmScopeRaiseOwns() && cg.snap->ps.stats[STAT_INZOOM]) || cg.snap->ps.stats[STAT_HEALTH] <= 0
+                || (!CG_HzmScopeRaiseOwns() && CG_HzmScopeActive())) { // [bug-3462] the gun stays down while the scope view eases out; [scopes1025] PiP raise keeps it
                 // unarmed or zooming, hide the arms
                 CoopGunVisNote(&s_coopArmsVis, 1, "HIDE-ARMS", (cent->currentState.eFlags & EF_UNARMED) ? 1 : 0);
                 for (i = 0; i < MAX_MODEL_SURFACES; i++) {

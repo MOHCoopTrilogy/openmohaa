@@ -1914,6 +1914,7 @@ CG_OffsetFirstPersonView
 ===============
 */
 #include "cg_adssights.h"
+#include "cg_adssights_scope.h" // [scopes1025] scoped rifles (F = objective, R = ocular)
 
 /*
 =================================================================================================
@@ -1969,6 +1970,11 @@ static const adsSight_t *CG_FindAdsSightByName(const char *wpn)
     for (i = 0; i < (int)(sizeof(s_adsSights) / sizeof(s_adsSights[0])); i++) {
         if (s_adsSights[i].name && !Q_stricmp(wpn, s_adsSights[i].name)) {
             return &s_adsSights[i];
+        }
+    }
+    for (i = 0; i < (int)(sizeof(s_adsSightsScope) / sizeof(s_adsSightsScope[0])); i++) { // [scopes1025]
+        if (s_adsSightsScope[i].name && !Q_stricmp(wpn, s_adsSightsScope[i].name)) {
+            return &s_adsSightsScope[i];
         }
     }
     return NULL;
@@ -5919,6 +5925,10 @@ qboolean CG_AimingDownSights(void)
         return qfalse;
     }
     if (cg.snap->ps.stats[STAT_INZOOM]) {
+        // [scopes1025] a picture-in-picture scope raises the rifle to the eye through the ADS pose (pose, sway, breath hold, aim gates)
+        if (CG_HzmScopeRaiseOwns() && !(cg.snap->ps.pm_flags & PMF_CAMERA_VIEW)) {
+            return qtrue;
+        }
         return qfalse;
     }
     if (cg.snap->ps.pm_flags & PMF_CAMERA_VIEW) {
@@ -8223,7 +8233,7 @@ static int CG_CalcFov(void)
     cg.fRefFovXSin     = sin(fov_x / 114.0f);
     cg.fRefFovYCos     = cos(fov_y / 114.0f);
     cg.fRefFovYSin     = sin(fov_y / 114.0f);
-    cg.zoomSensitivity = cg.refdef.fov_y / 75.0;
+    cg.zoomSensitivity = cg.refdef.fov_y / 75.0 * CG_HzmScopeSensScale(); // [scopes1025] the wide main view of a PiP scope must not speed the aim up
     return inwater;
 }
 

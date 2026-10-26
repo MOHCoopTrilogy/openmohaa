@@ -441,6 +441,14 @@ void RB_BeginDrawingView (void) {
 		clearBits |= GL_COLOR_BUFFER_BIT;
 	}
 
+	// HZM coop [scopes1025] the lens FBO is a colour view: never leave last frame's picture where nothing draws (the fog / fastsky clear above
+	// already set a colour clear for those cases; this only adds the black one)
+	if ( tr.hzmLensFbo && backEnd.viewParms.targetFbo == tr.hzmLensFbo && !( clearBits & GL_COLOR_BUFFER_BIT ) )
+	{
+		clearBits |= GL_COLOR_BUFFER_BIT;
+		qglClearColor( 0.0f, 0.0f, 0.0f, 1.0f );
+	}
+
 	qglClear( clearBits );
 
 	if ( ( backEnd.refdef.rdflags & RDF_HYPERSPACE ) )
@@ -1681,7 +1689,9 @@ const void	*RB_DrawSurfs( const void *data ) {
 		qglColorMask(!backEnd.colorMask[0], !backEnd.colorMask[1], !backEnd.colorMask[2], !backEnd.colorMask[3]);
 		backEnd.depthFill = qfalse;
 
-		if (!isShadowView)
+		// HZM coop [scopes1025] the PiP lens view needs none of the scene-depth copies / shadow mask below (no sun shadow receive, no soft
+		// edges); skipping them keeps the main scene's depth snapshot untouched and saves two full-scene copies
+		if (!isShadowView && !(tr.hzmLensFbo && backEnd.viewParms.targetFbo == tr.hzmLensFbo))
 		{
 			if (R_MsaaResolvesActive() && backEnd.viewParms.targetFbo == NULL)
 			{
@@ -1886,7 +1896,8 @@ const void	*RB_DrawSurfs( const void *data ) {
 			SetViewportAndScissor();
 		}
 
-		if (glRefConfig.framebufferObject && r_drawSunRays->integer)
+		if (glRefConfig.framebufferObject && r_drawSunRays->integer
+		    && !(tr.hzmLensFbo && backEnd.viewParms.targetFbo == tr.hzmLensFbo)) // [scopes1025] the lens view leaves the sun-ray mask / flare queries to the main view
 		{
 			FBO_t *oldFbo = glState.currentFBO;
 			FBO_Bind(tr.sunRaysFbo);
@@ -1914,7 +1925,9 @@ const void	*RB_DrawSurfs( const void *data ) {
 		RB_ShadowFinish();		
 
 		// add light flares on lights that aren't obscured
-		RB_RenderFlares();
+		if (!(tr.hzmLensFbo && backEnd.viewParms.targetFbo == tr.hzmLensFbo)) { // [scopes1025] flares test main-view depth: not in the lens
+			RB_RenderFlares();
+		}
 	}
 
 	if (glRefConfig.framebufferObject && tr.renderCubeFbo && backEnd.viewParms.targetFbo == tr.renderCubeFbo)
@@ -2411,6 +2424,10 @@ const void *RB_PostProcess(const void *data)
 	srcBox[1] = backEnd.viewParms.viewportY;
 	srcBox[2] = backEnd.viewParms.viewportWidth;
 	srcBox[3] = backEnd.viewParms.viewportHeight;
+
+	// HZM coop [scopes1025] picture-in-picture scope: lens picture inside the circle, the blurred wide world around it - on the
+	// HDR scene, BEFORE fog / bloom / tone map, so one exposure and one grade treat both (tr_hzm_lens.c)
+	RB_HZMLensComposite(srcFbo, srcBox);
 
 	// HZM gl2 fog parity (2026-07-28, workflow wf_053a935d-2dd): the fog must be applied
 	// BEFORE the tone stage, because gl1 is NOT untonemapped as the old comment here

@@ -74,6 +74,9 @@ static cvar_t *cg_scopeShadow;    // scope-shadow strength (0 = always centred)
 static cvar_t *cg_scopeInTime;    // seconds, scope in
 static cvar_t *cg_scopeOutTime;   // seconds, scope out
 static cvar_t *cg_scopeDebug;     // 1 = one ^~^~^ SCOPE line per second while scoped
+static cvar_t *cg_scopePip;       // [scopes1025] 1 = picture-in-picture lens (gl2): the wide world stays, the zoom is a second scene
+static cvar_t *cg_scopeRaise;     // [scopes1025] 1 = the rifle stays in the view and is raised to the eye (ADS pose) while scoped
+static cvar_t *r_ppScopePipLive;  // renderer-published: the PiP composite can run
 static cvar_t *r_ppScopeState;
 static cvar_t *r_ppScopeLive;
 
@@ -89,6 +92,8 @@ static struct {
     float    lastYaw, lastPitch;
     qboolean haveAng;
     qboolean holdHip;   // this frame: keep the hip fov (the zoom fov is still only in the next snapshot)
+    qboolean pip;       // [scopes1025] this scope is shown as a picture-in-picture lens (kept through the scope-out ease)
+    float    lensFov;   // [scopes1025] square lens-scene fov (degrees) published to the renderer
     int      lastTime;
     float    lens;      // published lens radius (fraction of screen height)
     float    eye;       // published pupil radius (lens radii)
@@ -110,6 +115,9 @@ static void CG_HzmScopeCvars(void)
     cg_scopeDebug   = cgi.Cvar_Get("cg_scopeDebug", "0", 0);
     r_ppScopeState  = cgi.Cvar_Get("r_ppScopeState", "0", 0);
     r_ppScopeLive   = cgi.Cvar_Get("r_ppScopeLive", "0", 0);
+    cg_scopePip     = cgi.Cvar_Get("cg_scopePip", "1", CVAR_ARCHIVE);
+    cg_scopeRaise   = cgi.Cvar_Get("cg_scopeRaise", "1", CVAR_ARCHIVE);
+    r_ppScopePipLive = cgi.Cvar_Get("r_ppScopePipLive", "0", 0);
 }
 
 static qhandle_t s_hRet[HO_NUM];
@@ -278,6 +286,11 @@ static void CG_HzmScopeFrame(float camFov)
         }
         hs.optic = optic;
         hs.remap = (known && cg_scopeTrueMag->integer) ? qtrue : qfalse;
+        // [scopes1025] picture-in-picture only for a known optic on a renderer whose composite is live; decided at the scope-in and kept
+        // through the ease-out so the view never changes mode mid-scope
+        if (hs.frac <= 0.0f) {
+            hs.pip = (hs.remap && cg_scopePip->integer && r_ppScopePipLive->integer && CG_HZM_RendererIsGl2()) ? qtrue : qfalse;
+        }
         if (hs.remap) {
             hs.scopeFov = 2.0f * RAD2DEG(atan(tan(DEG2RAD(40.0f)) / s_hzmOptics[optic].mag));
         } else {
@@ -299,6 +312,17 @@ static void CG_HzmScopeFrame(float camFov)
         hs.frac = 0.0f;
     }
     hs.ease = CG_HzmSmooth(hs.frac);
+    if (hs.frac <= 0.0f) {
+        hs.pip = qfalse;
+    }
+    hs.lensFov = 0.0f;
+    if (hs.pip && hs.optic >= 0) {
+        // the lens square: the lens circle (cg_scopeRadius of the screen height) plus a 4 percent margin, at the optic's magnification
+        // (vertical half-tan of the old full-screen scope view = 0.75 * tan(scopeFov / 2), 4:3 reference)
+        float scopeHalfTan = (float)tan(DEG2RAD(hs.scopeFov * 0.5f));
+        float halfTan      = 1.04f * 2.0f * cg_scopeRadius->value * 0.75f * scopeHalfTan;
+        hs.lensFov         = 2.0f * RAD2DEG((float)atan(halfTan));
+    }
 
     // ---- scope shadow: where the eye sits behind the eyepiece
     yawVel = pitchVel = 0.0f;
@@ -350,7 +374,7 @@ static void CG_HzmScopeFrame(float camFov)
     }
 
     // ---- publish to the gl2 pass (only on change; "0" once when the scope is down)
-    hs.lens = cg_scopeRadius->value * (1.0f + 0.55f * (1.0f - hs.ease));
+    hs.lens = cg_scopeRadius->value * (hs.pip ? 1.0f : (1.0f + 0.55f * (1.0f - hs.ease)));
     hs.eye  = 1.18f; // with the pupil's 0.86..1.0 fall-off: a centred eye casts no shadow at all
     {
         char buf[128];
@@ -360,13 +384,14 @@ static void CG_HzmScopeFrame(float camFov)
             Com_sprintf(
                 buf,
                 sizeof(buf),
-                "%.4f %.4f %.4f %.4f %.3f %.3f",
+                "%.4f %.4f %.4f %.4f %.3f %.3f %.3f",
                 hs.ease,
                 hs.lens,
                 hs.sx,
                 hs.sy,
                 hs.eye,
-                s_hzmOptics[hs.optic >= 0 ? hs.optic : HO_M73B1].warm
+                s_hzmOptics[hs.optic >= 0 ? hs.optic : HO_M73B1].warm,
+                hs.lensFov
             );
         }
         if (strcmp(buf, hs.pub)) {
@@ -406,6 +431,10 @@ qboolean CG_HzmScopeWorldFov(float camFov, float *outFov)
         *outFov = hs.hipFov;
         return qtrue;
     }
+    if (hs.pip && hs.frac > 0.0f && hs.hipFov > 1.0f) {
+        *outFov = hs.hipFov; // [scopes1025] the MAIN view stays wide; the zoom is the lens scene (renderer)
+        return qtrue;
+    }
     if (hs.frac <= 0.0f || (hs.ease >= 0.9999f && !hs.remap)) {
         return qfalse; // unlisted scope fully in: the server's fov, untouched
     }
@@ -417,6 +446,31 @@ qboolean CG_HzmScopeWorldFov(float camFov, float *outFov)
     b = (float)log(tan(DEG2RAD(hs.scopeFov * 0.5f)));
     *outFov = 2.0f * RAD2DEG(atan(exp(a + (b - a) * e)));
     return qtrue;
+}
+
+// [scopes1025] helpers for cg_view.c / cg_modelanim.c
+qboolean CG_HzmScopePipActive(void)
+{
+    return (cg_hzmScope && hs.pip && hs.frac > 0.0f) ? qtrue : qfalse;
+}
+
+// the rifle stays drawn and is raised to the eye through the ADS pose while a PiP scope is up
+qboolean CG_HzmScopeRaiseOwns(void)
+{
+    return (CG_HzmScopePipActive() && cg_scopeRaise && cg_scopeRaise->integer) ? qtrue : qfalse;
+}
+
+// mouse sensitivity scale of the lens against the wide view, eased with the scope (1 outside PiP)
+float CG_HzmScopeSensScale(void)
+{
+    float a, b;
+
+    if (!CG_HzmScopePipActive() || hs.hipFov < 1.0f || hs.scopeFov < 1.0f) {
+        return 1.0f;
+    }
+    a = (float)tan(DEG2RAD(hs.scopeFov * 0.5f)) / (float)tan(DEG2RAD(hs.hipFov * 0.5f));
+    b = (float)exp(log(a) * hs.ease);
+    return b;
 }
 
 qboolean CG_HzmScopeActive(void)

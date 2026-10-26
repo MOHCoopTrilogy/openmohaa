@@ -968,6 +968,11 @@ void RE_RenderScene( const refdef_t *fd ) {
 	if (!( fd->rdflags & RDF_NOWORLDMODEL )) {
 		R_GfxProbe_ViewBegin(GFXVIEW_MAIN);
 	}
+	// HZM coop [scopes1025] picture-in-picture scope: the magnified lens scene first (a no-op unless cgame published a lens fov), so
+	// tr.viewParms ends the frame as the MAIN view for the post cmd; same refdef origin/axes, own FBO, shares the scene lists
+	if ( !( fd->rdflags & RDF_NOWORLDMODEL ) ) {
+		R_HzmLensRenderView( &parms );
+	}
 	R_RenderView( &parms );
 	if (!( fd->rdflags & RDF_NOWORLDMODEL )) {
 		R_GfxProbe_ViewEnd(GFXVIEW_MAIN);
