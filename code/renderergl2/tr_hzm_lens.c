@@ -297,7 +297,24 @@ static qboolean R_HzmLensEnsureScratch(void)
 }
 
 // per pass: viewinfo (lens centre offset, mode 0 = full composite / 1 = rim only) and the texture units (0 = scene, 1 = wide, 2 = 1/4 blurred wide)
-#define LENS_PASS(mode) do { 	vec4_t vi_; 	VectorSet4(vi_, st[7], st[8], (mode), 0.0f); 	GLSL_BindProgram(&tr.hzmLensShader); 	GLSL_SetUniformVec4(&tr.hzmLensShader, UNIFORM_VIEWINFO, vi_); 	GL_BindToTMU(tr.hzmLensColor, TB_LEVELSMAP); 	GL_BindToTMU(tr.hzmLensQuartImg, TB_NORMALMAP); } while (0)
+#define LENS_PASS(mode) do { 	vec4_t vi_; 	VectorSet4(vi_, st[7], st[8], (mode), (tr.hzmGlassDrawn > 0) ? 1.0f : 0.0f); 	GLSL_BindProgram(&tr.hzmLensShader); 	GLSL_SetUniformVec4(&tr.hzmLensShader, UNIFORM_VIEWINFO, vi_); 	GL_BindToTMU(tr.hzmLensColor, TB_LEVELSMAP); 	GL_BindToTMU(tr.hzmLensQuartImg, TB_NORMALMAP); GL_BindToTMU(tr.hzmMaskImg, TB_DELUXEMAP); } while (0)
+
+static qboolean R_HzmLensEnsureMask(void)
+{
+	if (tr.hzmMaskFbo) {
+		return qtrue;
+	}
+	if (tr.sceneWidth <= 0) {
+		return qfalse;
+	}
+	tr.hzmMaskImg   = R_CreateImage("*hzmMask", NULL, tr.sceneWidth, tr.sceneHeight, IMGTYPE_COLORALPHA, IMGFLAG_NO_COMPRESSION | IMGFLAG_CLAMPTOEDGE, GL_RGBA8);
+	tr.hzmMaskDepth = R_CreateImage("*hzmMaskDepth", NULL, tr.sceneWidth, tr.sceneHeight, IMGTYPE_COLORALPHA, IMGFLAG_NO_COMPRESSION | IMGFLAG_CLAMPTOEDGE, GL_DEPTH_COMPONENT24);
+	tr.hzmMaskFbo   = FBO_Create("_hzmMask", tr.sceneWidth, tr.sceneHeight);
+	FBO_AttachImage(tr.hzmMaskFbo, tr.hzmMaskImg, GL_COLOR_ATTACHMENT0, 0);
+	FBO_AttachImage(tr.hzmMaskFbo, tr.hzmMaskDepth, GL_DEPTH_ATTACHMENT, 0);
+	R_CheckFBO(tr.hzmMaskFbo);
+	return qtrue;
+}
 
 /*
 Back end. Top of RB_PostProcess, on the resolved HDR scene (srcFbo), before bloom / tone map.
@@ -307,6 +324,7 @@ void RB_HZMLensComposite(FBO_t *srcFbo, ivec4_t srcBox)
 	const float *st;
 	vec4_t       color, params;
 
+	tr.hzmLensPostSkip = qfalse;
 	if (!tr.hzmLensValid) {
 		return;
 	}
@@ -332,6 +350,16 @@ void RB_HZMLensComposite(FBO_t *srcFbo, ivec4_t srcBox)
 	FBO_Blit(tr.hzmLensFbo, NULL, NULL, tr.hzmLensHalfFbo, NULL, NULL, NULL, 0);
 	FBO_Blit(tr.hzmLensHalfFbo, NULL, NULL, tr.hzmLensQuartFbo, NULL, NULL, NULL, 0);
 
+	// 0: the ocular GLASS coverage: the weapon view's lens surface alone, solid white, into the mask target. The glass is real geometry of the rifle, so the lens
+	// moves, sways and recoils with it and has its true shape; no glass mesh on a model (tr.hzmGlassDrawn 0) = the screen-space circle fallback
+	tr.hzmGlassDrawn = 0;
+	if (s_lateGunValid && !(ri.Cvar_Get("r_ppScopeDbg", "0", 0)->integer & 1) && R_HzmLensEnsureMask()) {
+		RB_HzmLensDrawGun(&s_lateGun, tr.hzmMaskFbo);
+	}
+
+	if (ri.Cvar_Get("r_ppScopeCrash", "0", 0)->integer > 1) {
+		ri.Printf(PRINT_ALL, "^~^~^ GLASS n=%d amt=%.2f R=%.3f lc=%.3f,%.3f\n", tr.hzmGlassDrawn, st[0], st[1], st[7], st[8]);
+	}
 	LENS_PASS(0.0f);   // 1: the scope picture inside the circle, the blurred wide world outside
 	FBO_SetHzmParams(params);
 	FBO_Blit(srcFbo, srcBox, NULL, tr.hzmLensScratchFbo, srcBox, &tr.hzmLensShader, color, 0);
@@ -340,11 +368,15 @@ void RB_HZMLensComposite(FBO_t *srcFbo, ivec4_t srcBox)
 	LENS_STAGE(21);
 
 	// 2: the VIEW WEAPON, last, on top, with its usual depth hack and weapon projection - the real rifle and hands, nothing composited from a render target
-	if (s_lateGunValid) {
+	if (s_lateGunValid && !(ri.Cvar_Get("r_ppScopeDbg", "0", 0)->integer & 4)) {
 		RB_HzmLensDrawGun(&s_lateGun, srcFbo);
 		s_lateGunValid = qfalse;
 	}
 
+	if (ri.Cvar_Get("r_ppScopeDbg", "0", 0)->integer & 2) {
+		LENS_STAGE(22);
+		return;
+	}
 	// 3: the eyepiece rim as a true circle over the weapon's faceted bell (ring only; the lens interior stays whatever the weapon left of it)
 	LENS_PASS(1.0f);
 	GL_BindToTMU(tr.hzmLensScratchImg, TB_DELUXEMAP);   // the finished picture of pass 1: it is put back inside the circle over whatever the weapon drew there
@@ -352,5 +384,6 @@ void RB_HZMLensComposite(FBO_t *srcFbo, ivec4_t srcBox)
 	FBO_Blit(srcFbo, srcBox, NULL, tr.hzmLensScratch2Fbo, srcBox, &tr.hzmLensShader, color, 0);
 	FBO_SetHzmParams(NULL);
 	FBO_FastBlit(tr.hzmLensScratch2Fbo, srcBox, srcFbo, srcBox, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+	tr.hzmLensPostSkip = qtrue;
 	LENS_STAGE(22);
 }

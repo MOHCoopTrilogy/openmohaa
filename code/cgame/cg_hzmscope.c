@@ -96,6 +96,7 @@ static struct {
     qboolean holdHip;   // this frame: keep the hip fov (the zoom fov is still only in the next snapshot)
     qboolean pip;       // [scopes1025] this scope is shown as a picture-in-picture lens (kept through the scope-out ease)
     float    lensFov;   // [scopes1025] square lens-scene fov (degrees) published to the renderer
+    float    glassR;    // [scopes1025] the glass surface's projected radius, screen-height units (0 = unknown)
     float    ocX, ocY;  // [scopes1025] the rifle's projected eyepiece centre (CG_HzmScopeSetOcular, last frame's)
     int      ocTime;
     float    lcX, lcY, lvX, lvY;   // the lens circle centre: follows the eyepiece (critically damped)
@@ -339,7 +340,6 @@ static void CG_HzmScopeFrame(float camFov)
         hs.lensK = CG_HzmSmooth((g - 0.15f) / 0.6f);
         // the lens only shows once the rifle has ARRIVED at the eye (ADS pose 0.65 .. 0.95): the rifle body carries the raise, and the
         // short fade then goes from the dark ocular straight into the lens - no long ghosted double image of two views. Out is the reverse.
-        hs.lensK *= CG_HzmSmooth((CG_AdsPoseFactor() - 0.84f) / 0.14f);
     }
     if (hs.pip && hs.optic >= 0) {
         // the lens square: the lens circle (cg_scopeRadius of the screen height) plus a 4 percent margin, at the optic's magnification
@@ -398,7 +398,7 @@ static void CG_HzmScopeFrame(float camFov)
 
     // ---- the lens circle follows the rifle's eyepiece (the bell drifts while the rifle lags / settles; the circle must stay in it)
     {
-        float tx = 0.0f, ty = 0.0f, lim = 0.06f, w = 45.0f, ax, ay, len;
+        float tx = 0.0f, ty = 0.0f, lim = 0.6f, w = 45.0f, ax, ay, len;
         if (hs.pip && cg.time - hs.ocTime < 200) {
             tx = hs.ocX;
             ty = hs.ocY;
@@ -414,7 +414,7 @@ static void CG_HzmScopeFrame(float camFov)
     }
 
     // ---- publish to the gl2 pass (only on change; "0" once when the scope is down)
-    hs.lens = hs.pip ? (0.225f * CG_HzmScopeScale()) : (cg_scopeRadius->value * (1.0f + 0.55f * (1.0f - hs.ease)));
+    hs.lens = hs.pip ? ((hs.glassR > 0.02f && hs.glassR < 0.6f) ? hs.glassR : 0.225f * CG_HzmScopeScale()) : (cg_scopeRadius->value * (1.0f + 0.55f * (1.0f - hs.ease)));
     hs.eye  = 1.18f; // with the pupil's 0.86..1.0 fall-off: a centred eye casts no shadow at all
     {
         char buf[128];
@@ -481,7 +481,9 @@ qboolean CG_HzmScopeWorldFov(float camFov, float *outFov)
         // [scopes1025] ROLE SWAP: the MAIN view is the magnified lens picture (MSAA, sun shadows, everything - exactly the bug-3462 scope
         // picture) the moment the lens starts to show, and the renderer adds the WIDE world as a second, blurred view around it. Until then
         // (the rifle still rising) the main view is the plain hip view, so a raise needs no second scene at all.
-        *outFov = (hs.ease * hs.lensK > 0.001f) ? hs.scopeFov : hs.hipFov;
+        // IN-MODEL LENS: the magnified picture is on the glass from the start of the raise and grows with the ease (log-tan, like bug-3462)
+        float a2 = (float)log(tan(DEG2RAD(hs.hipFov * 0.5f))), b2 = (float)log(tan(DEG2RAD(hs.scopeFov * 0.5f)));
+        *outFov = 2.0f * RAD2DEG(atan(exp(a2 + (b2 - a2) * hs.ease * hs.lensK)));   // lensK falls with the aim gate: a bolt / reload plays as a normal hip view, the zoom returns after
         return qtrue;
     }
     if (hs.frac <= 0.0f || (hs.ease >= 0.9999f && !hs.remap)) {
@@ -526,10 +528,11 @@ float CG_HzmScopeScale(void)
     return v < 0.5f ? 0.5f : (v > 1.6f ? 1.6f : v);
 }
 
-void CG_HzmScopeSetOcular(float x, float y)
+void CG_HzmScopeSetOcular(float x, float y, float glassR)
 {
     hs.ocX = x;
     hs.ocY = y;
+    hs.glassR = glassR;
     hs.ocTime = cg.time;
 }
 

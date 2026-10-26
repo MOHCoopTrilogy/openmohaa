@@ -2505,7 +2505,7 @@ static void CG_AdsRigSolve(refEntity_t *pREnt)
         dep = DotProduct(d2, cam[0]);
         if (dep > 0.3f && cg_fAdsWeaponFov > 1.0f && cg.refdef.width > 0) {
             tanY = (float)tan(DEG2RAD(cg_fAdsWeaponFov * 0.5f)) * (float)cg.refdef.height / (float)cg.refdef.width;
-            CG_HzmScopeSetOcular(-DotProduct(d2, cam[1]) / dep / (2.0f * tanY), -DotProduct(d2, cam[2]) / dep / (2.0f * tanY));
+            CG_HzmScopeSetOcular(-DotProduct(d2, cam[1]) / dep / (2.0f * tanY), -DotProduct(d2, cam[2]) / dep / (2.0f * tanY), (s->relief / 2.38f) / 1.5f / dep / (2.0f * tanY));
         }
     }
 

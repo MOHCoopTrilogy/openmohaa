@@ -555,6 +555,18 @@ static qboolean CoopAdsClipFitsHeldGun(const char *prefix)
     if (!cg.snap || cg.snap->ps.activeItems[1] < 0) {
         return qfalse;
     }
+    {   // [scopes1025] the scoped-bolt rows (kar98 choreography) belong to a scoped rifle held up to the eye, whatever its mesh
+        static const char *kScoped[] = {"kar98sniper", "springfield", "mosin", "enfield", "enfieldl42a1", "carcano"};
+        int                j;
+        for (j = 0; j < 6; j++) {
+            if (!Q_stricmp(prefix, kScoped[j])) {
+                return (CG_HzmScopeRaiseOwns() && cgi.Cvar_Get("coop_scopeBoltAds", "0", CVAR_ARCHIVE)->integer) ? qtrue : qfalse;
+            }
+        }
+        if (CG_HzmScopeRaiseOwns() && cgi.Cvar_Get("coop_scopeBoltAds", "0", CVAR_ARCHIVE)->integer) {
+            return qtrue;   // e.g. the Arisaka on the kar98 prefix
+        }
+    }
     for (i = 0; i < (int)(sizeof(kAuthored) / sizeof(kAuthored[0])); i++) {
         if (!Q_stricmp(prefix, kAuthored[i][0])) {
             return CG_AdsSightSameMesh(CG_ConfigString(CS_WEAPONS + cg.snap->ps.activeItems[1]), kAuthored[i][1]);

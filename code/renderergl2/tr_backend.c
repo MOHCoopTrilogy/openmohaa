@@ -462,7 +462,18 @@ void RB_BeginDrawingView (void) {
 	}
 	if ( backEnd.viewParms.flags & VPF_ONLYVIEWMODEL )
 	{
-		clearBits &= ~GL_COLOR_BUFFER_BIT;   // the late view weapon draws onto the composited scene: only its depth is cleared
+		clearBits &= ~GL_COLOR_BUFFER_BIT;   // the late view weapon draws onto the composited scene
+		if ( !( tr.hzmMaskFbo && backEnd.viewParms.targetFbo == tr.hzmMaskFbo ) )
+		{
+			// depth is NOT cleared: the depth the post chain reads (global fog, DoF) is then world + weapon (the weapon's depth hack keeps it in front), so the rifle is not fogged / blurred
+			// by what is behind it (a fence pattern showed through the rifle)
+			clearBits &= ~GL_DEPTH_BUFFER_BIT;
+		}
+		if ( tr.hzmMaskFbo && backEnd.viewParms.targetFbo == tr.hzmMaskFbo )
+		{
+			clearBits |= GL_COLOR_BUFFER_BIT;   // the coverage target starts black
+			qglClearColor( 0.0f, 0.0f, 0.0f, 0.0f );
+		}
 	}
 
 	qglClear( clearBits );
@@ -773,6 +784,7 @@ RB_RenderDrawSurfList
 */
 void RB_RenderDrawSurfList( drawSurf_t *drawSurfs, int numDrawSurfs ) {
 	qboolean skipScopeGlass = qfalse;   // [scopes1025]
+	const qboolean glassOnly = (tr.hzmMaskFbo && backEnd.viewParms.targetFbo == tr.hzmMaskFbo) ? qtrue : qfalse;
 	shader_t		*shader = NULL, *oldShader;
 	int				fogNum, oldFogNum;
 	int				entityNum, oldEntityNum;
@@ -892,9 +904,19 @@ void RB_RenderDrawSurfList( drawSurf_t *drawSurfs, int numDrawSurfs ) {
 		if ((backEnd.viewParms.flags & VPF_ONLYVIEWMODEL) && shader && ri.Cvar_Get("r_ppScopeCrash", "0", 0)->integer > 1) {
 			ri.Printf(PRINT_ALL, "^~^~^ GUNSHADER %s\n", shader->name);
 		}
-		skipScopeGlass = ((backEnd.viewParms.flags & VPF_ONLYVIEWMODEL) && shader && (strstr(shader->name, "lens") || strstr(shader->name, "Lens") || strstr(shader->name, "glass"))) ? qtrue : qfalse;
-		if (skipScopeGlass) {
-			continue;
+		{
+			qboolean isGlass = ((backEnd.viewParms.flags & VPF_ONLYVIEWMODEL) && shader && (strstr(shader->name, "lens") || strstr(shader->name, "Lens") || strstr(shader->name, "glass"))) ? qtrue : qfalse;
+			if (glassOnly) {
+				// coverage pass: only the glass, as solid white
+				skipScopeGlass = !isGlass;
+				if (isGlass) { shader = tr.hzmMaskShader; tr.hzmGlassDrawn++; }
+			} else {
+				skipScopeGlass = isGlass;   // the weapon pass never draws the glass
+				if ((backEnd.viewParms.flags & VPF_ONLYVIEWMODEL) && !skipScopeGlass && ri.Cvar_Get("r_ppScopeDbg", "0", 0)->integer & 8) { shader = tr.hzmMaskShader; }
+			}
+			if (skipScopeGlass) {
+				continue;
+			}
 		}
 		cubemapIndex = drawSurf->cubemapIndex;
 

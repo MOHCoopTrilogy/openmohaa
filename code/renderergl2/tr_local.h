@@ -2661,6 +2661,7 @@ typedef struct {
 	FBO_t                   *renderCubeFbo;
 
 	shader_t				*defaultShader;
+	shader_t				*hzmMaskShader;      // HZM coop [scopes1025]
 	shader_t				*shadowShader;
 	shader_t				*projectionShadowShader;
 
@@ -2724,6 +2725,10 @@ typedef struct {
 	qboolean        hzmLensValid;       // the lens view was queued this frame: the composite may run
 	FBO_t          *hzmLensHalfFbo, *hzmLensQuartFbo;   // HZM coop [scopes1025] the wide view's 1/2 and 1/4 box-downsampled copies (the blur reads the 1/4)
 	image_t        *hzmLensHalfImg, *hzmLensQuartImg;
+	FBO_t          *hzmMaskFbo;           // HZM coop [scopes1025] ocular-glass coverage (scene size, RGBA8 + own depth)
+	image_t        *hzmMaskImg, *hzmMaskDepth;
+	int             hzmGlassDrawn;        // surfaces the glass pass drew this frame (0 = no glass mesh: the screen-space circle fallback)
+	qboolean        hzmLensPostSkip;      // the scope PiP composited this frame: depth of field (reads the main-view depth, not the weapon's) must not run
 	qboolean        hzmGunValid;
 	shaderProgram_t heatHazeShader;     // HZM gl1-parity heat haze + localized muzzle shimmer
 	shaderProgram_t dofShader;          // HZM gl1-parity depth of field (r_ppDoF)
