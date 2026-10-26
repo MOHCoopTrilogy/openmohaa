@@ -1970,6 +1970,27 @@ reproduces the shipped picture and reports its error). cg_adsSightDebug 1 prints
 */
 #include "cg_adssights.h"
 
+
+// HZM coop [sight retune 2026-10-26] TEST: coop_adsSightDz shifts both sight points of the gun held (weapon model space z, + = down); coop_adsSightRelief > 0 overrides
+// the eye relief. Both 0 / -1 = the table as generated. Used to find the sight height / relief of a gun whose hands must grip near the eye (MP18).
+static const adsSight_t *CoopAdsSightTweak(const adsSight_t *in)
+{
+    static adsSight_t s_tw[2];
+    static int        s_n = 0;
+    static cvar_t    *pDz = NULL, *pRl = NULL;
+    adsSight_t       *o;
+
+    if (!in) { return NULL; }
+    if (!pDz) { pDz = cgi.Cvar_Get("coop_adsSightDz", "0", 0); pRl = cgi.Cvar_Get("coop_adsSightRelief", "-1", 0); }
+    if (pDz->value == 0.0f && pRl->value < 0.0f) { return in; }
+    o = &s_tw[(s_n++) & 1];
+    *o = *in;
+    o->F[2] += pDz->value;
+    o->R[2] += pDz->value;
+    if (pRl->value >= 0.0f) { o->relief = pRl->value; }
+    return o;
+}
+
 static const adsSight_t *CG_FindAdsSight(const char *tikiName)
 {
     int i;
@@ -1979,7 +2000,7 @@ static const adsSight_t *CG_FindAdsSight(const char *tikiName)
     }
     for (i = 0; i < (int)(sizeof(s_adsSights) / sizeof(s_adsSights[0])); i++) {
         if (!Q_stricmp(tikiName, s_adsSights[i].tiki)) {
-            return &s_adsSights[i];
+            return CoopAdsSightTweak(&s_adsSights[i]);
         }
     }
     return NULL;
