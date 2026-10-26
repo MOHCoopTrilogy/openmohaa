@@ -1955,6 +1955,11 @@ static void R_AddEntitySurface (int entityNum)
 				R_AddIQMSurfaces( ent );
 				break;
 			case MOD_BRUSH:
+				// HZM: a brush-model entity flagged RF_NOSHADOW (cgame sets it for every SOLID_BMODEL mover) is
+				// not drawn into the sun/depth shadow maps - promoted gates/doors cast no streak shadows.
+				if ( ( tr.viewParms.flags & ( VPF_SHADOWMAP | VPF_DEPTHSHADOW ) ) && ( ent->e.renderfx & RF_NOSHADOW ) ) {
+					break;
+				}
 				R_AddBrushModelSurfaces( ent );
 				break;
 			//
