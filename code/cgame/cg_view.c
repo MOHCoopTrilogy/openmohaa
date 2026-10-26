@@ -2011,6 +2011,8 @@ qboolean CG_AdsRigSolveOwns(void)
 }
 
 // ---------------------------------------------------------------------------------------- smoothing state
+static float CG_ScopeReloadFloor(float g);
+static float s_rigGateRaw = 1.0f;   // [scopes1025] the gate before the scoped-reload floor (the lens fades with THIS one)
 static float s_rigGate = 1.0f, s_rigGateV = 0.0f;   // animation gate follower (1 = aim pose, 0 = reload etc.)
 static float s_rigBlend = 0.0f, s_rigBlendV = 0.0f; // ADS blend follower of smoothstep(pose factor)
 static float s_rigW = 0.0f;                         // applied weight = gate * blend
@@ -2092,6 +2094,8 @@ void CG_AdsRigAdvance(void)
         // HZM coop [weaponview 2026-10-04] F3: the gate IS the aim pose's share of what is on screen (set again, fresh,
         // in CG_AdsRigSolve once this frame's crossblend is known). No follower, so it can neither lead nor lag the clip.
         s_rigGate  = CG_VMAimWeight();
+        s_rigGateRaw = s_rigGate;
+        s_rigGate  = CG_ScopeReloadFloor(s_rigGate);
         s_rigGateV = 0.0f;
     } else {
         AdsCritFollow(&s_rigGate, &s_rigGateV, cls == 2 ? 0.0f : 1.0f, pWg->value, dt);
@@ -2104,7 +2108,21 @@ void CG_AdsRigAdvance(void)
     s_rigW = s_rigGate * s_rigBlend;
 }
 
-float CG_AdsAnimGate(void) { return s_rigGate; }
+// [scopes1025] a scoped rifle keeps this share of the aim correction while the reload / bolt clip plays (coop_scopeReloadKeep, default 0.6): the rifle comes off the eye
+// only partway and stays angled at the target instead of dropping to the hip; the lens still fades with the RAW gate
+static float CG_ScopeReloadFloor(float g)
+{
+    static cvar_t *pK = NULL;
+    float          k;
+
+    if (!pK) {
+        pK = cgi.Cvar_Get("coop_scopeReloadKeep", "0.6", CVAR_ARCHIVE);
+    }
+    k = pK->value;
+    return (CG_HzmScopeRaiseOwns() && k > g) ? k : g;
+}
+
+float CG_AdsAnimGate(void) { return s_rigGateRaw; }
 float CG_AdsRigWeight(void) { return s_rigW; }
 
 static void CG_AdsRigSolve(refEntity_t *pREnt)
@@ -2155,6 +2173,8 @@ static void CG_AdsRigSolve(refEntity_t *pREnt)
     s_rigLastRun = cg.time;
     if (CG_VmHandFix() > 0.5f) {
         s_rigGate = CG_VMAimWeight(); // this frame's crossblend (CG_ViewModelAnimation ran before us)
+        s_rigGateRaw = s_rigGate;
+        s_rigGate = CG_ScopeReloadFloor(s_rigGate);
         s_rigW    = s_rigGate * s_rigBlend;
     }
     wpn = CG_ConfigString(CS_WEAPONS + wpnIdx);

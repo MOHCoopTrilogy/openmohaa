@@ -58,6 +58,7 @@ static const hzmScopeWeap_t s_hzmScopeWeaps[] = {
     {"FG 42",                  HO_ZF4    },
     {"Springfield '03 Sniper", HO_M73B1  },
     {"M1 Garand Sniper",       HO_M84    },
+    {"Silenced M1 Garand",     HO_M84    },   // [scopes1025] a scoped Garand too (garand_silenced.tik carries zoom 20)
     {"Mosin-Nagant Sniper",    HO_PU     },
     {"Silenced Mosin Sniper",  HO_PU     },
     {"SVT 40",                 HO_PU     },

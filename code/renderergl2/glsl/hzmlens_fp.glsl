@@ -31,10 +31,10 @@ void main()
 	float r      = length(q);
 
 	// ---- the rim, pass 1
-	float band  = smoothstep(0.995, 1.004, r) * (1.0 - smoothstep(1.395, 1.445, r));   // out to the bell's outer radius: its faceted silhouette is covered
+	float band  = smoothstep(0.995, 1.004, r) * (1.0 - smoothstep(1.50, 1.58, r));   // out to the bell's outer radius: its faceted silhouette is covered
 	vec2  qn    = q / max(r, 0.0001);
 	float arc   = pow(max(dot(qn, normalize(vec2(-0.55, -0.83))), 0.0), 6.0);
-	vec3  metal = vec3(0.016, 0.017, 0.020) * mix(1.6, 0.6, smoothstep(1.0, 1.4, r)) + vec3(0.075) * arc * smoothstep(1.02, 1.10, r) * (1.0 - smoothstep(1.22, 1.38, r));
+	vec3  metal = vec3(0.016, 0.017, 0.020) * mix(1.6, 0.6, smoothstep(1.0, 1.5, r)) + vec3(0.075) * arc * smoothstep(1.02, 1.10, r) * (1.0 - smoothstep(1.22, 1.45, r));
 	float ringK = band * smoothstep(0.55, 0.92, amt);
 
 	vec3  scene = texture2D(u_TextureMap, var_TexCoords).rgb;
