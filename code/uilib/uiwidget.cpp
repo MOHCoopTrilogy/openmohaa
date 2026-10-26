@@ -2318,6 +2318,16 @@ void UIWidget::Display(const UIRect2D& drawframe, float parent_alpha)
                 m_frame.size.width * k, m_frame.size.height * k, 0, 0, 1, 1, m_material->GetMaterial()
             );
         } else {
+            {   // [debug rdov] ui_labeldebug 1: where a radio overlay label really lands
+                static int s_nl = 0;
+                cvar_t    *ld   = uii.Cvar_Find("ui_labeldebug");
+                if (ld && ld->integer && getName() && !strncmp(getName(), "rov_", 4) && uid.time >= s_nl) {
+                    s_nl = uid.time + 500;
+                    uii.Sys_Printf("^~^~^ LABEL %s frame=%.1f,%.1f %.1fx%.1f clipped=%.1f,%.1f %.1fx%.1f screen=%.1f,%.1f %.1fx%.1f vs=%.3f,%.3f vid=%dx%d\n", getName(), m_frame.pos.x, m_frame.pos.y, m_frame.size.width, m_frame.size.height,
+                                   m_clippedframe.pos.x, m_clippedframe.pos.y, m_clippedframe.size.width, m_clippedframe.size.height, m_screenframe.pos.x, m_screenframe.pos.y, m_screenframe.size.width, m_screenframe.size.height,
+                                   m_vVirtualScale[0], m_vVirtualScale[1], uid.vidWidth, uid.vidHeight);
+                }
+            }
             uii.Rend_DrawPicStretched(
                 0, 0, m_frame.size.width, m_frame.size.height, 0, 0, 1, 1, m_material->GetMaterial()
             );

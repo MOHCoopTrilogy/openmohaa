@@ -17,26 +17,6 @@
  */
 
 #include "cl_ui.h"
-#ifdef _WIN32
-#include <windows.h>
-// [spike diagnostic] log the faulting address + stack of the first access violation to a file (resolved offline against the PDB)
-static LONG WINAPI Scene3D_VEH(EXCEPTION_POINTERS *ep)
-{
-    if (ep->ExceptionRecord->ExceptionCode == 0xC0000005 || ep->ExceptionRecord->ExceptionCode == 0xC0000094) {
-        FILE *f = fopen("G:\\mohaa-hudfeed3\\menus3d\\crash.txt", "a");
-        if (f) {
-            void *st[48];
-            USHORT n = RtlCaptureStackBackTrace(0, 48, st, NULL);
-            fprintf(f, "code %08lx addr %p base %p\n", ep->ExceptionRecord->ExceptionCode, ep->ExceptionRecord->ExceptionAddress, (void *)GetModuleHandleA(NULL));
-            for (USHORT i = 0; i < n; i++) {
-                fprintf(f, "  %p\n", st[i]);
-            }
-            fclose(f);
-        }
-    }
-    return EXCEPTION_CONTINUE_SEARCH;
-}
-#endif
 #include "../qcommon/tiki.h"
 
 class UIScene3D : public UIWidget
@@ -82,6 +62,7 @@ class UIScene3D : public UIWidget
     int                       m_flyStart;
     float                     m_flyDur;
     bool                      m_flying;
+    bool                      m_snap;      // a fly just ended: with keyboard / pad navigation active, put the cursor on the first live hotspot so the D-pad has somewhere to start
     int                       m_lastDraw;
     int                       m_hover;
 
@@ -177,9 +158,6 @@ CLASS_DECLARATION(UIWidget, UIScene3D, NULL) {
 
 UIScene3D::UIScene3D()
 {
-#ifdef _WIN32
-    AddVectoredExceptionHandler(1, Scene3D_VEH);
-#endif
     memset(&m_cur, 0, sizeof(m_cur));
     m_cur.fov = 60;
     m_from = m_to = m_home = m_ret = m_cur;
@@ -187,6 +165,7 @@ UIScene3D::UIScene3D()
     m_flyStart = 0;
     m_flyDur   = 0;
     m_flying   = false;
+    m_snap     = false;
     m_lastDraw = 0;
     m_hover    = -1;
     m_drawn    = 0;
@@ -339,6 +318,7 @@ void UIScene3D::Draw(void)
         m_cur.fov = m_from.fov + (m_to.fov - m_from.fov) * e;
         if (u >= 1.0f) {
             m_flying = false;
+            m_snap   = true;
         }
     }
 
@@ -502,6 +482,12 @@ void UIScene3D::Draw(void)
             if (h->w) {
                 const bool live = depth > 1.0f && !m_flying && stopOk;
                 // frame is relative to the parent container, whose origin is this widget's screen origin
+                if (live && m_snap) {
+                    m_snap = false;
+                    if (Cvar_VariableIntegerValue("ui_keyNavActive")) {
+                        CL_SetMousePos((int)sx, (int)sy);
+                    }
+                }
                 h->w->setFrame(UIRect2D(live ? sx - rpx - m_screenframe.pos.x : -9999.0f, live ? sy - rpx - m_screenframe.pos.y : -9999.0f, live ? rpx * 2.0f : 1.0f, live ? rpx * 2.0f : 1.0f));
             }
             continue;
@@ -515,6 +501,7 @@ void UIScene3D::Draw(void)
             hover = i - 1;
         }
     }
+    m_snap = false;
     bool anyBound = false;
     for (int i = 1; i <= m_hots.NumObjects(); i++) {
         if (m_hots.ObjectAt(i)->widget.length()) {
