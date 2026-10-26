@@ -4,7 +4,7 @@
 
 static const adsSight_t s_adsSightsScope[] = {
     {"models/weapons/arisakasniper.tik", "Arisaka Sniper", {11.9419f, -1.9775f, -5.3179f}, {-0.0581f, -1.9775f, -5.3179f}, 0.000000f, {-0.000f, -0.768f, -0.641f}, 2.566f}, // arisaka
-    {"models/weapons/carcanosniper.tik", "Carcano Sniper", {-1.1049f, -12.3250f, -8.2288f}, {-0.5778f, -0.4281f, -6.7497f}, 0.000000f, {0.111f, 0.118f, -0.987f}, 2.175f}, // carcano
+    {"models/weapons/carcanosniper.tik", "Carcano Sniper", {13.2818f, -0.9615f, -6.6274f}, {1.2818f, -0.9615f, -6.6274f}, 0.000000f, {0.000f, -0.025f, -1.000f}, 2.175f}, // carcano
     {"models/weapons/enfieldsniper.tik", "Lee-Enfield Sniper", {16.1391f, -0.8316f, -5.7265f}, {4.1391f, -0.8316f, -5.7265f}, 0.000000f, {-0.000f, 0.034f, -0.999f}, 3.166f}, // enfield
     {"models/weapons/fg42.tik", "FG 42", {8.0289f, -0.8260f, -7.2001f}, {-3.9711f, -0.8260f, -7.2001f}, 0.000000f, {0.000f, 0.019f, -1.000f}, 2.209f}, // fg42
     {"models/weapons/fg42_bloody.tik", "FG 42 (Bloody)", {8.0289f, -0.8260f, -7.2001f}, {-3.9711f, -0.8260f, -7.2001f}, 0.000000f, {0.000f, 0.019f, -1.000f}, 2.209f}, // fg42
@@ -34,8 +34,8 @@ static const adsSight_t s_adsSightsScope[] = {
     {"models/weapons/g43sniper_camo_woodland.tik", "G43 Sniper (Woodland)", {7.5657f, -1.3233f, -7.1860f}, {-4.4343f, -1.3233f, -7.1860f}, 0.000000f, {0.000f, -0.033f, -0.999f}, 2.251f}, // g43sniper
     {"models/weapons/g43sniper_chrome.tik", "G43 Sniper (Chrome)", {7.5657f, -1.3233f, -7.1860f}, {-4.4343f, -1.3233f, -7.1860f}, 0.000000f, {0.000f, -0.033f, -0.999f}, 2.251f}, // g43sniper
     {"models/weapons/g43sniper_gold.tik", "G43 Sniper (Gold)", {7.5657f, -1.3233f, -7.1860f}, {-4.4343f, -1.3233f, -7.1860f}, 0.000000f, {0.000f, -0.033f, -0.999f}, 2.251f}, // g43sniper
-    {"models/weapons/garand_scoped.tik", "M1 Garand Sniper", {12.9060f, -2.3692f, -4.9357f}, {0.9060f, -2.3692f, -4.9357f}, 0.000000f, {0.000f, -0.784f, -0.621f}, 2.030f}, // garand
-    {"models/weapons/garand_silenced.tik", "Silenced M1 Garand", {12.9060f, -2.3692f, -4.9357f}, {0.9060f, -2.3692f, -4.9357f}, 0.000000f, {0.000f, -0.784f, -0.621f}, 2.030f}, // garandsil
+    {"models/weapons/garand_scoped.tik", "M1 Garand Sniper", {12.9060f, -2.3692f, -4.9357f}, {0.9060f, -2.3692f, -4.9357f}, 0.000000f, {0.000f, -0.784f, -0.621f}, 3.400f}, // garand
+    {"models/weapons/garand_silenced.tik", "Silenced M1 Garand", {12.9060f, -2.3692f, -4.9357f}, {0.9060f, -2.3692f, -4.9357f}, 0.000000f, {0.000f, -0.784f, -0.621f}, 3.400f}, // garandsil
     {"models/weapons/kar98sniper.tik", "KAR98 - Sniper", {12.7036f, -1.8994f, -5.3585f}, {0.7036f, -1.8994f, -5.3585f}, 0.000000f, {-0.000f, -0.844f, -0.537f}, 2.499f}, // kar98sniper
     {"models/weapons/kar98sniper_bloody.tik", "KAR98 - Sniper (Bloody)", {12.7036f, -1.8994f, -5.3585f}, {0.7036f, -1.8994f, -5.3585f}, 0.000000f, {-0.000f, -0.844f, -0.537f}, 2.499f}, // kar98sniper
     {"models/weapons/kar98sniper_blued.tik", "KAR98 - Sniper (Blued)", {12.7036f, -1.8994f, -5.3585f}, {0.7036f, -1.8994f, -5.3585f}, 0.000000f, {-0.000f, -0.844f, -0.537f}, 2.499f}, // kar98sniper
@@ -77,13 +77,13 @@ static const adsSight_t s_adsSightsScope[] = {
     {"models/weapons/svt_rifle_chrome.tik", "SVT 40 (Chrome)", {11.7163f, -0.1576f, -7.0696f}, {-0.2837f, -0.1576f, -7.0696f}, 0.000000f, {0.000f, -0.049f, -0.999f}, 2.693f}, // svt
     {"models/weapons/svt_rifle_gold.tik", "SVT 40 (Gold)", {11.7163f, -0.1576f, -7.0696f}, {-0.2837f, -0.1576f, -7.0696f}, 0.000000f, {0.000f, -0.049f, -0.999f}, 2.693f}, // svt
     {"models/weapons/svt_rifle_hobbssvtwood.tik", "SVT 40 (Woodland Camo)", {11.7163f, -0.1576f, -7.0696f}, {-0.2837f, -0.1576f, -7.0696f}, 0.000000f, {0.000f, -0.049f, -0.999f}, 2.693f}, // svt
-    {"models/weapons/uk_w_l42a1.tik", "Enfield L42A1", {9.7514f, 1.7208f, 6.2183f}, {-2.2486f, 1.7208f, 6.2183f}, 0.000000f, {0.000f, -0.004f, 1.000f}, 2.717f}, // l42
-    {"models/weapons/uk_w_l42a1_bloody.tik", "Enfield L42A1 (Bloody)", {9.7514f, 1.7208f, 6.2183f}, {-2.2486f, 1.7208f, 6.2183f}, 0.000000f, {0.000f, -0.004f, 1.000f}, 2.717f}, // l42
-    {"models/weapons/uk_w_l42a1_blued.tik", "Enfield L42A1 (Blued)", {9.7514f, 1.7208f, 6.2183f}, {-2.2486f, 1.7208f, 6.2183f}, 0.000000f, {0.000f, -0.004f, 1.000f}, 2.717f}, // l42
-    {"models/weapons/uk_w_l42a1_camo_desert.tik", "Enfield L42A1 (Desert)", {9.7514f, 1.7208f, 6.2183f}, {-2.2486f, 1.7208f, 6.2183f}, 0.000000f, {0.000f, -0.004f, 1.000f}, 2.717f}, // l42
-    {"models/weapons/uk_w_l42a1_camo_winter.tik", "Enfield L42A1 (Winter)", {9.7514f, 1.7208f, 6.2183f}, {-2.2486f, 1.7208f, 6.2183f}, 0.000000f, {0.000f, -0.004f, 1.000f}, 2.717f}, // l42
-    {"models/weapons/uk_w_l42a1_camo_woodland.tik", "Enfield L42A1 (Woodland)", {9.7514f, 1.7208f, 6.2183f}, {-2.2486f, 1.7208f, 6.2183f}, 0.000000f, {0.000f, -0.004f, 1.000f}, 2.717f}, // l42
-    {"models/weapons/uk_w_l42a1_chrome.tik", "Enfield L42A1 (Chrome)", {9.7514f, 1.7208f, 6.2183f}, {-2.2486f, 1.7208f, 6.2183f}, 0.000000f, {0.000f, -0.004f, 1.000f}, 2.717f}, // l42
-    {"models/weapons/uk_w_l42a1_dhl42camo.tik", "Enfield L42A1 (Camo)", {9.7514f, 1.7208f, 6.2183f}, {-2.2486f, 1.7208f, 6.2183f}, 0.000000f, {0.000f, -0.004f, 1.000f}, 2.717f}, // l42
-    {"models/weapons/uk_w_l42a1_gold.tik", "Enfield L42A1 (Gold)", {9.7514f, 1.7208f, 6.2183f}, {-2.2486f, 1.7208f, 6.2183f}, 0.000000f, {0.000f, -0.004f, 1.000f}, 2.717f}, // l42
+    {"models/weapons/uk_w_l42a1.tik", "Enfield L42A1", {9.7514f, -1.7208f, -6.2183f}, {-2.2486f, -1.7208f, -6.2183f}, 0.000000f, {0.000f, 0.004f, -1.000f}, 2.717f}, // l42
+    {"models/weapons/uk_w_l42a1_bloody.tik", "Enfield L42A1 (Bloody)", {9.7514f, -1.7208f, -6.2183f}, {-2.2486f, -1.7208f, -6.2183f}, 0.000000f, {0.000f, 0.004f, -1.000f}, 2.717f}, // l42
+    {"models/weapons/uk_w_l42a1_blued.tik", "Enfield L42A1 (Blued)", {9.7514f, -1.7208f, -6.2183f}, {-2.2486f, -1.7208f, -6.2183f}, 0.000000f, {0.000f, 0.004f, -1.000f}, 2.717f}, // l42
+    {"models/weapons/uk_w_l42a1_camo_desert.tik", "Enfield L42A1 (Desert)", {9.7514f, -1.7208f, -6.2183f}, {-2.2486f, -1.7208f, -6.2183f}, 0.000000f, {0.000f, 0.004f, -1.000f}, 2.717f}, // l42
+    {"models/weapons/uk_w_l42a1_camo_winter.tik", "Enfield L42A1 (Winter)", {9.7514f, -1.7208f, -6.2183f}, {-2.2486f, -1.7208f, -6.2183f}, 0.000000f, {0.000f, 0.004f, -1.000f}, 2.717f}, // l42
+    {"models/weapons/uk_w_l42a1_camo_woodland.tik", "Enfield L42A1 (Woodland)", {9.7514f, -1.7208f, -6.2183f}, {-2.2486f, -1.7208f, -6.2183f}, 0.000000f, {0.000f, 0.004f, -1.000f}, 2.717f}, // l42
+    {"models/weapons/uk_w_l42a1_chrome.tik", "Enfield L42A1 (Chrome)", {9.7514f, -1.7208f, -6.2183f}, {-2.2486f, -1.7208f, -6.2183f}, 0.000000f, {0.000f, 0.004f, -1.000f}, 2.717f}, // l42
+    {"models/weapons/uk_w_l42a1_dhl42camo.tik", "Enfield L42A1 (Camo)", {9.7514f, -1.7208f, -6.2183f}, {-2.2486f, -1.7208f, -6.2183f}, 0.000000f, {0.000f, 0.004f, -1.000f}, 2.717f}, // l42
+    {"models/weapons/uk_w_l42a1_gold.tik", "Enfield L42A1 (Gold)", {9.7514f, -1.7208f, -6.2183f}, {-2.2486f, -1.7208f, -6.2183f}, 0.000000f, {0.000f, 0.004f, -1.000f}, 2.717f}, // l42
 };

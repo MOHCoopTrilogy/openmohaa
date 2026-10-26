@@ -2116,7 +2116,7 @@ static float CG_ScopeReloadFloor(float g)
     float          k;
 
     if (!pK) {
-        pK = cgi.Cvar_Get("coop_scopeReloadKeep", "0.6", CVAR_ARCHIVE);
+        pK = cgi.Cvar_Get("coop_scopeReloadKeep", "0.0", CVAR_ARCHIVE);
     }
     k = pK->value;
     return (CG_HzmScopeRaiseOwns() && k > g) ? k : g;
@@ -2478,6 +2478,12 @@ static void CG_AdsRigSolve(refEntity_t *pREnt)
         }
     }
     VectorMA(pREnt->origin, s_rigCur[7] * w, cam[0], pREnt->origin); // eye relief
+    if (CG_HzmScopeRaiseOwns() && s_rigGateRaw < 0.999f) {
+        // [scopes1025] reload / bolt while scoped: the rig keeps the clip aimed at the target (floor above) and the rifle sinks only partway - coop_scopeReloadLower units (~15-25 percent of the screen) x the share the clip owns
+        static cvar_t *pLow = NULL;
+        if (!pLow) { pLow = cgi.Cvar_Get("coop_scopeReloadLower", "0", CVAR_ARCHIVE); }
+        VectorMA(pREnt->origin, -pLow->value * (1.0f - s_rigGateRaw), cam[2], pREnt->origin);
+    }
 
     if (CG_HzmScopePipActive() && s >= s_adsSightsScope && s < s_adsSightsScope + sizeof(s_adsSightsScope) / sizeof(s_adsSightsScope[0])) {
         // [scopes1025] where the eyepiece (the sight row's R point) really is on screen after everything above: the lens circle follows it
