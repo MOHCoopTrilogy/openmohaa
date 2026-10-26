@@ -95,11 +95,15 @@ static void R_BindAnimatedImageToTMU( textureBundle_t *bundle, int tmu ) {
 
 	// it is necessary to do this messy calc to make sure animations line up
 	// exactly with waveforms of the same frequency
-	index = tess.shaderTime * bundle->imageAnimationSpeed * FUNCTABLE_SIZE;
+	index = (tess.shaderTime + bundle->imageAnimationPhase) * bundle->imageAnimationSpeed * FUNCTABLE_SIZE;
 	index >>= FUNCTABLE_SIZE2;
 
 	if ( index < 0 ) {
 		index = 0;	// may happen with shader time offsets
+	}
+	// HZM gl2 [fx_1025 step 0] animMapOnce: play once, then hold the last frame (gl1 tr_shade.c:235 semantics)
+	if ( (bundle->flags & BUNDLE_ANIMATE_ONCE) && index >= bundle->numImageAnimations ) {
+		index = bundle->numImageAnimations - 1;
 	}
 
 	// Windows x86 doesn't load renderer DLL with 64 bit modulus
@@ -184,6 +188,10 @@ void RB_BeginSurface( shader_t *shader, int fogNum, int cubemapIndex ) {
 	tess.useCacheVao = qfalse;
 
 	tess.shaderTime = backEnd.refdef.floatTime - tess.shader->timeOffset;
+	// HZM gl2 [fx_1025 step 0] sprite flipbooks run from the sprite's own creation time (see RB_RenderSpriteSurfList)
+	if (backEnd.inSpriteList) {
+		tess.shaderTime -= backEnd.shaderStartTime;
+	}
 	if (tess.shader->clampTime && tess.shaderTime >= tess.shader->clampTime) {
 		tess.shaderTime = tess.shader->clampTime;
 	}

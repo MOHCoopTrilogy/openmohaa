@@ -2949,6 +2949,7 @@ RB_RenderSpriteSurfList
 */
 void RB_RenderSpriteSurfList(drawSurf_t* drawSurfs, int numDrawSurfs) {
 	shader_t	*shader;
+	float		oldSpriteStart = -1.0f;   // HZM gl2 [fx_1025 step 0]
 	shader_t	*oldShader;
 	qboolean	depthRange;
 	qboolean	oldDepthRange;
@@ -2972,20 +2973,40 @@ void RB_RenderSpriteSurfList(drawSurf_t* drawSurfs, int numDrawSurfs) {
 	oldShader = NULL;
     depthRange = qfalse;
     oldDepthRange = qfalse;
+	backEnd.shaderStartTime = 0.0f;
 
     for (i = 0, drawSurf = drawSurfs; i < numDrawSurfs; i++, drawSurf++) {
 		shader = tr.sortedShaders[((refSprite_t*)drawSurf->surface)->shaderNum];
 		depthRange = (((refSprite_t*)drawSurf->surface)->renderfx & RF_DEPTHHACK) != 0;
 
-        if (shader != oldShader)
+        // HZM gl2 [fx_1025 step 0] per-sprite flipbook clock. gl1 plays a sprite's animMap from the sprite's own
+        // creation time (refSprite_t::shaderTime -> backEnd.shaderStartTime); gl2 assigned shaderStartTime and then
+        // never read it, so every particle of one shader showed the SAME frame of a global clock (a one-shot
+        // fireball started at a random frame, and animMapOnce was a plain loop). A batch of animated sprites is now
+        // split wherever the start time differs; non-animated shaders (the overwhelming majority) batch as before.
         {
-			if (oldShader) {
-				RB_EndSurface();
-			}
+            float spriteStart = ((refSprite_t*)drawSurf->surface)->shaderTime;
+            qboolean spriteAnim = qfalse;
+            int      sb, sbb;
+            for (sb = 0; sb < MAX_SHADER_STAGES && shader->stages[sb]; sb++) {
+                for (sbb = 0; sbb < NUM_TEXTURE_BUNDLES; sbb++) {
+                    if (shader->stages[sb]->bundle[sbb].numImageAnimations > 1) {
+                        spriteAnim = qtrue;
+                    }
+                }
+            }
+            if (shader != oldShader || (spriteAnim && spriteStart != oldSpriteStart))
+            {
+                if (oldShader) {
+                    RB_EndSurface();
+                }
 
-            RB_BeginSurface(shader, 0, 0);
-            oldShader = shader;
-			hzmPerf.spriteBatches++;
+                backEnd.shaderStartTime = spriteAnim ? spriteStart : 0.0f;
+                RB_BeginSurface(shader, 0, 0);
+                oldShader = shader;
+                oldSpriteStart = spriteStart;
+                hzmPerf.spriteBatches++;
+            }
         }
 
 		// HZM gl2 SOFT PARTICLES: record this sprite's depth-hack state for RB_SetSoftParticleUniforms.
@@ -3034,6 +3055,7 @@ void RB_RenderSpriteSurfList(drawSurf_t* drawSurfs, int numDrawSurfs) {
 	}
 
 	// HZM gl2 SOFT PARTICLES: close the fade window; world draws in later frames upload mode 0.
+	backEnd.shaderStartTime = 0.0f;
 	backEnd.inSpriteList = qfalse;
 }
 
