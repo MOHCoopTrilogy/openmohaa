@@ -12,6 +12,7 @@
 uniform sampler2D u_TextureMap;
 uniform sampler2D u_LevelsMap;
 uniform sampler2D u_ScreenImageMap;
+uniform sampler2D u_SpecularMap;      // the optic's reticle (black RGBA over the lens square), drawn INSIDE the picture
 uniform sampler2D u_ScreenDepthMap;   // pass 0: the ocular-glass coverage mask (white = the rifle's real glass); pass 1: the finished picture of pass 0, glass coverage in alpha
 uniform vec4      u_Color;      // (amount 0..1, lens radius / screen height, pupil x, pupil y) - pupil in lens radii, +y down
 uniform vec4      u_HzmParams;  // (pupil radius in lens radii, glass warmth, chromatic amount, outside brightness 0..1)
@@ -84,6 +85,16 @@ void main()
 	else         { inside.r = texture2D(u_LevelsMap, c0).r;   inside.g = texture2D(u_LevelsMap, c1).g;   inside.b = texture2D(u_LevelsMap, c2).b; }
 	float w  = u_HzmParams.y;
 	inside  *= vec3(1.0 + 0.25 * w, 1.0 + 0.05 * w, 1.0 - w);
+	if (u_FogDistance.y > 0.5)   // the reticle is part of the lens image: centred on the glass, clipped to it, dimmed by the same shadows
+	{
+		vec2  ruv = vec2(0.5) + q * 0.5;
+		vec2  ho  = vec2(u_InvTexRes.y / R) * 0.5 * 1.6;
+		vec4  rt  = texture2D(u_SpecularMap, ruv);
+		float hl  = max(max(texture2D(u_SpecularMap, ruv + vec2(ho.x, 0.0)).a, texture2D(u_SpecularMap, ruv - vec2(ho.x, 0.0)).a),
+		                max(texture2D(u_SpecularMap, ruv + vec2(0.0, ho.y)).a, texture2D(u_SpecularMap, ruv - vec2(0.0, ho.y)).a));
+		inside = mix(inside, vec3(0.85), hl * (1.0 - rt.a) * 0.45);
+		inside = mix(inside, rt.rgb, rt.a);
+	}
 	float rIn = (glass && !adsMode) ? r * 0.55 : r;   // the glass is seen at an angle at the hip: its real mask ends the picture, the circle's falloff must not darken it
 	inside  *= 1.0 - 0.45 * pow(smoothstep(0.62, 1.0, rIn), 1.6);   // soft inner shadow toward the rim (the tube wall)
 	inside  *= 1.0 - 0.85 * smoothstep(0.972, 0.996, rIn);          // the glass edge goes dark into the ring

@@ -462,6 +462,14 @@ static void CG_HzmScopeFrame(float camFov)
                 hs.mode
             );
         }
+        {   // the optic's reticle image name for the lens pass (in-lens reticle)
+            static char s_ret[32];
+            const char *rn = (hs.pip && hs.optic >= 0) ? s_hzmOptics[hs.optic].tex : "";
+            if (strcmp(rn, s_ret)) {
+                Q_strncpyz(s_ret, rn, sizeof(s_ret));
+                cgi.Cvar_Set("r_ppScopeRet", rn);
+            }
+        }
         if (strcmp(buf, hs.pub)) {
             Q_strncpyz(hs.pub, buf, sizeof(hs.pub));
             cgi.Cvar_Set("r_ppScopeState", buf);
@@ -712,6 +720,7 @@ void CG_HzmScopeDrawReticle(void)
     static const float ofs[4][2] = {{1.0f, 0.0f}, {-1.0f, 0.0f}, {0.0f, 1.0f}, {0.0f, -1.0f}};
 
     CG_HzmScopeCvars();
+    return;   // [scopes1025] the reticle is drawn INSIDE the lens picture by the gl2 pass (r_ppScopeRet), not as a screen-space overlay
     if (!hs.pip || hs.optic < 0 || s_assets <= 0 || !cg.snap) {
         return;
     }

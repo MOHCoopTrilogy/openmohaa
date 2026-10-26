@@ -296,8 +296,28 @@ static qboolean R_HzmLensEnsureScratch(void)
 	return qtrue;
 }
 
+// the optic's reticle image (r_ppScopeRet = the optic's texture name, set by cgame); NULL = none. Black RGBA, drawn INSIDE the lens picture by the shader
+static image_t *R_HzmLensRetImage(void)
+{
+	static cvar_t  *c = NULL;
+	static int      mod = -1;
+	static image_t *img = NULL;
+
+	if (!c) {
+		c = ri.Cvar_Get("r_ppScopeRet", "", 0);
+	}
+	if (c->modificationCount != mod) {
+		mod = c->modificationCount;
+		img = NULL;
+		if (c->string[0] && !strchr(c->string, '/') && !strchr(c->string, '.')) {
+			img = R_FindImageFile(va("textures/hud/coop_scope/ret_%s.tga", c->string), IMGTYPE_COLORALPHA, IMGFLAG_NOLIGHTSCALE | IMGFLAG_NO_COMPRESSION | IMGFLAG_CLAMPTOEDGE);
+		}
+	}
+	return img;
+}
+
 // per pass: viewinfo (lens centre offset, mode 0 = full composite / 1 = rim only) and the texture units (0 = scene, 1 = wide, 2 = 1/4 blurred wide)
-#define LENS_PASS(mode) do { 	vec4_t vi_; 	VectorSet4(vi_, st[7], st[8], (mode), ((tr.hzmGlassDrawn > 0) ? 1.0f : 0.0f) + ((st[9] > 0.5f) ? 2.0f : 0.0f)); 	GLSL_BindProgram(&tr.hzmLensShader); 	GLSL_SetUniformVec4(&tr.hzmLensShader, UNIFORM_VIEWINFO, vi_); { vec4_t bl_; VectorSet4(bl_, r_ppScopeBlur->value, 0.0f, 0.0f, 0.0f); GLSL_SetUniformVec4(&tr.hzmLensShader, UNIFORM_FOGDISTANCE, bl_); } 	GL_BindToTMU(tr.hzmLensColor, TB_LEVELSMAP); 	GL_BindToTMU(tr.hzmLensQuartImg, TB_NORMALMAP); GL_BindToTMU(tr.hzmMaskImg, TB_DELUXEMAP); } while (0)
+#define LENS_PASS(mode) do { 	vec4_t vi_; 	VectorSet4(vi_, st[7], st[8], (mode), ((tr.hzmGlassDrawn > 0) ? 1.0f : 0.0f) + ((st[9] > 0.5f) ? 2.0f : 0.0f)); 	GLSL_BindProgram(&tr.hzmLensShader); 	GLSL_SetUniformVec4(&tr.hzmLensShader, UNIFORM_VIEWINFO, vi_); { vec4_t bl_; image_t *ri_ = R_HzmLensRetImage(); VectorSet4(bl_, r_ppScopeBlur->value, ri_ ? 1.0f : 0.0f, 0.0f, 0.0f); GL_BindToTMU(ri_ ? ri_ : tr.whiteImage, TB_SPECULARMAP); GLSL_SetUniformVec4(&tr.hzmLensShader, UNIFORM_FOGDISTANCE, bl_); } 	GL_BindToTMU(tr.hzmLensColor, TB_LEVELSMAP); 	GL_BindToTMU(tr.hzmLensQuartImg, TB_NORMALMAP); GL_BindToTMU(tr.hzmMaskImg, TB_DELUXEMAP); } while (0)
 
 static qboolean R_HzmLensEnsureMask(void)
 {

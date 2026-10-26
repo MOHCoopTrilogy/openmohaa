@@ -1856,6 +1856,11 @@ void CG_DrawCrosshair()
         return;
     }
 
+    // [scopes1025] a scoped rifle in the hands (hip or ADS): only the reticle INSIDE the lens exists, never the HUD crosshair
+    if (CG_HzmScopeHeld()) {
+        return;
+    }
+
     // HZM coop [user 2026-10-05] "when gun is mounted crosshair needs to be turned off". Once the
     // brace has engaged (envelope past half - the same point the gun visibly settles into the rest)
     // the crosshair goes; the brace pip stays as the "you are braced" indicator.
