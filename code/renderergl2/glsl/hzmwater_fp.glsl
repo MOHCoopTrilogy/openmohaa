@@ -238,7 +238,7 @@ void main()
 		float ndvC  = max(dot(Nn, E), 0.02);
 		float Fc    = min(0.02 + 0.98 * pow(1.0 - ndvC, 5.0), 0.80);
 
-		vec3 body = mix(u_HzmCold1.rgb, u_HzmCold2.rgb, pow(ndvC, 2.2)) + u_HzmWetSkyZ.rgb * 0.025;
+		vec3 body = mix(u_HzmCold1.rgb, u_HzmCold2.rgb, pow(ndvC, 2.2)) + u_HzmWetSkyZ.rgb * ((u_HzmCold0.x < 1.5) ? 0.010 : 0.025);     // less sky-grey in the pens
 		body *= 0.55 + 0.45 * lmb;           // the baked light: lamp pools lift it, baked shadow keeps it dark
 		body *= mix(1.0, 0.62 + 0.76 * crest, clamp(u_HzmCold0.z, 0.0, 1.0) * ((u_HzmCold0.x < 1.5) ? 0.0 : 1.0));     // the swell shading is for open water; the pens keep their flat dark body     // crests a little lighter than the troughs: the swell reads as rolling
 		body *= 0.92 + 0.16 * (macro - 0.5) * 4.0 * 0.5 + 0.0;
@@ -349,7 +349,7 @@ void main()
 			// occluder is clearly nearer than this water pixel AND its world position is within 50 u of the waterline and within
 			// 100 u of this pixel on the ground - tall objects above the waterline never reach out sideways. No foam where this very
 			// pixel has something just below the surface (that is the object itself showing through).
-			float rpx = clamp(u_HzmCont4.y * u_HzmCont4.x / max(myD, 1.0), 2.0, 40.0);
+			float rpx = clamp(u_HzmCont4.y * ((u_HzmCold0.x < 1.5) ? 0.45 : 1.0) * u_HzmCont4.x / max(myD, 1.0), 2.0, 40.0);     // pens: a thin rim only
 			float acc = 0.0;
 			for (int k = 0; k < 8; k++)
 			{

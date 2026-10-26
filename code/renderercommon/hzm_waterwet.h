@@ -158,7 +158,7 @@ typedef struct {
 static const hzmWaterPreset_t hzmWaterPresets[] = {
 	{ 0.0f },
 	// COLD: dark green-grey-black (tools/water_look.py: deep 0.012 0.034 0.036, shallow 0.045 0.100 0.095)
-	{ 0.97f, 1.0f, 1.0f, 1.0f, 1.0f, { 0.012f, 0.034f, 0.036f }, { 0.045f, 0.100f, 0.095f }, 330.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f , 0.0f },
+	{ 0.97f, 1.0f, 1.0f, 1.0f, 1.0f, { 0.011f, 0.036f, 0.034f }, { 0.040f, 0.105f, 0.092f }, 330.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f , 0.35f },
 	// ICE: deep = clear ice (dark cold blue), shallow = white (bubbles / cracks), cover 1 (frost patches cut it away in the shader)
 	{ 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, { 0.035f, 0.110f, 0.200f }, { 0.640f, 0.740f, 0.860f }, 170.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f , 0.0f },
 	// the water presets below are defined at body gain 1; r_hzmWaterBody (default 2.0) scales them all
@@ -244,7 +244,7 @@ static ID_INLINE int HZM_WaterPresetFor( const char *shaderName, const char *map
 	}
 	// RIVER stays OFF (plain reflection layer) until its look is approved: the t13 captures read as a flat dark sheet
 	// (no flow, no reflections at bank angles). Set HZM_RIVER_PRESET_ON to 1 to try it.
-#define HZM_RIVER_PRESET_ON 0     // off until a river view is captured: m5l2b's teleport box keeps cameras off the water
+#define HZM_RIVER_PRESET_ON 1     // off until a river view is captured: m5l2b's teleport box keeps cameras off the water
 #if HZM_RIVER_PRESET_ON
 	for ( i = 0; i < (int)( sizeof( river ) / sizeof( river[0] ) ); i++ ) {
 		if ( !Q_stricmp( shaderName, river[i] ) ) return HZM_WPRESET_RIVER;
