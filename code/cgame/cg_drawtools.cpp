@@ -907,6 +907,7 @@ void CG_HudDrawElements()
     float  fX, fY;
     float  fWidth, fHeight;
     vec2_t virtualScale;
+    qboolean bCineHold;
 
     if (!cg_huddraw_force->integer && !cg_hud->integer) {
         return;
@@ -914,9 +915,12 @@ void CG_HudDrawElements()
     // HZM coop: cutscene HUD hold (coop_mod/cutscene.scr::cut_lock pokes coop_cineHud): every scripted huddraw / ihuddraw
     // element (rank star, carried-item icons, cards ...) is hidden while CG_CoopCineHudActive holds (self-expiring, consumed
     // from the cvar there) and comes back with it - the script state is untouched
-    if (CG_CoopCineHudActive()) {
-        return;
-    }
+    // [bug-4406, user 2026-10-26 "tap F to fight the current is gone"] the hold hides every scripted element EXCEPT the
+    // QTE prompt slots 124-126 (m3l1a coop_qteBar: plate, fill, "Tap F to fight the current"). coop_cineHudLoop holds
+    // this hide for the whole boat ride and the underwater struggle is INSIDE it, so since the hold began covering
+    // ihuddraw (2026-10-20) the bar and its words were never drawn. Those three slots are the only thing the player
+    // must see to play the beat; they are drawn by no one else.
+    bCineHold = CG_CoopCineHudActive();
 
     virtualScale[0] = cgs.glconfig.vidWidth / 640.0;
     virtualScale[1] = cgs.glconfig.vidHeight / 480.0;
@@ -926,6 +930,9 @@ void CG_HudDrawElements()
     }
 
     for (i = 0; i < MAX_HUDDRAW_ELEMENTS; i++) {
+        if (bCineHold && (i < 124 || i > 126)) {
+            continue;
+        }
         if ((!cgi.HudDrawElements[i].hShader && !cgi.HudDrawElements[i].string[0])
             || !cgi.HudDrawElements[i].vColor[3]) {
             // skip invisible elements
