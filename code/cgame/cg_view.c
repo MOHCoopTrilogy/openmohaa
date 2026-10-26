@@ -2125,6 +2125,35 @@ static float CG_ScopeReloadFloor(float g)
 float CG_AdsAnimGate(void) { return s_rigGateRaw; }
 float CG_AdsRigWeight(void) { return s_rigW; }
 
+// [scopes1025] where the scope's ocular (the sight row's R point) is on screen, and the glass radius: the lens circle / reticle / picture follow it (hip included)
+static void CG_ScopeOcular(refEntity_t *pREnt, const adsSight_t *s, vec3_t cam[3], const vec3_t E, int iTag)
+{
+    orientation_t or2;
+    vec3_t        G2, R2w, A2[3], d2;
+    float         dep, tanY;
+    int           q;
+
+    if (!CG_HzmScopeHeld() || !(s >= s_adsSightsScope && s < s_adsSightsScope + sizeof(s_adsSightsScope) / sizeof(s_adsSightsScope[0]))) {
+        return;
+    }
+    or2 = cgi.TIKI_Orientation(pREnt, iTag);
+    VectorCopy(pREnt->origin, G2);
+    for (q = 0; q < 3; q++) {
+        VectorMA(G2, or2.origin[q], pREnt->axis[q], G2);
+    }
+    MatrixMultiply(or2.axis, pREnt->axis, A2);
+    VectorCopy(G2, R2w);
+    for (q = 0; q < 3; q++) {
+        VectorMA(R2w, s->R[q], A2[q], R2w);
+    }
+    VectorSubtract(R2w, E, d2);
+    dep = DotProduct(d2, cam[0]);
+    if (dep > 0.3f && cg_fAdsWeaponFov > 1.0f && cg.refdef.width > 0) {
+        tanY = (float)tan(DEG2RAD(cg_fAdsWeaponFov * 0.5f)) * (float)cg.refdef.height / (float)cg.refdef.width;
+        CG_HzmScopeSetOcular(-DotProduct(d2, cam[1]) / dep / (2.0f * tanY), -DotProduct(d2, cam[2]) / dep / (2.0f * tanY), (s->relief / 2.38f) / 1.5f / dep / (2.0f * tanY));
+    }
+}
+
 static void CG_AdsRigSolve(refEntity_t *pREnt)
 {
     static cvar_t    *pDbg = NULL, *pWc = NULL, *pMode = NULL;
@@ -2384,6 +2413,7 @@ static void CG_AdsRigSolve(refEntity_t *pREnt)
     }
     s_rigTgtLive = updated;
     if (!s_rigTgtOk) {
+        CG_ScopeOcular(pREnt, s, cam, E, s_iTag);   // [scopes1025] hip: no aim target yet, the lens still follows the rifle
         return;
     }
     // v5 (2026-09-29), OPTIONAL - cg_adsRigSmooth 1: a one-euro filter on the TARGET with ONE cutoff for all 8
@@ -2446,6 +2476,7 @@ static void CG_AdsRigSolve(refEntity_t *pREnt)
     // ---- apply the followed correction, weighted
     w = s_rigW;
     if (w <= 0.0005f) {
+        CG_ScopeOcular(pREnt, s, cam, E, s_iTag);   // [scopes1025] the hip lens still follows the rifle
         return;
     }
     for (k = 0; k < 3; k++) {
@@ -2485,29 +2516,7 @@ static void CG_AdsRigSolve(refEntity_t *pREnt)
         VectorMA(pREnt->origin, -pLow->value * (1.0f - s_rigGateRaw), cam[2], pREnt->origin);
     }
 
-    if (CG_HzmScopePipActive() && s >= s_adsSightsScope && s < s_adsSightsScope + sizeof(s_adsSightsScope) / sizeof(s_adsSightsScope[0])) {
-        // [scopes1025] where the eyepiece (the sight row's R point) really is on screen after everything above: the lens circle follows it
-        orientation_t or2 = cgi.TIKI_Orientation(pREnt, s_iTag);
-        vec3_t        G2, R2w, A2[3], d2;
-        float         dep, tanY;
-        int           q;
-
-        VectorCopy(pREnt->origin, G2);
-        for (q = 0; q < 3; q++) {
-            VectorMA(G2, or2.origin[q], pREnt->axis[q], G2);
-        }
-        MatrixMultiply(or2.axis, pREnt->axis, A2);
-        VectorCopy(G2, R2w);
-        for (q = 0; q < 3; q++) {
-            VectorMA(R2w, s->R[q], A2[q], R2w);
-        }
-        VectorSubtract(R2w, E, d2);
-        dep = DotProduct(d2, cam[0]);
-        if (dep > 0.3f && cg_fAdsWeaponFov > 1.0f && cg.refdef.width > 0) {
-            tanY = (float)tan(DEG2RAD(cg_fAdsWeaponFov * 0.5f)) * (float)cg.refdef.height / (float)cg.refdef.width;
-            CG_HzmScopeSetOcular(-DotProduct(d2, cam[1]) / dep / (2.0f * tanY), -DotProduct(d2, cam[2]) / dep / (2.0f * tanY), (s->relief / 2.38f) / 1.5f / dep / (2.0f * tanY));
-        }
-    }
+    CG_ScopeOcular(pREnt, s, cam, E, s_iTag);
 
     if (pDbg->integer && (pDbg->integer >= 2 || cg.time - s_iLast >= 200)) {
         s_iLast = cg.time;

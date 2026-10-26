@@ -16,6 +16,7 @@ uniform sampler2D u_ScreenDepthMap;   // pass 0: the ocular-glass coverage mask 
 uniform vec4      u_Color;      // (amount 0..1, lens radius / screen height, pupil x, pupil y) - pupil in lens radii, +y down
 uniform vec4      u_HzmParams;  // (pupil radius in lens radii, glass warmth, chromatic amount, outside brightness 0..1)
 uniform vec4      u_ViewInfo;   // (lens circle centre offset x, y in screen-height units, +y down: it follows the rifle's eyepiece; pass mode)
+uniform vec4      u_FogDistance; // (blur radius scale, 0, 0, 0)
 uniform vec2      u_InvTexRes;  // 1 / scene size in texels
 
 varying vec2      var_TexCoords;
@@ -40,13 +41,16 @@ void main()
 	float R      = max(u_Color.y, 0.05);
 	vec2  q      = (p - u_ViewInfo.xy) / R;                    // lens radii, from the lens centre (the eyepiece)
 	float r      = length(q);
+	float vw     = u_ViewInfo.w;
+	bool  glass  = (mod(vw, 2.0) > 0.5);       // the rifle has a real glass surface (coverage mask)
+	bool  adsMode = (vw > 1.5);                // 1: MAIN = the magnified picture, aux = the wide world; 0: MAIN = the hip view, aux = the magnified LENS picture
 
 	// ---- the rim, pass 1
 	float band  = smoothstep(0.995, 1.004, r) * (1.0 - smoothstep(1.50, 1.58, r));   // out to the bell's outer radius: its faceted silhouette is covered
 	vec2  qn    = q / max(r, 0.0001);
 	float arc   = pow(max(dot(qn, normalize(vec2(-0.55, -0.83))), 0.0), 6.0);
 	vec3  metal = vec3(0.016, 0.017, 0.020) * mix(1.6, 0.6, smoothstep(1.0, 1.5, r)) + vec3(0.075) * arc * smoothstep(1.02, 1.10, r) * (1.0 - smoothstep(1.22, 1.45, r));
-	float ringK = band * smoothstep(0.55, 0.92, amt);
+	float ringK = band;
 
 	vec3  scene = texture2D(u_TextureMap, var_TexCoords).rgb;
 	if (u_ViewInfo.z > 0.5)
@@ -54,18 +58,20 @@ void main()
 		// whatever the weapon drew INSIDE the circle (the tube interior, the objective disc seen down the tube) is replaced by the finished picture again
 		vec4  pic     = texture2D(u_ScreenDepthMap, var_TexCoords);
 		float gm      = pic.a;
-		float restore = ((u_ViewInfo.w > 0.5) ? gm : (1.0 - smoothstep(0.985, 1.0, r))) * smoothstep(0.0, 0.12, amt);
+		float restore = glass ? gm : (1.0 - smoothstep(0.985, 1.0, r));
 		vec3  base    = mix(scene, pic.rgb, restore);
-		gl_FragColor = vec4(mix(base, metal, (u_ViewInfo.w > 0.5) ? 0.0 : ringK), 1.0);
+		gl_FragColor = vec4(mix(base, metal, glass ? 0.0 : ringK), 1.0);
 		return;
 	}
 
 	// ---- pass 0
-	float lens   = (u_ViewInfo.w > 0.5) ? smoothstep(0.3, 0.7, glassMask()) : (1.0 - smoothstep(0.985, 1.0, r));   // the rifle's real glass surface, else the circle
+	float lens   = glass ? smoothstep(0.3, 0.7, glassMask()) : (1.0 - smoothstep(0.985, 1.0, r));   // the rifle's real glass surface, else the circle
 	float pr     = length(q - u_Color.zw) / max(u_HzmParams.x, 0.5);
 	float pupil  = 1.0 - smoothstep(0.86, 1.0, pr);
 
-	vec3  wide   = texture2D(u_LevelsMap, var_TexCoords).rgb;        // the wide world (no weapon)
+	vec3  mainC  = texture2D(u_TextureMap, var_TexCoords).rgb;
+	vec3  auxC   = texture2D(u_LevelsMap, var_TexCoords).rgb;
+	vec3  wide   = adsMode ? auxC : mainC;                            // the wide world (no weapon)
 
 	// inside the lens: the magnified main picture
 	float r2   = min(r * r, 1.0);
@@ -73,13 +79,14 @@ void main()
 	float ca   = min(u_HzmParams.z, 4.0) * 0.004 * r2;
 	vec3  inside;
 	vec2  dl = d - vec2(u_ViewInfo.x / aspect, -u_ViewInfo.y);   // the picture rides with the lens (the rifle's real glass), not the screen centre
-	inside.r = texture2D(u_TextureMap, vec2(0.5) + dl * (bar + ca)).r;
-	inside.g = texture2D(u_TextureMap, vec2(0.5) + dl * bar).g;
-	inside.b = texture2D(u_TextureMap, vec2(0.5) + dl * (bar - ca)).b;
+	vec2  c0 = vec2(0.5) + dl * (bar + ca), c1 = vec2(0.5) + dl * bar, c2 = vec2(0.5) + dl * (bar - ca);   // the magnified picture: MAIN in ADS mode, the aux lens view otherwise
+	if (adsMode) { inside.r = texture2D(u_TextureMap, c0).r; inside.g = texture2D(u_TextureMap, c1).g; inside.b = texture2D(u_TextureMap, c2).b; }
+	else         { inside.r = texture2D(u_LevelsMap, c0).r;   inside.g = texture2D(u_LevelsMap, c1).g;   inside.b = texture2D(u_LevelsMap, c2).b; }
 	float w  = u_HzmParams.y;
 	inside  *= vec3(1.0 + 0.25 * w, 1.0 + 0.05 * w, 1.0 - w);
-	inside  *= 1.0 - 0.45 * pow(smoothstep(0.62, 1.0, r), 1.6);   // soft inner shadow toward the rim (the tube wall)
-	inside  *= 1.0 - 0.85 * smoothstep(0.972, 0.996, r);          // the glass edge goes dark into the ring
+	float rIn = (glass && !adsMode) ? r * 0.55 : r;   // the glass is seen at an angle at the hip: its real mask ends the picture, the circle's falloff must not darken it
+	inside  *= 1.0 - 0.45 * pow(smoothstep(0.62, 1.0, rIn), 1.6);   // soft inner shadow toward the rim (the tube wall)
+	inside  *= 1.0 - 0.85 * smoothstep(0.972, 0.996, rIn);          // the glass edge goes dark into the ring
 
 	// outside: the wide-angle world, out of focus and dim. The source is the 1/4 box-downsampled copy (each texel already averages 4 x 4 wide texels, so
 	// the foliage speckle is gone before the blur); 24 Vogel taps rotated per pixel smooth the rest.
@@ -87,12 +94,14 @@ void main()
 	if (amt > 0.0)
 	{
 		float ign = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));
-		vec3  b   = min(texture2D(u_ScreenImageMap, var_TexCoords).rgb, vec3(1.5)) * 0.04;
+		float br  = 0.05 * u_FogDistance.x;
+		vec3  b   = min(adsMode ? texture2D(u_ScreenImageMap, var_TexCoords).rgb : mainC, vec3(1.5)) * 0.04;
 		for (int k = 0; k < 24; k++)
 		{
 			float rr = sqrt((float(k) + 0.5) / 24.0);
 			float th = float(k) * 2.39996323 + ign * 6.2831853;
-			b += min(texture2D(u_ScreenImageMap, var_TexCoords + vec2(cos(th) / aspect, sin(th)) * rr * 0.05).rgb, vec3(1.5)) * 0.04;
+			vec2  tc = var_TexCoords + vec2(cos(th) / aspect, sin(th)) * rr * br;
+			b += min(adsMode ? texture2D(u_ScreenImageMap, tc).rgb : texture2D(u_TextureMap, tc).rgb, vec3(1.5)) * 0.04;
 		}
 		float rimShade = mix(0.62, 1.0, smoothstep(1.0, 1.9, r));   // the tube shadow: deepest at the ring, gone toward the screen edge
 		outside = b * clamp(u_HzmParams.w, 0.0, 1.0) * rimShade;
@@ -103,7 +112,7 @@ void main()
 	{
 		if (u_HzmParams.z < 15.0) { gl_FragColor = vec4(wide, 1.0); return; }
 		if (u_HzmParams.z < 25.0) { gl_FragColor = vec4(outside, 1.0); return; }
-		if (u_HzmParams.z < 35.0) { gl_FragColor = vec4(scene, 1.0); return; }
+		if (u_HzmParams.z < 35.0) { gl_FragColor = vec4(mainC, 1.0); return; }
 		if (u_HzmParams.z < 45.0) { gl_FragColor = vec4(vec3(glassMask()), 1.0); return; }
 		gl_FragColor = vec4(texture2D(u_ScreenImageMap, var_TexCoords).rgb, 1.0); return;
 	}
@@ -112,6 +121,6 @@ void main()
 	vec3 lensCol   = mix(shadowCol, inside, pupil);
 
 	vec3  ring     = mix(wide, outside, amt);
-	float lensFade = smoothstep(0.0, 0.12, amt) * lens;   // the magnified picture is on the glass from the start of the raise
+	float lensFade = lens;   // the live magnified picture is on the glass ALWAYS (hip, raise, bolt, reload)
 	gl_FragColor   = vec4(mix(ring, lensCol, lensFade), lens);   // alpha = the lens / glass coverage, for the restore in pass 1
 }

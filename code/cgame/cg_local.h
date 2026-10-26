@@ -778,6 +778,8 @@ const adsGunTune_t *CG_FindAdsTune(const char *wpn);
     int      CG_HzmScopeWeaponOptic(const char *wpn);
     qboolean CG_HzmScopeWorldFov(float camFov, float *outFov);
     qboolean CG_HzmScopeActive(void);
+    qboolean CG_HzmScopeHeld(void);
+    void     CG_HzmScopeDrawReticle(void);   // [scopes1025]       // [scopes1025] live lens: scoped rifle held (hip included)
     qboolean CG_HzmScopePipActive(void);  // [scopes1025] scope shown as a picture-in-picture lens
     qboolean CG_HzmScopeRaiseOwns(void);  // [scopes1025] rifle stays drawn and is raised to the eye (ADS pose)
     float    CG_HzmScopeSensScale(void);  // [scopes1025] lens / wide mouse sensitivity ratio (1 outside PiP)

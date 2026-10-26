@@ -104,7 +104,7 @@ static void R_HzmLensCvars(void)
 		r_ppScopeWide    = ri.Cvar_Get("r_ppScopeWide", "0.5", 0);
 		r_ppScopeShadows = ri.Cvar_Get("r_ppScopeShadows", "0", 0);
 		r_ppScopeOutside = ri.Cvar_Get("r_ppScopeOutside", "0.9", 0);
-		r_ppScopeBlur    = ri.Cvar_Get("r_ppScopeBlur", "1", 0);
+		r_ppScopeBlur    = ri.Cvar_Get("r_ppScopeBlur", "0.62", 0);
 		r_ppScopeCA      = ri.Cvar_Get("r_ppScopeCA", "0.5", 0);
 	}
 }
@@ -113,13 +113,13 @@ static void R_HzmLensCvars(void)
 static const float *R_HzmLensState(void)
 {
 	static int   s_mod = -1;
-	static float s_st[9];
+	static float s_st[10];
 
 	R_HzmLensCvars();
 	if (r_ppScopeState->modificationCount != s_mod) {
 		s_mod = r_ppScopeState->modificationCount;
 		memset(s_st, 0, sizeof(s_st));
-		sscanf(r_ppScopeState->string, "%f %f %f %f %f %f %f %f %f", &s_st[0], &s_st[1], &s_st[2], &s_st[3], &s_st[4], &s_st[5], &s_st[6], &s_st[7], &s_st[8]);
+		sscanf(r_ppScopeState->string, "%f %f %f %f %f %f %f %f %f %f", &s_st[0], &s_st[1], &s_st[2], &s_st[3], &s_st[4], &s_st[5], &s_st[6], &s_st[7], &s_st[8], &s_st[9]);
 	}
 	return s_st;
 }
@@ -128,7 +128,7 @@ qboolean R_HzmLensStateWantsPip(void)
 {
 	const float *st = R_HzmLensState();
 
-	return (st[0] > 0.001f && st[1] > 0.01f && st[6] > 1.0f) ? qtrue : qfalse;
+	return (st[1] > 0.01f && st[6] > 4.0f) ? qtrue : qfalse;   // [held scope] the lens is live whenever a scoped rifle is held: amount 0 = no ADS blur, not 'off'
 }
 
 // can this renderer run the PiP at all right now (renderer-published so cgame can read it)
@@ -210,7 +210,7 @@ void R_HzmLensRenderView(viewParms_t *mainParms)
 	LENS_STAGE(2);
 	st  = R_HzmLensState();
 	fov = st[6];
-	if (fov < 20.0f || fov > 130.0f) {
+	if (fov < 6.0f || fov > 130.0f) {
 		return;
 	}
 	// ROLE SWAP: the MAIN view is the magnified scope picture (cgame gives it the optic's fov); this second view is the WIDE hip-fov world
@@ -297,7 +297,7 @@ static qboolean R_HzmLensEnsureScratch(void)
 }
 
 // per pass: viewinfo (lens centre offset, mode 0 = full composite / 1 = rim only) and the texture units (0 = scene, 1 = wide, 2 = 1/4 blurred wide)
-#define LENS_PASS(mode) do { 	vec4_t vi_; 	VectorSet4(vi_, st[7], st[8], (mode), (tr.hzmGlassDrawn > 0) ? 1.0f : 0.0f); 	GLSL_BindProgram(&tr.hzmLensShader); 	GLSL_SetUniformVec4(&tr.hzmLensShader, UNIFORM_VIEWINFO, vi_); 	GL_BindToTMU(tr.hzmLensColor, TB_LEVELSMAP); 	GL_BindToTMU(tr.hzmLensQuartImg, TB_NORMALMAP); GL_BindToTMU(tr.hzmMaskImg, TB_DELUXEMAP); } while (0)
+#define LENS_PASS(mode) do { 	vec4_t vi_; 	VectorSet4(vi_, st[7], st[8], (mode), ((tr.hzmGlassDrawn > 0) ? 1.0f : 0.0f) + ((st[9] > 0.5f) ? 2.0f : 0.0f)); 	GLSL_BindProgram(&tr.hzmLensShader); 	GLSL_SetUniformVec4(&tr.hzmLensShader, UNIFORM_VIEWINFO, vi_); { vec4_t bl_; VectorSet4(bl_, r_ppScopeBlur->value, 0.0f, 0.0f, 0.0f); GLSL_SetUniformVec4(&tr.hzmLensShader, UNIFORM_FOGDISTANCE, bl_); } 	GL_BindToTMU(tr.hzmLensColor, TB_LEVELSMAP); 	GL_BindToTMU(tr.hzmLensQuartImg, TB_NORMALMAP); GL_BindToTMU(tr.hzmMaskImg, TB_DELUXEMAP); } while (0)
 
 static qboolean R_HzmLensEnsureMask(void)
 {
@@ -338,7 +338,7 @@ void RB_HZMLensComposite(FBO_t *srcFbo, ivec4_t srcBox)
 		return;
 	}
 	st = R_HzmLensState();
-	if (st[0] <= 0.001f || st[1] <= 0.01f) {
+	if (st[1] <= 0.01f) {
 		return;
 	}
 
@@ -347,8 +347,10 @@ void RB_HZMLensComposite(FBO_t *srcFbo, ivec4_t srcBox)
 
 	LENS_STAGE(20);
 	// the blur source: wide -> 1/2 -> 1/4, each a 2x2 box average (bilinear at exact half scale), so the foliage speckle is averaged, not point-sampled
-	FBO_Blit(tr.hzmLensFbo, NULL, NULL, tr.hzmLensHalfFbo, NULL, NULL, NULL, 0);
-	FBO_Blit(tr.hzmLensHalfFbo, NULL, NULL, tr.hzmLensQuartFbo, NULL, NULL, NULL, 0);
+	if (st[9] > 0.5f && st[0] > 0.001f) {   // ADS: the aux view is the wide world and feeds the blur
+		FBO_Blit(tr.hzmLensFbo, NULL, NULL, tr.hzmLensHalfFbo, NULL, NULL, NULL, 0);
+		FBO_Blit(tr.hzmLensHalfFbo, NULL, NULL, tr.hzmLensQuartFbo, NULL, NULL, NULL, 0);
+	}
 
 	// 0: the ocular GLASS coverage: the weapon view's lens surface alone, solid white, into the mask target. The glass is real geometry of the rifle, so the lens
 	// moves, sways and recoils with it and has its true shape; no glass mesh on a model (tr.hzmGlassDrawn 0) = the screen-space circle fallback

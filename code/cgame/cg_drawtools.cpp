@@ -4244,6 +4244,7 @@ void CG_Draw2D(void)
     CG_UpdateHudFade();
     CG_UpdateCountdown();
     CG_DrawGl2PostFxFallback(); // HZM gl2 re-port: under the HUD, over the scene (gl2 only)
+    CG_HzmScopeDrawReticle(); // [scopes1025] the live in-lens reticle, hip included
     CG_DrawZoomOverlay();
     CG_DrawAdsVignette();
     CG_DrawLagometer();

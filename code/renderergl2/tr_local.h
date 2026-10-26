@@ -1357,7 +1357,7 @@ typedef enum {
 	// the switch at 0 no view carries either bit and every test on them is dead.
 	VPF_SUNWORLD        = 0x200,    // the W bake (static world cascade, own arrays)
 	VPF_SUNSTABLE       = 0x400,    // a per-frame radial entity-only cascade
-	VPF_ONLYVIEWMODEL   = 0x800     // HZM coop [scopes1025] the scope PiP's rifle layer: only RF_FIRST_PERSON entities, no world, no sprites
+	VPF_ONLYVIEWMODEL   = 0x1000    // HZM coop [scopes1025] the scope PiP's rifle layer: only RF_FIRST_PERSON entities, no world, no sprites
 } viewParmFlags_t;
 
 typedef struct {
