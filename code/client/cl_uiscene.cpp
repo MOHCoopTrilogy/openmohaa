@@ -48,6 +48,8 @@ class UIScene3D : public UIWidget
         float     yaw;
         str       anim;      // optional: loop this TIKI animation (actors)
         str       hide;      // optional: comma list of surface names to nodraw (helmet indoors)
+        str       group;     // optional: models sharing a group name are alternatives - ONE is chosen at random when the world first draws (actor coin flip)
+        bool      off;
         int       animStart;
     };
     struct sceneHot_t {
@@ -102,8 +104,8 @@ Event EV_Scene_Model
 (
     "scenemodel",
     EV_DEFAULT,
-    "sffffSS",
-    "model x y z yaw [anim] [hidesurfaces]",
+    "sffffSSS",
+    "model x y z yaw [anim] [hidesurfaces] [choicegroup]",
     "Scene3D: add a model (tik) at an origin and yaw; optional looping animation and a comma list of surfaces to hide."
 );
 Event EV_Scene_Cam
@@ -176,6 +178,8 @@ void UIScene3D::SceneModel(Event *ev)
     m->yaw          = ev->GetFloat(5);
     m->anim         = ev->NumArgs() >= 6 ? ev->GetString(6) : "";
     m->hide         = ev->NumArgs() >= 7 ? ev->GetString(7) : "";
+    m->group        = ev->NumArgs() >= 8 ? ev->GetString(8) : "";
+    m->off          = false;
     m->animStart    = 0;
     m_models.AddObject(m);
 }
@@ -304,6 +308,32 @@ void UIScene3D::Draw(void)
     VectorCopy(m_cur.org, rd.vieworg);
     AnglesToAxis(m_cur.ang, rd.viewaxis);
 
+    if (m_drawn == 0) {
+        // coin flip per choice group (each time the world loads): keep exactly one member of every group
+        for (int i = 1; i <= m_models.NumObjects(); i++) {
+            sceneModel_t *a = m_models.ObjectAt(i);
+            if (!a->group.length()) {
+                continue;
+            }
+            int members[16], n = 0;
+            for (int j = 1; j <= m_models.NumObjects() && n < 16; j++) {
+                if (!str::cmp(m_models.ObjectAt(j)->group, a->group)) {
+                    members[n++] = j;
+                }
+            }
+            if (!n || members[0] != i) {
+                continue;          // roll each group once, from its first member
+            }
+            const unsigned seed = (unsigned)Sys_Milliseconds() * 2654435761u + (unsigned)i * 40503u;
+            const int      pick = n ? (int)((seed >> 12) % (unsigned)n) : 0;
+            for (int k = 0; k < n; k++) {
+                m_models.ObjectAt(members[k])->off = (k != pick);
+            }
+            if (Cvar_VariableIntegerValue("ui_scene_debug")) {
+                Com_Printf("^~^~^ SCENE3D choice '%s': member %d of %d -> %s\n", a->group.c_str(), pick + 1, n, m_models.ObjectAt(members[pick])->name.c_str());
+            }
+        }
+    }
     m_drawn++;
     re.ClearScene();
     for (int i = 1; i <= m_lights.NumObjects(); i++) {
@@ -313,6 +343,9 @@ void UIScene3D::Draw(void)
     const bool dbg = Cvar_VariableIntegerValue("ui_scene_debug") != 0;
     for (int i = 1; i <= m_models.NumObjects(); i++) {
         sceneModel_t *m = m_models.ObjectAt(i);
+        if (m->off) {
+            continue;
+        }
         if (!m->handle && m->anim.length() && m_drawn < 45) {
             continue;       // actors load lazily, a moment after the menu is up
         }
