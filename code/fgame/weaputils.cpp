@@ -3915,11 +3915,11 @@ void RadiusDamage(
                             fFrac = 1.0f;
                         }
                         if (fFrac > 0.0f) {
-                            cvar_t *pK = gi.Cvar_Get("coop_blastKnock", "0.55", CVAR_ARCHIVE);
-                            cvar_t *pS = gi.Cvar_Get("coop_blastStagger", "0.28", CVAR_ARCHIVE);
+                            cvar_t *pK = gi.Cvar_Get("coop_blastKnock", "0.45", CVAR_ARCHIVE);
+                            cvar_t *pS = gi.Cvar_Get("coop_blastStagger", "0.22", CVAR_ARCHIVE);
                             cvar_t *pM = gi.Cvar_Get("coop_blastMinDmg", "60", CVAR_ARCHIVE);
-                            fKnock     = pK ? pK->value : 0.55f;
-                            fStag      = pS ? pS->value : 0.28f;
+                            fKnock     = pK ? pK->value : 0.45f;
+                            fStag      = pS ? pS->value : 0.22f;
                             fMinDmg    = pM ? pM->value : 60.0f;
 
                             iTier = 1;
