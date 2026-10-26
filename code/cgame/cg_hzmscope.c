@@ -642,7 +642,7 @@ qboolean CG_HzmScopeDraw2D(void)
             const float k = hs.ease * hs.ease * hs.ease * hs.lensK, hl = 1.6f * (H / 720.0f), th = 0.7f * (H / 720.0f);
             const float ofs[4][2] = {{hl, 0.0f}, {-hl, 0.0f}, {0.0f, hl}, {0.0f, -hl}};
             int         q;
-            VectorSet4(col, 1.0f, 1.0f, 1.0f, 0.55f * k);
+            VectorSet4(col, 1.0f, 1.0f, 1.0f, 0.30f * k);
             cgi.R_SetColor(col);
             for (q = 0; q < 4; q++) {
                 cgi.R_DrawStretchPic(rx - R + ofs[q][0], ry - R + ofs[q][1], 2.0f * R, 2.0f * R, 0.0f, 0.0f, 1.0f, 1.0f, hRet);

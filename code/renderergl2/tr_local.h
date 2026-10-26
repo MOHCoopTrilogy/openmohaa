@@ -2719,12 +2719,12 @@ typedef struct {
 	int             hzmLensSize;
 	int             hzmLensW, hzmLensH;   // the WIDE view's target size (scene size x r_ppScopeWide)
 	int             hzmLensScratchW, hzmLensScratchH;
+	FBO_t          *hzmLensScratch2Fbo;   // HZM coop [scopes1025] second scratch: the rim pass reads the first (the finished picture) and writes this
+	image_t        *hzmLensScratchImg;
 	qboolean        hzmLensValid;       // the lens view was queued this frame: the composite may run
-	FBO_t          *hzmGunFbo;          // HZM coop [scopes1025] the rifle layer (scene-sized, HDR + depth texture): view weapon only
-	image_t        *hzmGunColor;
-	image_t        *hzmGunDepth;
-	int             hzmGunW, hzmGunH;
-	qboolean        hzmGunValid;        // the rifle layer was queued this frame
+	FBO_t          *hzmLensHalfFbo, *hzmLensQuartFbo;   // HZM coop [scopes1025] the wide view's 1/2 and 1/4 box-downsampled copies (the blur reads the 1/4)
+	image_t        *hzmLensHalfImg, *hzmLensQuartImg;
+	qboolean        hzmGunValid;
 	shaderProgram_t heatHazeShader;     // HZM gl1-parity heat haze + localized muzzle shimmer
 	shaderProgram_t dofShader;          // HZM gl1-parity depth of field (r_ppDoF)
 	shaderProgram_t underwaterShader;   // HZM NEW: underwater/slime/lava screen distortion (r_ppUnderwaterFx)
@@ -4553,6 +4553,9 @@ typedef struct {
 	drawSurf_t *drawSurfs;
 	int		numDrawSurfs;
 } drawSurfsCommand_t;
+void RB_HzmLensStoreGun(const drawSurfsCommand_t *cmd);
+void RB_HzmLensDrawGun(const drawSurfsCommand_t *cmd, FBO_t *dst);   // tr_backend.c: the view weapon, last, into dst   // HZM coop [scopes1025] tr_hzm_lens.c
+void RB_RenderDrawSurfList(drawSurf_t *drawSurfs, int numDrawSurfs);   // tr_backend.c
 
 typedef struct {
 	int commandId;

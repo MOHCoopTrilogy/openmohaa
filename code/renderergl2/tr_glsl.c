@@ -2000,8 +2000,8 @@ void GLSL_InitGPUShaders(void)
 		GLSL_InitUniforms(&tr.hzmLensShader);
 		GLSL_SetUniformInt(&tr.hzmLensShader, UNIFORM_TEXTUREMAP, TB_COLORMAP);
 		GLSL_SetUniformInt(&tr.hzmLensShader, UNIFORM_LEVELSMAP,  TB_LEVELSMAP);
-		GLSL_SetUniformInt(&tr.hzmLensShader, UNIFORM_SCREENIMAGEMAP, TB_NORMALMAP);   // the rifle layer colour
-		GLSL_SetUniformInt(&tr.hzmLensShader, UNIFORM_SCREENDEPTHMAP, TB_DELUXEMAP);   // ...and its depth
+		GLSL_SetUniformInt(&tr.hzmLensShader, UNIFORM_SCREENIMAGEMAP, TB_NORMALMAP);   // the wide view's 1/4 box-downsampled copy (the blur source)
+		GLSL_SetUniformInt(&tr.hzmLensShader, UNIFORM_SCREENDEPTHMAP, TB_DELUXEMAP);   // rim pass: the finished picture of pass 1
 		GLSL_FinishGPUShader(&tr.hzmLensShader);
 	}
 	else

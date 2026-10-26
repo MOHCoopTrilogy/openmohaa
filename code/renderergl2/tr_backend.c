@@ -30,7 +30,7 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 // targets: they skip the scene-depth copies, the sun-ray mask and the flare tests that belong to the main view
 static qboolean RB_IsScopeAuxView(void)
 {
-	return (backEnd.viewParms.targetFbo != NULL && (backEnd.viewParms.targetFbo == tr.hzmLensFbo || backEnd.viewParms.targetFbo == tr.hzmGunFbo)) ? qtrue : qfalse;
+	return (backEnd.viewParms.targetFbo != NULL && backEnd.viewParms.targetFbo == tr.hzmLensFbo) ? qtrue : qfalse;
 }
 
 backEndData_t	*backEndData;
@@ -460,10 +460,9 @@ void RB_BeginDrawingView (void) {
 		clearBits |= GL_COLOR_BUFFER_BIT;   // debug: a magenta lens clear shows which pixels the lens view never drew
 		qglClearColor( 1.0f, 0.0f, 1.0f, 1.0f );
 	}
-	if ( tr.hzmGunFbo && backEnd.viewParms.targetFbo == tr.hzmGunFbo )
+	if ( backEnd.viewParms.flags & VPF_ONLYVIEWMODEL )
 	{
-		clearBits |= GL_COLOR_BUFFER_BIT;   // the rifle layer starts empty (alpha 0) whatever the fog clear above chose
-		qglClearColor( 0.0f, 0.0f, 0.0f, 0.0f );
+		clearBits &= ~GL_COLOR_BUFFER_BIT;   // the late view weapon draws onto the composited scene: only its depth is cleared
 	}
 
 	qglClear( clearBits );
@@ -890,7 +889,10 @@ void RB_RenderDrawSurfList( drawSurf_t *drawSurfs, int numDrawSurfs ) {
         //=========================
 		// HZM coop [scopes1025] the rifle layer (the scope's real body around the lens) never draws the ocular GLASS surface: it is a translucent sheen
 		// that showed as grey haze over the world, and the lens picture replaces it anyway
-		skipScopeGlass = (tr.hzmGunFbo && backEnd.viewParms.targetFbo == tr.hzmGunFbo && shader && !Q_stricmpn(shader->name, "lens", 4)) ? qtrue : qfalse;
+		if ((backEnd.viewParms.flags & VPF_ONLYVIEWMODEL) && shader && ri.Cvar_Get("r_ppScopeCrash", "0", 0)->integer > 1) {
+			ri.Printf(PRINT_ALL, "^~^~^ GUNSHADER %s\n", shader->name);
+		}
+		skipScopeGlass = ((backEnd.viewParms.flags & VPF_ONLYVIEWMODEL) && shader && (strstr(shader->name, "lens") || strstr(shader->name, "Lens") || strstr(shader->name, "glass"))) ? qtrue : qfalse;
 		if (skipScopeGlass) {
 			continue;
 		}
@@ -1639,6 +1641,26 @@ RB_DrawSurfs
 
 =============
 */
+// HZM coop [scopes1025] the scope picture-in-picture's view weapon, drawn LAST into the composited scene (dst): its own view setup (BeginDrawingView clears
+// only depth, binds dst, sets the viewport and the weapon projection), then the same surface list the game draws weapons with - the usual depth hack, the real rifle.
+void RB_HzmLensDrawGun(const drawSurfsCommand_t *cmd, FBO_t *dst)
+{
+	viewParms_t svP = backEnd.viewParms;
+	trRefdef_t  svR = backEnd.refdef;
+
+	if (tess.numIndexes) {
+		RB_EndSurface();
+	}
+	backEnd.refdef    = cmd->refdef;
+	backEnd.viewParms = cmd->viewParms;
+	backEnd.viewParms.targetFbo = dst;
+	backEnd.depthFill = qfalse;
+	RB_BeginDrawingView();
+	RB_RenderDrawSurfList(cmd->drawSurfs, cmd->numDrawSurfs);
+	backEnd.viewParms = svP;
+	backEnd.refdef    = svR;
+}
+
 const void	*RB_DrawSurfs( const void *data ) {
 	const drawSurfsCommand_t	*cmd;
 	qboolean isShadowView;
@@ -1657,6 +1679,12 @@ const void	*RB_DrawSurfs( const void *data ) {
 
 	backEnd.refdef = cmd->refdef;
 	backEnd.viewParms = cmd->viewParms;
+
+	// HZM coop [scopes1025] the scope picture-in-picture's view weapon: not drawn here, kept and drawn last on top of the composited scene (tr_hzm_lens.c)
+	if ( backEnd.viewParms.flags & VPF_ONLYVIEWMODEL ) {
+		RB_HzmLensStoreGun( cmd );
+		return (const void *)(cmd + 1);
+	}
 
 	isShadowView = !!(backEnd.viewParms.flags & VPF_DEPTHSHADOW);
 

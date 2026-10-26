@@ -16,7 +16,7 @@ gets MSAA, sun shadows, SSAO - everything the bug-3462 scope picture always had)
   real scope body is the frame around the lens. Exposure, bloom and grade treat it all as one picture.
 A wide fov of 0 (or amount 0) leaves everything to the old bug-3462 pass (tr_hzm_scope.c).
 
-Cvars (flags 0): r_ppScopePip (1; 0 = never), r_ppScopeWide (1: wide view size relative to the scene), r_ppScopeShadows (0),
+Cvars (flags 0): r_ppScopePip (1; 0 = never), r_ppScopeWide (0.5: wide view size relative to the scene), r_ppScopeShadows (0),
 r_ppScopeOutside (0.75: brightness of the world around the lens), r_ppScopeCA (shared; 10 / 20 / 30 = debug views).
 r_ppScopePipLive is renderer-published: 1 while this path can run, so cgame never selects it when it cannot.
 ===========================================================================
@@ -101,7 +101,7 @@ static void R_HzmLensCvars(void)
 		r_ppScopeState   = ri.Cvar_Get("r_ppScopeState", "0", 0);
 		r_ppScopePip     = ri.Cvar_Get("r_ppScopePip", "1", 0);
 		r_ppScopePipLive = ri.Cvar_Get("r_ppScopePipLive", "0", 0);
-		r_ppScopeWide    = ri.Cvar_Get("r_ppScopeWide", "1", 0);
+		r_ppScopeWide    = ri.Cvar_Get("r_ppScopeWide", "0.5", 0);
 		r_ppScopeShadows = ri.Cvar_Get("r_ppScopeShadows", "0", 0);
 		r_ppScopeOutside = ri.Cvar_Get("r_ppScopeOutside", "0.9", 0);
 		r_ppScopeBlur    = ri.Cvar_Get("r_ppScopeBlur", "1", 0);
@@ -148,28 +148,6 @@ void R_HzmLensPublishLive(qboolean live)
 	}
 }
 
-static qboolean R_HzmLensEnsureGun(void)
-{
-	int fmt;
-
-	if (tr.hzmGunFbo) {
-		return (tr.hzmGunW == tr.sceneWidth && tr.hzmGunH == tr.sceneHeight) ? qtrue : qfalse;
-	}
-	if (!glRefConfig.framebufferObject || tr.sceneWidth <= 0) {
-		return qfalse;
-	}
-	fmt = (r_hdr->integer && glRefConfig.textureFloat) ? GL_RGBA16F_ARB : GL_RGBA8;
-	tr.hzmGunW = tr.sceneWidth;
-	tr.hzmGunH = tr.sceneHeight;
-	tr.hzmGunColor = R_CreateImage("*hzmGun", NULL, tr.hzmGunW, tr.hzmGunH, IMGTYPE_COLORALPHA, IMGFLAG_NO_COMPRESSION | IMGFLAG_CLAMPTOEDGE, fmt);
-	tr.hzmGunDepth = R_CreateImage("*hzmGunDepth", NULL, tr.hzmGunW, tr.hzmGunH, IMGTYPE_COLORALPHA, IMGFLAG_NO_COMPRESSION | IMGFLAG_CLAMPTOEDGE, GL_DEPTH_COMPONENT24);
-	tr.hzmGunFbo   = FBO_Create("_hzmGun", tr.hzmGunW, tr.hzmGunH);
-	FBO_AttachImage(tr.hzmGunFbo, tr.hzmGunColor, GL_COLOR_ATTACHMENT0, 0);
-	FBO_AttachImage(tr.hzmGunFbo, tr.hzmGunDepth, GL_DEPTH_ATTACHMENT, 0);
-	R_CheckFBO(tr.hzmGunFbo);
-	return qtrue;
-}
-
 static qboolean R_HzmLensEnsureFbo(void)
 {
 	int w, h, fmt;
@@ -197,6 +175,15 @@ static qboolean R_HzmLensEnsureFbo(void)
 	tr.hzmLensW = w;
 	tr.hzmLensH = h;
 	tr.hzmLensSize = w;
+	// the downsample chain the blur reads (box average 2x2 twice: no point-sampled foliage speckle): wide -> 1/2 -> 1/4
+	tr.hzmLensHalfImg = R_CreateImage("*hzmWideH", NULL, w / 2, h / 2, IMGTYPE_COLORALPHA, IMGFLAG_NO_COMPRESSION | IMGFLAG_CLAMPTOEDGE, fmt);
+	tr.hzmLensHalfFbo = FBO_Create("_hzmWideH", w / 2, h / 2);
+	FBO_AttachImage(tr.hzmLensHalfFbo, tr.hzmLensHalfImg, GL_COLOR_ATTACHMENT0, 0);
+	R_CheckFBO(tr.hzmLensHalfFbo);
+	tr.hzmLensQuartImg = R_CreateImage("*hzmWideQ", NULL, w / 4, h / 4, IMGTYPE_COLORALPHA, IMGFLAG_NO_COMPRESSION | IMGFLAG_CLAMPTOEDGE, fmt);
+	tr.hzmLensQuartFbo = FBO_Create("_hzmWideQ", w / 4, h / 4);
+	FBO_AttachImage(tr.hzmLensQuartFbo, tr.hzmLensQuartImg, GL_COLOR_ATTACHMENT0, 0);
+	R_CheckFBO(tr.hzmLensQuartFbo);
 	return qtrue;
 }
 
@@ -253,17 +240,14 @@ void R_HzmLensRenderView(viewParms_t *mainParms)
 	LENS_STAGE(11);
 	tr.hzmLensValid = qtrue;
 
-	// the RIFLE LAYER: the view weapon and arms alone, at the main view's size and projection, into their own target - the composite keeps them
-	// crisp over the blurred world (the real scope body around the lens). The main view then leaves them out.
+	// the VIEW WEAPON: a view of its own (VPF_ONLYVIEWMODEL, the weapon projection with its usual depth hack) that the back end does not draw where it is
+	// queued but keeps (RB_HzmLensStoreGun) and draws LAST, straight into the composited scene, from RB_HZMLensComposite: the real rifle on top of the
+	// blurred world, drawn exactly as the game draws weapons, with only the ocular glass left out. The main view leaves the weapon out.
 	tr.hzmGunValid = qfalse;
-	if (R_HzmLensEnsureGun()) {
+	{
 		viewParms_t gun = *mainParms;
 
-		gun.viewportX = 0;
-		gun.viewportY = 0;
-		gun.viewportWidth  = tr.hzmGunW;
-		gun.viewportHeight = tr.hzmGunH;
-		gun.targetFbo      = tr.hzmGunFbo;
+		gun.targetFbo      = NULL;
 		gun.targetFboLayer = 0;
 		gun.targetFboCubemapIndex = 0;
 		gun.isPortal       = qfalse;
@@ -271,9 +255,18 @@ void R_HzmLensRenderView(viewParms_t *mainParms)
 		LENS_STAGE(12);
 		R_RenderView(&gun);
 		LENS_STAGE(13);
-		tr.hzmGunValid = qtrue;
 		mainParms->flags |= VPF_NOVIEWMODEL;
 	}
+}
+
+static drawSurfsCommand_t s_lateGun;
+static qboolean           s_lateGunValid = qfalse;
+
+// back end: RB_DrawSurfs hands the weapon view's command over instead of drawing it
+void RB_HzmLensStoreGun(const drawSurfsCommand_t *cmd)
+{
+	s_lateGun      = *cmd;
+	s_lateGunValid = qtrue;
 }
 
 static qboolean R_HzmLensEnsureScratch(void)
@@ -289,14 +282,22 @@ static qboolean R_HzmLensEnsureScratch(void)
 	fmt = (r_hdr->integer && glRefConfig.textureFloat) ? GL_RGBA16F_ARB : GL_RGBA8;
 	{
 		image_t *img = R_CreateImage("*hzmLensScratch", NULL, w, h, IMGTYPE_COLORALPHA, IMGFLAG_NO_COMPRESSION | IMGFLAG_CLAMPTOEDGE, fmt);
+		image_t *img2 = R_CreateImage("*hzmLensScratch2", NULL, w, h, IMGTYPE_COLORALPHA, IMGFLAG_NO_COMPRESSION | IMGFLAG_CLAMPTOEDGE, fmt);
 		tr.hzmLensScratchFbo = FBO_Create("_hzmLensScratch", w, h);
 		FBO_AttachImage(tr.hzmLensScratchFbo, img, GL_COLOR_ATTACHMENT0, 0);
 		R_CheckFBO(tr.hzmLensScratchFbo);
+		tr.hzmLensScratchImg = img;
+		tr.hzmLensScratch2Fbo = FBO_Create("_hzmLensScratch2", w, h);
+		FBO_AttachImage(tr.hzmLensScratch2Fbo, img2, GL_COLOR_ATTACHMENT0, 0);
+		R_CheckFBO(tr.hzmLensScratch2Fbo);
 	}
 	tr.hzmLensScratchW = w;
 	tr.hzmLensScratchH = h;
 	return qtrue;
 }
+
+// per pass: viewinfo (lens centre offset, mode 0 = full composite / 1 = rim only) and the texture units (0 = scene, 1 = wide, 2 = 1/4 blurred wide)
+#define LENS_PASS(mode) do { 	vec4_t vi_; 	VectorSet4(vi_, st[7], st[8], (mode), 0.0f); 	GLSL_BindProgram(&tr.hzmLensShader); 	GLSL_SetUniformVec4(&tr.hzmLensShader, UNIFORM_VIEWINFO, vi_); 	GL_BindToTMU(tr.hzmLensColor, TB_LEVELSMAP); 	GL_BindToTMU(tr.hzmLensQuartImg, TB_NORMALMAP); } while (0)
 
 /*
 Back end. Top of RB_PostProcess, on the resolved HDR scene (srcFbo), before bloom / tone map.
@@ -327,25 +328,29 @@ void RB_HZMLensComposite(FBO_t *srcFbo, ivec4_t srcBox)
 	VectorSet4(params, st[4], st[5], r_ppScopeCA->value, r_ppScopeOutside->value);
 
 	LENS_STAGE(20);
-	{
-		vec4_t vi;
-		VectorSet4(vi, st[7], st[8], 0.0f, 0.0f);   // the lens circle centre (it follows the rifle's eyepiece), screen-height units, +y down
-		GLSL_BindProgram(&tr.hzmLensShader);
-		GLSL_SetUniformVec4(&tr.hzmLensShader, UNIFORM_VIEWINFO, vi);
-	}
-	GL_BindToTMU(tr.hzmLensColor, TB_LEVELSMAP);
-	if (tr.hzmGunValid && tr.hzmGunColor && tr.hzmGunDepth) {   // the rifle layer (colour + depth = its coverage mask)
-		GL_BindToTMU(tr.hzmGunColor, TB_NORMALMAP);
-		GL_BindToTMU(tr.hzmGunDepth, TB_DELUXEMAP);
-	} else {
-		GL_BindToTMU(tr.whiteImage, TB_NORMALMAP);
-		GL_BindToTMU(tr.whiteImage, TB_DELUXEMAP);   // depth 1 everywhere = no rifle
-	}
-	tr.hzmGunValid = qfalse;
+	// the blur source: wide -> 1/2 -> 1/4, each a 2x2 box average (bilinear at exact half scale), so the foliage speckle is averaged, not point-sampled
+	FBO_Blit(tr.hzmLensFbo, NULL, NULL, tr.hzmLensHalfFbo, NULL, NULL, NULL, 0);
+	FBO_Blit(tr.hzmLensHalfFbo, NULL, NULL, tr.hzmLensQuartFbo, NULL, NULL, NULL, 0);
+
+	LENS_PASS(0.0f);   // 1: the scope picture inside the circle, the blurred wide world outside
 	FBO_SetHzmParams(params);
 	FBO_Blit(srcFbo, srcBox, NULL, tr.hzmLensScratchFbo, srcBox, &tr.hzmLensShader, color, 0);
 	FBO_SetHzmParams(NULL);
-	LENS_STAGE(21);
 	FBO_FastBlit(tr.hzmLensScratchFbo, srcBox, srcFbo, srcBox, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+	LENS_STAGE(21);
+
+	// 2: the VIEW WEAPON, last, on top, with its usual depth hack and weapon projection - the real rifle and hands, nothing composited from a render target
+	if (s_lateGunValid) {
+		RB_HzmLensDrawGun(&s_lateGun, srcFbo);
+		s_lateGunValid = qfalse;
+	}
+
+	// 3: the eyepiece rim as a true circle over the weapon's faceted bell (ring only; the lens interior stays whatever the weapon left of it)
+	LENS_PASS(1.0f);
+	GL_BindToTMU(tr.hzmLensScratchImg, TB_DELUXEMAP);   // the finished picture of pass 1: it is put back inside the circle over whatever the weapon drew there
+	FBO_SetHzmParams(params);
+	FBO_Blit(srcFbo, srcBox, NULL, tr.hzmLensScratch2Fbo, srcBox, &tr.hzmLensShader, color, 0);
+	FBO_SetHzmParams(NULL);
+	FBO_FastBlit(tr.hzmLensScratch2Fbo, srcBox, srcFbo, srcBox, GL_COLOR_BUFFER_BIT, GL_NEAREST);
 	LENS_STAGE(22);
 }
