@@ -1259,6 +1259,7 @@ void RB_HZMScreenFx(FBO_t *srcFbo, ivec4_t srcBox)
 		static cvar_t *r_ppMuzzleAx = NULL, *r_ppMuzzleAy = NULL, *r_ppMuzzleAs = NULL;   // cgame-owned, NOT archived
 		float muzX, muzY;
 		float heat, muzHeat, muzR;
+		int hzSpots = 0;
 
 		if (!r_ppHeatHaze) {
 			r_ppHeatHaze     = ri.Cvar_Get("r_ppHeatHaze",     "1",    CVAR_ARCHIVE);
@@ -1293,7 +1294,28 @@ void RB_HZMScreenFx(FBO_t *srcFbo, ivec4_t srcBox)
 				muzR *= r_ppMuzzleAs->value;
 			}
 
-			if (heat > 0.001f || muzHeat > 0.001f)
+			// HZM fx_1025: localized fire/blast spots published by cgame (r_ppHz0..7 = "u v r s", r_ppHzCount)
+			{
+				static cvar_t *r_ppHzCount = NULL, *r_ppHzN[8];
+				int k;
+				if (!r_ppHzCount) {
+					r_ppHzCount = ri.Cvar_Get("r_ppHzCount", "0", CVAR_TEMP);
+					for (k = 0; k < 8; k++) {
+						r_ppHzN[k] = ri.Cvar_Get(va("r_ppHz%d", k), "0 0 0 0", CVAR_TEMP);
+					}
+				}
+				hzSpots = r_ppHzCount->integer > 8 ? 8 : r_ppHzCount->integer;
+				for (k = 0; k < 8; k++) {
+					vec4_t sp = {0, 0, 0, 0};
+					if (k < hzSpots) {
+						sscanf(r_ppHzN[k]->string, "%f %f %f %f", &sp[0], &sp[1], &sp[2], &sp[3]);
+						sp[3] *= r_ppHeatAmount->value;
+					}
+					GLSL_SetUniformVec4(&tr.heatHazeShader, UNIFORM_HZMHAZE0 + k, sp);
+				}
+			}
+
+			if (heat > 0.001f || muzHeat > 0.001f || hzSpots > 0)
 			{
 				vec4_t muz;
 

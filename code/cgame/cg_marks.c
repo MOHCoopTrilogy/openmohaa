@@ -791,6 +791,7 @@ void CG_AssembleFinalMarks(
         pMark->alphaFade  = alphaFade;
         pMark->markShader = markShader;
         pMark->fadein     = fadein;
+        pMark->killTime   = 0;
         VectorCopy(pos, pMark->pos);
         pMark->radius = radius;
 
@@ -891,6 +892,19 @@ CG_AddMarks
 #define MARK_TOTAL_TIME 10000
 #define MARK_FADE_TIME  1000
 
+// HZM fx_1025: SCORCH marks (shader coop_scorch, one under every blast). They live coop_scorchTime seconds (default 90, retail
+// marks 10), at most coop_scorchMax (default 14) are kept - the OLDEST ones over the cap fade out over 2 s - and a fresh scorch
+// fades IN so a grenade does not pop a black patch. Everything else about marks is unchanged.
+static int CG_IsScorchShader(int shader)
+{
+    static int s_h = -1, s_reg = 0;
+    if (!s_reg) {
+        s_reg = 1;
+        s_h = cgi.R_RegisterShader("coop_scorch");
+    }
+    return s_h > 0 && shader == s_h;
+}
+
 void CG_AddMarks(void)
 {
     int         j;
@@ -911,6 +925,17 @@ void CG_AddMarks(void)
         return;
     }
 
+    int scorchSeen = 0, scorchMax, scorchTotal;
+    {
+        static cvar_t *pMax = NULL, *pTime = NULL;
+        if (!pMax) {
+            pMax  = cgi.Cvar_Get("coop_scorchMax", "14", CVAR_ARCHIVE);
+            pTime = cgi.Cvar_Get("coop_scorchTime", "90", CVAR_ARCHIVE);
+        }
+        scorchMax   = pMax->integer < 1 ? 1 : pMax->integer;
+        scorchTotal = (int)(pTime->value * 1000.0f);
+        if (scorchTotal < 5000) { scorchTotal = 5000; }
+    }
     viewleafnum = cgi.CM_PointLeafnum(cg.refdef.vieworg);
     for (pMark = cg_activeMarkObjs.nextMark; pMark != &cg_activeMarkObjs; pMark = pNext) {
         // grab next now, so if the local entity is freed we
@@ -918,9 +943,22 @@ void CG_AddMarks(void)
         pNext = pMark->nextMark;
 
         // see if it is time to completely remove it
-        if (pMark->alphaFade && cg.time > pMark->time + MARK_TOTAL_TIME) {
-            CG_FreeMarkObj(pMark);
-            continue;
+        {
+            int total = MARK_TOTAL_TIME;
+            if (CG_IsScorchShader(pMark->markShader)) {
+                total = scorchTotal;
+                if (++scorchSeen > scorchMax && !pMark->killTime) {
+                    pMark->killTime = cg.time;
+                }
+                if (pMark->killTime && cg.time > pMark->killTime + 2000) {
+                    CG_FreeMarkObj(pMark);
+                    continue;
+                }
+            }
+            if (pMark->alphaFade && cg.time > pMark->time + total) {
+                CG_FreeMarkObj(pMark);
+                continue;
+            }
         }
 
         if (pMark->markPolys->iIndex < 0 && !CG_UpdateMarkPosition(pMark)) {
@@ -961,8 +999,16 @@ void CG_AddMarks(void)
             }
         }
 
-        if (pMark->alphaFade) {
-            t = pMark->time + MARK_TOTAL_TIME - cg.time;
+        if (pMark->killTime) {
+            fade = 255 - 255 * (cg.time - pMark->killTime) / 2000;
+            if (fade < 0) { fade = 0; }
+            for (pPoly = pMark->markPolys; pPoly; pPoly = pPoly->nextPoly) {
+                for (j = 0; j < pPoly->numVerts; j++) {
+                    pPoly->verts[j].modulate[3] = fade;
+                }
+            }
+        } else if (pMark->alphaFade) {
+            t = pMark->time + (CG_IsScorchShader(pMark->markShader) ? scorchTotal : MARK_TOTAL_TIME) - cg.time;
             if (t < MARK_FADE_TIME) {
                 fade = 255 * t / MARK_FADE_TIME;
                 for (pPoly = pMark->markPolys; pPoly; pPoly = pPoly->nextPoly) {

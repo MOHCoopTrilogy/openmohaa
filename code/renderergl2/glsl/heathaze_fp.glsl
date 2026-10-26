@@ -14,7 +14,32 @@ uniform vec4      u_Color;      // (heat, time seconds, muzzleHeat, muzzleRadius
 uniform vec4      u_HzmParams;  // (muzzleX, muzzleY, aspect w/h, depthOk); centre in UV, radius = fraction of height
 uniform sampler2D u_LevelsMap;  // scene depth (TB_LEVELSMAP), only read when u_HzmParams.w > 0.5
 
+uniform vec4      u_HzHaze0, u_HzHaze1, u_HzHaze2, u_HzHaze3, u_HzHaze4, u_HzHaze5, u_HzHaze6, u_HzHaze7;   // fx_1025 spots: (u, v, radius/height, strength)
+
 varying vec2      var_TexCoords;
+
+// HZM fx_1025: one localized, one-sided, rising shimmer spot (same shape as the muzzle one) - fires, wrecks, blasts
+vec2 hzSpot(vec4 sp, float t, float aspect)
+{
+	if (sp.w <= 0.001) {
+		return vec2(0.0);
+	}
+	vec2  dm = (var_TexCoords - sp.xy) * vec2(aspect, 1.0);
+	float R  = max(sp.z, 0.001);
+	float dy = -dm.y;                                   // texture v runs top-down: up the screen is -v
+	float wy = smoothstep(-0.15 * R, 0.6 * R, dy) * (1.0 - smoothstep(1.4 * R, 3.2 * R, dy));
+	float wx = clamp(1.0 - abs(dm.x) / (0.9 * R + 0.25 * max(dy, 0.0)), 0.0, 1.0);
+	float f  = sp.w * wx * wy;
+	f = f * f;
+	if (f <= 0.0) {
+		return vec2(0.0);
+	}
+	float a = f * 0.020;
+	vec2  d;
+	d.x = sin(var_TexCoords.y * 120.0 + t * 15.0 + sp.x * 40.0) * a + sin(var_TexCoords.y * 61.0 - t * 9.0) * a * 0.6;
+	d.y = sin(var_TexCoords.x * 100.0 + t * 12.0) * a * 0.7;
+	return d;
+}
 
 void main()
 {
@@ -53,6 +78,8 @@ void main()
 			d = vec2(0.0);
 		}
 	}
+	d += hzSpot(u_HzHaze0, t, u_HzmParams.z) + hzSpot(u_HzHaze1, t, u_HzmParams.z) + hzSpot(u_HzHaze2, t, u_HzmParams.z) + hzSpot(u_HzHaze3, t, u_HzmParams.z)
+	   + hzSpot(u_HzHaze4, t, u_HzmParams.z) + hzSpot(u_HzHaze5, t, u_HzmParams.z) + hzSpot(u_HzHaze6, t, u_HzmParams.z) + hzSpot(u_HzHaze7, t, u_HzmParams.z);
 	uv += d;
 
 	gl_FragColor = vec4(texture2D(u_TextureMap, uv).rgb, 1.0);

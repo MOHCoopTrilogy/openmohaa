@@ -1701,6 +1701,108 @@ void CG_AddSuppression(float amount)
     CG_HudFadeTouch(); // HZM coop - under fire: bring the HUD chrome back
 }
 
+// HZM fx_1025 - LOCALIZED HEAT SHIMMER SPOTS. Tik commands hazeburst/hazespot (explosions, fires, wrecks) register world spots
+// during the tempmodel/emitter update; CG_HazeSpotsPublish (called once per frame after them) keeps the nearest HZ_MAX
+// visible ones, projects them to screen UV, drops any without line of sight, and publishes r_ppHzN ("u v r s", r = fraction of
+// screen height) + r_ppHzCount for the gl2 heat-haze pass. cvars: coop_hazeSpots (0 off, default 1), coop_hazeMaxDist.
+#define HZ_MAX 8
+typedef struct { vec3_t o; float r, s; } hzSpot_t;
+static hzSpot_t s_hzIn[32];
+static int      s_hzInN = 0;
+static float    s_hzVis[32];   // eased visibility per input slot is not stable across frames: eased by position hash below
+
+void CG_HazeSpotAdd(const vec3_t origin, float radius, float strength)
+{
+    if (s_hzInN >= 32 || radius <= 1.0f || strength <= 0.01f) {
+        return;
+    }
+    VectorCopy(origin, s_hzIn[s_hzInN].o);
+    s_hzIn[s_hzInN].r = radius;
+    s_hzIn[s_hzInN].s = strength > 1.0f ? 1.0f : strength;
+    s_hzInN++;
+}
+
+static void CG_HazeSpotsPublish(void)
+{
+    static cvar_t *pOn = NULL, *pDist = NULL;
+    static int     s_published = 0;
+    hzSpot_t       out[HZ_MAX];
+    float          outU[HZ_MAX], outV[HZ_MAX], outR[HZ_MAX], outS[HZ_MAX], outD[HZ_MAX];
+    int            i, j, n = 0;
+    float          tx, ty, maxd;
+
+    if (!pOn) {
+        pOn   = cgi.Cvar_Get("coop_hazeSpots", "1", CVAR_ARCHIVE);
+        pDist = cgi.Cvar_Get("coop_hazeMaxDist", "1400", CVAR_ARCHIVE);
+    }
+    maxd = pDist->value > 100.0f ? pDist->value : 1400.0f;
+    tx = (float)tan(DEG2RAD(cg.refdef.fov_x * 0.5f));
+    ty = (float)tan(DEG2RAD(cg.refdef.fov_y * 0.5f));
+    if (pOn->integer && cg.refdef.width > 0 && tx > 0.05f && ty > 0.05f && !CG_HzmScopeActive()) {
+        for (i = 0; i < s_hzInN; i++) {
+            vec3_t d;
+            float  fwd, lft, up, sx, sy, R, str, dist;
+            trace_t tr;
+
+            VectorSubtract(s_hzIn[i].o, cg.refdef.vieworg, d);
+            fwd = DotProduct(d, cg.refdef.viewaxis[0]);
+            if (fwd < 24.0f) {
+                continue;
+            }
+            dist = VectorLength(d);
+            if (dist > maxd) {
+                continue;
+            }
+            lft = DotProduct(d, cg.refdef.viewaxis[1]);
+            up  = DotProduct(d, cg.refdef.viewaxis[2]);
+            sx  = -lft / (fwd * tx);
+            sy  = up / (fwd * ty);
+            R   = 0.5f * s_hzIn[i].r / (fwd * ty);          // fraction of screen height
+            if (sx < -1.0f - R || sx > 1.0f + R || sy < -1.0f - R || sy > 1.0f + R || R < 0.004f) {
+                continue;
+            }
+            str = s_hzIn[i].s * (dist > maxd * 0.6f ? (maxd - dist) / (maxd * 0.4f) : 1.0f);   // distance LOD: fade out the far ones
+            if (R > 0.45f) { R = 0.45f; }
+            // line of sight: a trace from the eye to a point just short of the spot (walls hide shimmer)
+            {
+                vec3_t e;
+                VectorMA(cg.refdef.vieworg, 0.97f, d, e);
+                CG_Trace(&tr, cg.refdef.vieworg, vec3_origin, vec3_origin, e, cg.snap->ps.clientNum, MASK_SOLID, qfalse, qfalse, "HazeSpot");
+                if (tr.fraction < 0.999f) {
+                    continue;
+                }
+            }
+            if (n < HZ_MAX) {
+                j = n++;
+            } else {
+                // replace the farthest kept spot if this one is nearer
+                float worst = -1.0f; int wi = 0;
+                for (j = 0; j < HZ_MAX; j++) { if (outD[j] > worst) { worst = outD[j]; wi = j; } }
+                if (dist >= worst) { continue; }
+                j = wi;
+            }
+            outU[j] = 0.5f + 0.5f * sx;
+            outV[j] = 0.5f - 0.5f * sy;       // texture v runs top-down; the shader treats +y as UP from this point
+            outR[j] = R;
+            outS[j] = str;
+            outD[j] = dist;
+        }
+    }
+    for (i = 0; i < HZ_MAX; i++) {
+        if (i < n) {
+            cgi.Cvar_Set(va("r_ppHz%d", i), va("%.4f %.4f %.4f %.3f", outU[i], outV[i], outR[i], outS[i]));
+        } else if (i < s_published) {
+            cgi.Cvar_Set(va("r_ppHz%d", i), "0 0 0 0");
+        }
+    }
+    if (n != s_published || n > 0) {
+        cgi.Cvar_Set("r_ppHzCount", va("%d", n));
+    }
+    s_published = n;
+    s_hzInN = 0;
+    (void)out; (void)s_hzVis;
+}
+
 // HZM coop - HEAT HAZE intensity 0..1. Bumped by CG_AddHeat (nearby explosions, from cg_parsemsg.cpp),
 // decays each frame, published to the renderer as r_ppHeat. Same pattern as suppression.
 static float    s_coopHeat = 0.0f;
@@ -7950,6 +8052,7 @@ static int CG_CalcFov(void)
         s_coopHeat -= dt2 / hfade;
         if (s_coopHeat < 0.0f) { s_coopHeat = 0.0f; }
         cgi.Cvar_Set("r_ppHeat", va("%g", s_coopHeat));
+        CG_HazeSpotsPublish();   // HZM fx_1025: localized spots registered this frame by hazeburst/hazespot
 
         // LOCALIZED muzzle heat decays on the same fade and publishes only its INTENSITY (r_ppMuzzleHeat).
         // The hot-spot position/size (r_ppMuzzleX/Y/Radius) are renderer-side tunable cvars - we don't write

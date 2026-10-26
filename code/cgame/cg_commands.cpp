@@ -695,6 +695,27 @@ Event EV_Client_BlockDynamicLight(
     "The intensity is the radius of the light\n"
     "type is the type of light to create (lensflare,viewlensflare,additive)"
 );
+Event EV_Client_HazeBurst(
+    "hazeburst",
+    EV_DEFAULT,
+    "fff",
+    "radius strength life",
+    "HZM fx_1025: localized heat shimmer at the model origin. radius in world units, strength 0..1, life in seconds. Shown by the gl2 heat-haze pass; hidden without line of sight."
+);
+Event EV_Client_HazeSpot(
+    "hazespot",
+    EV_DEFAULT,
+    "ff",
+    "radius strength",
+    "HZM fx_1025: use on an originemitter that carries no particles: the emitter origin is a persistent heat shimmer spot."
+);
+Event EV_Client_FireLight(
+    "firelight",
+    EV_DEFAULT,
+    "fffff",
+    "red green blue radius flicker",
+    "HZM fx_1025: on a particle-free originemitter: a persistent firelight that flickers by +-flicker (0..1) and is culled beyond coop_fireLightDist."
+);
 Event EV_Client_SetEntityColor
 (
     "entcolor",
@@ -1302,6 +1323,9 @@ CLASS_DECLARATION(Listener, ClientGameCommandManager, NULL) {
     {&EV_Client_OriginDynamicLight,         &ClientGameCommandManager::OriginDynamicLight        },
     {&EV_Client_DynamicLight,               &ClientGameCommandManager::DynamicLight              },
     {&EV_Client_BlockDynamicLight,          &ClientGameCommandManager::BlockDynamicLight         },
+                {&EV_Client_HazeBurst,                  &ClientGameCommandManager::HazeBurst                 },
+    {&EV_Client_HazeSpot,                   &ClientGameCommandManager::HazeSpot                  },
+    {&EV_Client_FireLight,                  &ClientGameCommandManager::FireLight                 },
     {&EV_Client_SetEntityColor,             &ClientGameCommandManager::SetEntityColor            },
     {&EV_Client_SetGlobalFade,              &ClientGameCommandManager::SetGlobalFade             },
     {&EV_Client_SetParentLink,              &ClientGameCommandManager::SetParentLink             },
@@ -4713,6 +4737,66 @@ void ClientGameCommandManager::OriginDynamicLight(Event *ev)
 }
 
 //===============
+// HazeBurst  (HZM fx_1025) - clone of OriginDynamicLight: a one-shot tempmodel that never draws a light but registers a
+// localized heat-shimmer spot (lightType bit HZM_HAZE_BIT, radius in lightIntensity, strength in color[0]).
+//===============
+void ClientGameCommandManager::HazeBurst(Event *ev)
+{
+    if (!current_entity) {
+        m_spawnthing = NULL;
+        return;
+    }
+
+    if (!m_pCurrentSfx) {
+        m_spawnthing = &m_localemitter;
+    }
+    InitializeSpawnthing(m_spawnthing);
+
+    m_spawnthing->cgd.origin         = current_entity->origin;
+    m_spawnthing->cgd.flags |= T_DLIGHT;
+    m_spawnthing->cgd.color[0]       = ev->GetFloat(2);
+    m_spawnthing->cgd.color[1]       = 0;
+    m_spawnthing->cgd.color[2]       = 0;
+    m_spawnthing->cgd.color[3]       = 1.0;
+    m_spawnthing->cgd.lightIntensity = ev->GetFloat(1);
+    m_spawnthing->cgd.life           = ev->GetFloat(3) * 1000;
+    m_spawnthing->cgd.lightType      = HZM_HAZE_BIT;
+    SpawnEffect(1, m_spawnthing);
+}
+
+//===============
+// HazeSpot  (HZM fx_1025) - emitter form: like `dlight`, UpdateEmitter registers the spot each frame instead of spawning particles
+//===============
+void ClientGameCommandManager::HazeSpot(Event *ev)
+{
+    if (!m_spawnthing) {
+        return;
+    }
+
+    m_spawnthing->cgd.flags |= T_DLIGHT;
+    m_spawnthing->dcolor[0]          = ev->GetFloat(2);
+    m_spawnthing->dcolor[1]          = 0;
+    m_spawnthing->dcolor[2]          = 0;
+    m_spawnthing->cgd.lightIntensity = ev->GetFloat(1);
+    m_spawnthing->cgd.lightType      = HZM_HAZE_BIT;
+}
+
+void ClientGameCommandManager::FireLight(Event *ev)
+{
+    if (!m_spawnthing) {
+        return;
+    }
+
+    m_spawnthing->cgd.flags |= T_DLIGHT;
+    m_spawnthing->dcolor[0]          = ev->GetFloat(1);
+    m_spawnthing->dcolor[1]          = ev->GetFloat(2);
+    m_spawnthing->dcolor[2]          = ev->GetFloat(3);
+    m_spawnthing->cgd.lightIntensity = ev->GetFloat(4);
+    m_spawnthing->cgd.alpha          = ev->GetFloat(5);
+    m_spawnthing->cgd.lightType      = HZM_FLICK_BIT;
+}
+
+//===============
 // DynamicLight
 //===============
 void ClientGameCommandManager::DynamicLight(Event *ev)
@@ -5104,6 +5188,34 @@ void ClientGameCommandManager::UpdateEmitter(
         m_spawnthing->cgd.createTime   = cg.time;
         m_spawnthing->cgd.parentOrigin = entity_origin;
 
+        if ((m_spawnthing->cgd.flags & T_DLIGHT) && (m_spawnthing->cgd.lightType & HZM_HAZE_BIT)) {
+            CG_HazeSpotAdd(m_spawnthing->cgd.origin, m_spawnthing->cgd.lightIntensity * scale, m_spawnthing->dcolor[0]);
+            continue;
+        }
+        if ((m_spawnthing->cgd.flags & T_DLIGHT) && (m_spawnthing->cgd.lightType & HZM_FLICK_BIT)) {
+            static cvar_t *pFLD = NULL;
+            vec3_t         fd;
+            float          fdist, fn, ft, ph, famt = m_spawnthing->cgd.alpha;
+            if (!pFLD) {
+                pFLD = cgi.Cvar_Get("coop_fireLightDist", "1500", CVAR_ARCHIVE);
+            }
+            VectorSubtract(m_spawnthing->cgd.origin, cg.refdef.vieworg, fd);
+            fdist = VectorLength(fd);
+            if (fdist < (pFLD->value > 100.0f ? pFLD->value : 1500.0f)) {
+                ft = cg.time * 0.001f;
+                ph = m_spawnthing->cgd.origin[0] * 0.013f + m_spawnthing->cgd.origin[1] * 0.017f;
+                fn = 0.5f * (float)sin(ft * 11.3f + ph) + 0.3f * (float)sin(ft * 17.9f + ph * 2.1f) + 0.2f * (float)sin(ft * 5.1f + ph * 0.7f);
+                cgi.R_AddLightToScene(
+                    m_spawnthing->cgd.origin,
+                    m_spawnthing->cgd.lightIntensity * scale * (1.0f + famt * fn),
+                    m_spawnthing->dcolor[0] * (0.92f + 0.08f * fn),
+                    m_spawnthing->dcolor[1] * (0.92f + 0.08f * fn),
+                    m_spawnthing->dcolor[2] * (0.92f + 0.08f * fn),
+                    0
+                );
+            }
+            continue;
+        }
         if (m_spawnthing->cgd.flags & T_DLIGHT) {
             cgi.R_AddLightToScene(
                 m_spawnthing->cgd.origin,
