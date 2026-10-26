@@ -2258,7 +2258,7 @@ static void CG_AdsRigSolve(refEntity_t *pREnt)
                 }
                 VectorAdd(R2, Tw, R2);
                 rR2         = DotProduct(R2, cam[0]);
-                s_rigTgt[7] = s->relief - rR2;
+                s_rigTgt[7] = ((s >= s_adsSightsScope && s < s_adsSightsScope + sizeof(s_adsSightsScope) / sizeof(s_adsSightsScope[0])) ? s->relief / CG_HzmScopeScale() : s->relief) - rR2;
             }
             // cg_adsRigReliefBias: a live offset on top (units, + = eye further back from the rear sight) - used by the
             // harness to measure the sight-window clutter at several eye reliefs in-engine, hands included
@@ -2458,6 +2458,30 @@ static void CG_AdsRigSolve(refEntity_t *pREnt)
         }
     }
     VectorMA(pREnt->origin, s_rigCur[7] * w, cam[0], pREnt->origin); // eye relief
+
+    if (CG_HzmScopePipActive() && s >= s_adsSightsScope && s < s_adsSightsScope + sizeof(s_adsSightsScope) / sizeof(s_adsSightsScope[0])) {
+        // [scopes1025] where the eyepiece (the sight row's R point) really is on screen after everything above: the lens circle follows it
+        orientation_t or2 = cgi.TIKI_Orientation(pREnt, s_iTag);
+        vec3_t        G2, R2w, A2[3], d2;
+        float         dep, tanY;
+        int           q;
+
+        VectorCopy(pREnt->origin, G2);
+        for (q = 0; q < 3; q++) {
+            VectorMA(G2, or2.origin[q], pREnt->axis[q], G2);
+        }
+        MatrixMultiply(or2.axis, pREnt->axis, A2);
+        VectorCopy(G2, R2w);
+        for (q = 0; q < 3; q++) {
+            VectorMA(R2w, s->R[q], A2[q], R2w);
+        }
+        VectorSubtract(R2w, E, d2);
+        dep = DotProduct(d2, cam[0]);
+        if (dep > 0.3f && cg_fAdsWeaponFov > 1.0f && cg.refdef.width > 0) {
+            tanY = (float)tan(DEG2RAD(cg_fAdsWeaponFov * 0.5f)) * (float)cg.refdef.height / (float)cg.refdef.width;
+            CG_HzmScopeSetOcular(-DotProduct(d2, cam[1]) / dep / (2.0f * tanY), -DotProduct(d2, cam[2]) / dep / (2.0f * tanY));
+        }
+    }
 
     if (pDbg->integer && (pDbg->integer >= 2 || cg.time - s_iLast >= 200)) {
         s_iLast = cg.time;

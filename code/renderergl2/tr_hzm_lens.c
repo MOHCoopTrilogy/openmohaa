@@ -105,7 +105,7 @@ static void R_HzmLensCvars(void)
 		r_ppScopeShadows = ri.Cvar_Get("r_ppScopeShadows", "0", 0);
 		r_ppScopeOutside = ri.Cvar_Get("r_ppScopeOutside", "0.9", 0);
 		r_ppScopeBlur    = ri.Cvar_Get("r_ppScopeBlur", "1", 0);
-		r_ppScopeCA      = ri.Cvar_Get("r_ppScopeCA", "1", 0);
+		r_ppScopeCA      = ri.Cvar_Get("r_ppScopeCA", "0.5", 0);
 	}
 }
 
@@ -113,13 +113,13 @@ static void R_HzmLensCvars(void)
 static const float *R_HzmLensState(void)
 {
 	static int   s_mod = -1;
-	static float s_st[7];
+	static float s_st[9];
 
 	R_HzmLensCvars();
 	if (r_ppScopeState->modificationCount != s_mod) {
 		s_mod = r_ppScopeState->modificationCount;
 		memset(s_st, 0, sizeof(s_st));
-		sscanf(r_ppScopeState->string, "%f %f %f %f %f %f %f", &s_st[0], &s_st[1], &s_st[2], &s_st[3], &s_st[4], &s_st[5], &s_st[6]);
+		sscanf(r_ppScopeState->string, "%f %f %f %f %f %f %f %f %f", &s_st[0], &s_st[1], &s_st[2], &s_st[3], &s_st[4], &s_st[5], &s_st[6], &s_st[7], &s_st[8]);
 	}
 	return s_st;
 }
@@ -327,6 +327,12 @@ void RB_HZMLensComposite(FBO_t *srcFbo, ivec4_t srcBox)
 	VectorSet4(params, st[4], st[5], r_ppScopeCA->value, r_ppScopeOutside->value);
 
 	LENS_STAGE(20);
+	{
+		vec4_t vi;
+		VectorSet4(vi, st[7], st[8], 0.0f, 0.0f);   // the lens circle centre (it follows the rifle's eyepiece), screen-height units, +y down
+		GLSL_BindProgram(&tr.hzmLensShader);
+		GLSL_SetUniformVec4(&tr.hzmLensShader, UNIFORM_VIEWINFO, vi);
+	}
 	GL_BindToTMU(tr.hzmLensColor, TB_LEVELSMAP);
 	if (tr.hzmGunValid && tr.hzmGunColor && tr.hzmGunDepth) {   // the rifle layer (colour + depth = its coverage mask)
 		GL_BindToTMU(tr.hzmGunColor, TB_NORMALMAP);

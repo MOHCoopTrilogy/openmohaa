@@ -17,6 +17,7 @@ uniform sampler2D u_ScreenImageMap;
 uniform sampler2D u_ScreenDepthMap;
 uniform vec4      u_Color;      // (amount 0..1, lens radius / screen height, pupil x, pupil y) - pupil in lens radii, +y down
 uniform vec4      u_HzmParams;  // (pupil radius in lens radii, glass warmth, chromatic amount, outside brightness 0..1)
+uniform vec4      u_ViewInfo;   // (lens circle centre offset x, y in screen-height units, +y down: it follows the rifle's eyepiece)
 uniform vec2      u_InvTexRes;  // 1 / scene size in texels
 
 varying vec2      var_TexCoords;
@@ -28,7 +29,7 @@ void main()
 	vec2  d      = var_TexCoords - vec2(0.5);
 	vec2  p      = d * vec2(aspect, -1.0);                     // screen-height units, +y down
 	float R      = max(u_Color.y, 0.05);
-	vec2  q      = p / R;                                      // lens radii
+	vec2  q      = (p - u_ViewInfo.xy) / R;                    // lens radii, from the lens centre (the eyepiece)
 	float r      = length(q);
 
 	float lens   = 1.0 - smoothstep(0.985, 1.0, r);            // crisp edge
@@ -41,7 +42,7 @@ void main()
 	float gunA   = 1.0 - smoothstep(0.9990, 0.99995, gunDepth);       // rifle coverage
 	vec4  gunTex = texture2D(u_ScreenImageMap, var_TexCoords);
 	vec3  gunCol = gunTex.rgb;
-	gunA        *= smoothstep(0.05, 0.60, gunTex.a);                    // the translucent glass writes depth but not full alpha: it keeps the world behind it
+	gunA        *= smoothstep(0.55, 0.97, gunTex.a);                    // the translucent glass writes depth but not full alpha: it keeps the world behind it
 	vec3  sharp  = mix(wide, gunCol, gunA);                            // the plain wide view with the rifle in it
 
 	// ---- inside the lens: the magnified main picture
@@ -94,6 +95,13 @@ void main()
 	vec3 ring      = mix(sharp, outside, amt);
 	float lensFade = smoothstep(0.55, 0.92, amt) * lens;
 	vec3 col       = mix(ring, lensCol, lensFade);
+
+	// the eyepiece rim as a TRUE circle: dark anodised metal with a soft highlight arc and a soft outer falloff, over the faceted rifle mesh
+	float band  = smoothstep(0.995, 1.004, r) * (1.0 - smoothstep(1.14, 1.26, r));
+	vec2  qn    = q / max(r, 0.0001);
+	float arc   = pow(max(dot(qn, normalize(vec2(-0.55, -0.83))), 0.0), 6.0);
+	vec3  metal = vec3(0.018, 0.019, 0.022) + vec3(0.07) * arc * smoothstep(1.0, 1.06, r) * (1.0 - smoothstep(1.06, 1.16, r));
+	col = mix(col, metal, band * smoothstep(0.55, 0.92, amt));
 
 	gl_FragColor   = vec4(col, 1.0);
 }

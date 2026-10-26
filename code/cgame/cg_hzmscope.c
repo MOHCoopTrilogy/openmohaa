@@ -74,6 +74,7 @@ static cvar_t *cg_scopeShadow;    // scope-shadow strength (0 = always centred)
 static cvar_t *cg_scopeInTime;    // seconds, scope in
 static cvar_t *cg_scopeOutTime;   // seconds, scope out
 static cvar_t *cg_scopeDebug;     // 1 = one ^~^~^ SCOPE line per second while scoped
+static cvar_t *coop_scopeScale;   // [scopes1025] picture-in-picture scope size: 1 = CoD-style (lens 45 percent of the screen height, eyepiece rim ~60 percent)
 static cvar_t *cg_scopePip;       // [scopes1025] 1 = picture-in-picture lens (gl2): the wide world stays, the zoom is a second scene
 static cvar_t *cg_scopeRaise;     // [scopes1025] 1 = the rifle stays in the view and is raised to the eye (ADS pose) while scoped
 static cvar_t *r_ppScopePipLive;  // renderer-published: the PiP composite can run
@@ -94,6 +95,9 @@ static struct {
     qboolean holdHip;   // this frame: keep the hip fov (the zoom fov is still only in the next snapshot)
     qboolean pip;       // [scopes1025] this scope is shown as a picture-in-picture lens (kept through the scope-out ease)
     float    lensFov;   // [scopes1025] square lens-scene fov (degrees) published to the renderer
+    float    ocX, ocY;  // [scopes1025] the rifle's projected eyepiece centre (CG_HzmScopeSetOcular, last frame's)
+    int      ocTime;
+    float    lcX, lcY, lvX, lvY;   // the lens circle centre: follows the eyepiece (critically damped)
     float    lensK;     // [scopes1025] how much of the lens shows (1 aimed; falls while a reload / switch takes the gun off the eye)
     int      lastTime;
     float    lens;      // published lens radius (fraction of screen height)
@@ -117,6 +121,7 @@ static void CG_HzmScopeCvars(void)
     r_ppScopeState  = cgi.Cvar_Get("r_ppScopeState", "0", 0);
     r_ppScopeLive   = cgi.Cvar_Get("r_ppScopeLive", "0", 0);
     cg_scopePip     = cgi.Cvar_Get("cg_scopePip", "1", CVAR_ARCHIVE);
+    coop_scopeScale = cgi.Cvar_Get("coop_scopeScale", "1", CVAR_ARCHIVE);
     cg_scopeRaise   = cgi.Cvar_Get("cg_scopeRaise", "1", CVAR_ARCHIVE);
     r_ppScopePipLive = cgi.Cvar_Get("r_ppScopePipLive", "0", 0);
 }
@@ -382,8 +387,25 @@ static void CG_HzmScopeFrame(float camFov)
         }
     }
 
+    // ---- the lens circle follows the rifle's eyepiece (the bell drifts while the rifle lags / settles; the circle must stay in it)
+    {
+        float tx = 0.0f, ty = 0.0f, lim = 0.06f, w = 45.0f, ax, ay, len;
+        if (hs.pip && cg.time - hs.ocTime < 200) {
+            tx = hs.ocX;
+            ty = hs.ocY;
+            len = (float)sqrt(tx * tx + ty * ty);
+            if (len > lim) { tx *= lim / len; ty *= lim / len; }
+        }
+        if (dt > 0.0f) {
+            ax = w * w * (tx - hs.lcX) - 2.0f * w * hs.lvX;
+            ay = w * w * (ty - hs.lcY) - 2.0f * w * hs.lvY;
+            hs.lvX += ax * dt; hs.lvY += ay * dt;
+            hs.lcX += hs.lvX * dt; hs.lcY += hs.lvY * dt;
+        }
+    }
+
     // ---- publish to the gl2 pass (only on change; "0" once when the scope is down)
-    hs.lens = cg_scopeRadius->value * (hs.pip ? 1.0f : (1.0f + 0.55f * (1.0f - hs.ease)));
+    hs.lens = hs.pip ? (0.225f * CG_HzmScopeScale()) : (cg_scopeRadius->value * (1.0f + 0.55f * (1.0f - hs.ease)));
     hs.eye  = 1.18f; // with the pupil's 0.86..1.0 fall-off: a centred eye casts no shadow at all
     {
         char buf[128];
@@ -393,14 +415,16 @@ static void CG_HzmScopeFrame(float camFov)
             Com_sprintf(
                 buf,
                 sizeof(buf),
-                "%.4f %.4f %.4f %.4f %.3f %.3f %.3f",
+                "%.4f %.4f %.4f %.4f %.3f %.3f %.3f %.4f %.4f",
                 hs.ease * hs.lensK,
                 hs.lens,
                 hs.sx,
                 hs.sy,
                 hs.eye,
                 s_hzmOptics[hs.optic >= 0 ? hs.optic : HO_M73B1].warm,
-                hs.lensFov
+                hs.lensFov,
+                hs.lcX,
+                hs.lcY
             );
         }
         if (strcmp(buf, hs.pub)) {
@@ -480,6 +504,24 @@ qboolean CG_HzmScopeRaiseOwns(void)
 float CG_HzmScopeSensScale(void)
 {
     return 1.0f;   // [scopes1025] the main view carries the scope fov itself (role swap), so CG_CalcFov's own sensitivity scale is already right
+}
+
+// the PiP scope's size multiplier (coop_scopeScale, 0.5 .. 1.6): lens radius 0.225 x scale of the screen height; cg_view.c scales the eye relief by 1/scale so
+// the real eyepiece bell stays in proportion to the lens
+float CG_HzmScopeScale(void)
+{
+    float v;
+
+    CG_HzmScopeCvars();
+    v = coop_scopeScale ? coop_scopeScale->value : 1.0f;
+    return v < 0.5f ? 0.5f : (v > 1.6f ? 1.6f : v);
+}
+
+void CG_HzmScopeSetOcular(float x, float y)
+{
+    hs.ocX = x;
+    hs.ocY = y;
+    hs.ocTime = cg.time;
 }
 
 qboolean CG_HzmScopeActive(void)
@@ -585,7 +627,9 @@ qboolean CG_HzmScopeDraw2D(void)
     VectorSet4(col, 0.0f, 0.0f, 0.0f, hs.ease * hs.ease * hs.ease * hs.lensK);
     cgi.R_SetColor(col);
     if (hRet) {
-        cgi.R_DrawStretchPic(cx - R, cy - R, 2.0f * R, 2.0f * R, 0.0f, 0.0f, 1.0f, 1.0f, hRet);
+        // [scopes1025] the reticle sits on the lens centre, which follows the eyepiece a little (the scope axis); screen centre otherwise
+        const float rx = hs.pip ? cx + hs.lcX * H : cx, ry = hs.pip ? cy + hs.lcY * H : cy;
+        cgi.R_DrawStretchPic(rx - R, ry - R, 2.0f * R, 2.0f * R, 0.0f, 0.0f, 1.0f, 1.0f, hRet);
     }
     cgi.R_SetColor(NULL);
     return qtrue;
