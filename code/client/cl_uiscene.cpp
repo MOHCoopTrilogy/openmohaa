@@ -124,7 +124,7 @@ Event EV_Scene_Back
     EV_DEFAULT,
     NULL,
     NULL,
-    "Scene3D: ESC. When ui_atcStop is above 0 the camera flies back to the home pose (ui_atcStop 0, the return pose is dropped); otherwise the menu is popped."
+    "Scene3D: ESC. When ui_atcStop is above 0 the camera flies back to the home pose (ui_atcStop 0, the return pose is dropped; with ui_atcAuto 1 the menu then pops); otherwise the menu is popped."
 );
 
 Event EV_Scene_Hot
@@ -236,6 +236,9 @@ void UIScene3D::SceneBack(Event *ev)
         Cvar_Set("ui_atcStop", "0");
         m_retSet = false;
         StartFly(m_home, 0.6f);
+        if (Cvar_VariableIntegerValue("ui_atcAuto")) {
+            Cbuf_AddText("uiafter 0.62 popmenu 1\n");     // entered straight from the flat main menu: BACK from the shelf pulls out and leaves
+        }
     } else {
         Cbuf_AddText("popmenu 1\n");
     }
