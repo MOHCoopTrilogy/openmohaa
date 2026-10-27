@@ -92,8 +92,9 @@ void main()
 		vec4  rt  = texture2D(u_SpecularMap, ruv);
 		float hl  = max(max(texture2D(u_SpecularMap, ruv + vec2(ho.x, 0.0)).a, texture2D(u_SpecularMap, ruv - vec2(ho.x, 0.0)).a),
 		                max(texture2D(u_SpecularMap, ruv + vec2(0.0, ho.y)).a, texture2D(u_SpecularMap, ruv - vec2(0.0, ho.y)).a));
-		inside = mix(inside, vec3(0.85), hl * (1.0 - rt.a) * 0.45);
-		inside = mix(inside, rt.rgb, rt.a);
+		float ra = clamp(rt.a * 2.0, 0.0, 1.0);                       // the lines are thin: firm them up, BLACK
+		inside = mix(inside, inside * 0.25, hl * (1.0 - ra) * 0.5);    // a faint dark halo only (keeps the line readable on bright scenes)
+		inside = mix(inside, vec3(0.0), ra);
 	}
 	float rIn = (glass && !adsMode) ? r * 0.55 : r;   // the glass is seen at an angle at the hip: its real mask ends the picture, the circle's falloff must not darken it
 	inside  *= 1.0 - 0.45 * pow(smoothstep(0.62, 1.0, rIn), 1.6);   // soft inner shadow toward the rim (the tube wall)
