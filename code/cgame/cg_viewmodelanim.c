@@ -555,16 +555,18 @@ static qboolean CoopAdsClipFitsHeldGun(const char *prefix)
     if (!cg.snap || cg.snap->ps.activeItems[1] < 0) {
         return qfalse;
     }
-    {   // [scopes1025] the scoped-bolt rows (kar98 choreography) belong to a scoped rifle held up to the eye, whatever its mesh
-        static const char *kScoped[] = {"kar98sniper", "springfield", "mosin", "enfield", "enfieldl42a1", "carcano"};
+    {   // [scopes1025] a SCOPED rifle held up to the eye may play a prefix `_ads` row only on the prefixes whose rows were baked for the scoped guns; every other scoped gun on a shared
+        // prefix (Arisaka / silenced Kar98 / Mosin ... ) plays its own per-weapon row (`coopr_<weapon key>_rechamber_ads`, picked in CG_ViewModelAnimation) or the hip clip - never
+        // a clip authored for another mesh. Unscoped guns fall through to the iron-sight guard below (the old kScoped short-circuit wrongly refused them: unscoped Springfield /
+        // Mosin / Enfield lost their authored aimed bolt).
+        static const char *kScoped[] = {"kar98sniper", "springfield"};
         int                j;
-        for (j = 0; j < 6; j++) {
-            if (!Q_stricmp(prefix, kScoped[j])) {
-                return (CG_HzmScopeRaiseOwns() && cgi.Cvar_Get("coop_scopeBoltAds", "0", CVAR_ARCHIVE)->integer) ? qtrue : qfalse;
+        if (CG_HzmScopeRaiseOwns() && cgi.Cvar_Get("coop_scopeBoltAds", "1", CVAR_ARCHIVE)->integer) {
+            for (j = 0; j < 2; j++) {
+                if (!Q_stricmp(prefix, kScoped[j])) {
+                    return qtrue;
+                }
             }
-        }
-        if (CG_HzmScopeRaiseOwns() && cgi.Cvar_Get("coop_scopeBoltAds", "0", CVAR_ARCHIVE)->integer) {
-            return qtrue;   // e.g. the Arisaka on the kar98 prefix
         }
     }
     for (i = 0; i < (int)(sizeof(kAuthored) / sizeof(kAuthored[0])); i++) {
@@ -1195,8 +1197,20 @@ void CG_ViewModelAnimation(refEntity_t *pModel)
             if (pAdsAnims->integer && !bWeaponChanged && CG_AimingDownSights()
                 && (a == VM_ANIM_RELOAD || a == VM_ANIM_RELOAD_SINGLE || a == VM_ANIM_RELOAD_END
                     || a == VM_ANIM_RECHAMBER || a == COOP_VM_ANIM_CYCLE)) {
-                char szAds[MAX_QPATH];
+                char     szAds[MAX_QPATH];
+                qboolean bPerWpnScoped = qfalse;
                 Com_sprintf(szAds, sizeof(szAds), "%s_ads", szAnimName);
+                // [scopes1025] a scoped bolt: the gun's OWN row `coopr_<weapon key>_rechamber_ads` (exists = a clip was baked for exactly this gun; no row = the hip bolt, silently)
+                if (a == VM_ANIM_RECHAMBER && cg.snap && cg.snap->ps.activeItems[1] >= 0 && CG_HzmScopeRaiseOwns()
+                    && cgi.Cvar_Get("coop_scopeBoltAds", "1", CVAR_ARCHIVE)->integer) {
+                    char szKey[MAX_QPATH], szPer[MAX_QPATH];
+                    CoopWeaponKey(CG_ConfigString(CS_WEAPONS + cg.snap->ps.activeItems[1]), szKey, sizeof(szKey));
+                    Com_sprintf(szPer, sizeof(szPer), "coopr_%s_rechamber_ads", szKey);
+                    if (cgi.Anim_NumForName(pTiki, szPer) != -1) {
+                        Q_strncpyz(szAds, szPer, sizeof(szAds));
+                        bPerWpnScoped = qtrue;
+                    }
+                }
                 if (CG_CoopBrace() > 0.5f) { // HZM coop [adsbrace] braced: the brace carries the weight
                     char szAdsB[MAX_QPATH];
                     Com_sprintf(szAdsB, sizeof(szAdsB), "%s_adsb", szAnimName);
@@ -1205,7 +1219,7 @@ void CG_ViewModelAnimation(refEntity_t *pModel)
                     }
                 }
                 if (cgi.Anim_NumForName(pTiki, szAds) != -1
-                    && CoopAdsClipFitsHeldGun(AnimPrefixList[iAnimPrefixIndex])) {
+                    && (bPerWpnScoped || CoopAdsClipFitsHeldGun(AnimPrefixList[iAnimPrefixIndex]))) {
                     Q_strncpyz(s_szCoopHipAnim, szAnimName, sizeof(s_szCoopHipAnim));
                     Q_strncpyz(szAnimName, szAds, sizeof(szAnimName));
                     s_coopAdsClip = qtrue;
