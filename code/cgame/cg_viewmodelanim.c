@@ -1255,8 +1255,9 @@ void CG_ViewModelAnimation(refEntity_t *pModel)
             CoopWeaponKey(CG_ConfigString(CS_WEAPONS + cg.snap->ps.activeItems[1]), szKey, sizeof(szKey));
             Com_sprintf(szTry, sizeof(szTry), "coopr_%s_fire_ads", szKey);
             if (cgi.Anim_NumForName(pTiki, szTry) == -1) {
-                Com_sprintf(szTry, sizeof(szTry), "%s_charge", AnimPrefixList[iAnimPrefixIndex]);
-                CoopPerWeaponReloadAnim(pTiki, "charge", szTry, sizeof(szTry));
+                // the scoped ADS pose is the server's IDLE clip + the rig correction (not `charge`, which is a different pose: the lens jumped 0.15 of the screen the first frame)
+                Com_sprintf(szTry, sizeof(szTry), "%s_idle", AnimPrefixList[iAnimPrefixIndex]);
+                CoopPerWeaponReloadAnim(pTiki, "idle", szTry, sizeof(szTry));
             }
             if (cgi.Anim_NumForName(pTiki, szTry) != -1) {
                 Q_strncpyz(s_szCoopHipAnim, szAnimName, sizeof(s_szCoopHipAnim));

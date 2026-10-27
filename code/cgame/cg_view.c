@@ -3352,8 +3352,10 @@ void CG_OffsetFirstPersonView(refEntity_t *pREnt, qboolean bUseWorldPosition)
                 {
                     static cvar_t *pFP = NULL;
                     if (!pFP) { pFP = cgi.Cvar_Get("coop_fovPunch", "1.0", CVAR_ARCHIVE); }
-                    s_fovPunch += 0.55f * fClassKick * pFP->value * (float)(s_lastClip - iClip);
-                    if (s_fovPunch > 2.2f) { s_fovPunch = 2.2f; }
+                    if (!(bAds && CG_HzmScopeRaiseOwns())) {   // [scopes1025] no world-fov pop under a scope
+                        s_fovPunch += 0.55f * fClassKick * pFP->value * (float)(s_lastClip - iClip);
+                        if (s_fovPunch > 2.2f) { s_fovPunch = 2.2f; }
+                    }
                 }
                 CG_NoteLocalFire(); // timestamp OUR shot. Flesh impacts are broadcast for EVERY
                                     // shooter, so without this a teammate killing someone next to
@@ -3493,9 +3495,17 @@ void CG_OffsetFirstPersonView(refEntity_t *pREnt, qboolean bUseWorldPosition)
                 // gun kicks UP (muzzle climb) and BACK toward the camera, then recovers. The
                 // backward term saturates INDEPENDENTLY of the cap above: muzzle climb may grow
                 // freely without ever intersecting the view, travel toward the eye may not.
+                // [scopes1025] SCOPED ADS: the eye sits ~2-3 u behind the ocular, so the shoulder shove (~1 u straight at the eye) swelled the bell by ~40 percent and the lift moved the lens a
+                // quarter of the screen. A scoped shot is a small, mostly-PITCH kick: back <= 0.1 u (bell < ~5 percent), lift <= 0.06 u, climb capped at 0.7 deg (the lens leaves centre by
+                // well under 5 percent of the screen height), recovered in ~0.15 s (below). Iron sights / hip: unchanged.
+                const qboolean bScopedKick = (bAds && CG_HzmScopeRaiseOwns()) ? qtrue : qfalse;
                 float fBack = s_recoil * 0.5f;
                 if (fBack > RECOIL_MAX_BACK) {
                     fBack = RECOIL_MAX_BACK;
+                }
+                if (bScopedKick) {
+                    fBack = s_recoil * 0.05f;
+                    if (fBack > 0.06f) { fBack = 0.06f; }
                 }
                 // [user 2026-09-09, bug-2562] "when I fire some of these guns it seems to lift the entire gun
                 // with recoil (IE the handgun) instead of the barrel." It did: this used to be the two
@@ -3531,13 +3541,21 @@ void CG_OffsetFirstPersonView(refEntity_t *pREnt, qboolean bUseWorldPosition)
                     else if (iClass & WEAPON_CLASS_HEAVY)  { fClassRot = 0.5f; }
 
                     fUpMix = (fRecRot != 0.0f) ? 0.3f : 1.0f; // cg_recoilRot 0 = the old pure translation, exactly
-                    VectorMA(pREnt->origin,  s_recoil * 0.8f * fUpMix, mat[2], pREnt->origin); // up
+                    {
+                        float fLift = s_recoil * 0.8f * fUpMix;
+                        if (bScopedKick) {
+                            fLift *= 0.15f;
+                            if (fLift > 0.03f) { fLift = 0.03f; }
+                        }
+                        VectorMA(pREnt->origin, fLift, mat[2], pREnt->origin); // up
+                    }
                     VectorMA(pREnt->origin, -fBack,                    mat[0], pREnt->origin); // back toward camera
 
                     // ADS keeps 35% of the climb: a gun that does not move when fired on the sights reads as
                     // broken, but the hand-dialled per-gun alignments in s_adsGunTune must not be fought hard
                     fDeg = s_recoil * fRecRot * fClassRot * (1.0f - 0.65f * CG_AdsPoseFactor());
                     if (fDeg > fRecMax) { fDeg = fRecMax; } else if (fDeg < -fRecMax) { fDeg = -fRecMax; }
+                    if (bScopedKick && fDeg > 0.4f) { fDeg = 0.4f; }
 
                     if ((fDeg > 0.01f || fDeg < -0.01f) && pREnt->tiki) {
                         static int    s_iRecTag  = -2;
@@ -3585,6 +3603,7 @@ void CG_OffsetFirstPersonView(refEntity_t *pREnt, qboolean bUseWorldPosition)
                     // the SAME point of aim. Keeping the kick and tripling the return rate is what
                     // reads as braced; deleting the kick would just read as a broken gun.
                     fRec *= 1.0f + fBrace * 2.2f;
+                    if (bScopedKick) { fRec = 18.0f; }   // [scopes1025] recovered (to ~7 percent) within ~0.15 s
                     s_recoil -= s_recoil * (cg.frametime / 1000.0f) * fRec;
                     if (s_recoil < 0.002f) {
                         s_recoil = 0.0f;
