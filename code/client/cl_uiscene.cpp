@@ -68,6 +68,43 @@ class UIScene3D : public UIWidget
     int                       m_lastDraw;
     int                       m_hover;
 
+    // ---- actor life director (ui_atticActorLife): the choice-group "actor1" model walks a round of stations on the attic floor, each with a stock animation ----
+    struct dirStation_t {
+        str   name;
+        float yaw, tmin, tmax;
+        int   n;
+        float wp[10][2];       // path from the hub to the station position (last point)
+        str   seq;             // comma list: "a|alt" once, "b|alt~" looped for the rest of the stay
+    };
+    Container<dirStation_t *> m_stations;
+    bool   m_dirOn;
+    float  m_hub[3];
+    float  m_speed;
+    float  m_turnRate;
+    str    m_idleAlts, m_walkAlts, m_breakAlts;
+    float  m_breakMin, m_breakMax;
+    // runtime
+    int    m_dState;           // 0 start, 1 wait, 2 walk, 3 turn to the station yaw, 4 station sequence
+    float  m_dTimer, m_dPos[2], m_dYaw, m_dTargetYaw, m_aClock;
+    int    m_dAt;              // station index the actor stands at (-1 = hub)
+    int    m_dNext;
+    int    m_bag[16], m_bagN, m_lastStation;
+    float  m_path[40][2];
+    int    m_pathN, m_pathI;
+    int    m_seqTok;
+    float  m_seqT0, m_seqTotal;
+    unsigned m_rng;
+    struct animPlay_t {
+        str   alts;
+        float t0;
+        bool  loop;
+        float rate;
+    };
+    animPlay_t m_aCur, m_aPrev;
+    float      m_blendT0;
+    int        m_dirLast;
+    int        m_dirFrame;
+
 public:
     CLASS_PROTOTYPE(UIScene3D);
 
@@ -80,6 +117,15 @@ public:
     friend bool UI_SceneEscape(void);
     void SceneRoot(Event *ev);
     void SceneLeave(Event *ev);
+    void ActorHub(Event *ev);
+    void ActorStation(Event *ev);
+    void ActorBreak(Event *ev);
+    float DirRand(float a, float b);
+    void  DirSetAnim(const str& alts, bool loop, float rate);
+    void  DirPickNext();
+    void  DirUpdate(dtiki_t *tiki, float dt);
+    int   DirResolve(dtiki_t *tiki, const str& alts);
+    float DirAnimTime(dtiki_t *tiki, const str& alts, float clockNow, const animPlay_t& a, bool *looped);
     bool TryEscape();
     static UIScene3D *s_rootScene;
     static int        s_rootDrawn;
@@ -153,6 +199,33 @@ Event EV_Scene_Leave
     "Scene3D: a flat menu is about to be pushed over the scene; when the scene is drawn again the camera flies back (to the return pose, else home) at once instead of after the 1.5 s hitch guard."
 );
 
+Event EV_Scene_ActorHub
+(
+    "actorhub",
+    EV_DEFAULT,
+    "fffssf",
+    "x y yaw idle walk speed",
+    "Scene3D: the actor life director - home spot (MOHAA units), idle / walk animation alternatives ('a|b'), walk speed (units per second)."
+);
+
+Event EV_Scene_ActorStation
+(
+    "actorstation",
+    EV_DEFAULT,
+    "sfffss",
+    "name yaw tmin tmax path seq",
+    "Scene3D: a station of the round: facing yaw, stay seconds (random between), the floor path from the hub 'x y,x y,...' (the last point is where he stands), the animation sequence 'a,b~,c' (~ = looped)."
+);
+
+Event EV_Scene_ActorBreak
+(
+    "actorbreak",
+    EV_DEFAULT,
+    "sff",
+    "anims tmin tmax",
+    "Scene3D: the pause between stations (idle / look-around alternatives, stay seconds)."
+);
+
 Event EV_Scene_Hot
 (
     "scenehot",
@@ -179,6 +252,9 @@ CLASS_DECLARATION(UIWidget, UIScene3D, NULL) {
     {&EV_Scene_Back,   &UIScene3D::SceneBack},
     {&EV_Scene_Root,   &UIScene3D::SceneRoot},
     {&EV_Scene_Leave,  &UIScene3D::SceneLeave},
+    {&EV_Scene_ActorHub, &UIScene3D::ActorHub},
+    {&EV_Scene_ActorStation, &UIScene3D::ActorStation},
+    {&EV_Scene_ActorBreak, &UIScene3D::ActorBreak},
     {&EV_Scene_Light,  &UIScene3D::SceneLight},
     {&W_LeftMouseDown, &UIScene3D::OnClick   },
     {NULL,             NULL                  }
@@ -199,6 +275,24 @@ UIScene3D::UIScene3D()
     m_leaving  = false;
     m_hover    = -1;
     m_drawn    = 0;
+    m_dirOn    = false;
+    m_speed    = 60.0f;
+    m_turnRate = 150.0f;
+    m_breakMin = 1.5f;
+    m_breakMax = 3.5f;
+    m_dState   = 0;
+    m_dAt      = -1;
+    m_dNext    = -1;
+    m_bagN     = 0;
+    m_lastStation = -1;
+    m_aClock   = 0.0f;
+    m_rng      = 2463534242u;
+    m_blendT0  = -10.0f;
+    m_dirLast  = 0;
+    m_dirFrame = -1;
+    m_pathN = m_pathI = 0;
+    m_seqTok = 0;
+    m_seqT0 = m_seqTotal = 0.0f;
 }
 
 void UIScene3D::SceneModel(Event *ev)
@@ -302,6 +396,293 @@ bool UIScene3D::TryEscape()
 bool UI_SceneEscape(void)
 {
     return UIScene3D::s_rootScene && UIScene3D::s_rootScene->TryEscape();
+}
+
+void UIScene3D::ActorHub(Event *ev)
+{
+    m_hub[0]   = ev->GetFloat(1);
+    m_hub[1]   = ev->GetFloat(2);
+    m_hub[2]   = ev->GetFloat(3);
+    m_idleAlts = ev->GetString(4);
+    m_walkAlts = ev->GetString(5);
+    m_speed    = ev->GetFloat(6);
+    m_dirOn    = true;
+}
+
+void UIScene3D::ActorStation(Event *ev)
+{
+    if (m_stations.NumObjects() >= 16) {
+        return;
+    }
+    dirStation_t *st = new dirStation_t;
+    st->name = ev->GetString(1);
+    st->yaw  = ev->GetFloat(2);
+    st->tmin = ev->GetFloat(3);
+    st->tmax = ev->GetFloat(4);
+    st->n    = 0;
+    {
+        const char *q = ev->GetString(5).c_str();
+        float       x, y;
+        int         used;
+        while (st->n < 10 && sscanf(q, " %f %f%n", &x, &y, &used) == 2) {
+            st->wp[st->n][0] = x;
+            st->wp[st->n][1] = y;
+            st->n++;
+            q += used;
+            while (*q == ',' || *q == ' ') {
+                q++;
+            }
+        }
+    }
+    st->seq = ev->GetString(6);
+    m_stations.AddObject(st);
+}
+
+void UIScene3D::ActorBreak(Event *ev)
+{
+    m_breakAlts = ev->GetString(1);
+    m_breakMin  = ev->GetFloat(2);
+    m_breakMax  = ev->GetFloat(3);
+}
+
+float UIScene3D::DirRand(float a, float b)
+{
+    m_rng ^= m_rng << 13;
+    m_rng ^= m_rng >> 17;
+    m_rng ^= m_rng << 5;
+    return a + (b - a) * ((m_rng & 0xFFFFFF) / 16777215.0f);
+}
+
+void UIScene3D::DirSetAnim(const str& alts, bool loop, float rate)
+{
+    if (!m_aCur.alts.length() || str::cmp(m_aCur.alts, alts) || m_aCur.loop != loop) {
+        m_aPrev    = m_aCur;
+        m_blendT0  = m_aClock;
+        m_aCur.alts = alts;
+        m_aCur.t0   = m_aClock;
+        m_aCur.loop = loop;
+        m_aCur.rate = rate;
+    }
+}
+
+// the next station from a shuffled bag (never the one he stands at), path = back to the hub along his own path, then the new one
+void UIScene3D::DirPickNext()
+{
+    const int ns = m_stations.NumObjects();
+    if (ns <= 0) {
+        m_dNext = -1;
+        return;
+    }
+    if (m_bagN <= 0) {
+        m_bagN = ns;
+        for (int i = 0; i < ns; i++) {
+            m_bag[i] = i;
+        }
+        for (int i = ns - 1; i > 0; i--) {
+            const int j = (int)DirRand(0.0f, (float)(i + 1) - 0.001f);
+            const int t = m_bag[i];
+            m_bag[i] = m_bag[j];
+            m_bag[j] = t;
+        }
+        if (ns > 1 && m_bag[m_bagN - 1] == m_lastStation) {
+            const int t = m_bag[0];
+            m_bag[0] = m_bag[m_bagN - 1];
+            m_bag[m_bagN - 1] = t;
+        }
+    }
+    m_dNext = m_bag[--m_bagN];
+    m_lastStation = m_dNext;
+    m_pathN = 0;
+    if (m_dAt >= 0) {
+        dirStation_t *c = m_stations.ObjectAt(m_dAt + 1);
+        for (int i = c->n - 2; i >= 0 && m_pathN < 38; i--) {
+            m_path[m_pathN][0] = c->wp[i][0];
+            m_path[m_pathN][1] = c->wp[i][1];
+            m_pathN++;
+        }
+    }
+    m_path[m_pathN][0] = m_hub[0];
+    m_path[m_pathN][1] = m_hub[1];
+    m_pathN++;
+    dirStation_t *nx = m_stations.ObjectAt(m_dNext + 1);
+    for (int i = 0; i < nx->n && m_pathN < 40; i++) {
+        m_path[m_pathN][0] = nx->wp[i][0];
+        m_path[m_pathN][1] = nx->wp[i][1];
+        m_pathN++;
+    }
+    m_pathI = 0;
+}
+
+int UIScene3D::DirResolve(dtiki_t *tiki, const str& alts)
+{
+    const char *p = alts.c_str();
+    while (*p) {
+        const char *e = strchr(p, '|');
+        char        name[64];
+        size_t      n = e ? (size_t)(e - p) : strlen(p);
+        if (n >= sizeof(name)) {
+            n = sizeof(name) - 1;
+        }
+        memcpy(name, p, n);
+        name[n] = 0;
+        const int idx = TIKI_Anim_NumForName(tiki, name);
+        if (idx >= 0) {
+            return idx;
+        }
+        p += n + (e ? 1 : 0);
+    }
+    return -1;
+}
+
+// local time of an animation play at clock `clockNow`: looped = wraps, else holds the last frame
+float UIScene3D::DirAnimTime(dtiki_t *tiki, const str& alts, float clockNow, const animPlay_t& a, bool *looped)
+{
+    const int idx = DirResolve(tiki, alts);
+    float     t   = (clockNow - a.t0) * a.rate;
+    if (t < 0.0f) {
+        t = 0.0f;
+    }
+    const float len = idx >= 0 ? TIKI_Anim_Time(tiki, idx) : 0.0f;
+    if (len > 0.05f) {
+        if (a.loop) {
+            t = t - len * floor(t / len);
+        } else if (t > len) {
+            t = len - 0.001f;
+        }
+    }
+    if (looped) {
+        *looped = a.loop;
+    }
+    return t;
+}
+
+void UIScene3D::DirUpdate(dtiki_t *tiki, float dt)
+{
+    m_aClock += dt;
+    if (m_dState == 0) {
+        m_dPos[0] = m_hub[0];
+        m_dPos[1] = m_hub[1];
+        m_dYaw    = m_hub[2];
+        m_dAt     = -1;
+        DirSetAnim(m_idleAlts, true, 1.0f);
+        m_dTimer  = DirRand(2.5f, 4.5f);
+        m_dState  = 1;
+        return;
+    }
+    if (dt <= 0.0f) {
+        return;
+    }
+    switch (m_dState) {
+    case 1:       // wait (idle / look-around), then the next station
+        m_dTimer -= dt;
+        if (m_dTimer <= 0.0f) {
+            DirPickNext();
+            if (m_dNext >= 0) {
+                m_dState = 2;
+            } else {
+                m_dTimer = 4.0f;
+            }
+        }
+        break;
+    case 2: {     // walk the path
+        if (m_pathI >= m_pathN) {
+            m_dAt         = m_dNext;
+            m_dTargetYaw  = m_stations.ObjectAt(m_dAt + 1)->yaw;
+            DirSetAnim(m_idleAlts, true, 1.0f);
+            m_dState = 3;
+            break;
+        }
+        const float dx = m_path[m_pathI][0] - m_dPos[0], dy = m_path[m_pathI][1] - m_dPos[1];
+        const float dist = sqrt(dx * dx + dy * dy);
+        if (dist < 3.0f) {
+            m_pathI++;
+            break;
+        }
+        const float want = atan2(dy, dx) * 180.0f / M_PI;
+        float       da   = want - m_dYaw;
+        da               = da - 360.0f * floor(da / 360.0f + 0.5f);
+        const float maxT = m_turnRate * dt;
+        m_dYaw += (da > maxT ? maxT : (da < -maxT ? -maxT : da));
+        if (fabs(da) < 45.0f) {
+            DirSetAnim(m_walkAlts, true, 1.0f);
+            const float step = m_speed * dt < dist ? m_speed * dt : dist;
+            const float ry   = m_dYaw * M_PI / 180.0f;
+            m_dPos[0] += cos(ry) * step;
+            m_dPos[1] += sin(ry) * step;
+        } else {
+            DirSetAnim(m_idleAlts, true, 1.0f);
+        }
+        break;
+    }
+    case 3: {     // turn to face the station, then start its sequence
+        float da = m_dTargetYaw - m_dYaw;
+        da       = da - 360.0f * floor(da / 360.0f + 0.5f);
+        const float maxT = (m_turnRate * 0.8f) * dt;
+        m_dYaw += (da > maxT ? maxT : (da < -maxT ? -maxT : da));
+        if (fabs(da) < 2.0f) {
+            dirStation_t *st = m_stations.ObjectAt(m_dAt + 1);
+            m_seqTok   = 0;
+            m_seqT0    = m_aClock;
+            m_seqTotal = DirRand(st->tmin, st->tmax);
+            m_dTimer   = 0.0f;
+            m_dState   = 4;
+        }
+        break;
+    }
+    case 4: {     // the station's animation sequence
+        dirStation_t *st = m_stations.ObjectAt(m_dAt + 1);
+        // find the token m_seqTok
+        const char *p = st->seq.c_str();
+        for (int k = 0; k < m_seqTok && *p; k++) {
+            const char *e = strchr(p, ',');
+            if (!e) {
+                p += strlen(p);
+                break;
+            }
+            p = e + 1;
+        }
+        if (!*p) {
+            DirSetAnim(m_breakAlts.length() ? m_breakAlts : m_idleAlts, true, 1.0f);
+            m_dTimer = DirRand(m_breakMin, m_breakMax);
+            m_dState = 1;
+            break;
+        }
+        const char *e = strchr(p, ',');
+        char        tok[96];
+        size_t      n = e ? (size_t)(e - p) : strlen(p);
+        if (n >= sizeof(tok)) {
+            n = sizeof(tok) - 1;
+        }
+        memcpy(tok, p, n);
+        tok[n] = 0;
+        bool loop = false;
+        if (n > 0 && tok[n - 1] == '~') {
+            loop     = true;
+            tok[n - 1] = 0;
+        }
+        str alts(tok);
+        if (m_dTimer == 0.0f) {          // token start
+            DirSetAnim(alts, loop, 1.0f);
+            m_dTimer = 0.001f;
+            m_seqT0  = m_aClock;
+        }
+        const int   idx = DirResolve(tiki, alts);
+        const float len = idx >= 0 ? TIKI_Anim_Time(tiki, idx) : 1.0f;
+        const float run = m_aClock - m_seqT0;
+        bool        done;
+        if (loop) {
+            // a looped token fills the stay minus the lengths of the once-tokens after it (rough: the rest of the stay)
+            done = run >= (m_seqTotal > len ? m_seqTotal : len);
+        } else {
+            done = run >= len - 0.05f;
+        }
+        if (done) {
+            m_seqTok++;
+            m_dTimer = 0.0f;
+        }
+        break;
+    }
+    }
 }
 
 void UIScene3D::SceneHot(Event *ev)
@@ -497,9 +878,51 @@ void UIScene3D::Draw(void)
         }
         VectorCopy(m->origin, ent.origin);
         vec3_t a = {0, m->yaw, 0};
+        const char *lifeCv = Cvar_VariableString("ui_atticActorLife");      // unset = on; 0 = the old static idle
+        const bool directed = m_dirOn && m->group.length() && (!lifeCv[0] || atoi(lifeCv) != 0);
+        if (directed) {
+            // the director advances only while the camera rests at the home view (frozen during a fly / at the shelf; a covered scene is not drawn at all)
+            const bool atHome = !m_flying && VectorCompare(m_cur.org, m_home.org) && m_cur.fov == m_home.fov;
+            float      dt     = 0.0f;
+            if (m_dirLast && atHome) {
+                dt = (uid.time - m_dirLast) * 0.001f / UIWidget::CamSlow();
+                if (dt > 0.1f) {
+                    dt = 0.1f;
+                }
+            }
+            m_dirLast = uid.time;
+            if (m_dirFrame != m_drawn) {
+                m_dirFrame = m_drawn;
+                DirUpdate(ent.tiki, dt);
+            }
+            ent.origin[0] = m_dPos[0];
+            ent.origin[1] = m_dPos[1];
+            a[1]          = m_dYaw;
+        }
         AnglesToAxis(a, ent.axis);
         ent.shaderRGBA[0] = ent.shaderRGBA[1] = ent.shaderRGBA[2] = ent.shaderRGBA[3] = 255;
-        if (m->anim.length()) {
+        if (m->anim.length() && directed) {
+            ent.shaderRGBA[0] = ent.shaderRGBA[1] = ent.shaderRGBA[2] = 150;
+            const int idxC = DirResolve(ent.tiki, m_aCur.alts);
+            const int idxI = DirResolve(ent.tiki, m_idleAlts);
+            const int idx0 = idxC >= 0 ? idxC : idxI;
+            float     w    = (m_aClock - m_blendT0) / 0.30f;
+            w              = w < 0.0f ? 0.0f : (w > 1.0f ? 1.0f : w);
+            if (idx0 >= 0) {
+                ent.frameInfo[0].index  = idx0;
+                ent.frameInfo[0].time   = DirAnimTime(ent.tiki, idxC >= 0 ? m_aCur.alts : m_idleAlts, m_aClock, m_aCur, NULL);
+                ent.frameInfo[0].weight = w < 1.0f && m_aPrev.alts.length() ? w : 1.0f;
+                ent.actionWeight        = 1.0f;
+                if (w < 1.0f && m_aPrev.alts.length()) {
+                    const int idxP = DirResolve(ent.tiki, m_aPrev.alts);
+                    if (idxP >= 0) {
+                        ent.frameInfo[1].index  = idxP;
+                        ent.frameInfo[1].time   = DirAnimTime(ent.tiki, m_aPrev.alts, m_aClock, m_aPrev, NULL);
+                        ent.frameInfo[1].weight = 1.0f - w;
+                    }
+                }
+            }
+        } else if (m->anim.length()) {
             ent.shaderRGBA[0] = ent.shaderRGBA[1] = ent.shaderRGBA[2] = 150;   // actors are fullbright without a world: pull them down to the room's exposure
             const int idx = TIKI_Anim_NumForName(ent.tiki, m->anim.c_str());
             if (idx >= 0) {
