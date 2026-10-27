@@ -1244,6 +1244,27 @@ void CG_ViewModelAnimation(refEntity_t *pModel)
                 }
             }
         }
+        // [scopes1025] A SCOPED rifle fired in ADS: the vanilla `fire` row (a hip pose) used to play for ~0.25 s, the aim slot lost its weight, the view snapped to the hip pose (scope off the eye,
+        // surround un-blurred) until the bolt row brought it back. Now the shot stays in the ADS hold class: the gun's own `coopr_<key>_fire_ads` row when the hands tiki has it, otherwise the aim
+        // pose (`charge`) is simply held - bit-identical, so the sight stays solved at full weight, the lens stays live, and the feel layer's recoil kick plays on top.
+        // coop_scopeFireHold 0 = the old fire row.
+        if ((cgi.anim->g_iLastVMAnim == VM_ANIM_FIRE || cgi.anim->g_iLastVMAnim == VM_ANIM_FIRE_SECONDARY) && !bWeaponChanged && !s_coopAdsClip
+            && cg.snap && cg.snap->ps.activeItems[1] >= 0 && CG_HzmScopeRaiseOwns() && CG_AimingDownSights()
+            && cgi.Cvar_Get("coop_scopeFireHold", "1", CVAR_ARCHIVE)->integer) {
+            char szKey[MAX_QPATH], szTry[MAX_QPATH];
+            CoopWeaponKey(CG_ConfigString(CS_WEAPONS + cg.snap->ps.activeItems[1]), szKey, sizeof(szKey));
+            Com_sprintf(szTry, sizeof(szTry), "coopr_%s_fire_ads", szKey);
+            if (cgi.Anim_NumForName(pTiki, szTry) == -1) {
+                Com_sprintf(szTry, sizeof(szTry), "%s_charge", AnimPrefixList[iAnimPrefixIndex]);
+                CoopPerWeaponReloadAnim(pTiki, "charge", szTry, sizeof(szTry));
+            }
+            if (cgi.Anim_NumForName(pTiki, szTry) != -1) {
+                Q_strncpyz(s_szCoopHipAnim, szAnimName, sizeof(s_szCoopHipAnim));
+                Q_strncpyz(szAnimName, szTry, sizeof(szAnimName));
+                s_coopAdsClip = qtrue;
+                s_coopAdsBolt = qfalse;
+            }
+        }
         {   // HZM coop [heavy lane 2026-10-13] harness trace of the row that starts now (apply_vmtrace.py)
             static cvar_t *pTrace = NULL;
             if (!pTrace) {
