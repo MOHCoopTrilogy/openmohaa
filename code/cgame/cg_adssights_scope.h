@@ -34,8 +34,8 @@ static const adsSight_t s_adsSightsScope[] = {
     {"models/weapons/g43sniper_camo_woodland.tik", "G43 Sniper (Woodland)", {7.5657f, -1.3233f, -7.1860f}, {-4.4343f, -1.3233f, -7.1860f}, 0.000000f, {0.000f, -0.033f, -0.999f}, 2.251f}, // g43sniper
     {"models/weapons/g43sniper_chrome.tik", "G43 Sniper (Chrome)", {7.5657f, -1.3233f, -7.1860f}, {-4.4343f, -1.3233f, -7.1860f}, 0.000000f, {0.000f, -0.033f, -0.999f}, 2.251f}, // g43sniper
     {"models/weapons/g43sniper_gold.tik", "G43 Sniper (Gold)", {7.5657f, -1.3233f, -7.1860f}, {-4.4343f, -1.3233f, -7.1860f}, 0.000000f, {0.000f, -0.033f, -0.999f}, 2.251f}, // g43sniper
-    {"models/weapons/garand_scoped.tik", "M1 Garand Sniper", {12.9060f, -2.3692f, -4.9357f}, {0.9060f, -2.3692f, -4.9357f}, 0.000000f, {0.000f, -0.259f, -0.966f}, 2.030f}, // garand
-    {"models/weapons/garand_silenced.tik", "Silenced M1 Garand", {12.9060f, -2.3692f, -4.9357f}, {0.9060f, -2.3692f, -4.9357f}, 0.000000f, {0.000f, -0.259f, -0.966f}, 2.030f}, // garandsil
+    {"models/weapons/garand_scoped.tik", "M1 Garand Sniper", {12.9060f, -2.3692f, -4.9357f}, {0.9060f, -2.3692f, -4.9357f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 2.030f}, // garand
+    {"models/weapons/garand_silenced.tik", "Silenced M1 Garand", {12.9060f, -2.3692f, -4.9357f}, {0.9060f, -2.3692f, -4.9357f}, 0.000000f, {0.000f, 0.000f, -1.000f}, 2.030f}, // garandsil
     {"models/weapons/kar98sniper.tik", "KAR98 - Sniper", {12.7036f, -1.8994f, -5.3585f}, {0.7036f, -1.8994f, -5.3585f}, 0.000000f, {-0.000f, -0.844f, -0.537f}, 2.499f}, // kar98sniper
     {"models/weapons/kar98sniper_bloody.tik", "KAR98 - Sniper (Bloody)", {12.7036f, -1.8994f, -5.3585f}, {0.7036f, -1.8994f, -5.3585f}, 0.000000f, {-0.000f, -0.844f, -0.537f}, 2.499f}, // kar98sniper
     {"models/weapons/kar98sniper_blued.tik", "KAR98 - Sniper (Blued)", {12.7036f, -1.8994f, -5.3585f}, {0.7036f, -1.8994f, -5.3585f}, 0.000000f, {-0.000f, -0.844f, -0.537f}, 2.499f}, // kar98sniper

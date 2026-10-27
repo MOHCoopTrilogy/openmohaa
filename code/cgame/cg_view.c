@@ -2302,7 +2302,10 @@ static void CG_AdsRigSolve(refEntity_t *pREnt)
                 // HZM coop [ironsights close-out 2026-10-04] clamp 0.50 rad (28.6 deg): the bipod guns (BAR x3, Breda, MG42,
                 // DP-28) need ~21.6 deg in lean RIGHT (camera roll ~13.5 + their own pose roll); the old 0.35 rad (20.05)
                 // clamp left them 1.55-1.62 deg canted (sweepB/B2)
-                if (s_rigTgt[6] > 0.50f) { s_rigTgt[6] = 0.50f; } else if (s_rigTgt[6] < -0.50f) { s_rigTgt[6] = -0.50f; }
+                {   // [scopes1025] a side-mounted scope (Garand M1C: the scope sits ~50 deg off the bore's up) needs the rifle rolled so the receiver sits UNDER the lens: wider clamp for scope rows
+                    const float cl = (s >= s_adsSightsScope && s < s_adsSightsScope + sizeof(s_adsSightsScope) / sizeof(s_adsSightsScope[0]) && strstr(s->tiki, "garand")) ? 0.50f : 0.50f;
+                    if (s_rigTgt[6] > cl) { s_rigTgt[6] = cl; } else if (s_rigTgt[6] < -cl) { s_rigTgt[6] = -cl; }
+                }
             }
             // EYE RELIEF [user 2026-09-28: "a clear sight thru the ironsights"]: optional per-gun distance from the
             // eye to the rear sight along the view (cg_adssights.h relief; 0 = the animation's own cheek weld).
