@@ -61,7 +61,14 @@ void main()
 		float gm      = pic.a;
 		float restore = glass ? gm : (1.0 - smoothstep(0.985, 1.0, r));
 		vec3  base    = mix(scene, pic.rgb, restore);
-		gl_FragColor = vec4(mix(base, metal, glass ? 0.0 : ringK), 1.0);
+		vec3 outc = mix(base, metal, glass ? 0.0 : ringK);
+		if (glass)   // a faint rim highlight on a DARK ring (upper-left arc) so a black eyepiece ring does not read as a flat disc; bright metal bells are left alone
+		{
+			float hl  = arc * smoothstep(1.0, 1.04, r) * (1.0 - smoothstep(1.15, 1.32, r));
+			float lum = dot(outc, vec3(0.333));
+			outc += vec3(0.085, 0.09, 0.10) * hl * (1.0 - smoothstep(0.05, 0.22, lum));
+		}
+		gl_FragColor = vec4(outc, 1.0);
 		return;
 	}
 
