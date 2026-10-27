@@ -3214,6 +3214,25 @@ void UI_After_f(void)
 UI_ListMenus_f
 ====================
 */
+/*
+====================
+UI_Veil_f - [HZM attic-main] uiveil <alpha 0..1> <seconds>: fade the full-screen black veil (the dip around an attic -> flat menu cut)
+====================
+*/
+void UI_Veil_f(void)
+{
+    if (Cmd_Argc() < 3) {
+        Com_Printf("Usage: uiveil <alpha> <seconds>\n");
+        return;
+    }
+    UIWidget::VeilTo((float)atof(Cmd_Argv(1)), (float)atof(Cmd_Argv(2)));
+}
+
+/*
+====================
+UI_ListMenus_f
+====================
+*/
 void UI_ListMenus_f()
 {
     menuManager.ListMenus();
@@ -5727,6 +5746,7 @@ void CL_ShutdownUI(void)
     Cmd_RemoveCommand("showmenu");
     Cmd_RemoveCommand("widgetcommand");
     Cmd_RemoveCommand("uiafter");
+    Cmd_RemoveCommand("uiveil");
     Cmd_RemoveCommand("listmenus");
     Cmd_RemoveCommand("togglemenu");
     Cmd_RemoveCommand("loadmenu");
@@ -6033,6 +6053,7 @@ void CL_InitializeUI(void)
     Cmd_AddCommand("widgetcommand", UI_WidgetCommand_f);
     Cmd_AddCommand("globalwidgetcommand", UI_GlobalWidgetCommand_f);
     Cmd_AddCommand("uiafter", UI_After_f);
+    Cmd_AddCommand("uiveil", UI_Veil_f);
     Cmd_AddCommand("listmenus", UI_ListMenus_f);
     Cmd_AddCommand("togglemenu", UI_ToggleMenu_f);
     Cmd_AddCommand("loadmenu", UI_LoadMenu_f);

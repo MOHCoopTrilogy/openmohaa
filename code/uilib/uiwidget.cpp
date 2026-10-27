@@ -2937,6 +2937,33 @@ bool UIWidget::CamMoveActive()
     return uid.time < s_camEndMs;
 }
 
+float UIWidget::s_veilFrom = 0.0f, UIWidget::s_veilTo = 0.0f;
+int   UIWidget::s_veilStart = 0, UIWidget::s_veilDur = 0;
+
+float UIWidget::VeilAlphaNow()
+{
+    if (UIWidget::s_veilDur <= 0) {
+        return UIWidget::s_veilTo;
+    }
+    float u = (float)(uid.time - UIWidget::s_veilStart) / (float)UIWidget::s_veilDur;
+    u = u < 0.0f ? 0.0f : (u > 1.0f ? 1.0f : u);
+    return UIWidget::s_veilFrom + (UIWidget::s_veilTo - UIWidget::s_veilFrom) * u;
+}
+
+void UIWidget::VeilTo(float target, float seconds)
+{
+    s_veilFrom  = VeilAlphaNow();
+    s_veilTo    = target;
+    s_veilStart = uid.time;
+    s_veilDur   = (int)(seconds * CamSlow() * 1000.0f);
+}
+
+void UIWidget::VeilSnap(float alpha)
+{
+    s_veilFrom = s_veilTo = alpha;
+    s_veilDur  = 0;
+}
+
 void UIWidget::CamMoveSkip()
 {
     s_camSkipMs = uid.time;

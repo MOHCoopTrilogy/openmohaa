@@ -391,6 +391,8 @@ void UIScene3D::Draw(void)
     }
     if (resumed) {
         m_leaving = false;
+        UIWidget::VeilSnap(1.0f);          // BACK from a flat menu: dip - black first, then the attic fades up while the camera flies home
+        UIWidget::VeilTo(0.0f, 0.24f);
     }
     m_lastDraw = uid.time;
     if (m_root) {
@@ -504,7 +506,7 @@ void UIScene3D::Draw(void)
                 if (!m->animStart) {
                     m->animStart = uid.time;
                 }
-                float t   = (uid.time - m->animStart) * 0.001f;
+                float t   = (uid.time - m->animStart) * 0.001f / UIWidget::CamSlow();   // ui_camslow (video capture): the actor idles on the slowed clock too
                 float len = TIKI_Anim_Time(ent.tiki, idx);
                 if (len > 0.05f) {
                     t = t - len * floor(t / len);
