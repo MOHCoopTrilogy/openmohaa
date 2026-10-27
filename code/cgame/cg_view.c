@@ -2052,6 +2052,9 @@ static int CG_AdsAnimClass(void)
     if (CG_VMAimedCycleActive()) {
         return 1;
     }
+    if (CG_VMScopedReloadAdsClip()) {   // [scopes1025] an authored scoped reload clip: hold the solved aim, the clip's own gun motion plays on top
+        return 1;
+    }
     a = cg.snap->ps.iViewModelAnim;
     switch (a) {
     case VM_ANIM_IDLE:
