@@ -1961,6 +1961,13 @@ static const adsSight_t *CG_FindAdsSight(const char *tikiName)
     if (!tikiName || !*tikiName) {
         return NULL;
     }
+    if (CG_HzmScopeHeld()) {   // [scopes1025] a held scoped rifle (SVT 40, Silenced M1 Garand also have iron rows): the SCOPE row is the sight in use
+        for (i = 0; i < (int)(sizeof(s_adsSightsScope) / sizeof(s_adsSightsScope[0])); i++) {
+            if (!Q_stricmp(tikiName, s_adsSightsScope[i].tiki)) {
+                return &s_adsSightsScope[i];
+            }
+        }
+    }
     for (i = 0; i < (int)(sizeof(s_adsSights) / sizeof(s_adsSights[0])); i++) {
         if (!Q_stricmp(tikiName, s_adsSights[i].tiki)) {
             return &s_adsSights[i];

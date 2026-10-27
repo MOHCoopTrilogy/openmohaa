@@ -1964,6 +1964,15 @@ static const adsSight_t *CG_FindAdsSightByName(const char *wpn)
     if (!wpn || !*wpn) {
         return NULL;
     }
+    // [scopes1025] a scoped rifle whose name ALSO has an iron-sight row (SVT 40, Silenced M1 Garand) must use the SCOPE row: the iron row aligns a sight that is not
+    // the one in use (the eye ended up far from the ocular: tiny dark glass, rifle held out)
+    if (CG_HzmScopeWeaponOptic(wpn) >= 0) {
+        for (i = 0; i < (int)(sizeof(s_adsSightsScope) / sizeof(s_adsSightsScope[0])); i++) {
+            if (s_adsSightsScope[i].name && !Q_stricmp(wpn, s_adsSightsScope[i].name)) {
+                return &s_adsSightsScope[i];
+            }
+        }
+    }
     // EXACT name only. Every skin TIKI that shares a solved mesh has its own generated row, and a variant
     // with a DIFFERENT mesh ("BAR (Pacific)") never falls back to the base gun's geometry by stripping its
     // suffix - that fallback is exactly how CG_FindAdsTune hands those variants the wrong sight picture.
@@ -2222,9 +2231,12 @@ static void CG_AdsRigSolve(refEntity_t *pREnt)
     }
 
     // ---- target: only from an AIM pose, and not while a fire/reload crossblend is still settling
+    // [scopes1025] coop_scopeReloadLive: a scoped reload keeps solving the target every frame (the gun tracks the clip's pose), applied at the partial
+    // weight coop_scopeReloadKeep - the scope stays part-way at the eye and the lens live while the clip's own dip / roll / hands play on top
     if ((!s_rigTgtOk && !(s_rigFreshGun && CG_VMAimWeight() < 0.999f))
         || ((CG_VmHandFix() > 0.5f) ? (CG_VMAimWeight() > 0.999f && s_rigAnimCls == 0)
-                                    : (s_rigAnimCls == 0 && cg.time >= s_rigHoldUntil))) {
+                                    : (s_rigAnimCls == 0 && cg.time >= s_rigHoldUntil))
+        || (s_rigAnimCls == 2 && s_rigTgtOk && CG_HzmScopeRaiseOwns() && cgi.Cvar_Get("coop_scopeReloadLive", "0", CVAR_ARCHIVE)->integer)) {
         or = cgi.TIKI_Orientation(pREnt, s_iTag);
         VectorCopy(pREnt->origin, G);
         for (i = 0; i < 3; i++) {
