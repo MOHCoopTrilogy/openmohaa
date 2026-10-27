@@ -19,6 +19,13 @@
 #include "cl_ui.h"
 #include "../qcommon/tiki.h"
 
+// bumped after every renderer restart (vid_restart): the cached model handles of every Scene3D are stale then and must be registered again
+static int s_sceneRendererEpoch = 0;
+void       UI_SceneRendererRestart(void)
+{
+    s_sceneRendererEpoch++;
+}
+
 class UIScene3D : public UIWidget
 {
     struct sceneModel_t {
@@ -41,6 +48,7 @@ class UIScene3D : public UIWidget
         int    stop;                   // optional: the hotspot is live only while cvar ui_atcStop == stop (-1 = always)
         str    widget;                 // optional: name of a sibling Button that is re-framed to this hotspot every frame (mouse / keyboard / pad focus all work on it)
         SafePtr<UIWidget> w;
+        float  box[4];                 // optional hit box (scenehotbox): centre offset x y and half size w h, in pixels at 1080 px screen height (scaled with the screen); box[2] == 0 = the square of `radius`
     };
     struct sceneLight_t {
         vec3_t org;
@@ -78,6 +86,7 @@ class UIScene3D : public UIWidget
     };
     Container<dirStation_t *> m_stations;
     bool   m_dirOn;
+    int    m_rendEpoch;          // s_sceneRendererEpoch the model handles were registered under
     float  m_hub[3];
     float  m_speed;
     float  m_turnRate;
@@ -93,6 +102,7 @@ class UIScene3D : public UIWidget
     int    m_pathN, m_pathI;
     int    m_seqTok;
     float  m_seqT0, m_seqTotal;
+    float  m_stClock0;          // director clock when the station sequence began (the stay is measured from here)
     unsigned m_rng;
     struct animPlay_t {
         str   alts;
@@ -130,6 +140,7 @@ public:
     static UIScene3D *s_rootScene;
     static int        s_rootDrawn;
     void SceneHot(Event *ev);
+    void SceneHotBox(Event *ev);
     void SceneLight(Event *ev);
     void OnClick(Event *ev);
     void Draw(void) override;
@@ -234,6 +245,15 @@ Event EV_Scene_Hot
     "name x y z radius command [caption] [focuswidget] [stop]",
     "Scene3D: a clickable sphere in the scene; hover sets ui_scene_hot (1-based index, 0 = none) and prints the caption beside the object, a click stuffs the command."
 );
+Event EV_Scene_HotBox
+(
+    "scenehotbox",
+    EV_DEFAULT,
+    "sffff",
+    "name offx offy halfw halfh",
+    "Scene3D: gives the named hotspot a rectangular hit box (pixels at 1080 px screen height, scaled with the screen): centre offset from the projected point and half width / height - for tall narrow things such as doors."
+);
+
 Event EV_Scene_Light
 (
     "scenelight",
@@ -248,6 +268,7 @@ CLASS_DECLARATION(UIWidget, UIScene3D, NULL) {
     {&EV_Scene_Cam,    &UIScene3D::SceneCam  },
     {&EV_Scene_Fly,    &UIScene3D::SceneFly  },
     {&EV_Scene_Hot,    &UIScene3D::SceneHot  },
+    {&EV_Scene_HotBox, &UIScene3D::SceneHotBox},
     {&EV_Scene_Return, &UIScene3D::SceneReturn},
     {&EV_Scene_Back,   &UIScene3D::SceneBack},
     {&EV_Scene_Root,   &UIScene3D::SceneRoot},
@@ -276,6 +297,7 @@ UIScene3D::UIScene3D()
     m_hover    = -1;
     m_drawn    = 0;
     m_dirOn    = false;
+    m_rendEpoch = s_sceneRendererEpoch;
     m_speed    = 60.0f;
     m_turnRate = 150.0f;
     m_breakMin = 1.5f;
@@ -292,7 +314,7 @@ UIScene3D::UIScene3D()
     m_dirFrame = -1;
     m_pathN = m_pathI = 0;
     m_seqTok = 0;
-    m_seqT0 = m_seqTotal = 0.0f;
+    m_seqT0 = m_seqTotal = m_stClock0 = 0.0f;
 }
 
 void UIScene3D::SceneModel(Event *ev)
@@ -565,7 +587,7 @@ void UIScene3D::DirUpdate(dtiki_t *tiki, float dt)
         m_dYaw    = m_hub[2];
         m_dAt     = -1;
         DirSetAnim(m_idleAlts, true, 1.0f);
-        m_dTimer  = DirRand(2.5f, 4.5f);
+        m_dTimer  = DirRand(0.8f, 1.5f);
         m_dState  = 1;
         return;
     }
@@ -604,7 +626,7 @@ void UIScene3D::DirUpdate(dtiki_t *tiki, float dt)
         const float maxT = m_turnRate * dt;
         m_dYaw += (da > maxT ? maxT : (da < -maxT ? -maxT : da));
         if (fabs(da) < 45.0f) {
-            DirSetAnim(m_walkAlts, true, 1.0f);
+            DirSetAnim(m_walkAlts, true, m_speed / 75.0f);
             const float step = m_speed * dt < dist ? m_speed * dt : dist;
             const float ry   = m_dYaw * M_PI / 180.0f;
             m_dPos[0] += cos(ry) * step;
@@ -623,6 +645,7 @@ void UIScene3D::DirUpdate(dtiki_t *tiki, float dt)
             dirStation_t *st = m_stations.ObjectAt(m_dAt + 1);
             m_seqTok   = 0;
             m_seqT0    = m_aClock;
+            m_stClock0 = m_aClock;
             m_seqTotal = DirRand(st->tmin, st->tmax);
             m_dTimer   = 0.0f;
             m_dState   = 4;
@@ -670,11 +693,13 @@ void UIScene3D::DirUpdate(dtiki_t *tiki, float dt)
         const float len = idx >= 0 ? TIKI_Anim_Time(tiki, idx) : 1.0f;
         const float run = m_aClock - m_seqT0;
         bool        done;
+        const float stayed = m_aClock - m_stClock0;
         if (loop) {
-            // a looped token fills the stay minus the lengths of the once-tokens after it (rough: the rest of the stay)
-            done = run >= (m_seqTotal > len ? m_seqTotal : len);
+            // a looped token fills what is left of the stay (the once-tokens before it count against it)
+            done = stayed >= m_seqTotal && run >= 1.5f;
         } else {
-            done = run >= len - 0.05f;
+            // a once-token plays out, but is cut short once the stay is over
+            done = run >= len - 0.05f || (stayed >= m_seqTotal && run >= 2.0f);
         }
         if (done) {
             m_seqTok++;
@@ -697,7 +722,23 @@ void UIScene3D::SceneHot(Event *ev)
     h->caption    = ev->NumArgs() >= 7 ? ev->GetString(7) : "";
     h->widget     = ev->NumArgs() >= 8 ? ev->GetString(8) : "";
     h->stop       = ev->NumArgs() >= 9 ? (int)ev->GetFloat(9) : -1;
+    h->box[0] = h->box[1] = h->box[2] = h->box[3] = 0.0f;
     m_hots.AddObject(h);
+}
+
+void UIScene3D::SceneHotBox(Event *ev)
+{
+    const str nm = ev->GetString(1);
+    for (int i = 1; i <= m_hots.NumObjects(); i++) {
+        sceneHot_t *h = m_hots.ObjectAt(i);
+        if (!str::icmp(h->name, nm)) {
+            h->box[0] = ev->GetFloat(2);
+            h->box[1] = ev->GetFloat(3);
+            h->box[2] = ev->GetFloat(4);
+            h->box[3] = ev->GetFloat(5);
+            return;
+        }
+    }
 }
 
 void UIScene3D::SceneLight(Event *ev)
@@ -845,6 +886,13 @@ void UIScene3D::Draw(void)
     for (int i = 1; i <= m_lights.NumObjects(); i++) {
         sceneLight_t *l = m_lights.ObjectAt(i);
         re.AddLightToScene(l->org, l->radius, l->color[0], l->color[1], l->color[2], 0);
+    }
+    if (m_rendEpoch != s_sceneRendererEpoch) {
+        // the renderer was restarted under us (vid_restart): every cached handle is stale - register all models again
+        m_rendEpoch = s_sceneRendererEpoch;
+        for (int i = 1; i <= m_models.NumObjects(); i++) {
+            m_models.ObjectAt(i)->handle = 0;
+        }
     }
     const bool dbg = Cvar_VariableIntegerValue("ui_scene_debug") != 0;
     for (int i = 1; i <= m_models.NumObjects(); i++) {
@@ -1007,7 +1055,15 @@ void UIScene3D::Draw(void)
                         CL_SetMousePos((int)sx, (int)sy);
                     }
                 }
-                h->w->setFrame(UIRect2D(live ? sx - rpx - m_screenframe.pos.x : -9999.0f, live ? sy - rpx - m_screenframe.pos.y : -9999.0f, live ? rpx * 2.0f : 1.0f, live ? rpx * 2.0f : 1.0f));
+                float hx = rpx, hy = rpx, cx = sx, cy = sy;
+                if (h->box[2] > 0.0f) {
+                    const float k = H / 1080.0f;
+                    cx += h->box[0] * k;
+                    cy += h->box[1] * k;
+                    hx = h->box[2] * k;
+                    hy = h->box[3] * k;
+                }
+                h->w->setFrame(UIRect2D(live ? cx - hx - m_screenframe.pos.x : -9999.0f, live ? cy - hy - m_screenframe.pos.y : -9999.0f, live ? hx * 2.0f : 1.0f, live ? hy * 2.0f : 1.0f));
             }
             continue;
         }

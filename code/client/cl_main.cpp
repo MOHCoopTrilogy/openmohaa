@@ -1825,6 +1825,7 @@ void CL_Vid_Restart_f( void ) {
 		CL_SendPureChecksums();
 	}
 
+	UI_SceneRendererRestart(); // [HZM attic-main] the attic scene re-registers its models
 	cls.vid_restart = qfalse;
 	Com_Printf("----- finished CL_Vid_Restart_f ----\n");
 	HzmDiag_LongOp( HZF_VID_RESTART, 0, NULL ); // HZM coop [bug-3486]
