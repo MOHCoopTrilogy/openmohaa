@@ -62,6 +62,8 @@ class UIScene3D : public UIWidget
     int                       m_flyStart;
     float                     m_flyDur;
     bool                      m_flying;
+    bool                      m_root;      // the scene is the main menu itself (sceneroot): ESC at the shelf flies home through UI_SceneEscape()
+    bool                      m_leaving;   // sceneleave: a flat menu is about to open over the scene; fly back as soon as it is shown again
     bool                      m_snap;      // a fly just ended: with keyboard / pad navigation active, put the cursor on the first live hotspot so the D-pad has somewhere to start
     int                       m_lastDraw;
     int                       m_hover;
@@ -75,6 +77,12 @@ public:
     void SceneFly(Event *ev);
     void SceneReturn(Event *ev);
     void SceneBack(Event *ev);
+    friend bool UI_SceneEscape(void);
+    void SceneRoot(Event *ev);
+    void SceneLeave(Event *ev);
+    bool TryEscape();
+    static UIScene3D *s_rootScene;
+    static int        s_rootDrawn;
     void SceneHot(Event *ev);
     void SceneLight(Event *ev);
     void OnClick(Event *ev);
@@ -127,6 +135,24 @@ Event EV_Scene_Back
     "Scene3D: ESC. When ui_atcStop is above 0 the camera flies back to the home pose (ui_atcStop 0, the return pose is dropped; with ui_atcAuto 1 the menu then pops); otherwise the menu is popped."
 );
 
+Event EV_Scene_Root
+(
+    "sceneroot",
+    EV_DEFAULT,
+    NULL,
+    NULL,
+    "Scene3D: this scene IS the main menu (ui_atticMain): ESC while ui_atcStop is 1 (the shelf) flies back home instead of popping, nothing else changes."
+);
+
+Event EV_Scene_Leave
+(
+    "sceneleave",
+    EV_DEFAULT,
+    NULL,
+    NULL,
+    "Scene3D: a flat menu is about to be pushed over the scene; when the scene is drawn again the camera flies back (to the return pose, else home) at once instead of after the 1.5 s hitch guard."
+);
+
 Event EV_Scene_Hot
 (
     "scenehot",
@@ -151,6 +177,8 @@ CLASS_DECLARATION(UIWidget, UIScene3D, NULL) {
     {&EV_Scene_Hot,    &UIScene3D::SceneHot  },
     {&EV_Scene_Return, &UIScene3D::SceneReturn},
     {&EV_Scene_Back,   &UIScene3D::SceneBack},
+    {&EV_Scene_Root,   &UIScene3D::SceneRoot},
+    {&EV_Scene_Leave,  &UIScene3D::SceneLeave},
     {&EV_Scene_Light,  &UIScene3D::SceneLight},
     {&W_LeftMouseDown, &UIScene3D::OnClick   },
     {NULL,             NULL                  }
@@ -167,6 +195,8 @@ UIScene3D::UIScene3D()
     m_flying   = false;
     m_snap     = false;
     m_lastDraw = 0;
+    m_root     = false;
+    m_leaving  = false;
     m_hover    = -1;
     m_drawn    = 0;
 }
@@ -244,6 +274,36 @@ void UIScene3D::SceneBack(Event *ev)
     }
 }
 
+UIScene3D *UIScene3D::s_rootScene = NULL;
+int        UIScene3D::s_rootDrawn = -100000;
+
+void UIScene3D::SceneRoot(Event *ev)
+{
+    m_root = true;
+}
+
+void UIScene3D::SceneLeave(Event *ev)
+{
+    m_leaving = true;
+}
+
+bool UIScene3D::TryEscape()
+{
+    if (!m_root || uid.time - s_rootDrawn > 400 || Cvar_VariableIntegerValue("ui_atcStop") != 1) {
+        return false;
+    }
+    Cvar_Set("ui_atcStop", "0");
+    m_retSet = false;
+    StartFly(m_home, 0.6f);
+    return true;
+}
+
+// ESC from cl_ui.cpp: true when the root attic scene consumed it (shelf -> home)
+bool UI_SceneEscape(void)
+{
+    return UIScene3D::s_rootScene && UIScene3D::s_rootScene->TryEscape();
+}
+
 void UIScene3D::SceneHot(Event *ev)
 {
     sceneHot_t *h = new sceneHot_t;
@@ -314,14 +374,29 @@ void UIScene3D::Draw(void)
             forcePose = NULL;
         }
     }
+    // a flat menu pushed over the scene stops its Draw (the camera fly may be frozen half way): when the scene is drawn again after a hotspot announced the leave
+    // (sceneleave), finish that fly and fly back at once
+    const bool resumed = m_leaving && m_lastDraw && uid.time - m_lastDraw > 150;
+    if (resumed && m_flying) {
+        m_cur    = m_to;
+        m_flying = false;
+    }
     {
         const cam_t& tgt = m_retSet ? m_ret : m_home;
         // 1500 ms: a covered scene (a flat menu opened over it) is away for seconds; a render hitch (lazy model / shader load, ~800 ms seen) must not fly the camera home
-        if (!(forcePose && forcePose[0]) && m_lastDraw && uid.time - m_lastDraw > 1500 && !m_flying && (VectorCompare(m_cur.org, tgt.org) == 0 || m_cur.fov != tgt.fov)) {
+        if (!(forcePose && forcePose[0]) && m_lastDraw && (resumed || uid.time - m_lastDraw > 1500) && !m_flying && (VectorCompare(m_cur.org, tgt.org) == 0 || m_cur.fov != tgt.fov)) {
             StartFly(tgt, 0.6f);
+            m_leaving = false;
         }
     }
+    if (resumed) {
+        m_leaving = false;
+    }
     m_lastDraw = uid.time;
+    if (m_root) {
+        s_rootScene = this;
+        s_rootDrawn = uid.time;
+    }
 
     if (m_flying) {
         const bool  skipped = UIWidget::s_camSkipMs >= m_flyStart;

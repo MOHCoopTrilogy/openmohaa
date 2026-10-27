@@ -3306,6 +3306,10 @@ void UI_MenuEscape(const char *name)
     }
 
     if (menuManager.CurrentMenu() == mainmenu && clc.state == CA_DISCONNECTED) {
+        // [HZM attic-main] the attic IS this menu: ESC at the radio shelf flies back to the overview
+        if (UI_SceneEscape()) {
+            return;
+        }
         if (developer->integer) {
             if (UI_ConsoleIsVisible()) {
                 UI_CloseConsole();
@@ -3325,6 +3329,11 @@ void UI_MenuEscape(const char *name)
     if (UIWidget::CamMoveActive()) {
         UIWidget::CamMoveSkip();
         uWinMan.RunAfterDue(true);
+        return;
+    }
+
+    // [HZM attic-main] the root attic scene (ui_atticMain): ESC at the radio shelf flies back to the attic overview
+    if (UI_SceneEscape()) {
         return;
     }
 
