@@ -16177,7 +16177,9 @@ int Player::CoopLootKindOf(Entity *pEnt)
         Actor *pBody = static_cast<Actor *>(pEnt);
 
         // enemy bodies only (decision 5), each searched once
-        if (!pBody->IsDead() || pBody->m_iCoopLootState != 0 || pBody->m_Team != TEAM_GERMAN || pBody->hidden()) {
+        // [hotfix 1.10.36.1 bug-4433] never an animal (dogs): Actor_Dog sets m_bIsAnimal (user: dog corpses need no search)
+        if (!pBody->IsDead() || pBody->m_iCoopLootState != 0 || pBody->m_Team != TEAM_GERMAN || pBody->hidden()
+            || pBody->m_bIsAnimal) {
             return HZM_LOOT_NONE;
         }
         if (pBody->m_iCoopLootLock >= 0 && pBody->m_iCoopLootLock != entnum
