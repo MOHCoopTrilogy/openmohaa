@@ -299,9 +299,25 @@ void UIScene3D::Draw(void)
     const float W = (float)uid.vidWidth, H = (float)uid.vidHeight;
 
     // BACK from the opened menu: the widget is shown again away from home -> fly home by itself
+    // [debug] ui_scene_pose "x y z pitch yaw roll fov": hold the camera on that pose (no fly, no auto-return)
+    const char *forcePose = Cvar_VariableString("ui_scene_pose");
+    if (forcePose && forcePose[0]) {
+        float v[7] = {0};
+        if (sscanf(forcePose, "%f %f %f %f %f %f %f", &v[0], &v[1], &v[2], &v[3], &v[4], &v[5], &v[6]) == 7) {
+            for (int i = 0; i < 3; i++) {
+                m_cur.org[i] = v[i];
+                m_cur.ang[i] = v[3 + i];
+            }
+            m_cur.fov = v[6];
+            m_flying  = false;
+        } else {
+            forcePose = NULL;
+        }
+    }
     {
         const cam_t& tgt = m_retSet ? m_ret : m_home;
-        if (m_lastDraw && uid.time - m_lastDraw > 250 && !m_flying && (VectorCompare(m_cur.org, tgt.org) == 0 || m_cur.fov != tgt.fov)) {
+        // 1500 ms: a covered scene (a flat menu opened over it) is away for seconds; a render hitch (lazy model / shader load, ~800 ms seen) must not fly the camera home
+        if (!(forcePose && forcePose[0]) && m_lastDraw && uid.time - m_lastDraw > 1500 && !m_flying && (VectorCompare(m_cur.org, tgt.org) == 0 || m_cur.fov != tgt.fov)) {
             StartFly(tgt, 0.6f);
         }
     }
