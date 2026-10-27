@@ -16228,6 +16228,81 @@ bool Player::CoopLootUseElsewhere()
 // One AreaEntities call, integer and dot-product tests per entity, and at most three traces - and those only
 // when something lootable is actually in the box. A gun wins a near tie with a body, so a gun lying on its
 // owner stays takeable.
+// [user 2026-10-27] A body is ~70 units long and lies in a death pose, but the aim test used its centroid alone with a 30 unit
+// radius: aiming at the head or the feet of a corpse gave no prompt. Test the aim ray against the whole body instead - the head,
+// chest, pelvis and both feet (skeleton tags, which follow the death anim / ragdoll pose) plus the midpoints between them, and
+// answer with the point the player is looking closest to. The centroid stays as a candidate so nothing that worked stops working.
+static bool s_hzmLootBodyAim(Entity *e, const Vector& vEye, const Vector& vFwd, Vector& vBest, float& fRBest)
+{
+    static const char *sTags[] = {"Bip01 Head", "Bip01 Spine1", "Bip01 Pelvis", "Bip01 L Foot", "Bip01 R Foot"};
+    Vector             vP[12];
+    float              fR[12];
+    int                n = 0, i, iBest = -1;
+    float              fBestRatio = 9999.0f;
+    Vector             vTag[5];
+    bool               bTag[5] = {false, false, false, false, false};
+
+    vP[n] = e->centroid;
+    fR[n] = HZM_LOOT_BODY_R;
+    n++;
+    if (e->edict && e->edict->tiki) {
+        for (i = 0; i < 5; i++) {
+            orientation_t o;
+
+            if (e->GetTag(sTags[i], &o)) {
+                vTag[i] = Vector(o.origin);
+                bTag[i] = true;
+                vP[n]   = vTag[i];
+                fR[n]   = 16.0f;
+                n++;
+            }
+        }
+        // head-chest, chest-pelvis, pelvis-foot x2
+        static const int sSeg[4][2] = {{0, 1}, {1, 2}, {2, 3}, {2, 4}};
+        for (i = 0; i < 4; i++) {
+            if (bTag[sSeg[i][0]] && bTag[sSeg[i][1]] && n < 12) {
+                vP[n] = (vTag[sSeg[i][0]] + vTag[sSeg[i][1]]) * 0.5f;
+                fR[n] = 14.0f;
+                n++;
+            }
+        }
+    }
+    for (i = 0; i < n; i++) {
+        Vector vD    = vP[i] - vEye;
+        float  fDist = vD.length();
+        float  fAng  = 0.0f, fAllow, fRatio;
+
+        if (fDist >= 1.0f) {
+            float fDot = (vD * vFwd) / fDist;
+
+            if (fDot > 1.0f) {
+                fDot = 1.0f;
+            } else if (fDot < -1.0f) {
+                fDot = -1.0f;
+            }
+            fAng = RAD2DEG(acos(fDot));
+        }
+        fAllow = (fDist > fR[i]) ? RAD2DEG(atan(fR[i] / fDist)) : 90.0f;
+        if (fAllow < s_lootCone->value) {
+            fAllow = s_lootCone->value;
+        }
+        if (fAng > fAllow) {
+            continue;
+        }
+        fRatio = fAng / fAllow;
+        if (fRatio < fBestRatio) {
+            fBestRatio = fRatio;
+            iBest      = i;
+        }
+    }
+    if (iBest < 0) {
+        return false;
+    }
+    vBest  = vP[iBest];
+    fRBest = fR[iBest];
+    return true;
+}
+
 void Player::CoopLootSelect(float fRange, float fCone, bool bSearchOn)
 {
     int     touch[MAX_GENTITIES];
@@ -16290,6 +16365,9 @@ void Player::CoopLootSelect(float fRange, float fCone, bool bSearchOn)
             vTo   = e->centroid;
             fR    = HZM_LOOT_BODY_R;
             bWeap = false;
+            if (!s_hzmLootBodyAim(e, vEye, vFwd, vTo, fR)) {
+                continue;
+            }
         } else {
             continue;
         }
