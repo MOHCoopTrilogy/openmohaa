@@ -430,7 +430,9 @@ static void CG_HzmScopeFrame(float camFov)
             len = (float)sqrt(tx * tx + ty * ty);
             if (len > lim) { tx *= lim / len; ty *= lim / len; }
         }
-        if (dt > 0.0f) {
+        if (hs.pip && cg.time - hs.ocTime < 200) {   // [scopes1025] glitch fix: the lens circle IS the glass - no spring lag (a rifle jump left a lagged circle: picture only in the overlap, black crescent + dark halo)
+            hs.lcX = tx; hs.lcY = ty; hs.lvX = hs.lvY = 0.0f;
+        } else if (dt > 0.0f) {
             ax = w * w * (tx - hs.lcX) - 2.0f * w * hs.lvX;
             ay = w * w * (ty - hs.lcY) - 2.0f * w * hs.lvY;
             hs.lvX += ax * dt; hs.lvY += ay * dt;

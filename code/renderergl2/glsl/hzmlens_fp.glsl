@@ -75,6 +75,7 @@ void main()
 	// ---- pass 0
 	float lens   = glass ? smoothstep(0.3, 0.7, glassMask()) : (1.0 - smoothstep(0.985, 1.0, r));   // the rifle's real glass surface, else the circle
 	float pr     = length(q - u_Color.zw) / max(u_HzmParams.x, 0.5);
+	if (glass) pr *= 0.62;   // the real glass edge ends the picture: the exit-pupil fade starts well outside the glass (a jumping rifle must never blacken part of the glass)
 	float pupil  = 1.0 - smoothstep(0.86, 1.0, pr);
 
 	vec3  mainC  = texture2D(u_TextureMap, var_TexCoords).rgb;
@@ -103,7 +104,7 @@ void main()
 		inside = mix(inside, inside * 0.25, hl * (1.0 - ra) * 0.5);    // a faint dark halo only (keeps the line readable on bright scenes)
 		inside = mix(inside, vec3(0.0), ra);
 	}
-	float rIn = (glass && !adsMode) ? r * 0.55 : r;   // the glass is seen at an angle at the hip: its real mask ends the picture, the circle's falloff must not darken it
+	float rIn = glass ? r * (adsMode ? 0.8 : 0.55) : r;   // the glass is seen at an angle at the hip: its real mask ends the picture, the circle's falloff must not darken it
 	inside  *= 1.0 - 0.45 * pow(smoothstep(0.62, 1.0, rIn), 1.6);   // soft inner shadow toward the rim (the tube wall)
 	inside  *= 1.0 - 0.85 * smoothstep(0.972, 0.996, rIn);          // the glass edge goes dark into the ring
 
