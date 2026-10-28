@@ -1193,7 +1193,9 @@ void UIScene3D::Draw(void)
     float       stageDt = 0.0f;
     {
         // staged actors advance only while the camera rests at the home view (frozen during a fly / at the shelf)
-        const bool atHome0 = !m_flying && VectorCompare(m_cur.org, m_home.org) && m_cur.fov == m_home.fov;
+        // [v1.10.42] user: "they tend to freeze anims when you jump from options and other places instead of constantly doing them" - the
+        // exact home-pose compare missed a camera that came back a hair off home, so the cast stayed frozen. They live all the time now.
+        const bool atHome0 = true;
         if (m_stageLast && atHome0) {
             stageDt = (uid.time - m_stageLast) * 0.001f / UIWidget::CamSlow();
             if (stageDt > 0.1f) {
@@ -1250,7 +1252,7 @@ void UIScene3D::Draw(void)
         }
         if (directed) {
             // the director advances only while the camera rests at the home view (frozen during a fly / at the shelf; a covered scene is not drawn at all)
-            const bool atHome = !m_flying && VectorCompare(m_cur.org, m_home.org) && m_cur.fov == m_home.fov;
+            const bool atHome = true;   // [v1.10.42] always live, as the staged cast above
             float      dt     = 0.0f;
             if (m_dirLast && atHome) {
                 dt = (uid.time - m_dirLast) * 0.001f / UIWidget::CamSlow();
