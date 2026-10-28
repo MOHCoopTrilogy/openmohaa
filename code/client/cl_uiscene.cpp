@@ -1485,6 +1485,20 @@ void UIScene3D::Draw(void)
                 maxy = sy > maxy ? sy : maxy;
             }
             l->w->setFrame(UIRect2D(ok ? minx - m_screenframe.pos.x : -9999.0f, ok ? miny - m_screenframe.pos.y : -9999.0f, ok ? maxx - minx : 1.0f, ok ? maxy - miny : 1.0f));
+            // [v1.10.43] user: "font sizes need to be correct for each one so they don't run off" - scale the caption so it fills ~88% of the
+            // board's width and ~70% of its height, whichever is tighter, at any resolution and for any caption length.
+            if (ok && l->w->getFont() && l->w->getTitle() && l->w->getTitle()[0]) {
+                const float tw = (float)l->w->getFont()->getWidth(l->w->getTitle(), -1);
+                const float th = (float)l->w->getFont()->getHeight(NULL);
+                if (tw > 0.0f && th > 0.0f) {
+                    float s  = 0.88f * (maxx - minx) / tw;
+                    float s2 = 0.70f * (maxy - miny) / th;
+                    if (s2 < s) {
+                        s = s2;
+                    }
+                    l->w->setTextFitScale(s, s);
+                }
+            }
         }
     }
     m_snap = false;

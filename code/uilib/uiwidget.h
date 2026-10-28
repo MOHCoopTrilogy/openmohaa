@@ -392,6 +392,8 @@ public:
     UIFont       *getFont() const;
     bool          isVirtual() const;
     const vec2_t& getVirtualScale() const;
+    // HZM [v1.10.43] attic chalk captions: the scene sets the text scale so each caption fits its board (Scene3D scenelabel)
+    void          setTextFitScale(float sx, float sy) { m_bVirtual = true; m_vVirtualScale[0] = sx; m_vVirtualScale[1] = sy; }
     const vec2_t& getHighResScale() const;
 };
 
