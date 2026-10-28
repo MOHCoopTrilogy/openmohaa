@@ -914,8 +914,11 @@ CG_Init
 Called after every level change or subsystem restart
 =================
 */
+extern int g_hzmCgInitMs; // cg_consolecmds.c - map-entry guard for the auto team / weapon pickers
+
 void CG_Init(clientGameImport_t *imported, int serverMessageNum, int serverCommandSequence, int clientNum)
 {
+    g_hzmCgInitMs = imported->Milliseconds ? imported->Milliseconds() : 0;
     // HZM coop - ragdoll: renderer table must start clean (plan section-5)
     if (imported->R_ClearAllRagdolls) {
         imported->R_ClearAllRagdolls();

@@ -856,9 +856,39 @@ void CG_Mapinfo_f(void)
     cgi.Printf("---------------------\n");
 }
 
+/*
+HZM [v1.10.41] user: "when you enter a lobby you have to hit esc first because the main menu cursor is always on the screen".
+On spawn the game sends "wait 250;pushmenu_teamselect" (fgame player.cpp); coop joins the player to a team and pops the
+menu with staggered popmenus that all run BEFORE that 250-frame wait ends, so the picker opened last and stayed - hidden by
+coop's UI, leaving only the GUI cursor until ESC. In the first 20 s of a map, a player who is already on a team is not
+sent to a picker. Later (a player opening the team menu on purpose) and spectators are untouched.
+*/
+int g_hzmCgInitMs = 0;
+
+static qboolean CG_HzmSkipAutoPicker(const char *what)
+{
+    int team;
+
+    if (!cg.snap || !cgi.Milliseconds) {
+        return qfalse;
+    }
+    if (cgi.Milliseconds() - g_hzmCgInitMs > 20000) {
+        return qfalse;
+    }
+    team = cg.snap->ps.stats[STAT_TEAM];
+    if (team != TEAM_ALLIES && team != TEAM_AXIS) {
+        return qfalse;
+    }
+    cgi.Printf("^~^~^ UIPICKER skipped the auto %s picker: already on a team at map entry\n", what);
+    return qtrue;
+}
+
 void CG_PushMenuTeamSelect_f(void)
 {
     if (cgs.gametype == GT_SINGLE_PLAYER) {
+        return;
+    }
+    if (CG_HzmSkipAutoPicker("team")) {
         return;
     }
 
