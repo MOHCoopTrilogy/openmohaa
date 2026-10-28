@@ -419,11 +419,10 @@ void R_AddBrushModelSurfaces ( trRefEntity_t *ent ) {
 	for ( i = 0 ; i < bmodel->numSurfaces ; i++ ) {
 		int surf = bmodel->firstSurface + i;
 
-		if (tr.world->surfacesViewCount[surf] != tr.viewCount)
-		{
-			tr.world->surfacesViewCount[surf] = tr.viewCount;
-			R_AddWorldSurface( tr.world->surfaces + surf, tr.currentEntity->needDlights, 0 );
-		}
+		// HZM: no once-per-view dedupe for brush ENTITIES. Several entities may share one inline model (the m2l3 finale cover crates
+		// all use *140); the dedupe drew only the first one in view, so the rest blinked in and out with the camera. gl1 already skips it.
+		tr.world->surfacesViewCount[surf] = tr.viewCount;
+		R_AddWorldSurface( tr.world->surfaces + surf, tr.currentEntity->needDlights, 0 );
 	}
 }
 
