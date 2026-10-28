@@ -96,6 +96,7 @@ static struct {
     qboolean holdHip;   // this frame: keep the hip fov (the zoom fov is still only in the next snapshot)
     qboolean pip;       // [scopes1025] this scope is shown as a picture-in-picture lens (kept through the scope-out ease)
     float    lensFov;   // [scopes1025] square lens-scene fov (degrees) published to the renderer
+    float    pipK;      // [scopes1025] glass -> live picture blend 0..1 (the lens is real glass until the scope reaches the eye)
     float    glassR;    // [scopes1025] the glass surface's projected radius, screen-height units (0 = unknown)
     float    ocX, ocY;  // [scopes1025] the rifle's projected eyepiece centre (CG_HzmScopeSetOcular, last frame's)
     int      ocTime;
@@ -253,6 +254,50 @@ static float CG_HzmAngleDelta(float a, float b)
         d += 360.0f;
     }
     return d;
+}
+
+/*
+CG_HzmScopePublish - the state string for the gl2 pass. Also re-run from CG_HzmScopeSetOcular, so the lens centre / radius / glass the shader uses are THIS frame's rifle transform (the renderer reads the cvar after the whole frame), never last frame's.
+*/
+static void CG_HzmScopePublish(void)
+{
+    hs.lens = hs.pip ? ((hs.glassR > 0.01f && hs.glassR < 0.6f) ? hs.glassR : 0.03f) : (cg_scopeRadius->value * (1.0f + 0.55f * (1.0f - hs.ease)));
+    hs.eye  = 1.18f; // with the pupil's 0.86..1.0 fall-off: a centred eye casts no shadow at all
+    {
+        char buf[128];
+        if (!hs.pip && hs.frac <= 0.0f) {
+            Q_strncpyz(buf, "0", sizeof(buf));
+        } else {
+            Com_sprintf(
+                buf,
+                sizeof(buf),
+                "%.4f %.4f %.4f %.4f %.3f %.3f %.3f %.4f %.4f %d %.3f",
+                hs.ease * hs.lensK,
+                hs.lens,
+                hs.sx,
+                hs.sy,
+                hs.eye,
+                s_hzmOptics[hs.optic >= 0 ? hs.optic : HO_M73B1].warm,
+                hs.lensFov,
+                hs.lcX,
+                hs.lcY,
+                hs.mode,
+                hs.pipK
+            );
+        }
+        {   // the optic's reticle image name for the lens pass (in-lens reticle)
+            static char s_ret[32];
+            const char *rn = (hs.pip && hs.optic >= 0) ? s_hzmOptics[hs.optic].tex : "";
+            if (strcmp(rn, s_ret)) {
+                Q_strncpyz(s_ret, rn, sizeof(s_ret));
+                cgi.Cvar_Set("r_ppScopeRet", rn);
+            }
+        }
+        if (strcmp(buf, hs.pub)) {
+            Q_strncpyz(hs.pub, buf, sizeof(hs.pub));
+            cgi.Cvar_Set("r_ppScopeState", buf);
+        }
+    }
 }
 
 /*
@@ -440,43 +485,12 @@ static void CG_HzmScopeFrame(float camFov)
         }
     }
 
+    // the live picture only exists while the scope is up: it fades in over the last part of the raise (~0.1-0.15 s) and out again on lowering; at the hip / sprint / hip reload the
+    // gl2 pass is skipped entirely and the rifle's own glass shader shows
+    hs.pipK = hs.pip ? CG_HzmSmooth((hs.ease - 0.55f) / 0.35f) : 0.0f;
+
     // ---- publish to the gl2 pass (only on change; "0" once when the scope is down)
-    hs.lens = hs.pip ? ((hs.glassR > 0.01f && hs.glassR < 0.6f) ? hs.glassR : 0.03f) : (cg_scopeRadius->value * (1.0f + 0.55f * (1.0f - hs.ease)));
-    hs.eye  = 1.18f; // with the pupil's 0.86..1.0 fall-off: a centred eye casts no shadow at all
-    {
-        char buf[128];
-        if (!hs.pip && hs.frac <= 0.0f) {
-            Q_strncpyz(buf, "0", sizeof(buf));
-        } else {
-            Com_sprintf(
-                buf,
-                sizeof(buf),
-                "%.4f %.4f %.4f %.4f %.3f %.3f %.3f %.4f %.4f %d",
-                hs.ease * hs.lensK,
-                hs.lens,
-                hs.sx,
-                hs.sy,
-                hs.eye,
-                s_hzmOptics[hs.optic >= 0 ? hs.optic : HO_M73B1].warm,
-                hs.lensFov,
-                hs.lcX,
-                hs.lcY,
-                hs.mode
-            );
-        }
-        {   // the optic's reticle image name for the lens pass (in-lens reticle)
-            static char s_ret[32];
-            const char *rn = (hs.pip && hs.optic >= 0) ? s_hzmOptics[hs.optic].tex : "";
-            if (strcmp(rn, s_ret)) {
-                Q_strncpyz(s_ret, rn, sizeof(s_ret));
-                cgi.Cvar_Set("r_ppScopeRet", rn);
-            }
-        }
-        if (strcmp(buf, hs.pub)) {
-            Q_strncpyz(hs.pub, buf, sizeof(hs.pub));
-            cgi.Cvar_Set("r_ppScopeState", buf);
-        }
-    }
+    CG_HzmScopePublish();
 
     if (cg_scopeDebug->integer && (hs.frac > 0.0f || hs.pip) && (cg_scopeDebug->integer > 1 || cg.time - hs.dbgTime > 1000)) {
         hs.dbgTime = cg.time;
@@ -579,6 +593,14 @@ void CG_HzmScopeSetOcular(float x, float y, float glassR)
     hs.ocY = y;
     hs.glassR = glassR;
     hs.ocTime = cg.time;
+    // [scopes1025] zero lag: the lens circle / reticle centre / radius are THIS frame's rifle transform (we are called from the rig solve, after the viewmodel is placed) and are republished
+    // straight away - the renderer reads r_ppScopeState after the whole frame
+    if (hs.pip) {
+        float len = (float)sqrt(x * x + y * y), tx = x, ty = y;
+        if (len > 0.6f) { tx *= 0.6f / len; ty *= 0.6f / len; }
+        hs.lcX = tx; hs.lcY = ty; hs.lvX = hs.lvY = 0.0f;
+        CG_HzmScopePublish();
+    }
 }
 
 qboolean CG_HzmScopeActive(void)

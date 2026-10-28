@@ -5340,6 +5340,26 @@ static void CreateInternalShaders( void ) {
 	stages[0].stateBits = GLS_DEFAULT;
 	tr.hzmMaskShader = FinishShader();
 
+	// HZM coop [scopes1025] solid BLACK, opaque: every other surface of the view weapon in the coverage pass - the glass mask is depth-tested against the whole rifle and hands, so anything in front
+	// of the glass (bell, receiver, hand) cuts the mask exactly as it cuts the glass
+	InitShader( "<hzmScopeMaskBlack>", LIGHTMAP_NONE );
+	stages[0].bundle[0].image[0] = tr.whiteImage;
+	stages[0].active = qtrue;
+	stages[0].rgbGen = CGEN_CONST;
+	stages[0].constantColor[0] = 0; stages[0].constantColor[1] = 0; stages[0].constantColor[2] = 0; stages[0].constantColor[3] = 255;
+	stages[0].alphaGen = AGEN_IDENTITY;
+	stages[0].stateBits = GLS_DEFAULT;
+	tr.hzmMaskBlackShader = FinishShader();
+
+	InitShader( "<hzmScopeMaskGreen>", LIGHTMAP_NONE );   // QA marker (r_ppScopeCA 50): the glass surface in the weapon pass, pure green
+	stages[0].bundle[0].image[0] = tr.whiteImage;
+	stages[0].active = qtrue;
+	stages[0].rgbGen = CGEN_CONST;
+	stages[0].constantColor[0] = 0; stages[0].constantColor[1] = 255; stages[0].constantColor[2] = 0; stages[0].constantColor[3] = 255;
+	stages[0].alphaGen = AGEN_IDENTITY;
+	stages[0].stateBits = GLS_DEFAULT;
+	tr.hzmMaskGreenShader = FinishShader();
+
 	// shadow shader is just a marker
 	Q_strncpyz( shader.name, "<stencil shadow>", sizeof( shader.name ) );
 	shader.sort = SS_STENCIL_SHADOW;
