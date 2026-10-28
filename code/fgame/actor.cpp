@@ -5664,7 +5664,14 @@ void Actor::HandlePain(Event *ev)
 
     attacker = ev->GetEntity(1);
     if (attacker && attacker->IsSubclassOfSentient() && IsTeamMate(static_cast<Sentient *>(attacker))) {
-        return;
+        // HZM coop (blastreact1025): a blast thrown by a teammate (player grenade on an ally, axis grenade on
+        // axis bystanders) still has to knock the victim about - RadiusDamage stamps coop_blastTier on the
+        // actor just before Damage(). Anything else from a teammate stays ignored, exactly as before.
+        ScriptVariable *pBT = Vars()->GetVariable("coop_blastTier");
+        if (!pBT || (pBT->GetType() != VARIABLE_INTEGER && pBT->GetType() != VARIABLE_FLOAT)
+            || pBT->intValue() <= 0) {
+            return;
+        }
     }
 
     if (!m_bNoLongPain) {
@@ -5775,12 +5782,44 @@ void Actor::HandleKilled(Event *ev, bool bPlayDeathAnim)
             if (fPush > 420.0f) {
                 fPush = 420.0f;
             }
-            fPush *= g_corpseImpulse->value;
+
+            // HZM coop (blastreact1025): when RadiusDamage stamped how close this blast was, scale the throw by
+            // that (point blank = hard and high, edge of the radius = a shove), keep the vector clean of the
+            // un-normalised org-origin dir, and don't ram a body into a wall it is standing against.
+            float           fLift = 0.55f;
+            ScriptVariable *pBF   = Vars()->GetVariable("coop_blastFrac");
+            ScriptVariable *pBD   = Vars()->GetVariable("coop_blastDir");
+            cvar_t         *pBKS  = gi.Cvar_Get("g_blastKillScale", "1", CVAR_ARCHIVE);
+            if (pBF && (pBF->GetType() == VARIABLE_FLOAT || pBF->GetType() == VARIABLE_INTEGER)
+                && pBF->floatValue() > 0.0f) {
+                float fFr = pBF->floatValue();
+                if (fFr > 1.0f) {
+                    fFr = 1.0f;
+                }
+                fPush = 140.0f + 320.0f * fFr;
+                if (fPush > 460.0f) {
+                    fPush = 460.0f;
+                }
+                fLift = 0.55f + 0.35f * fFr;
+                if (pBD && pBD->GetType() == VARIABLE_VECTOR) {
+                    vDir = pBD->vectorValue();
+                }
+            }
+            fPush *= g_corpseImpulse->value * ((pBKS && pBKS->value > 0.0f) ? pBKS->value : 1.0f);
 
             vDir.z = 0;
             vDir.normalize();
+            if (pBF && pBF->GetType() == VARIABLE_FLOAT) {
+                // 56 u of free run along the throw, else most of the horizontal is wasted on the wall
+                trace_t trWall = G_Trace(origin + Vector(0, 0, 24), Vector(-8, -8, 0), Vector(8, 8, 8),
+                                         origin + Vector(0, 0, 24) + vDir * 56.0f, this, MASK_SOLID, false,
+                                         "BlastKillWall");
+                if (trWall.fraction < 1.0f) {
+                    fPush *= 0.35f + 0.65f * trWall.fraction;
+                }
+            }
             velocity += vDir * fPush;
-            velocity.z += fPush * 0.55f;
+            velocity.z += fPush * fLift;
         }
     }
 

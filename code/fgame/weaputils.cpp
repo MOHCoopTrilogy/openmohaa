@@ -3889,7 +3889,66 @@ void RadiusDamage(
             }
 
             if (points > 0) {
+                // HZM coop - BLAST REACTION STAMP (blastreact1025). Only this loop knows how far the blast was
+                // from the victim, so it tells a LIVE actor how hard it was hit BEFORE Damage() sends the
+                // survivor its pain event (the pain scripts start synchronously inside Damage and copy these
+                // script vars into self.fact; coop_mod/blastreact.scr turns them into flinch / stagger /
+                // knockdown). Vars are cleared again right after. Dead bodies are left to the ragdoll path.
+                EntityPtr blastPtr;
+                bool      bBlastStamped = false;
+                if (ent->IsSubclassOfActor() && ent->deadflag == DEAD_NO && ent->health > 0 && radius > 0
+                    && (mod == MOD_EXPLOSION || mod == MOD_EXPLODEWALL || mod == MOD_GRENADE || mod == MOD_ROCKET
+                        || mod == MOD_LANDMINE || mod == MOD_THROWNOBJECT)) {
+                    cvar_t *pBR = gi.Cvar_Get("coop_blastReact", "1", CVAR_ARCHIVE);
+                    if (pBR && pBR->integer) {
+                        float  fBr  = radius;
+                        float  fRd  = fabs(ent->maxs[0] - ent->mins[0]);
+                        Vector vBrd = ent->centroid - origin;
+                        float  fFrac, fKnock, fStag, fMinDmg;
+                        int    iTier;
+
+                        if (fRd < fabs(ent->maxs[1] - ent->mins[1])) {
+                            fRd = fabs(ent->maxs[1] - ent->mins[1]);
+                        }
+                        fFrac = 1.0f - (vBrd.length() - fRd) / fBr;
+                        if (fFrac > 1.0f) {
+                            fFrac = 1.0f;
+                        }
+                        if (fFrac > 0.0f) {
+                            cvar_t *pK = gi.Cvar_Get("coop_blastKnock", "0.45", CVAR_ARCHIVE);
+                            cvar_t *pS = gi.Cvar_Get("coop_blastStagger", "0.22", CVAR_ARCHIVE);
+                            cvar_t *pM = gi.Cvar_Get("coop_blastMinDmg", "60", CVAR_ARCHIVE);
+                            fKnock     = pK ? pK->value : 0.45f;
+                            fStag      = pS ? pS->value : 0.22f;
+                            fMinDmg    = pM ? pM->value : 60.0f;
+
+                            iTier = 1;
+                            if (damage >= fMinDmg) {
+                                if (fFrac >= fKnock || (damage >= 300.0f && fFrac >= fKnock * 0.73f)) {
+                                    iTier = 3;
+                                } else if (fFrac >= fStag) {
+                                    iTier = 2;
+                                }
+                            }
+
+                            vBrd.z = 0;
+                            vBrd.normalize();
+                            blastPtr = ent;
+                            ent->Vars()->SetVariable("coop_blastDir", vBrd);
+                            ent->Vars()->SetVariable("coop_blastFrac", fFrac);
+                            ent->Vars()->SetVariable("coop_blastDmg", damage);
+                            ent->Vars()->SetVariable("coop_blastTier", iTier);
+                            bBlastStamped = true;
+                        }
+                    }
+                }
+
                 ent->Damage(inflictor, attacker, points, org, dir, vec_zero, knockback, DAMAGE_RADIUS, mod);
+
+                if (bBlastStamped && blastPtr) {
+                    blastPtr->Vars()->SetVariable("coop_blastTier", 0);
+                    blastPtr->Vars()->SetVariable("coop_blastFrac", 0.0f);
+                }
 
                 if (g_gametype->integer == GT_SINGLE_PLAYER && weap) {
                     if (ent->IsSubclassOfPlayer() || ent->IsSubclassOfVehicle() || ent->IsSubclassOfVehicleTank()
