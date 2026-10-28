@@ -15,9 +15,11 @@ uniform float   u_Time;
 #endif
 
 uniform mat4    u_ModelViewProjectionMatrix;
+uniform mat4    u_ModelMatrix;
 
 varying vec3    var_Position;
 varying vec2    var_LightTex;
+varying vec2    var_St;          // the RAW texcoord (before any tcMod), for the shoreline alpha ramp
 varying float   var_NormalZ;     // the BSP face's own (wound) normal: a cull-none underside reads < 0
 
 #if defined(USE_DEFORM_VERTEXES)
@@ -84,7 +86,8 @@ void main()
 #endif
 
 	gl_Position  = u_ModelViewProjectionMatrix * vec4(position, 1.0);
-	var_Position = position;
+	var_Position = (u_ModelMatrix * vec4(position, 1.0)).xyz;
 	var_LightTex = attr_TexCoord1.xy;
-	var_NormalZ  = attr_Normal.z;
+	var_St       = attr_TexCoord0.xy;
+	var_NormalZ  = (u_ModelMatrix * vec4(attr_Normal, 0.0)).z;
 }

@@ -878,6 +878,10 @@ void RB_RenderDrawSurfList( drawSurf_t *drawSurfs, int numDrawSurfs ) {
 			if ( shader->hzmSoftEdge > 0.0f && !backEnd.softDepthValid && !backEnd.depthFill ) {
 				RB_HZM_SoftEdgeSnapshotAt( entityNum, bStaticModel );
 			}
+			// HZM water presets: the contact-foam snapshot, hoisted exactly like the soft-edge one above (tess is empty here)
+			if ( shader->hzmWaterPreset && shader->hzmWaterPreset != 2 && !hzmWaterSnapValid && !backEnd.depthFill ) {
+				RB_HZMWaterDepthSnapshot();
+			}
 			RB_BeginSurface( shader, fogNum, cubemapIndex );
 			backEnd.pc.c_surfBatches++;
 			oldShader = shader;
@@ -1622,6 +1626,7 @@ const void	*RB_DrawSurfs( const void *data ) {
 
 	backEnd.refdef = cmd->refdef;
 	backEnd.viewParms = cmd->viewParms;
+	hzmWaterSnapValid = qfalse;     // HZM water presets: this view's scene-depth snapshot is not taken yet
 
 	isShadowView = !!(backEnd.viewParms.flags & VPF_DEPTHSHADOW);
 

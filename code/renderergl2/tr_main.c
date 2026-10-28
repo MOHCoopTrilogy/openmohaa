@@ -22,6 +22,7 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 // tr_main.c -- main control flow for each frame
 
 #include "tr_local.h"
+extern int hzmPlanarNoOblique;     // tr_hzm_water.c (planar debug)
 
 #include <string.h> // memcpy
 
@@ -945,7 +946,7 @@ void R_SetupProjectionZ(viewParms_t *dest)
 	dest->projectionMatrix[10] = -( zFar + zNear ) / depth;
 	dest->projectionMatrix[14] = -2 * zFar * zNear / depth;
 
-	if (dest->isPortal)
+	if (dest->isPortal || ((dest->flags & VPF_HZMPLANAR) && !hzmPlanarNoOblique))
 	{
 		float	plane[4];
 		float	plane2[4];
@@ -1678,6 +1679,11 @@ void R_AddDrawSurf( surfaceType_t *surface, shader_t *shader,
 		if ( ( tr.viewParms.flags & VPF_DEPTHSHADOW ) && R_DepthViewSkipsFrontend( shader ) ) {
 			return;
 		}
+	}
+	// HZM water presets: the planar reflection view never draws the water it reflects (it would cover the whole view
+	// from underneath)
+	if ( ( tr.viewParms.flags & VPF_HZMPLANAR ) && shader->hzmWater ) {
+		return;
 	}
 
 	// instead of checking for overflow, we just mask the index
