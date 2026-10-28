@@ -1188,7 +1188,14 @@ void ClientGameCommandManager::AddTempModels(void)
         newEnt.radius = 4.0;
 
         // Add to the ref
-        if (p->cgd.flags & T_DLIGHT) {
+        if ((p->cgd.flags & T_DLIGHT) && (p->cgd.lightType & HZM_HAZE_BIT)) {
+            // HZM fx_1025: not a light - a localized heat-shimmer spot that eases out over its life
+            float hAge = (p->cgd.life > 0) ? (float)(cg.time - p->cgd.createTime) / (float)p->cgd.life : 0.0f;
+            float hFade = 1.0f - hAge;
+            if (hFade > 0.0f) {
+                CG_HazeSpotAdd(p->cgd.origin, p->cgd.lightIntensity * (1.0f + 0.5f * hAge), p->cgd.color[0] * hFade * hFade);
+            }
+        } else if (p->cgd.flags & T_DLIGHT) {
             // Tempmodel is a Dynamic Light
             cgi.R_AddLightToScene(
                 p->cgd.origin,

@@ -1256,7 +1256,10 @@ void RB_HZMScreenFx(FBO_t *srcFbo, ivec4_t srcBox)
 	{
 		static cvar_t *r_ppHeatHaze = NULL, *r_ppHeat = NULL, *r_ppHeatAmount = NULL;
 		static cvar_t *r_ppMuzzleHeat = NULL, *r_ppMuzzleX = NULL, *r_ppMuzzleY = NULL, *r_ppMuzzleRadius = NULL;
+		static cvar_t *r_ppMuzzleAx = NULL, *r_ppMuzzleAy = NULL, *r_ppMuzzleAs = NULL;   // cgame-owned, NOT archived
+		float muzX, muzY;
 		float heat, muzHeat, muzR;
+		int hzSpots = 0;
 
 		if (!r_ppHeatHaze) {
 			r_ppHeatHaze     = ri.Cvar_Get("r_ppHeatHaze",     "1",    CVAR_ARCHIVE);
@@ -1266,6 +1269,9 @@ void RB_HZMScreenFx(FBO_t *srcFbo, ivec4_t srcBox)
 			r_ppMuzzleX      = ri.Cvar_Get("r_ppMuzzleX",      "0.5",  CVAR_ARCHIVE);
 			r_ppMuzzleY      = ri.Cvar_Get("r_ppMuzzleY",      "0.6",  CVAR_ARCHIVE);
 			r_ppMuzzleRadius = ri.Cvar_Get("r_ppMuzzleRadius", "0.28", CVAR_ARCHIVE);
+			r_ppMuzzleAx     = ri.Cvar_Get("r_ppMuzzleAx",     "0.5",  0);
+			r_ppMuzzleAy     = ri.Cvar_Get("r_ppMuzzleAy",     "0.5",  0);
+			r_ppMuzzleAs     = ri.Cvar_Get("r_ppMuzzleAs",     "0",    0);
 		}
 
 		if (r_ppHeatHaze->integer)
@@ -1280,21 +1286,53 @@ void RB_HZMScreenFx(FBO_t *srcFbo, ivec4_t srcBox)
 
 			muzR = r_ppMuzzleRadius->value;
 			if (muzR < 0.02f) muzR = 0.02f;
+			muzX = r_ppMuzzleX->value;
+			muzY = r_ppMuzzleY->value;
+			if (r_ppMuzzleAs->value > 0.01f) {   // cgame is anchoring the shimmer to the barrel: its point, the user radius scaled
+				muzX = r_ppMuzzleAx->value;
+				muzY = r_ppMuzzleAy->value;
+				muzR *= r_ppMuzzleAs->value;
+			}
 
-			if (heat > 0.001f || muzHeat > 0.001f)
+			// HZM fx_1025: localized fire/blast spots published by cgame (r_ppHz0..7 = "u v r s", r_ppHzCount)
+			{
+				static cvar_t *r_ppHzCount = NULL, *r_ppHzN[8];
+				int k;
+				if (!r_ppHzCount) {
+					r_ppHzCount = ri.Cvar_Get("r_ppHzCount", "0", CVAR_TEMP);
+					for (k = 0; k < 8; k++) {
+						r_ppHzN[k] = ri.Cvar_Get(va("r_ppHz%d", k), "0 0 0 0", CVAR_TEMP);
+					}
+				}
+				hzSpots = r_ppHzCount->integer > 8 ? 8 : r_ppHzCount->integer;
+				for (k = 0; k < 8; k++) {
+					vec4_t sp = {0, 0, 0, 0};
+					if (k < hzSpots) {
+						sscanf(r_ppHzN[k]->string, "%f %f %f %f", &sp[0], &sp[1], &sp[2], &sp[3]);
+						sp[3] *= r_ppHeatAmount->value;
+					}
+					GLSL_SetUniformVec4(&tr.heatHazeShader, UNIFORM_HZMHAZE0 + k, sp);
+				}
+			}
+
+			if (heat > 0.001f || muzHeat > 0.001f || hzSpots > 0)
 			{
 				vec4_t muz;
 
-				VectorSet4(muz, r_ppMuzzleX->value, r_ppMuzzleY->value, 0.0f, 0.0f);
+				FBO_t *hzDst = tr.globalFogFbo ? tr.globalFogFbo : tr.screenScratchFbo;   // colour-only alias: depth is sampled below
+				qboolean hzDepth = (tr.globalFogFbo && tr.renderDepthImage && muzHeat > 0.001f) ? qtrue : qfalse;
+
+				VectorSet4(muz, muzX, muzY, (float)glConfig.vidWidth / (float)(glConfig.vidHeight > 0 ? glConfig.vidHeight : 1), hzDepth ? 1.0f : 0.0f);
 				FBO_SetHzmParams(muz);
+				GL_BindToTMU(hzDepth ? R_MsaaDepthMinMaxOr(tr.renderDepthImage) : tr.whiteImage, TB_LEVELSMAP);
 
 				color[0] = heat;
 				color[1] = backEnd.refdef.floatTime;
 				color[2] = muzHeat;
 				color[3] = muzR;
 
-				FBO_Blit(srcFbo, srcBox, NULL, tr.screenScratchFbo, srcBox, &tr.heatHazeShader, color, 0);
-				FBO_FastBlit(tr.screenScratchFbo, srcBox, srcFbo, srcBox, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+				FBO_Blit(srcFbo, srcBox, NULL, hzDst, srcBox, &tr.heatHazeShader, color, 0);
+				FBO_FastBlit(hzDst, srcBox, srcFbo, srcBox, GL_COLOR_BUFFER_BIT, GL_NEAREST);
 				FBO_SetHzmParams(NULL);
 			}
 		}

@@ -71,6 +71,8 @@ TIKI file, similar to ScriptMaster in the server game dll.
 #define T_COLLISION           (1 << 11)
 #define T_FLICKERALPHA        (1 << 12)
 #define T_DLIGHT              (1 << 13)
+#define HZM_FLICK_BIT         (1 << 29) // HZM fx_1025: emitter dlight flickers (amount in cgd.alpha) and is distance-culled
+#define HZM_HAZE_BIT          (1 << 30) // HZM fx_1025: dlight lightType marker - a heat-shimmer spot, no light is drawn
 #define T_FADEIN              (1 << 14)
 #define T_GLOBALFADEIN        (1 << 15)
 #define T_GLOBALFADEOUT       (1 << 16)
@@ -893,6 +895,9 @@ private:
     void          TagDynamicLight(Event *ev);
     void          OriginDynamicLight(Event *ev);
     void          DynamicLight(Event *ev);
+    void          HazeBurst(Event *ev);   // HZM fx_1025: one-shot localized heat shimmer
+    void          HazeSpot(Event *ev);
+    void          FireLight(Event *ev);   // HZM fx_1025: emitter-form persistent FLICKERING light (distance-culled)    // HZM fx_1025: emitter-form persistent shimmer spot
     void          BlockDynamicLight(Event *ev);
     void          EndBlockDynamicLight();
     void          GetOrientation(int tagnum, spawnthing_t *sp);

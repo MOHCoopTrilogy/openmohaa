@@ -1451,7 +1451,7 @@ void CG_MakeExplosionEffect(const vec3_t vPos, int iType)
         VectorSubtract(vPos, cg.refdef.vieworg, vd);
         d = VectorLength(vd);
         if (d < hr) {
-            CG_AddHeat((1.0f - (d / hr)) * 0.9f);
+            CG_AddHeat((1.0f - (d / hr)) * cgi.Cvar_Get("coop_heatScreen", "0.35", CVAR_ARCHIVE)->value);   // HZM fx_1025: the fullscreen warp is now a small background term; the localized hazeburst spot carries the effect
         }
     }
 
@@ -1531,7 +1531,7 @@ void CG_MakeExplosionEffect(const vec3_t vPos, int iType)
         case SFX_EXP_BAZOOKA_BASE:
             iSurfEffect = SFX_EXP_BAZOOKA_SNOW;
             if (cg_protocol >= protocol_e::PROTOCOL_MOHTA_MIN) {
-                iBaseEffect = -1;
+                /* HZM fx_1025: HD base blast now plays on every surface (retail dropped it on dirt/snow/grass/rock) */
             }
             break;
         case SFX_EXP_HEAVYSHELL_BASE:
@@ -1540,7 +1540,7 @@ void CG_MakeExplosionEffect(const vec3_t vPos, int iType)
         default:
             iSurfEffect = SFX_EXP_GREN_SNOW;
             if (cg_protocol >= protocol_e::PROTOCOL_MOHTA_MIN) {
-                iBaseEffect = -1;
+                /* HZM fx_1025: HD base blast now plays on every surface (retail dropped it on dirt/snow/grass/rock) */
             }
             break;
         }
@@ -1576,7 +1576,7 @@ void CG_MakeExplosionEffect(const vec3_t vPos, int iType)
         case SFX_EXP_BAZOOKA_BASE:
             iSurfEffect = SFX_EXP_BAZOOKA_DIRT;
             if (cg_protocol >= protocol_e::PROTOCOL_MOHTA_MIN) {
-                iBaseEffect = -1;
+                /* HZM fx_1025: HD base blast now plays on every surface (retail dropped it on dirt/snow/grass/rock) */
             }
             break;
         case SFX_EXP_HEAVYSHELL_BASE:
@@ -1585,7 +1585,7 @@ void CG_MakeExplosionEffect(const vec3_t vPos, int iType)
         default:
             iSurfEffect = SFX_EXP_GREN_DIRT;
             if (cg_protocol >= protocol_e::PROTOCOL_MOHTA_MIN) {
-                iBaseEffect = -1;
+                /* HZM fx_1025: HD base blast now plays on every surface (retail dropped it on dirt/snow/grass/rock) */
             }
             break;
         }
@@ -1609,7 +1609,7 @@ void CG_MakeExplosionEffect(const vec3_t vPos, int iType)
         default:
             iSurfEffect = SFX_EXP_GREN_GRASS;
             if (cg_protocol >= protocol_e::PROTOCOL_MOHTA_MIN) {
-                iBaseEffect = -1;
+                /* HZM fx_1025: HD base blast now plays on every surface (retail dropped it on dirt/snow/grass/rock) */
             }
             break;
         }
@@ -1623,7 +1623,7 @@ void CG_MakeExplosionEffect(const vec3_t vPos, int iType)
         case SFX_EXP_BAZOOKA_BASE:
             iSurfEffect = SFX_EXP_BAZOOKA_STONE;
             if (cg_protocol >= protocol_e::PROTOCOL_MOHTA_MIN) {
-                iBaseEffect = -1;
+                /* HZM fx_1025: HD base blast now plays on every surface (retail dropped it on dirt/snow/grass/rock) */
             }
             break;
         case SFX_EXP_HEAVYSHELL_BASE:
@@ -1632,7 +1632,7 @@ void CG_MakeExplosionEffect(const vec3_t vPos, int iType)
         default:
             iSurfEffect = SFX_EXP_GREN_STONE;
             if (cg_protocol >= protocol_e::PROTOCOL_MOHTA_MIN) {
-                iBaseEffect = -1;
+                /* HZM fx_1025: HD base blast now plays on every surface (retail dropped it on dirt/snow/grass/rock) */
             }
             break;
         }

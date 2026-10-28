@@ -2893,6 +2893,99 @@ static qboolean CoopFpBodyBuild(centity_t *cent, const refEntity_t *pModel, refE
 float CG_HZM_AircraftPitch(const centity_t *cent, float fPitch);
 void  CG_HZM_AircraftView(const centity_t *cent, refEntity_t *model);
 
+/*
+ * HZM coop [haze-muzzle 2026-10-25] WHERE THE GUN FIRE SHIMMER SITS. The localized gunfire heat haze (r_ppMuzzleHeat) used
+ * to be drawn around a FIXED screen point, so it hung over the iron sights in ADS. This projects the RENDERED view-weapon's
+ * barrel tag (tag_barrel; the gun's forward extent when a model has none) to normalized screen UV each frame, with the
+ * same projection the gun itself is drawn with (r_weaponfovx when the renderer swaps it in for the depth-hack layer), and
+ * cg_view.c publishes the result as r_ppMuzzleX/Y/Radius. Read back through CG_CoopMuzzleHazePoint.
+ */
+static float s_fMzU, s_fMzV, s_fMzR;
+static int   s_iMzTime = -100000;
+
+qboolean CG_CoopMuzzleHazePoint(float *u, float *v, float *r)
+{
+    if (cg.time - s_iMzTime > 120 || cg.time < s_iMzTime) {
+        return qfalse;
+    }
+    *u = s_fMzU;
+    *v = s_fMzV;
+    *r = s_fMzR;
+    return qtrue;
+}
+
+static void CG_CoopMuzzleHazeProbe(const refEntity_t *model)
+{
+    static cvar_t *pWFov = NULL, *pDbg = NULL;
+    static void   *s_pTiki = NULL;
+    static int     s_iTag  = -1;
+    refEntity_t   *pm = (refEntity_t *)model;
+    vec3_t         vP, vD, vTagWorld;
+    float          fwd, lft, up, fFovX, fFovY, tx, ty, sx, sy, R, depthScale;
+    int            j;
+
+    if (!pWFov) {
+        pWFov = cgi.Cvar_Get("r_weaponfovx", "0", 0);
+        pDbg  = cgi.Cvar_Get("coop_muzzleHazeDbg", "0", 0);
+    }
+    if (cg.renderingThirdPerson || cg.snap->ps.stats[STAT_INZOOM] || CG_HzmScopeActive() || cg.refdef.width <= 0) {
+        return;
+    }
+    if (model->tiki != s_pTiki) {
+        s_pTiki = model->tiki;
+        s_iTag  = cgi.Tag_NumForName(model->tiki, "tag_barrel");
+    }
+    if (s_iTag >= 0) {
+        orientation_t o = cgi.TIKI_Orientation(pm, s_iTag);
+        VectorCopy(model->origin, vTagWorld);
+        for (j = 0; j < 3; j++) {
+            VectorMA(vTagWorld, o.origin[j], model->axis[j], vTagWorld);
+        }
+    } else {
+        return; // not a gun (arms, mags, gear): no barrel tag
+    }
+
+    VectorSubtract(vTagWorld, cg.refdef.vieworg, vD);
+    fwd = DotProduct(vD, cg.refdef.viewaxis[0]);
+    lft = DotProduct(vD, cg.refdef.viewaxis[1]);
+    up  = DotProduct(vD, cg.refdef.viewaxis[2]);
+    if (fwd < 2.0f) {
+        return; // behind / inside the camera
+    }
+    fFovX = cg.refdef.fov_x;
+    fFovY = cg.refdef.fov_y;
+    if (pWFov->value > 1.0f && fabs(pWFov->value - fFovX) > 0.05f) {
+        float tw = (float)tan(DEG2RAD(fFovX * 0.5f)), th = (float)tan(DEG2RAD(fFovY * 0.5f));
+        tx = (float)tan(DEG2RAD(pWFov->value * 0.5f));
+        ty = (tw != 0.0f) ? tx * (th / tw) : th; // renderer keeps the world aspect for the weapon projection
+    } else {
+        tx = (float)tan(DEG2RAD(fFovX * 0.5f));
+        ty = (float)tan(DEG2RAD(fFovY * 0.5f));
+    }
+    if (tx < 0.05f || ty < 0.05f) {
+        return;
+    }
+    sx = -lft / (fwd * tx);
+    sy = up / (fwd * ty);
+    if (sx < -0.97f || sx > 0.97f || sy < -0.97f || sy > 0.97f) {
+        return; // off-screen: no shimmer at the edge
+    }
+    depthScale = 40.0f / fwd;
+    if (depthScale < 0.6f) { depthScale = 0.6f; } else if (depthScale > 2.0f) { depthScale = 2.0f; }
+    R = depthScale * (0.84f / tx); // a SCALE on the user's r_ppMuzzleRadius (the menu slider), not a radius
+    s_fMzU    = 0.5f + 0.5f * sx;
+    s_fMzV    = 0.5f + 0.5f * sy + 0.015f * R; // origin a hair above the muzzle; the shader only rises UP from here
+    s_fMzR    = R;
+    s_iMzTime = cg.time;
+    if (pDbg->integer) {
+        static int s_iNext = 0;
+        if (cg.time >= s_iNext) {
+            s_iNext = cg.time + 400;
+            cgi.Printf("^~^~^ MUZZLEHAZE uv=(%.3f %.3f) r=%.3f fwd=%.1f fov=%.1f\n", s_fMzU, s_fMzV, R, fwd, tx);
+        }
+    }
+}
+
 void CG_ModelAnim(centity_t *cent, qboolean bDoShaderTime)
 {
     entityState_t *s1;
@@ -4880,6 +4973,9 @@ coopOthersDone:;
             }
         }
         CG_HZM_AircraftView(cent, &model); // HZM coop [aircraft 2026-10-05] fog see-through, debug log
+        if (cg.snap && s1->parent == cg.snap->ps.clientNum && (model.renderfx & RF_FIRST_PERSON) && model.tiki) {
+            CG_CoopMuzzleHazeProbe(&model); // HZM coop [haze-muzzle 2026-10-25] where the barrel is on screen
+        }
         cgi.R_AddRefEntityToScene(&model, s1->parent);
 
         // HZM coop [bug-2569] THE BODY COPIES GO IN AFTER THE RIG, AND ONLY WITH IT. RE_GetRenderEntity returns the FIRST

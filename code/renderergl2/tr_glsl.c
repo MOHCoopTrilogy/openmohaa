@@ -179,6 +179,14 @@ static uniformInfo_t uniformsInfo[] =
 
 	{ "u_InvTexRes",           GLSL_VEC2 },
 	{ "u_HzmParams",           GLSL_VEC4 },   // HZM gl2 post-FX spare (bug-1151)
+	{ "u_HzHaze0", GLSL_VEC4 },
+	{ "u_HzHaze1", GLSL_VEC4 },
+	{ "u_HzHaze2", GLSL_VEC4 },
+	{ "u_HzHaze3", GLSL_VEC4 },
+	{ "u_HzHaze4", GLSL_VEC4 },
+	{ "u_HzHaze5", GLSL_VEC4 },
+	{ "u_HzHaze6", GLSL_VEC4 },
+	{ "u_HzHaze7", GLSL_VEC4 },
 	{ "u_AutoExposureMinMax",  GLSL_VEC2 },
 	{ "u_ToneMinAvgMaxLinear", GLSL_VEC3 },
 
@@ -1963,6 +1971,7 @@ void GLSL_InitGPUShaders(void)
 
 	GLSL_InitUniforms(&tr.heatHazeShader);
 	GLSL_SetUniformInt(&tr.heatHazeShader, UNIFORM_TEXTUREMAP, TB_COLORMAP);
+	GLSL_SetUniformInt(&tr.heatHazeShader, UNIFORM_LEVELSMAP,  TB_LEVELSMAP);   // view-weapon depth mask (muzzle shimmer)
 	GLSL_FinishGPUShader(&tr.heatHazeShader);
 
 	numEtcShaders++;
