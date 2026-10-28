@@ -1245,6 +1245,8 @@ static void CL_PadBinds_f(void)
     {   // the picture follows the connected pad: ps / xbox / generic (Auto mode publishes in_padType when a pad opens)
         const char *t = Cvar_VariableString("in_padType");
         Cvar_Set("ui_padPic", (!Q_stricmp(t, "ps")) ? "ps" : (!Q_stricmp(t, "xbox") ? "xbox" : "generic"));
+        // menu enabledcvar gates compare NUMBERS only (uiwidget.cpp: atoi), so the page reads this one: 0 xbox, 1 ps, 2 generic
+        Cvar_Set("ui_padPicN", (!Q_stricmp(t, "ps")) ? "1" : (!Q_stricmp(t, "xbox") ? "0" : "2"));
     }
 }
 
