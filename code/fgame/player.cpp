@@ -19070,6 +19070,12 @@ void Player::TickCoopBreath(void)
     // HZM MP - Aim Down Sights OFF: RMB does not steady the aim (breath hold) when ADS is disabled (MP
     // only, 0 in coop). Scoped weapons steady through their own zoom path, not this button.
     bAds      = ((last_ucmd.buttons & BUTTON_COOPADS) && !CoopMpRealismOff(MPREALISM_NOADS)) ? qtrue : qfalse;
+    // [v1.10.45] user: "you can infinitely hold your breath when you ADS - it is meant to take away your stamina like sprinting does".
+    // The client steadies a SCOPED zoom too (cg_view.c: BUTTON_COOPADS || bScoped), but this only counted the ADS button, so through
+    // a scope the picture held steady forever and the pool never drained. A scope zoom is aiming here as well.
+    if (!bAds && IsZoomed()) {
+        bAds = qtrue;
+    }
     bWalkHeld = (last_ucmd.buttons & BUTTON_RUN) ? qfalse : qtrue;
     m_bCoopBreathSteady = qfalse;
 
