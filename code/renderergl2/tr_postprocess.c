@@ -1750,6 +1750,9 @@ immediately before RB_HZMBloom.
 */
 void RB_HZMDof(FBO_t *srcFbo, ivec4_t srcBox)
 {
+	if (tr.hzmLensPostSkip) {
+		return;   // HZM coop [scopes1025] the scope picture-in-picture composited this frame (the view is already out-of-focus by design)
+	}
 	static cvar_t *r_ppDoFFocus = NULL, *r_ppDoFRange = NULL, *r_ppDoFIntensity = NULL;
 	ivec4_t quarterBox;
 	vec4_t  srcTexCoords;

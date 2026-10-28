@@ -26,6 +26,13 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 #include "tr_hzm_framegen.h" // HZM frame generation (r_hzmFrameGen)
 #include "../renderercommon/hzm_storm.h" // HZM coop [2026-09-28] storm darkness
 
+// HZM coop [scopes1025] the scope picture-in-picture's two auxiliary colour views (the magnified lens scene, the rifle layer) render into their own
+// targets: they skip the scene-depth copies, the sun-ray mask and the flare tests that belong to the main view
+static qboolean RB_IsScopeAuxView(void)
+{
+	return (backEnd.viewParms.targetFbo != NULL && backEnd.viewParms.targetFbo == tr.hzmLensFbo) ? qtrue : qfalse;
+}
+
 backEndData_t	*backEndData;
 backEndState_t	backEnd;
 
@@ -441,6 +448,34 @@ void RB_BeginDrawingView (void) {
 		clearBits |= GL_COLOR_BUFFER_BIT;
 	}
 
+	// HZM coop [scopes1025] the lens FBO is a colour view: never leave last frame's picture where nothing draws (the fog / fastsky clear above
+	// already set a colour clear for those cases; this only adds the black one)
+	if ( tr.hzmLensFbo && backEnd.viewParms.targetFbo == tr.hzmLensFbo && !( clearBits & GL_COLOR_BUFFER_BIT ) )
+	{
+		clearBits |= GL_COLOR_BUFFER_BIT;
+		qglClearColor( 0.0f, 0.0f, 0.0f, 1.0f );
+	}
+	if ( tr.hzmLensFbo && backEnd.viewParms.targetFbo == tr.hzmLensFbo && ri.Cvar_Get("r_ppScopeClearDbg", "0", 0)->integer )
+	{
+		clearBits |= GL_COLOR_BUFFER_BIT;   // debug: a magenta lens clear shows which pixels the lens view never drew
+		qglClearColor( 1.0f, 0.0f, 1.0f, 1.0f );
+	}
+	if ( backEnd.viewParms.flags & VPF_ONLYVIEWMODEL )
+	{
+		clearBits &= ~GL_COLOR_BUFFER_BIT;   // the late view weapon draws onto the composited scene
+		if ( !( tr.hzmMaskFbo && backEnd.viewParms.targetFbo == tr.hzmMaskFbo ) )
+		{
+			// depth is NOT cleared: the depth the post chain reads (global fog, DoF) is then world + weapon (the weapon's depth hack keeps it in front), so the rifle is not fogged / blurred
+			// by what is behind it (a fence pattern showed through the rifle)
+			clearBits &= ~GL_DEPTH_BUFFER_BIT;
+		}
+		if ( tr.hzmMaskFbo && backEnd.viewParms.targetFbo == tr.hzmMaskFbo )
+		{
+			clearBits |= GL_COLOR_BUFFER_BIT;   // the coverage target starts black
+			qglClearColor( 0.0f, 0.0f, 0.0f, 0.0f );
+		}
+	}
+
 	qglClear( clearBits );
 
 	if ( ( backEnd.refdef.rdflags & RDF_HYPERSPACE ) )
@@ -748,6 +783,8 @@ RB_RenderDrawSurfList
 ==================
 */
 void RB_RenderDrawSurfList( drawSurf_t *drawSurfs, int numDrawSurfs ) {
+	qboolean skipScopeGlass = qfalse;   // [scopes1025]
+	const qboolean glassOnly = (tr.hzmMaskFbo && backEnd.viewParms.targetFbo == tr.hzmMaskFbo) ? qtrue : qfalse;
 	shader_t		*shader = NULL, *oldShader;
 	int				fogNum, oldFogNum;
 	int				entityNum, oldEntityNum;
@@ -829,6 +866,9 @@ void RB_RenderDrawSurfList( drawSurf_t *drawSurfs, int numDrawSurfs ) {
 
 	for (i = 0, drawSurf = drawSurfs ; i < numDrawSurfs ; i++, drawSurf++) {
 		if ( drawSurf->sort == oldSort && drawSurf->cubemapIndex == oldCubemapIndex) {
+			if (skipScopeGlass) {
+				continue;   // [scopes1025] the rifle layer leaves the ocular glass out
+			}
 			// see RB_DepthFillSkip: bug-gl2-foliage-white + bug-gl2-invisible-live-char-depthprepass
 			// stay in force for the MAIN-view prepass; a VPF_DEPTHSHADOW cascade lets casters through.
 			if (backEnd.depthFill && RB_DepthFillSkip(shader, entityNum, allowChars, allowCutout)) {
@@ -859,6 +899,25 @@ void RB_RenderDrawSurfList( drawSurf_t *drawSurfs, int numDrawSurfs ) {
 			bStaticModel = qfalse;
         }
         //=========================
+		// HZM coop [scopes1025] the rifle layer (the scope's real body around the lens) never draws the ocular GLASS surface: it is a translucent sheen
+		// that showed as grey haze over the world, and the lens picture replaces it anyway
+		if ((backEnd.viewParms.flags & VPF_ONLYVIEWMODEL) && shader && ri.Cvar_Get("r_ppScopeCrash", "0", 0)->integer > 1) {
+			ri.Printf(PRINT_ALL, "^~^~^ GUNSHADER %s\n", shader->name);
+		}
+		{
+			qboolean isGlass = ((backEnd.viewParms.flags & VPF_ONLYVIEWMODEL) && shader && (strstr(shader->name, "lens") || strstr(shader->name, "Lens") || strstr(shader->name, "glass"))) ? qtrue : qfalse;
+			if (glassOnly) {
+				// coverage pass: only the glass, as solid white
+				skipScopeGlass = !isGlass;
+				if (isGlass) { shader = tr.hzmMaskShader; tr.hzmGlassDrawn++; }
+			} else {
+				skipScopeGlass = isGlass;   // the weapon pass never draws the glass
+				if ((backEnd.viewParms.flags & VPF_ONLYVIEWMODEL) && !skipScopeGlass && ri.Cvar_Get("r_ppScopeDbg", "0", 0)->integer & 8) { shader = tr.hzmMaskShader; }
+			}
+			if (skipScopeGlass) {
+				continue;
+			}
+		}
 		cubemapIndex = drawSurf->cubemapIndex;
 
 		//
@@ -1608,6 +1667,26 @@ RB_DrawSurfs
 
 =============
 */
+// HZM coop [scopes1025] the scope picture-in-picture's view weapon, drawn LAST into the composited scene (dst): its own view setup (BeginDrawingView clears
+// only depth, binds dst, sets the viewport and the weapon projection), then the same surface list the game draws weapons with - the usual depth hack, the real rifle.
+void RB_HzmLensDrawGun(const drawSurfsCommand_t *cmd, FBO_t *dst)
+{
+	viewParms_t svP = backEnd.viewParms;
+	trRefdef_t  svR = backEnd.refdef;
+
+	if (tess.numIndexes) {
+		RB_EndSurface();
+	}
+	backEnd.refdef    = cmd->refdef;
+	backEnd.viewParms = cmd->viewParms;
+	backEnd.viewParms.targetFbo = dst;
+	backEnd.depthFill = qfalse;
+	RB_BeginDrawingView();
+	RB_RenderDrawSurfList(cmd->drawSurfs, cmd->numDrawSurfs);
+	backEnd.viewParms = svP;
+	backEnd.refdef    = svR;
+}
+
 const void	*RB_DrawSurfs( const void *data ) {
 	const drawSurfsCommand_t	*cmd;
 	qboolean isShadowView;
@@ -1627,6 +1706,12 @@ const void	*RB_DrawSurfs( const void *data ) {
 	backEnd.refdef = cmd->refdef;
 	backEnd.viewParms = cmd->viewParms;
 	hzmWaterSnapValid = qfalse;     // HZM water presets: this view's scene-depth snapshot is not taken yet
+
+	// HZM coop [scopes1025] the scope picture-in-picture's view weapon: not drawn here, kept and drawn last on top of the composited scene (tr_hzm_lens.c)
+	if ( backEnd.viewParms.flags & VPF_ONLYVIEWMODEL ) {
+		RB_HzmLensStoreGun( cmd );
+		return (const void *)(cmd + 1);
+	}
 
 	isShadowView = !!(backEnd.viewParms.flags & VPF_DEPTHSHADOW);
 
@@ -1686,7 +1771,9 @@ const void	*RB_DrawSurfs( const void *data ) {
 		qglColorMask(!backEnd.colorMask[0], !backEnd.colorMask[1], !backEnd.colorMask[2], !backEnd.colorMask[3]);
 		backEnd.depthFill = qfalse;
 
-		if (!isShadowView)
+		// HZM coop [scopes1025] the PiP lens view needs none of the scene-depth copies / shadow mask below (no sun shadow receive, no soft
+		// edges); skipping them keeps the main scene's depth snapshot untouched and saves two full-scene copies
+		if (!isShadowView && !RB_IsScopeAuxView())
 		{
 			if (R_MsaaResolvesActive() && backEnd.viewParms.targetFbo == NULL)
 			{
@@ -1891,7 +1978,8 @@ const void	*RB_DrawSurfs( const void *data ) {
 			SetViewportAndScissor();
 		}
 
-		if (glRefConfig.framebufferObject && r_drawSunRays->integer)
+		if (glRefConfig.framebufferObject && r_drawSunRays->integer
+		    && !RB_IsScopeAuxView()) // [scopes1025] the lens view leaves the sun-ray mask / flare queries to the main view
 		{
 			FBO_t *oldFbo = glState.currentFBO;
 			FBO_Bind(tr.sunRaysFbo);
@@ -1919,7 +2007,9 @@ const void	*RB_DrawSurfs( const void *data ) {
 		RB_ShadowFinish();		
 
 		// add light flares on lights that aren't obscured
-		RB_RenderFlares();
+		if (!RB_IsScopeAuxView()) { // [scopes1025] flares test main-view depth: not in the lens
+			RB_RenderFlares();
+		}
 	}
 
 	if (glRefConfig.framebufferObject && tr.renderCubeFbo && backEnd.viewParms.targetFbo == tr.renderCubeFbo)
@@ -2416,6 +2506,10 @@ const void *RB_PostProcess(const void *data)
 	srcBox[1] = backEnd.viewParms.viewportY;
 	srcBox[2] = backEnd.viewParms.viewportWidth;
 	srcBox[3] = backEnd.viewParms.viewportHeight;
+
+	// HZM coop [scopes1025] picture-in-picture scope: lens picture inside the circle, the blurred wide world around it - on the
+	// HDR scene, BEFORE fog / bloom / tone map, so one exposure and one grade treat both (tr_hzm_lens.c)
+	RB_HZMLensComposite(srcFbo, srcBox);
 
 	// HZM gl2 fog parity (2026-07-28, workflow wf_053a935d-2dd): the fog must be applied
 	// BEFORE the tone stage, because gl1 is NOT untonemapped as the old comment here

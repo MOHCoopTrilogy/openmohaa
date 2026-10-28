@@ -1850,6 +1850,10 @@ static void R_AddEntitySurface (int entityNum)
 	if ( (ent->e.renderfx & RF_FIRST_PERSON) && (tr.viewParms.flags & VPF_NOVIEWMODEL)) {
 		return;
 	}
+	// HZM coop [scopes1025] the rifle layer: nothing but the first-person (view weapon / arms) entities
+	if ( (tr.viewParms.flags & VPF_ONLYVIEWMODEL) && !(ent->e.renderfx & RF_FIRST_PERSON)) {
+		return;
+	}
 
 	// HZM foliage shadows: a scripted (build-mode) foliage script_model whose shadow maps/<map>.hzmlm baked into the
 	// lightmap (matched by its spawn origin) stays out of the per-frame shadow maps, like the baked static models.
@@ -2038,9 +2042,13 @@ R_GenerateDrawSurfs
 ====================
 */
 void R_GenerateDrawSurfs( void ) {
+	const qboolean onlyVm = (tr.viewParms.flags & VPF_ONLYVIEWMODEL) ? qtrue : qfalse;   // HZM coop [scopes1025]
+
+	if (!onlyVm) {
 	R_AddWorldSurfaces ();
 
 	R_AddPolygonSurfaces();
+	}
 
 	// set the projection matrix with the minimum zfar
 	// now that we have the world bounded
@@ -2049,7 +2057,11 @@ void R_GenerateDrawSurfs( void ) {
 	// matrix for lod calculation
 
 	// dynamically compute far clip plane distance
-	if (!(tr.viewParms.flags & VPF_SHADOWMAP))
+	if (onlyVm)
+	{
+		tr.viewParms.zFar = 1024.0f;   // [scopes1025] no world to bound: the rifle layer only needs the arm's length
+	}
+	else if (!(tr.viewParms.flags & VPF_SHADOWMAP))
 	{
 		R_SetFarClip();
 	}
@@ -2068,7 +2080,7 @@ void R_GenerateDrawSurfs( void ) {
 	tr.viewParms.weaponFovActive = qfalse;
 	if ( tr.viewParms.stereoFrame == STEREO_CENTER
 		&& r_weaponfovx && r_weaponfovx->value > 1.0f
-		&& fabs( r_weaponfovx->value - tr.viewParms.fovX ) > 0.05f )
+		&& ( fabs( r_weaponfovx->value - tr.viewParms.fovX ) > 0.05f || onlyVm ) )   // [scopes1025] the rifle layer always gets the weapon near plane
 	{
 		float wxmax, wymax, xmax, ymax;
 		float zFar  = tr.viewParms.zFar;
@@ -2105,7 +2117,9 @@ void R_GenerateDrawSurfs( void ) {
 	//
 	// OPENMOHAA-specific stuff
     //=========================
+    if (!onlyVm) {
     R_AddSpriteSurfaces();
+    }
 	//=========================
 }
 

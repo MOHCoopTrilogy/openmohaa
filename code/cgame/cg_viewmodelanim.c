@@ -549,6 +549,7 @@ qboolean        CG_CoopReloadFromEmpty(void)
 static qboolean s_coopAdsClip = qfalse; // HZM coop [adsanim] the clip being started is a <gun>_<anim>_ads variant
 static qboolean s_coopAdsBolt = qfalse; // HZM coop [adsreload] ...and it is a bolt (rechamber) clip
 static int      s_coopAdsSlot = -1;     // HZM coop [adsbolt] slot playing an _ads clip (-1 = none)
+static qboolean s_coopAdsScopedReload = qfalse; // [scopes1025] the _ads clip is a SCOPED per-weapon reload row (coopr_<key>_reload*_ads): a hold class for the rig
 static int      s_coopSwapSlot = -1;    // HZM coop [adsbolt] slot of the hip clip swapped in on ADS release
 static char     s_szCoopHipAnim[MAX_QPATH]; // HZM coop [adsbolt] the hip clip the _ads clip stands in for
 int             g_iCoopVmTagSnap = -100000; // HZM coop [adsbolt] cg.time of an ADS-release swap (no tag fade)
@@ -579,6 +580,20 @@ static qboolean CoopAdsClipFitsHeldGun(const char *prefix)
 
     if (!cg.snap || cg.snap->ps.activeItems[1] < 0) {
         return qfalse;
+    }
+    {   // [scopes1025] a SCOPED rifle held up to the eye may play a prefix `_ads` row only on the prefixes whose rows were baked for the scoped guns; every other scoped gun on a shared
+        // prefix (Arisaka / silenced Kar98 / Mosin ... ) plays its own per-weapon row (`coopr_<weapon key>_rechamber_ads`, picked in CG_ViewModelAnimation) or the hip clip - never
+        // a clip authored for another mesh. Unscoped guns fall through to the iron-sight guard below (the old kScoped short-circuit wrongly refused them: unscoped Springfield /
+        // Mosin / Enfield lost their authored aimed bolt).
+        static const char *kScoped[] = {"kar98sniper", "springfield"};
+        int                j;
+        if (CG_HzmScopeRaiseOwns() && cgi.Cvar_Get("coop_scopeBoltAds", "1", CVAR_ARCHIVE)->integer) {
+            for (j = 0; j < 2; j++) {
+                if (!Q_stricmp(prefix, kScoped[j])) {
+                    return qtrue;
+                }
+            }
+        }
     }
     for (i = 0; i < (int)(sizeof(kAuthored) / sizeof(kAuthored[0])); i++) {
         if (!Q_stricmp(prefix, kAuthored[i][0])) {
@@ -635,6 +650,12 @@ qboolean CG_VMAdsTagRight(void)
 qboolean CG_VMAdsBoltClip(void)
 {
     return (cgi.anim && s_coopAdsSlot >= 0 && s_coopAdsSlot == cgi.anim->g_iCurrentVMAnimSlot && s_coopAdsBolt) ? qtrue : qfalse;
+}
+
+// [scopes1025] the newest view clip is a scoped per-weapon reload _ads row: cg_view.c holds the aim correction at full weight while it plays
+qboolean CG_VMScopedReloadAdsClip(void)
+{
+    return (cgi.anim && s_coopAdsSlot >= 0 && s_coopAdsSlot == cgi.anim->g_iCurrentVMAnimSlot && s_coopAdsScopedReload) ? qtrue : qfalse;
 }
 
 // HZM coop [ads rifles 2026-10-12] an aimed bolt clip is the only clip on screen: both weapon tags hold the gun
@@ -1219,6 +1240,7 @@ void CG_ViewModelAnimation(refEntity_t *pModel)
         // ADS framing never fades out to the hip and back. No row = today's hip clip, silently. Client-only; same
         // frame count and frame time as the hip clip, so the server's timing is unchanged.
         s_coopAdsClip = qfalse;
+        s_coopAdsScopedReload = qfalse;
         {
             static cvar_t *pAdsAnims = NULL;
             int            a         = cgi.anim->g_iLastVMAnim;
@@ -1228,8 +1250,28 @@ void CG_ViewModelAnimation(refEntity_t *pModel)
             if (pAdsAnims->integer && !bWeaponChanged && CG_AimingDownSights()
                 && (a == VM_ANIM_RELOAD || a == VM_ANIM_RELOAD_SINGLE || a == VM_ANIM_RELOAD_END
                     || a == VM_ANIM_RECHAMBER || a == COOP_VM_ANIM_CYCLE)) {
-                char szAds[MAX_QPATH];
+                char     szAds[MAX_QPATH];
+                qboolean bPerWpnScoped = qfalse;
                 Com_sprintf(szAds, sizeof(szAds), "%s_ads", szAnimName);
+                // [scopes1025] a scoped bolt: the gun's OWN row `coopr_<weapon key>_rechamber_ads` (exists = a clip was baked for exactly this gun; no row = the hip bolt, silently)
+                // The same for the scoped RELOAD: `coopr_<key>_reload_ads` / `_reload_single_ads` / `_reload_end_ads` - exists = played, and the rig treats it as a hold class (below); none = today's reload
+                {
+                    const char *pszSfx = (a == VM_ANIM_RECHAMBER)      ? "rechamber"
+                                         : (a == VM_ANIM_RELOAD)        ? "reload"
+                                         : (a == VM_ANIM_RELOAD_SINGLE) ? "reload_single"
+                                         : (a == VM_ANIM_RELOAD_END)    ? "reload_end"
+                                                                        : NULL;
+                    if (pszSfx && cg.snap && cg.snap->ps.activeItems[1] >= 0 && CG_HzmScopeRaiseOwns()
+                        && cgi.Cvar_Get("coop_scopeBoltAds", "1", CVAR_ARCHIVE)->integer) {
+                        char szKey[MAX_QPATH], szPer[MAX_QPATH];
+                        CoopWeaponKey(CG_ConfigString(CS_WEAPONS + cg.snap->ps.activeItems[1]), szKey, sizeof(szKey));
+                        Com_sprintf(szPer, sizeof(szPer), "coopr_%s_%s_ads", szKey, pszSfx);
+                        if (cgi.Anim_NumForName(pTiki, szPer) != -1) {
+                            Q_strncpyz(szAds, szPer, sizeof(szAds));
+                            bPerWpnScoped = qtrue;
+                        }
+                    }
+                }
                 if (CG_CoopBrace() > 0.5f) { // HZM coop [adsbrace] braced: the brace carries the weight
                     char szAdsB[MAX_QPATH];
                     Com_sprintf(szAdsB, sizeof(szAdsB), "%s_adsb", szAnimName);
@@ -1238,12 +1280,35 @@ void CG_ViewModelAnimation(refEntity_t *pModel)
                     }
                 }
                 if (cgi.Anim_NumForName(pTiki, szAds) != -1
-                    && CoopAdsClipFitsHeldGun(AnimPrefixList[iAnimPrefixIndex])) {
+                    && (bPerWpnScoped || CoopAdsClipFitsHeldGun(AnimPrefixList[iAnimPrefixIndex]))) {
                     Q_strncpyz(s_szCoopHipAnim, szAnimName, sizeof(s_szCoopHipAnim));
                     Q_strncpyz(szAnimName, szAds, sizeof(szAnimName));
                     s_coopAdsClip = qtrue;
                     s_coopAdsBolt = (a == VM_ANIM_RECHAMBER) ? qtrue : qfalse;
+                    s_coopAdsScopedReload = (bPerWpnScoped && a != VM_ANIM_RECHAMBER && !Q_stricmpn(szAds, "coopr_", 6)) ? qtrue : qfalse;
                 }
+            }
+        }
+        // [scopes1025] A SCOPED rifle fired in ADS: the vanilla `fire` row (a hip pose) used to play for ~0.25 s, the aim slot lost its weight, the view snapped to the hip pose (scope off the eye,
+        // surround un-blurred) until the bolt row brought it back. Now the shot stays in the ADS hold class: the gun's own `coopr_<key>_fire_ads` row when the hands tiki has it, otherwise the aim
+        // pose (`charge`) is simply held - bit-identical, so the sight stays solved at full weight, the lens stays live, and the feel layer's recoil kick plays on top.
+        // coop_scopeFireHold 0 = the old fire row.
+        if ((cgi.anim->g_iLastVMAnim == VM_ANIM_FIRE || cgi.anim->g_iLastVMAnim == VM_ANIM_FIRE_SECONDARY) && !bWeaponChanged && !s_coopAdsClip
+            && cg.snap && cg.snap->ps.activeItems[1] >= 0 && CG_HzmScopeRaiseOwns() && CG_AimingDownSights()
+            && cgi.Cvar_Get("coop_scopeFireHold", "1", CVAR_ARCHIVE)->integer) {
+            char szKey[MAX_QPATH], szTry[MAX_QPATH];
+            CoopWeaponKey(CG_ConfigString(CS_WEAPONS + cg.snap->ps.activeItems[1]), szKey, sizeof(szKey));
+            Com_sprintf(szTry, sizeof(szTry), "coopr_%s_fire_ads", szKey);
+            if (cgi.Anim_NumForName(pTiki, szTry) == -1) {
+                // the scoped ADS pose is the server's IDLE clip + the rig correction (not `charge`, which is a different pose: the lens jumped 0.15 of the screen the first frame)
+                Com_sprintf(szTry, sizeof(szTry), "%s_idle", AnimPrefixList[iAnimPrefixIndex]);
+                CoopPerWeaponReloadAnim(pTiki, "idle", szTry, sizeof(szTry));
+            }
+            if (cgi.Anim_NumForName(pTiki, szTry) != -1) {
+                Q_strncpyz(s_szCoopHipAnim, szAnimName, sizeof(s_szCoopHipAnim));
+                Q_strncpyz(szAnimName, szTry, sizeof(szAnimName));
+                s_coopAdsClip = qtrue;
+                s_coopAdsBolt = qfalse;
             }
         }
         {   // HZM coop [heavy lane 2026-10-13] harness trace of the row that starts now (apply_vmtrace.py)

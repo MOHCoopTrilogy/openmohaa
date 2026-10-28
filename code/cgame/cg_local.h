@@ -706,6 +706,7 @@ const adsGunTune_t *CG_FindAdsTune(const char *wpn);
     float    CG_VMCurWeight(void); // HZM coop [weaponview 2026-10-04] displayed weight of the newest view clip
     qboolean CG_VMAdsTagRight(void); // HZM coop [adsbolt] an _ads clip leads: keep the view weapon on tag_weapon_right
     qboolean CG_VMAdsBoltSolo(void); // HZM coop [ads rifles] an aimed bolt clip alone on screen: both tags hold the gun
+    qboolean CG_VMScopedReloadAdsClip(void); // [scopes1025] a scoped per-weapon reload _ads row is the newest view clip
     qboolean CG_VMAdsBoltClip(void); // HZM coop [ads rifles] the view model's newest clip is an aimed bolt clip
     qboolean CG_VMAmmoPropEarly(dtiki_t *tiki); // HZM coop [adsprop] ammo prop attached before the reload clip leads
     extern int g_iCoopVmTagSnap;     // HZM coop [adsbolt] cg.time of an ADS-release swap to the hip clip
@@ -782,6 +783,13 @@ const adsGunTune_t *CG_FindAdsTune(const char *wpn);
     int      CG_HzmScopeWeaponOptic(const char *wpn);
     qboolean CG_HzmScopeWorldFov(float camFov, float *outFov);
     qboolean CG_HzmScopeActive(void);
+    qboolean CG_HzmScopeHeld(void);
+    void     CG_HzmScopeDrawReticle(void);   // [scopes1025]       // [scopes1025] live lens: scoped rifle held (hip included)
+    qboolean CG_HzmScopePipActive(void);  // [scopes1025] scope shown as a picture-in-picture lens
+    qboolean CG_HzmScopeRaiseOwns(void);  // [scopes1025] rifle stays drawn and is raised to the eye (ADS pose)
+    float    CG_HzmScopeSensScale(void);  // [scopes1025] lens / wide mouse sensitivity ratio (1 outside PiP)
+    float    CG_HzmScopeScale(void);      // [scopes1025] coop_scopeScale, clamped
+    void     CG_HzmScopeSetOcular(float x, float y, float glassR);  // [scopes1025] projected eyepiece centre, screen-height units from the centre, +y down
     qboolean CG_HzmScopeOwnsAds(void);
     float    CG_HzmScopeHipFov(void);
     qboolean CG_HzmScopeDraw2D(void);

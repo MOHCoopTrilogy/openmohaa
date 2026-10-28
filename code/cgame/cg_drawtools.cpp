@@ -1863,6 +1863,11 @@ void CG_DrawCrosshair()
         return;
     }
 
+    // [scopes1025] a scoped rifle in the hands (hip or ADS): only the reticle INSIDE the lens exists, never the HUD crosshair
+    if (CG_HzmScopeHeld()) {
+        return;
+    }
+
     // HZM coop [user 2026-10-05] "when gun is mounted crosshair needs to be turned off". Once the
     // brace has engaged (envelope past half - the same point the gun visibly settles into the rest)
     // the crosshair goes; the brace pip stays as the "you are braced" indicator.
@@ -4251,6 +4256,7 @@ void CG_Draw2D(void)
     CG_UpdateHudFade();
     CG_UpdateCountdown();
     CG_DrawGl2PostFxFallback(); // HZM gl2 re-port: under the HUD, over the scene (gl2 only)
+    CG_HzmScopeDrawReticle(); // [scopes1025] the live in-lens reticle, hip included
     CG_DrawZoomOverlay();
     CG_DrawAdsVignette();
     CG_DrawLagometer();

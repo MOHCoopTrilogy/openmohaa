@@ -2016,6 +2016,7 @@ CG_OffsetFirstPersonView
 ===============
 */
 #include "cg_adssights.h"
+#include "cg_adssights_scope.h" // [scopes1025] scoped rifles (F = objective, R = ocular)
 
 /*
 =================================================================================================
@@ -2086,12 +2087,26 @@ static const adsSight_t *CG_FindAdsSightByName(const char *wpn)
     if (!wpn || !*wpn) {
         return NULL;
     }
+    // [scopes1025] a scoped rifle whose name ALSO has an iron-sight row (SVT 40, Silenced M1 Garand) must use the SCOPE row: the iron row aligns a sight that is not
+    // the one in use (the eye ended up far from the ocular: tiny dark glass, rifle held out)
+    if (CG_HzmScopeWeaponOptic(wpn) >= 0) {
+        for (i = 0; i < (int)(sizeof(s_adsSightsScope) / sizeof(s_adsSightsScope[0])); i++) {
+            if (s_adsSightsScope[i].name && !Q_stricmp(wpn, s_adsSightsScope[i].name)) {
+                return &s_adsSightsScope[i];
+            }
+        }
+    }
     // EXACT name only. Every skin TIKI that shares a solved mesh has its own generated row, and a variant
     // with a DIFFERENT mesh ("BAR (Pacific)") never falls back to the base gun's geometry by stripping its
     // suffix - that fallback is exactly how CG_FindAdsTune hands those variants the wrong sight picture.
     for (i = 0; i < (int)(sizeof(s_adsSights) / sizeof(s_adsSights[0])); i++) {
         if (s_adsSights[i].name && !Q_stricmp(wpn, s_adsSights[i].name)) {
             return CoopAdsSightTweak(&s_adsSights[i]);
+        }
+    }
+    for (i = 0; i < (int)(sizeof(s_adsSightsScope) / sizeof(s_adsSightsScope[0])); i++) { // [scopes1025]
+        if (s_adsSightsScope[i].name && !Q_stricmp(wpn, s_adsSightsScope[i].name)) {
+            return &s_adsSightsScope[i];
         }
     }
     return NULL;
@@ -2128,6 +2143,8 @@ qboolean CG_AdsRigSolveOwns(void)
 }
 
 // ---------------------------------------------------------------------------------------- smoothing state
+static float CG_ScopeReloadFloor(float g);
+static float s_rigGateRaw = 1.0f;   // [scopes1025] the gate before the scoped-reload floor (the lens fades with THIS one)
 static float s_rigGate = 1.0f, s_rigGateV = 0.0f;   // animation gate follower (1 = aim pose, 0 = reload etc.)
 static float s_rigBlend = 0.0f, s_rigBlendV = 0.0f; // ADS blend follower of smoothstep(pose factor)
 static float s_rigW = 0.0f;                         // applied weight = gate * blend
@@ -2156,6 +2173,9 @@ static int CG_AdsAnimClass(void)
     // HZM coop [aimed per-shot cycle 2026-10-12] the server still says `charge` while the hands play the client-only
     // cycle clip: hold the aligned pose and let the clip's own gun motion play, as for fire / rechamber
     if (CG_VMAimedCycleActive()) {
+        return 1;
+    }
+    if (CG_VMScopedReloadAdsClip()) {   // [scopes1025] an authored scoped reload clip: hold the solved aim, the clip's own gun motion plays on top
         return 1;
     }
     a = cg.snap->ps.iViewModelAnim;
@@ -2209,6 +2229,8 @@ void CG_AdsRigAdvance(void)
         // HZM coop [weaponview 2026-10-04] F3: the gate IS the aim pose's share of what is on screen (set again, fresh,
         // in CG_AdsRigSolve once this frame's crossblend is known). No follower, so it can neither lead nor lag the clip.
         s_rigGate  = CG_VMAimWeight();
+        s_rigGateRaw = s_rigGate;
+        s_rigGate  = CG_ScopeReloadFloor(s_rigGate);
         s_rigGateV = 0.0f;
     } else {
         AdsCritFollow(&s_rigGate, &s_rigGateV, cls == 2 ? 0.0f : 1.0f, pWg->value, dt);
@@ -2221,8 +2243,51 @@ void CG_AdsRigAdvance(void)
     s_rigW = s_rigGate * s_rigBlend;
 }
 
-float CG_AdsAnimGate(void) { return s_rigGate; }
+// [scopes1025] a scoped rifle keeps this share of the aim correction while the reload / bolt clip plays (coop_scopeReloadKeep, default 0.6): the rifle comes off the eye
+// only partway and stays angled at the target instead of dropping to the hip; the lens still fades with the RAW gate
+static float CG_ScopeReloadFloor(float g)
+{
+    static cvar_t *pK = NULL;
+    float          k;
+
+    if (!pK) {
+        pK = cgi.Cvar_Get("coop_scopeReloadKeep", "0.0", CVAR_ARCHIVE);
+    }
+    k = pK->value;
+    return (CG_HzmScopeRaiseOwns() && k > g) ? k : g;
+}
+
+float CG_AdsAnimGate(void) { return s_rigGateRaw; }
 float CG_AdsRigWeight(void) { return s_rigW; }
+
+// [scopes1025] where the scope's ocular (the sight row's R point) is on screen, and the glass radius: the lens circle / reticle / picture follow it (hip included)
+static void CG_ScopeOcular(refEntity_t *pREnt, const adsSight_t *s, vec3_t cam[3], const vec3_t E, int iTag)
+{
+    orientation_t or2;
+    vec3_t        G2, R2w, A2[3], d2;
+    float         dep, tanY;
+    int           q;
+
+    if (!CG_HzmScopeHeld() || !(s >= s_adsSightsScope && s < s_adsSightsScope + sizeof(s_adsSightsScope) / sizeof(s_adsSightsScope[0]))) {
+        return;
+    }
+    or2 = cgi.TIKI_Orientation(pREnt, iTag);
+    VectorCopy(pREnt->origin, G2);
+    for (q = 0; q < 3; q++) {
+        VectorMA(G2, or2.origin[q], pREnt->axis[q], G2);
+    }
+    MatrixMultiply(or2.axis, pREnt->axis, A2);
+    VectorCopy(G2, R2w);
+    for (q = 0; q < 3; q++) {
+        VectorMA(R2w, s->R[q], A2[q], R2w);
+    }
+    VectorSubtract(R2w, E, d2);
+    dep = DotProduct(d2, cam[0]);
+    if (dep > 0.3f && cg_fAdsWeaponFov > 1.0f && cg.refdef.width > 0) {
+        tanY = (float)tan(DEG2RAD(cg_fAdsWeaponFov * 0.5f)) * (float)cg.refdef.height / (float)cg.refdef.width;
+        CG_HzmScopeSetOcular(-DotProduct(d2, cam[1]) / dep / (2.0f * tanY), -DotProduct(d2, cam[2]) / dep / (2.0f * tanY), (s->relief / 2.38f) / 1.5f / dep / (2.0f * tanY));
+    }
+}
 
 static void CG_AdsRigSolve(refEntity_t *pREnt)
 {
@@ -2272,6 +2337,8 @@ static void CG_AdsRigSolve(refEntity_t *pREnt)
     s_rigLastRun = cg.time;
     if (CG_VmHandFix() > 0.5f) {
         s_rigGate = CG_VMAimWeight(); // this frame's crossblend (CG_ViewModelAnimation ran before us)
+        s_rigGateRaw = s_rigGate;
+        s_rigGate = CG_ScopeReloadFloor(s_rigGate);
         s_rigW    = s_rigGate * s_rigBlend;
     }
     wpn = CG_ConfigString(CS_WEAPONS + wpnIdx);
@@ -2290,9 +2357,12 @@ static void CG_AdsRigSolve(refEntity_t *pREnt)
     }
 
     // ---- target: only from an AIM pose, and not while a fire/reload crossblend is still settling
+    // [scopes1025] coop_scopeReloadLive: a scoped reload keeps solving the target every frame (the gun tracks the clip's pose), applied at the partial
+    // weight coop_scopeReloadKeep - the scope stays part-way at the eye and the lens live while the clip's own dip / roll / hands play on top
     if ((!s_rigTgtOk && !(s_rigFreshGun && CG_VMAimWeight() < 0.999f))
         || ((CG_VmHandFix() > 0.5f) ? (CG_VMAimWeight() > 0.999f && s_rigAnimCls == 0)
-                                    : (s_rigAnimCls == 0 && cg.time >= s_rigHoldUntil))) {
+                                    : (s_rigAnimCls == 0 && cg.time >= s_rigHoldUntil))
+        || (s_rigAnimCls == 2 && s_rigTgtOk && CG_HzmScopeRaiseOwns() && cgi.Cvar_Get("coop_scopeReloadLive", "0", CVAR_ARCHIVE)->integer)) {
         or = cgi.TIKI_Orientation(pREnt, s_iTag);
         VectorCopy(pREnt->origin, G);
         for (i = 0; i < 3; i++) {
@@ -2358,7 +2428,10 @@ static void CG_AdsRigSolve(refEntity_t *pREnt)
                 // HZM coop [ironsights close-out 2026-10-04] clamp 0.50 rad (28.6 deg): the bipod guns (BAR x3, Breda, MG42,
                 // DP-28) need ~21.6 deg in lean RIGHT (camera roll ~13.5 + their own pose roll); the old 0.35 rad (20.05)
                 // clamp left them 1.55-1.62 deg canted (sweepB/B2)
-                if (s_rigTgt[6] > 0.50f) { s_rigTgt[6] = 0.50f; } else if (s_rigTgt[6] < -0.50f) { s_rigTgt[6] = -0.50f; }
+                {   // [scopes1025] a side-mounted scope (Garand M1C: the scope sits ~50 deg off the bore's up) needs the rifle rolled so the receiver sits UNDER the lens: wider clamp for scope rows
+                    const float cl = (s >= s_adsSightsScope && s < s_adsSightsScope + sizeof(s_adsSightsScope) / sizeof(s_adsSightsScope[0]) && strstr(s->tiki, "garand")) ? 0.50f : 0.50f;
+                    if (s_rigTgt[6] > cl) { s_rigTgt[6] = cl; } else if (s_rigTgt[6] < -cl) { s_rigTgt[6] = -cl; }
+                }
             }
             // EYE RELIEF [user 2026-09-28: "a clear sight thru the ironsights"]: optional per-gun distance from the
             // eye to the rear sight along the view (cg_adssights.h relief; 0 = the animation's own cheek weld).
@@ -2375,12 +2448,17 @@ static void CG_AdsRigSolve(refEntity_t *pREnt)
                 }
                 VectorAdd(R2, Tw, R2);
                 rR2         = DotProduct(R2, cam[0]);
-                s_rigTgt[7] = s->relief - rR2;
+                s_rigTgt[7] = ((s >= s_adsSightsScope && s < s_adsSightsScope + sizeof(s_adsSightsScope) / sizeof(s_adsSightsScope[0])) ? s->relief / CG_HzmScopeScale() : s->relief) - rR2;
             }
             // cg_adsRigReliefBias: a live offset on top (units, + = eye further back from the rear sight) - used by the
             // harness to measure the sight-window clutter at several eye reliefs in-engine, hands included
             s_rigTgt[7] += cgi.Cvar_Get("cg_adsRigReliefBias", "0", 0)->value;
-            if (s_rigTgt[7] > 4.0f) { s_rigTgt[7] = 4.0f; } else if (s_rigTgt[7] < -4.0f) { s_rigTgt[7] = -4.0f; }
+            {
+                // [scopes1025] a scoped rifle's ocular has to come right up to the eye (tens of units back along the view), far past the +-4 u an
+                // iron sight needs; the near plane is the weapon one (r_weaponznear)
+                const float lim = (s >= s_adsSightsScope && s < s_adsSightsScope + sizeof(s_adsSightsScope) / sizeof(s_adsSightsScope[0])) ? 40.0f : 4.0f;
+                if (s_rigTgt[7] > lim) { s_rigTgt[7] = lim; } else if (s_rigTgt[7] < -lim) { s_rigTgt[7] = -lim; }
+            }
             if (!s_rigTgtOk && s_rigFreshGun && s_rigW >= 0.001f) {
                 // [quick-draw motion] the new gun's first aim pose: nothing applied yet, so ease in from zero
                 for (k = 0; k < 8; k++) {
@@ -2476,6 +2554,7 @@ static void CG_AdsRigSolve(refEntity_t *pREnt)
     }
     s_rigTgtLive = updated;
     if (!s_rigTgtOk) {
+        CG_ScopeOcular(pREnt, s, cam, E, s_iTag);   // [scopes1025] hip: no aim target yet, the lens still follows the rifle
         return;
     }
     // v5 (2026-09-29), OPTIONAL - cg_adsRigSmooth 1: a one-euro filter on the TARGET with ONE cutoff for all 8
@@ -2538,6 +2617,7 @@ static void CG_AdsRigSolve(refEntity_t *pREnt)
     // ---- apply the followed correction, weighted
     w = s_rigW;
     if (w <= 0.0005f) {
+        CG_ScopeOcular(pREnt, s, cam, E, s_iTag);   // [scopes1025] the hip lens still follows the rifle
         return;
     }
     for (k = 0; k < 3; k++) {
@@ -2570,6 +2650,14 @@ static void CG_AdsRigSolve(refEntity_t *pREnt)
         }
     }
     VectorMA(pREnt->origin, s_rigCur[7] * w, cam[0], pREnt->origin); // eye relief
+    if (CG_HzmScopeRaiseOwns() && s_rigGateRaw < 0.999f) {
+        // [scopes1025] reload / bolt while scoped: the rig keeps the clip aimed at the target (floor above) and the rifle sinks only partway - coop_scopeReloadLower units (~15-25 percent of the screen) x the share the clip owns
+        static cvar_t *pLow = NULL;
+        if (!pLow) { pLow = cgi.Cvar_Get("coop_scopeReloadLower", "0", CVAR_ARCHIVE); }
+        VectorMA(pREnt->origin, -pLow->value * (1.0f - s_rigGateRaw), cam[2], pREnt->origin);
+    }
+
+    CG_ScopeOcular(pREnt, s, cam, E, s_iTag);
 
     if (pDbg->integer && (pDbg->integer >= 2 || cg.time - s_iLast >= 200)) {
         s_iLast = cg.time;
@@ -3387,8 +3475,10 @@ void CG_OffsetFirstPersonView(refEntity_t *pREnt, qboolean bUseWorldPosition)
                 {
                     static cvar_t *pFP = NULL;
                     if (!pFP) { pFP = cgi.Cvar_Get("coop_fovPunch", "1.0", CVAR_ARCHIVE); }
-                    s_fovPunch += 0.55f * fClassKick * pFP->value * (float)(s_lastClip - iClip);
-                    if (s_fovPunch > 2.2f) { s_fovPunch = 2.2f; }
+                    if (!(bAds && CG_HzmScopeRaiseOwns())) {   // [scopes1025] no world-fov pop under a scope
+                        s_fovPunch += 0.55f * fClassKick * pFP->value * (float)(s_lastClip - iClip);
+                        if (s_fovPunch > 2.2f) { s_fovPunch = 2.2f; }
+                    }
                 }
                 CG_NoteLocalFire(); // timestamp OUR shot. Flesh impacts are broadcast for EVERY
                                     // shooter, so without this a teammate killing someone next to
@@ -3528,9 +3618,17 @@ void CG_OffsetFirstPersonView(refEntity_t *pREnt, qboolean bUseWorldPosition)
                 // gun kicks UP (muzzle climb) and BACK toward the camera, then recovers. The
                 // backward term saturates INDEPENDENTLY of the cap above: muzzle climb may grow
                 // freely without ever intersecting the view, travel toward the eye may not.
+                // [scopes1025] SCOPED ADS: the eye sits ~2-3 u behind the ocular, so the shoulder shove (~1 u straight at the eye) swelled the bell by ~40 percent and the lift moved the lens a
+                // quarter of the screen. A scoped shot is a small, mostly-PITCH kick: back <= 0.1 u (bell < ~5 percent), lift <= 0.06 u, climb capped at 0.7 deg (the lens leaves centre by
+                // well under 5 percent of the screen height), recovered in ~0.15 s (below). Iron sights / hip: unchanged.
+                const qboolean bScopedKick = (bAds && CG_HzmScopeRaiseOwns()) ? qtrue : qfalse;
                 float fBack = s_recoil * 0.5f;
                 if (fBack > RECOIL_MAX_BACK) {
                     fBack = RECOIL_MAX_BACK;
+                }
+                if (bScopedKick) {
+                    fBack = s_recoil * 0.05f;
+                    if (fBack > 0.06f) { fBack = 0.06f; }
                 }
                 // [user 2026-09-09, bug-2562] "when I fire some of these guns it seems to lift the entire gun
                 // with recoil (IE the handgun) instead of the barrel." It did: this used to be the two
@@ -3566,13 +3664,21 @@ void CG_OffsetFirstPersonView(refEntity_t *pREnt, qboolean bUseWorldPosition)
                     else if (iClass & WEAPON_CLASS_HEAVY)  { fClassRot = 0.5f; }
 
                     fUpMix = (fRecRot != 0.0f) ? 0.3f : 1.0f; // cg_recoilRot 0 = the old pure translation, exactly
-                    VectorMA(pREnt->origin,  s_recoil * 0.8f * fUpMix, mat[2], pREnt->origin); // up
+                    {
+                        float fLift = s_recoil * 0.8f * fUpMix;
+                        if (bScopedKick) {
+                            fLift *= 0.15f;
+                            if (fLift > 0.03f) { fLift = 0.03f; }
+                        }
+                        VectorMA(pREnt->origin, fLift, mat[2], pREnt->origin); // up
+                    }
                     VectorMA(pREnt->origin, -fBack,                    mat[0], pREnt->origin); // back toward camera
 
                     // ADS keeps 35% of the climb: a gun that does not move when fired on the sights reads as
                     // broken, but the hand-dialled per-gun alignments in s_adsGunTune must not be fought hard
                     fDeg = s_recoil * fRecRot * fClassRot * (1.0f - 0.65f * CG_AdsPoseFactor());
                     if (fDeg > fRecMax) { fDeg = fRecMax; } else if (fDeg < -fRecMax) { fDeg = -fRecMax; }
+                    if (bScopedKick && fDeg > 0.4f) { fDeg = 0.4f; }
 
                     if ((fDeg > 0.01f || fDeg < -0.01f) && pREnt->tiki) {
                         static int    s_iRecTag  = -2;
@@ -3620,6 +3726,7 @@ void CG_OffsetFirstPersonView(refEntity_t *pREnt, qboolean bUseWorldPosition)
                     // the SAME point of aim. Keeping the kick and tripling the return rate is what
                     // reads as braced; deleting the kick would just read as a broken gun.
                     fRec *= 1.0f + fBrace * 2.2f;
+                    if (bScopedKick) { fRec = 18.0f; }   // [scopes1025] recovered (to ~7 percent) within ~0.15 s
                     s_recoil -= s_recoil * (cg.frametime / 1000.0f) * fRec;
                     if (s_recoil < 0.002f) {
                         s_recoil = 0.0f;
@@ -6042,6 +6149,10 @@ qboolean CG_AimingDownSights(void)
         return qfalse;
     }
     if (cg.snap->ps.stats[STAT_INZOOM]) {
+        // [scopes1025] a picture-in-picture scope raises the rifle to the eye through the ADS pose (pose, sway, breath hold, aim gates)
+        if (CG_HzmScopeRaiseOwns() && !(cg.snap->ps.pm_flags & PMF_CAMERA_VIEW)) {
+            return qtrue;
+        }
         return qfalse;
     }
     if (cg.snap->ps.pm_flags & PMF_CAMERA_VIEW) {
@@ -8371,7 +8482,7 @@ static int CG_CalcFov(void)
     cg.fRefFovXSin     = sin(fov_x / 114.0f);
     cg.fRefFovYCos     = cos(fov_y / 114.0f);
     cg.fRefFovYSin     = sin(fov_y / 114.0f);
-    cg.zoomSensitivity = cg.refdef.fov_y / 75.0;
+    cg.zoomSensitivity = cg.refdef.fov_y / 75.0 * CG_HzmScopeSensScale(); // [scopes1025] the wide main view of a PiP scope must not speed the aim up
     return inwater;
 }
 

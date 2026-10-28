@@ -1386,7 +1386,8 @@ typedef enum {
 	VPF_SUNSTABLE       = 0x400,    // a per-frame radial entity-only cascade
 	// HZM water presets (tr_hzm_water.c): the planar reflection view of the cold harbour water. Mirrored camera, oblique
 	// clip at the waterline (portalPlane), the water-pass shaders themselves are not drawn in it.
-	VPF_HZMPLANAR       = 0x800
+	VPF_HZMPLANAR       = 0x800,
+	VPF_ONLYVIEWMODEL   = 0x1000    // HZM coop [scopes1025] the scope PiP's rifle layer: only RF_FIRST_PERSON entities, no world, no sprites (was 0x800; bit moved because VPF_HZMPLANAR owns it)
 } viewParmFlags_t;
 
 typedef struct {
@@ -1435,6 +1436,7 @@ typedef struct {
     qboolean	farplane_cull;
     qboolean	renderTerrain; // added in 2.0
 } viewParms_t;
+void R_HzmLensRenderView(viewParms_t *mainParms);      // HZM coop [scopes1025] the picture-in-picture lens scene (tr_hzm_lens.c)
 
 
 /*
@@ -2689,6 +2691,7 @@ typedef struct {
 	FBO_t                   *renderCubeFbo;
 
 	shader_t				*defaultShader;
+	shader_t				*hzmMaskShader;      // HZM coop [scopes1025]
 	shader_t				*shadowShader;
 	shader_t				*projectionShadowShader;
 
@@ -2739,6 +2742,24 @@ typedef struct {
 	shaderProgram_t suppressionShader;  // HZM gl1-parity suppression tunnel-vignette
 	shaderProgram_t hitBloodShader;     // HZM coop [user 08-02] on-hit blood splatter
 	shaderProgram_t hzmScopeShader;     // HZM coop [bug-3462] modern scope optics (TRY-built: 0 = pass off)
+	shaderProgram_t hzmLensShader;      // HZM coop [scopes1025] picture-in-picture lens composite (TRY-built: 0 = PiP off)
+	FBO_t          *hzmLensFbo;         // lens scene target (N x N, HDR), lazily created
+	image_t        *hzmLensColor;
+	image_t        *hzmLensDepth;
+	FBO_t          *hzmLensScratchFbo;  // scene-sized HDR scratch the composite writes (screenScratch is RGBA8)
+	int             hzmLensSize;
+	int             hzmLensW, hzmLensH;   // the WIDE view's target size (scene size x r_ppScopeWide)
+	int             hzmLensScratchW, hzmLensScratchH;
+	FBO_t          *hzmLensScratch2Fbo;   // HZM coop [scopes1025] second scratch: the rim pass reads the first (the finished picture) and writes this
+	image_t        *hzmLensScratchImg;
+	qboolean        hzmLensValid;       // the lens view was queued this frame: the composite may run
+	FBO_t          *hzmLensHalfFbo, *hzmLensQuartFbo;   // HZM coop [scopes1025] the wide view's 1/2 and 1/4 box-downsampled copies (the blur reads the 1/4)
+	image_t        *hzmLensHalfImg, *hzmLensQuartImg;
+	FBO_t          *hzmMaskFbo;           // HZM coop [scopes1025] ocular-glass coverage (scene size, RGBA8 + own depth)
+	image_t        *hzmMaskImg, *hzmMaskDepth;
+	int             hzmGlassDrawn;        // surfaces the glass pass drew this frame (0 = no glass mesh: the screen-space circle fallback)
+	qboolean        hzmLensPostSkip;      // the scope PiP composited this frame: depth of field (reads the main-view depth, not the weapon's) must not run
+	qboolean        hzmGunValid;
 	shaderProgram_t heatHazeShader;     // HZM gl1-parity heat haze + localized muzzle shimmer
 	shaderProgram_t dofShader;          // HZM gl1-parity depth of field (r_ppDoF)
 	shaderProgram_t underwaterShader;   // HZM NEW: underwater/slime/lava screen distortion (r_ppUnderwaterFx)
@@ -4579,6 +4600,9 @@ typedef struct {
 	drawSurf_t *drawSurfs;
 	int		numDrawSurfs;
 } drawSurfsCommand_t;
+void RB_HzmLensStoreGun(const drawSurfsCommand_t *cmd);
+void RB_HzmLensDrawGun(const drawSurfsCommand_t *cmd, FBO_t *dst);   // tr_backend.c: the view weapon, last, into dst   // HZM coop [scopes1025] tr_hzm_lens.c
+void RB_RenderDrawSurfList(drawSurf_t *drawSurfs, int numDrawSurfs);   // tr_backend.c
 
 typedef struct {
 	int commandId;

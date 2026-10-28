@@ -2327,6 +2327,12 @@ void R_FG_LatchView( const void *viewParms )
 	if ( !fg.mode || fg.build.scene ) {
 		return;
 	}
+	// HZM coop [scopes1025] a picture-in-picture scope lens is composited into this frame: the warp would carry the lens picture on the
+	// wide view's motion, so this frame is a real one (nothing latched)
+	if ( tr.hzmLensValid ) {
+		fg.latched = qfalse;
+		return;
+	}
 	// only a view that fills the picture: anything smaller would need its own rectangle in every pass
 	sw = tr.sceneFbo ? tr.sceneFbo->width : glConfig.vidWidth;
 	sh = tr.sceneFbo ? tr.sceneFbo->height : glConfig.vidHeight;
