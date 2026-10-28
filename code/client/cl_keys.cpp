@@ -770,9 +770,25 @@ static const char *CL_KeyTokenText(int key)
              {"PAD0_DPAD_UP", "D-pad Up"}, {"PAD0_DPAD_DOWN", "D-pad Down"}, {"PAD0_DPAD_LEFT", "D-pad Left"},
              {"PAD0_DPAD_RIGHT", "D-pad Right"}, {"PAD0_LEFTSTICK_CLICK", "L3"}, {"PAD0_RIGHTSTICK_CLICK", "R3"},
              {"PAD0_BACK", "View"}, {"PAD0_START", "Menu"}, {"PAD0_MISC1", "Share"}};
+    // [v1.10.45] PlayStation names when the connected pad is a DualShock / DualSense (in_padType from sdl_input.c)
+    static const struct {
+        const char *from, *to;
+    } ps[] = {{"PAD0_A", "Cross"}, {"PAD0_B", "Circle"}, {"PAD0_X", "Square"}, {"PAD0_Y", "Triangle"}, {"PAD0_LEFTSHOULDER", "L1"},
+              {"PAD0_RIGHTSHOULDER", "R1"}, {"PAD0_LEFTTRIGGER", "L2"}, {"PAD0_RIGHTTRIGGER", "R2"}, {"PAD0_BACK", "Create"},
+              {"PAD0_START", "Options"}, {"PAD0_MISC1", "Mic"}, {"PAD0_TOUCHPAD", "Touchpad"}};
     const char *nm = Key_KeynumToBindString(key);
     int         i;
 
+    if (nm && !Q_stricmp(Cvar_VariableString("in_padType"), "ps")) {
+        for (i = 0; i < (int)(sizeof(ps) / sizeof(ps[0])); i++) {
+            if (!Q_stricmp(nm, ps[i].from)) {
+                return ps[i].to;
+            }
+        }
+    }
+    if (nm && !Q_stricmp(nm, "PAD0_TOUCHPAD")) {
+        return "Touchpad";
+    }
     for (i = 0; nm && i < (int)(sizeof(t) / sizeof(t[0])); i++) {
         if (!Q_stricmp(nm, t[i].from)) {
             return t[i].to;

@@ -635,6 +635,17 @@ static void IN_PadOpenFirst( void )
 	}
 	memset( &stick_state, '\0', sizeof( stick_state ) );
 	Com_Printf( "Gamepad opened: %s\n", SDL_GameControllerName( gamepad ) );
+	{	// [v1.10.45] user: "does it recognize a PlayStation controller? I see Xbox buttons" - publish the family for the prompts / glyphs
+		const SDL_GameControllerType gt = SDL_GameControllerGetType( gamepad );
+		const char *fam = "xbox";
+		if ( gt == SDL_CONTROLLER_TYPE_PS3 || gt == SDL_CONTROLLER_TYPE_PS4 || gt == SDL_CONTROLLER_TYPE_PS5 ) {
+			fam = "ps";
+		} else if ( gt == SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_PRO ) {
+			fam = "nintendo";
+		}
+		Cvar_Set( "in_padType", fam );
+		Com_Printf( "^~^~^ PADTYPE %s (sdl type %d)\n", fam, (int)gt );
+	}
 	IN_PadSetStatus( "connected" );
 }
 

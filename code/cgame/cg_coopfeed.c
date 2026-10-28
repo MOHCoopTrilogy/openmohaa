@@ -1068,8 +1068,29 @@ static void CG_DrawPadGlyph(float x, float y, float size, int code, float alpha)
     vec4_t c;
     float  u0 = (float)(code % 4) * 0.25f + 0.002f, v0 = (float)(code / 4) * 0.25f + 0.002f;
 
-    if (!s_padGlyphShader) {
-        s_padGlyphShader = cgi.R_RegisterShader("textures/hud/coop_padglyphs");
+    {   // [v1.10.45] PlayStation sheet (same 16-cell layout, gen_pad_glyphs.py --ps) when the pad is a DualShock / DualSense
+        static qhandle_t s_psShader = 0;
+        static cvar_t   *pType      = NULL;
+        if (!pType) {
+            pType = cgi.Cvar_Get("in_padType", "xbox", 0);
+        }
+        if (!s_padGlyphShader) {
+            s_padGlyphShader = cgi.R_RegisterShader("textures/hud/coop_padglyphs");
+        }
+        if (pType && !Q_stricmp(pType->string, "ps")) {
+            if (!s_psShader) {
+                s_psShader = cgi.R_RegisterShader("textures/hud/coop_padglyphs_ps");
+            }
+            if (s_psShader) {
+                cgi.R_SetColor(NULL);
+                c[0] = c[1] = c[2] = 1.0f;
+                c[3]               = alpha;
+                cgi.R_SetColor(c);
+                cgi.R_DrawStretchPic(x, y, size, size, u0, v0, u0 + 0.246f, v0 + 0.246f, s_psShader);
+                cgi.R_SetColor(NULL);
+                return;
+            }
+        }
     }
     c[0] = c[1] = c[2] = 1.0f;
     c[3]               = alpha;
