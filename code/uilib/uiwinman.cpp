@@ -157,6 +157,7 @@ UIWindowManager::UIWindowManager()
     m_amidead          = false;
     m_lastbuttons      = 0;
     m_padClick         = 0;
+    m_afterPrevButtons = 0;
     m_oldview          = NULL;
     m_firstResponder   = NULL;
     m_backgroundwidget = NULL;
@@ -302,6 +303,47 @@ void UIWindowManager::UpdateViews(void)
     }
 }
 
+// [HZM menu-next2, E5] pending `uiafter` commands (menu camera moves: "zoom, THEN open the menu")
+struct uiAfter_t {
+    int  fireMs;
+    char cmd[256];
+};
+static uiAfter_t s_after[8];
+static int       s_afterCount = 0;
+
+void UIWindowManager::QueueAfter(float seconds, const char *cmd)
+{
+    seconds *= UIWidget::CamSlow();
+    if (seconds <= 0.0f || s_afterCount >= 8) {
+        // no delay (or the queue is full): run it now, in order
+        uii.Cmd_Stuff(va("%s\n", cmd));
+        return;
+    }
+    s_after[s_afterCount].fireMs = uid.time + (int)(seconds * 1000.0f);
+    Q_strncpyz(s_after[s_afterCount].cmd, cmd, sizeof(s_after[s_afterCount].cmd));
+    s_afterCount++;
+    UIWidget::NoteCamMove(seconds);
+}
+
+void UIWindowManager::RunAfterDue(bool all)
+{
+    int i = 0;
+
+    while (i < s_afterCount) {
+        if (all || uid.time >= s_after[i].fireMs) {
+            char cmd[256];
+            Q_strncpyz(cmd, s_after[i].cmd, sizeof(cmd));
+            for (int k = i + 1; k < s_afterCount; k++) {
+                s_after[k - 1] = s_after[k];
+            }
+            s_afterCount--;
+            uii.Cmd_Stuff(va("%s\n", cmd));
+        } else {
+            i++;
+        }
+    }
+}
+
 void UIWindowManager::ServiceEvents(void)
 {
     UIPoint2D         pos;
@@ -311,6 +353,16 @@ void UIWindowManager::ServiceEvents(void)
     pos.x   = uid.mouseX;
     pos.y   = uid.mouseY;
     buttons = uid.mouseFlags;
+
+    // [HZM menu-next2, E5] menu camera moves: due commands run; a fresh mouse press skips the move to its end
+    if (s_afterCount) {
+        RunAfterDue(false);
+    }
+    if ((buttons & 3) && !(m_afterPrevButtons & 3) && UIWidget::CamMoveActive()) {
+        UIWidget::CamMoveSkip();
+        RunAfterDue(true);
+    }
+    m_afterPrevButtons = (int)buttons;
     // [HZM gamepad-next] PadTab click: frame 3 hover, frame 2 button down, frame 1 button up
     if (m_padClick > 0) {
         if (m_padClick == 2) {
@@ -878,6 +930,13 @@ bool UIWindowManager::PadTab(int dir)
 qboolean UIWindowManager::KeyEvent(int key, unsigned int time)
 {
     UIWidget *selwidget = NULL;
+
+    // [HZM menu-next2, E5] a menu camera move is running: any key / pad button skips it (and is eaten)
+    if (UIWidget::CamMoveActive() && key != K_MWHEELUP && key != K_MWHEELDOWN) {
+        UIWidget::CamMoveSkip();
+        RunAfterDue(true);
+        return true;
+    }
 
     // [HZM gamepad-next] an open pad pull-down owns the D-pad (up / down = highlight, A = pick, B = cancel)
     if (UIPulldownMenu::PadKey(key)) {

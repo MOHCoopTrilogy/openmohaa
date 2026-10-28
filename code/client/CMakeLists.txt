@@ -4,8 +4,8 @@ project(omohclient)
 
 add_subdirectory("../cgame" "./cgame")
 
-file(GLOB SOURCES_CLIENT "./*.c*")
-file(GLOB_RECURSE SOURCES_UILIB "../uilib/*.c*")
+file(GLOB SOURCES_CLIENT CONFIGURE_DEPENDS "./*.c*")   # CONFIGURE_DEPENDS: a new source file (cl_uiscene.cpp) must not need a manual `cmake .` (v5 test copy)
+file(GLOB_RECURSE SOURCES_UILIB CONFIGURE_DEPENDS "../uilib/*.c*")
 
 set(SOURCES_CLIENT ${SOURCES_CLIENT}
 	# Gamespy

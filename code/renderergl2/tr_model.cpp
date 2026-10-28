@@ -1692,6 +1692,9 @@ void R_AddSkelSurfaces(trRefEntity_t *ent)
             if (iRadiusCull == CULL_OUT && r_hzmSkelCull->integer
                 && !(tr.viewParms.flags & (VPF_SHADOWMAP | VPF_DEPTHSHADOW | VPF_PSHADOW | VPF_SUNWORLD | VPF_SUNSTABLE))
                 && !(ent->e.renderfx & (RF_FIRST_PERSON | RF_DEPTHHACK))
+                // [menus3d] a no-world scene (menu / HUD 3D widget, e.g. the attic Scene3D) has no PVS to save work against and its
+                // models are whole-room chunks whose origin sits far from the camera: the sphere test dropped them all at the radio shelf
+                && !(tr.refdef.rdflags & RDF_NOWORLDMODEL)
                 && R_CullPointAndRadius(tiki_worldorigin, radius * 2.0f + 96.0f) == CULL_OUT) {
                 return;
             }

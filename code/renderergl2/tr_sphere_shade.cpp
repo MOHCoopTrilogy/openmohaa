@@ -1250,7 +1250,7 @@ void RB_Sphere_BuildDLights()
 
 void RB_Sphere_SetupEntity()
 {
-    if (r_light_nolight->integer) {
+    if (r_light_nolight->integer || !tr.world) {   // [HZM menus3d] no world (menu scene): nothing to light from -> fullbright
         backEnd.currentSphere->TessFunction = &RB_Light_Fullbright;
     } else if (RB_Sphere_SetupGlobals() && RB_Sphere_ResetPointColors()) {
         backEnd.currentSphere->numRealLights = 0;
