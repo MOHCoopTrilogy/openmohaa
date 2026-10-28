@@ -498,6 +498,11 @@ qboolean Item::Drop(void)
 
     // drop the item
     PlaceItem();
+    // HZM coop [2026-10-25, bug-4211] "dropped weapons sometimes still float in the air". MASK_ITEM carries CONTENTS_PLAYERCLIP and
+    // CONTENTS_TRIGGER, and maps are carpeted in invisible clip brushes (measured on m1l1: a DETAIL|MONSTERCLIP|PLAYERCLIP brush
+    // hanging 90 u over the visible floor - a gun and a helmet both came to rest ON it, nodraw, in mid-air). A DROPPED item lands on
+    // what is visible and solid only: world + fence. (Map-placed items keep MASK_ITEM.) Same lesson as severed heads (bug-1915).
+    edict->clipmask = MASK_ITEM & ~(CONTENTS_TRIGGER | CONTENTS_PLAYERCLIP);
     velocity = owner->velocity * 0.5 + Vector(G_CRandom(50), G_CRandom(50), 100);
     setAngles(owner->angles);
     avelocity = Vector(0, G_CRandom(360), 0);
@@ -878,6 +883,7 @@ void Item::Landed(Event *ev)
         warning("Item::Landed", "Item %d has landed on an entity that might move\n", entnum);
     }
     setMoveType(MOVETYPE_NONE);
+
 }
 
 Listener *Item::GetScriptOwner()

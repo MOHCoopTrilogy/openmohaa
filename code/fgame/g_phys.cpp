@@ -29,6 +29,7 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 #include "actor.h"
 #include "player.h"
 #include "debuglines.h"
+#include "object.h"
 
 /*
 
@@ -1140,7 +1141,7 @@ void G_Physics_Toss(Entity *ent)
     // it. Items + MOVETYPE_TOSS only: thrown grenades are Projectile/MOVETYPE_BOUNCE, gibs are
     // MOVETYPE_GIB - both excluded; a normally-falling item never traces allsolid so its
     // counter stays 0 and behavior is unchanged.
-    if (ent->movetype == MOVETYPE_TOSS && ent->IsSubclassOfItem()) {
+    if (ent->movetype == MOVETYPE_TOSS && (ent->IsSubclassOfItem() || ent->isSubclassOf(HelmetObject))) { // [bug-4211] popped helmets share the unstick
         // HZM 07-20 (bug-923 round 2): cover the WEDGE case too - a gun dropped into a steep rock
         // crease never traces allsolid, it just keeps CONTACTING surfaces with normal[2] <= 0.7
         // (too steep to count as ground), so it never settles and its avelocity yaw-spin never
@@ -1196,6 +1197,21 @@ void G_Physics_Toss(Entity *ent)
 
         // stop if on ground
         if (trace.plane.normal[2] > 0.7) {
+            if (ent->movetype == MOVETYPE_TOSS && (ent->IsSubclassOfItem() || ent->isSubclassOf(HelmetObject))) {
+                static cvar_t *s_tossDbg = NULL;
+                if (!s_tossDbg) {
+                    s_tossDbg = gi.Cvar_Get("coop_tossDebug", "0", 0);
+                }
+                if (s_tossDbg->integer) {
+                    gi.Printf("^~^~^ TOSSLAND ent=%d %s o=(%.0f %.0f %.0f) hit=%d %s contents=0x%x surf=0x%x n=%.2f\n", ent->entnum,
+                        ent->getClassname(), ent->origin[0], ent->origin[1], ent->origin[2], trace.ent ? trace.ent->entity->entnum : -1,
+                        trace.ent && trace.ent->entity ? trace.ent->entity->getClassname() : "-", trace.contents, trace.surfaceFlags,
+                        trace.plane.normal[2]);
+                    trace_t rr = G_Trace(Vector(ent->origin) + Vector(0, 0, 2), vec_zero, vec_zero, Vector(ent->origin) - Vector(0, 0, 600), ent, MASK_SOLID, qfalse, "tossdbg");
+                    gi.Printf("^~^~^ TOSSRAY ent=%d ray: frac=%.3f drop=%.1f ss=%d c=0x%x surf=0x%x ent=%d | box: ss=%d allsolid=%d\n", ent->entnum, rr.fraction, rr.fraction * 602.0f,
+                        rr.startsolid, rr.contents, rr.surfaceFlags, rr.ent ? rr.ent->entity->entnum : -1, trace.startsolid, trace.allsolid);
+                }
+            }
             ent->groundentity   = trace.ent;
             ent->groundplane    = trace.plane;
             ent->groundcontents = trace.contents;
