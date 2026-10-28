@@ -2692,6 +2692,8 @@ typedef struct {
 
 	shader_t				*defaultShader;
 	shader_t				*hzmMaskShader;      // HZM coop [scopes1025]
+	shader_t				*hzmMaskGreenShader; // QA marker
+	shader_t				*hzmMaskBlackShader; // HZM coop [scopes1025] the rest of the rifle in the coverage pass (depth occluder, black)
 	shader_t				*shadowShader;
 	shader_t				*projectionShadowShader;
 

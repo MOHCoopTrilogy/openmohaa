@@ -2260,6 +2260,9 @@ static float CG_ScopeReloadFloor(float g)
 float CG_AdsAnimGate(void) { return s_rigGateRaw; }
 float CG_AdsRigWeight(void) { return s_rigW; }
 
+static const adsSight_t *s_ocRow = NULL;   // [scopes1025] the held scope's sight row / gun tag, remembered by CG_ScopeOcular
+static int               s_ocTag = -1, s_ocTime = 0;
+
 // [scopes1025] where the scope's ocular (the sight row's R point) is on screen, and the glass radius: the lens circle / reticle / picture follow it (hip included)
 static void CG_ScopeOcular(refEntity_t *pREnt, const adsSight_t *s, vec3_t cam[3], const vec3_t E, int iTag)
 {
@@ -2271,6 +2274,7 @@ static void CG_ScopeOcular(refEntity_t *pREnt, const adsSight_t *s, vec3_t cam[3
     if (!CG_HzmScopeHeld() || !(s >= s_adsSightsScope && s < s_adsSightsScope + sizeof(s_adsSightsScope) / sizeof(s_adsSightsScope[0]))) {
         return;
     }
+    s_ocRow = s; s_ocTag = iTag; s_ocTime = cg.time;   // for the late, final-transform re-projection at the end of CG_OffsetFirstPersonView
     or2 = cgi.TIKI_Orientation(pREnt, iTag);
     VectorCopy(pREnt->origin, G2);
     for (q = 0; q < 3; q++) {
@@ -5991,6 +5995,13 @@ void CG_OffsetFirstPersonView(refEntity_t *pREnt, qboolean bUseWorldPosition)
     }
 
     VectorCopy(origin, cg.playerHeadPos);
+
+    // [scopes1025] the lens centre / radius for the gl2 pass from the rifle's FINAL transform this frame (sway, recoil, lag and the feel layers are all applied by now)
+    if (pREnt && s_ocRow && s_ocTime == cg.time && CG_HzmScopeHeld()) {
+        vec3_t camF[3];
+        AnglesToAxis(cg.refdefViewAngles, camF);
+        CG_ScopeOcular(pREnt, s_ocRow, camF, origin, s_ocTag);
+    }
 }
 
 /*

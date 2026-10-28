@@ -128,7 +128,7 @@ void main()
 	}
 
 	// debug views (r_ppScopeCA): 10 = the wide view alone, 20 = the blurred outside, 30 = the main picture
-	if (u_HzmParams.z > 5.0)
+	if (u_HzmParams.z > 5.0 && !(u_HzmParams.z > 47.0 && u_HzmParams.z < 53.0))
 	{
 		if (u_HzmParams.z < 15.0) { gl_FragColor = vec4(wide, 1.0); return; }
 		if (u_HzmParams.z < 25.0) { gl_FragColor = vec4(outside, 1.0); return; }
@@ -137,8 +137,12 @@ void main()
 		gl_FragColor = vec4(texture2D(u_ScreenImageMap, var_TexCoords).rgb, 1.0); return;
 	}
 
+	// the rifle's glass seen from the side (the real glass shader is skipped while the picture is on): dark coated tint + a soft highlight; blended with the picture by u_FogDistance.z
+	float kPip = clamp(u_FogDistance.z, 0.0, 1.0);
+	vec3  glassFake = vec3(0.010, 0.026, 0.045) + vec3(0.30, 0.34, 0.42) * 0.28 * smoothstep(0.75, 0.0, length(q - vec2(-0.32, -0.38)));
 	vec3 shadowCol = vec3(0.012);                                     // the pupil shadow is the dark inside of the tube, never the world
-	vec3 lensCol   = mix(shadowCol, inside, pupil);
+	vec3 lensCol   = mix(glassFake, mix(shadowCol, inside, pupil), kPip);
+	if (u_HzmParams.z > 47.0 && u_HzmParams.z < 53.0) lensCol = vec3(1.0, 0.0, 1.0);   // r_ppScopeCA 50: QA marker - the picture is painted magenta (tools/pip_leak_check.py)
 
 	vec3  ring     = mix(wide, outside, amt);
 	float lensFade = lens;   // the live magnified picture is on the glass ALWAYS (hip, raise, bolt, reload)

@@ -782,6 +782,12 @@ static void RB_SetupCharLighting(void)
 RB_RenderDrawSurfList
 ==================
 */
+static qboolean r_ppScopeCA_dbg(void)   // [scopes1025] QA marker mode (r_ppScopeCA 50)
+{
+	const float v = ri.Cvar_Get("r_ppScopeCA", "0.5", 0)->value;
+	return (v > 47.0f && v < 53.0f) ? qtrue : qfalse;
+}
+
 void RB_RenderDrawSurfList( drawSurf_t *drawSurfs, int numDrawSurfs ) {
 	qboolean skipScopeGlass = qfalse;   // [scopes1025]
 	const qboolean glassOnly = (tr.hzmMaskFbo && backEnd.viewParms.targetFbo == tr.hzmMaskFbo) ? qtrue : qfalse;
@@ -908,10 +914,13 @@ void RB_RenderDrawSurfList( drawSurf_t *drawSurfs, int numDrawSurfs ) {
 			qboolean isGlass = ((backEnd.viewParms.flags & VPF_ONLYVIEWMODEL) && shader && (strstr(shader->name, "lens") || strstr(shader->name, "Lens") || strstr(shader->name, "glass"))) ? qtrue : qfalse;
 			if (glassOnly) {
 				// coverage pass: only the glass, as solid white
-				skipScopeGlass = !isGlass;
+				// coverage pass: the glass in white, EVERY other surface of the rifle / hands in black with the same depth test: the mask is the glass minus whatever is in front of it
+				skipScopeGlass = qfalse;
 				if (isGlass) { shader = tr.hzmMaskShader; tr.hzmGlassDrawn++; }
+				else if (shader && tr.hzmMaskBlackShader && !shader->isSky && shader->stages[0]) { shader = tr.hzmMaskBlackShader; }
 			} else {
 				skipScopeGlass = isGlass;   // the weapon pass never draws the glass
+				if (isGlass && tr.hzmMaskGreenShader && r_ppScopeCA_dbg()) { skipScopeGlass = qfalse; shader = tr.hzmMaskGreenShader; }   // QA marker
 				if ((backEnd.viewParms.flags & VPF_ONLYVIEWMODEL) && !skipScopeGlass && ri.Cvar_Get("r_ppScopeDbg", "0", 0)->integer & 8) { shader = tr.hzmMaskShader; }
 			}
 			if (skipScopeGlass) {

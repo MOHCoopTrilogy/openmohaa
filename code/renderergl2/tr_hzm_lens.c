@@ -113,13 +113,14 @@ static void R_HzmLensCvars(void)
 static const float *R_HzmLensState(void)
 {
 	static int   s_mod = -1;
-	static float s_st[10];
+	static float s_st[12];
 
 	R_HzmLensCvars();
 	if (r_ppScopeState->modificationCount != s_mod) {
 		s_mod = r_ppScopeState->modificationCount;
 		memset(s_st, 0, sizeof(s_st));
-		sscanf(r_ppScopeState->string, "%f %f %f %f %f %f %f %f %f %f", &s_st[0], &s_st[1], &s_st[2], &s_st[3], &s_st[4], &s_st[5], &s_st[6], &s_st[7], &s_st[8], &s_st[9]);
+		s_st[10] = 1.0f;   /* older cgame without the glass->picture blend: the picture is fully on */
+		sscanf(r_ppScopeState->string, "%f %f %f %f %f %f %f %f %f %f %f", &s_st[0], &s_st[1], &s_st[2], &s_st[3], &s_st[4], &s_st[5], &s_st[6], &s_st[7], &s_st[8], &s_st[9], &s_st[10]);
 	}
 	return s_st;
 }
@@ -128,7 +129,7 @@ qboolean R_HzmLensStateWantsPip(void)
 {
 	const float *st = R_HzmLensState();
 
-	return (st[1] > 0.01f && st[6] > 4.0f) ? qtrue : qfalse;   // [held scope] the lens is live whenever a scoped rifle is held: amount 0 = no ADS blur, not 'off'
+	return (st[1] > 0.01f && st[6] > 4.0f && st[10] > 0.002f) ? qtrue : qfalse;   // st[10] = glass -> live picture blend; 0 = the rifle's real glass shader shows and the whole PIP pass is skipped   // [held scope] the lens is live whenever a scoped rifle is held: amount 0 = no ADS blur, not 'off'
 }
 
 // can this renderer run the PiP at all right now (renderer-published so cgame can read it)
@@ -317,7 +318,7 @@ static image_t *R_HzmLensRetImage(void)
 }
 
 // per pass: viewinfo (lens centre offset, mode 0 = full composite / 1 = rim only) and the texture units (0 = scene, 1 = wide, 2 = 1/4 blurred wide)
-#define LENS_PASS(mode) do { 	vec4_t vi_; 	VectorSet4(vi_, st[7], st[8], (mode), ((tr.hzmGlassDrawn > 0) ? 1.0f : 0.0f) + ((st[9] > 0.5f) ? 2.0f : 0.0f)); 	GLSL_BindProgram(&tr.hzmLensShader); 	GLSL_SetUniformVec4(&tr.hzmLensShader, UNIFORM_VIEWINFO, vi_); { vec4_t bl_; image_t *ri_ = R_HzmLensRetImage(); VectorSet4(bl_, r_ppScopeBlur->value, ri_ ? 1.0f : 0.0f, 0.0f, 0.0f); GL_BindToTMU(ri_ ? ri_ : tr.whiteImage, TB_SPECULARMAP); GLSL_SetUniformVec4(&tr.hzmLensShader, UNIFORM_FOGDISTANCE, bl_); } 	GL_BindToTMU(tr.hzmLensColor, TB_LEVELSMAP); 	GL_BindToTMU(tr.hzmLensQuartImg, TB_NORMALMAP); GL_BindToTMU(tr.hzmMaskImg, TB_DELUXEMAP); } while (0)
+#define LENS_PASS(mode) do { 	vec4_t vi_; 	VectorSet4(vi_, st[7], st[8], (mode), ((tr.hzmGlassDrawn > 0) ? 1.0f : 0.0f) + ((st[9] > 0.5f) ? 2.0f : 0.0f)); 	GLSL_BindProgram(&tr.hzmLensShader); 	GLSL_SetUniformVec4(&tr.hzmLensShader, UNIFORM_VIEWINFO, vi_); { vec4_t bl_; image_t *ri_ = R_HzmLensRetImage(); VectorSet4(bl_, r_ppScopeBlur->value, ri_ ? 1.0f : 0.0f, st[10], 0.0f); GL_BindToTMU(ri_ ? ri_ : tr.whiteImage, TB_SPECULARMAP); GLSL_SetUniformVec4(&tr.hzmLensShader, UNIFORM_FOGDISTANCE, bl_); } 	GL_BindToTMU(tr.hzmLensColor, TB_LEVELSMAP); 	GL_BindToTMU(tr.hzmLensQuartImg, TB_NORMALMAP); GL_BindToTMU(tr.hzmMaskImg, TB_DELUXEMAP); } while (0)
 
 static qboolean R_HzmLensEnsureMask(void)
 {
@@ -400,6 +401,10 @@ void RB_HZMLensComposite(FBO_t *srcFbo, ivec4_t srcBox)
 		return;
 	}
 	// 3: the eyepiece rim as a true circle over the weapon's faceted bell (ring only; the lens interior stays whatever the weapon left of it)
+	if (r_ppScopeCA->value > 47.0f && r_ppScopeCA->value < 53.0f) {   // QA marker mode: no pass 1 (it would put the picture back over the green glass)
+		tr.hzmLensPostSkip = qtrue;
+		return;
+	}
 	LENS_PASS(1.0f);
 	GL_BindToTMU(tr.hzmLensScratchImg, TB_DELUXEMAP);   // the finished picture of pass 1: it is put back inside the circle over whatever the weapon drew there
 	FBO_SetHzmParams(params);
