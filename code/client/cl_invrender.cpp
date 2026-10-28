@@ -502,6 +502,11 @@ void UI_DoInventory(qboolean activate_mouse)
     s_main_inv->m_mouse_active = true;
 }
 
+qboolean UI_HzmInventoryOpen(void)
+{
+    return (s_main_inv && !s_main_inv->isDying()) ? qtrue : qfalse;
+}
+
 qboolean UI_CloseInventory()
 {
     menuManager.PassEventToAllWidgets(EV_ClearInvItemReference);

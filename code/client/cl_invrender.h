@@ -123,3 +123,4 @@ void CL_Draw3DModel(
 
 void     UI_DoInventory(qboolean activate_mouse);
 qboolean UI_CloseInventory(void);
+qboolean UI_HzmInventoryOpen(void); // HZM - the GUI-mouse watchdog in UI_Update leaves an open inventory alone

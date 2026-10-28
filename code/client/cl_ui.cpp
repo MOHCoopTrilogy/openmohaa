@@ -2060,19 +2060,22 @@ void UI_Update(void)
         // screen" - on every path into a map (host, join, between missions) a menu from before the load was still on the stack:
         // nothing drawn, but the GUI mouse stayed on and ate the input until ESC popped it. On the edge into CA_ACTIVE (the
         // load is over, before any server stufftext runs) whatever is left is closed and the mouse goes back to the game.
-        static int s_hzmPrevState = CA_UNINITIALIZED;
-        if (clc.state == CA_ACTIVE && s_hzmPrevState != CA_ACTIVE && !server_loading) {
-            Menu *pLeft = menuManager.CurrentMenu();
-            if (pLeft) {
-                Com_Printf("^~^~^ UIACTIVE closed a leftover menu '%s' on entering the game\n", pLeft->m_name.c_str());
-                UI_ForceMenuOff(true);
-                UI_FocusMenuIfExists();
-            } else if (in_guimouse) {
-                Com_Printf("^~^~^ UIACTIVE GUI mouse was still on with no menu - released\n");
-                UI_FocusMenuIfExists();
+        // [v1.10.41b] the edge test never fired: the load cinematic keeps server_loading set past CA_ACTIVE, and
+        // UI_FinishLoadingScreen_f closes the menus WITHOUT IN_MouseOff. Now a watchdog: in a live game, a GUI mouse
+        // with no menu, console, DM console, inventory or bind capture open is released (and logged once per map).
+        static int s_hzmLogged = 0;
+        if (clc.state != CA_ACTIVE) {
+            s_hzmLogged = 0;
+        } else if (!server_loading && in_guimouse && !menuManager.CurrentMenu() && !UI_ConsoleIsVisible()
+                   && !(dm_console && dm_console->IsVisible()) && !(developer_console && developer_console->IsVisible())
+                   && !UI_HzmInventoryOpen() && !UI_BindActive()) {
+            if (!s_hzmLogged) {
+                Com_Printf("^~^~^ UIACTIVE GUI mouse on with nothing open in game - released\n");
+                s_hzmLogged = 1;
             }
+            UI_ActivateView3D();
+            IN_MouseOff();
         }
-        s_hzmPrevState = clc.state;
     }
 
     // HZM coop [user 2026-09-13] top compass bar: when cgame changes the band, re-apply the gmbox and DM box
