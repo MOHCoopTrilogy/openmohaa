@@ -271,6 +271,13 @@ void CG_General(centity_t *cent)
     ent.shader_data[1] = s1->skinNum;
     ent.renderfx |= s1->renderfx;
 
+    // HZM: a solid brush-model entity (script_object gates/doors/pieces promoted out of the BSP; they are ET_GENERAL)
+    // must not be a gl2 sun/depth-shadow caster: the stock static version cast none, and its alpha-tested fence
+    // leaves threw thin dark wedge streaks on the snow. Tiki models/players take other paths and keep their shadows.
+    if (s1->solid == SOLID_BMODEL) {
+        ent.renderfx |= RF_NOSHADOW;
+    }
+
     ent.tiki            = cgi.R_Model_GetHandle(cgs.model_draw[s1->modelindex]);
     ent.frameInfo[0]    = s1->frameInfo[0];
     ent.actionWeight    = 1.0;
