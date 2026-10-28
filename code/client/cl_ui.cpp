@@ -2056,6 +2056,24 @@ void UI_Update(void)
     CL_FillUIDef();
     uWinMan.ServiceEvents();
     UI_HzmUpdateNotice(); // HZM coop - "update available" line (local file, see above)
+    {   // HZM [v1.10.40] user: "when you enter a lobby you have to hit esc first because the main menu cursor is always on the
+        // screen" - on every path into a map (host, join, between missions) a menu from before the load was still on the stack:
+        // nothing drawn, but the GUI mouse stayed on and ate the input until ESC popped it. On the edge into CA_ACTIVE (the
+        // load is over, before any server stufftext runs) whatever is left is closed and the mouse goes back to the game.
+        static int s_hzmPrevState = CA_UNINITIALIZED;
+        if (clc.state == CA_ACTIVE && s_hzmPrevState != CA_ACTIVE && !server_loading) {
+            Menu *pLeft = menuManager.CurrentMenu();
+            if (pLeft) {
+                Com_Printf("^~^~^ UIACTIVE closed a leftover menu '%s' on entering the game\n", pLeft->m_name.c_str());
+                UI_ForceMenuOff(true);
+                UI_FocusMenuIfExists();
+            } else if (in_guimouse) {
+                Com_Printf("^~^~^ UIACTIVE GUI mouse was still on with no menu - released\n");
+                UI_FocusMenuIfExists();
+            }
+        }
+        s_hzmPrevState = clc.state;
+    }
 
     // HZM coop [user 2026-09-13] top compass bar: when cgame changes the band, re-apply the gmbox and DM box
     // frames the way UI_ResolutionChange does, so the bar toggles live without a vid_restart. Nothing runs
