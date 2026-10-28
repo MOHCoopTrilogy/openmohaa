@@ -643,6 +643,10 @@ static void IN_PadOpenFirst( void )
 		} else if ( gt == SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_PRO ) {
 			fam = "nintendo";
 		}
+		// [v1.10.46] anything that is not a recognised Xbox pad is generic (the layout page draws a neutral pad)
+		if ( gt == SDL_CONTROLLER_TYPE_UNKNOWN || gt == SDL_CONTROLLER_TYPE_VIRTUAL || gt == SDL_CONTROLLER_TYPE_GOOGLE_STADIA || gt == SDL_CONTROLLER_TYPE_AMAZON_LUNA || gt == SDL_CONTROLLER_TYPE_NVIDIA_SHIELD ) {
+			fam = "generic";
+		}
 		Cvar_Set( "in_padType", fam );
 		Com_Printf( "^~^~^ PADTYPE %s (sdl type %d)\n", fam, (int)gt );
 	}

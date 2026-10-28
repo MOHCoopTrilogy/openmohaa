@@ -1188,6 +1188,87 @@ void Key_KeynameCompletion(void (*callback)(const char *s))
 CL_InitKeyCommands
 ===================
 */
+
+/*
+===================
+[v1.10.46] CONTROLLER LAYOUT page (ui/coop_padlayout.urc)
+user: "we need a place for players to rebind their controller controls (and it should use a controller image like modern games do)".
+ui_padbinds            writes ui_padb_<BUTTON> = the friendly name of what each pad button does (read by the page's labels)
+padbind_cycle <B> [-1] steps PAD0_<B> to the next / previous action in s_padActions and refreshes the labels
+The actions are the mod's own commands, the same strings the default binds use (coop_mod/cfg/coop_defbinds*.cfg).
+===================
+*/
+static const struct {
+    const char *name, *cmd;
+} s_padActions[] = {
+    {"Fire", "+attackprimary"}, {"Aim down sights", "+button13"}, {"Use / interact", "+use"}, {"Jump", "+moveup"},
+    {"Crouch / prone", "+movedown"}, {"Reload", "vstr coop_padX"}, {"Swap weapon", "vstr coop_padY"}, {"Quick grenade", "+coopnade"},
+    {"Sprint / hold breath", "+speed"}, {"Melee", "+attacksecondary"}, {"Medkit", "append name ,8mk"}, {"Take cover", "append name ,9cv"},
+    {"Sidearm", "+coopsidearm"}, {"Ammo box", "append name ,abx"}, {"Lean left", "+leanleft"}, {"Lean right", "+leanright"},
+    {"Objectives", "vstr coop_obj"}, {"Scoreboard", "+scores"}, {"Pause menu", "pushmenu main"}, {"Walk", "+button12"},
+    {"Nothing", ""},
+};
+static const char *s_padButtons[] = {"A", "B", "X", "Y", "LEFTSHOULDER", "RIGHTSHOULDER", "LEFTTRIGGER", "RIGHTTRIGGER", "DPAD_UP", "DPAD_DOWN",
+                                     "DPAD_LEFT", "DPAD_RIGHT", "LEFTSTICK_CLICK", "RIGHTSTICK_CLICK", "BACK", "START", "MISC1", "TOUCHPAD",
+                                     "PADDLE1", "PADDLE2", "PADDLE3", "PADDLE4"};
+
+static int CL_PadActionIndex(const char *b)
+{
+    int i;
+    if (!b || !b[0]) {
+        return (int)(sizeof(s_padActions) / sizeof(s_padActions[0])) - 1;
+    }
+    for (i = 0; i < (int)(sizeof(s_padActions) / sizeof(s_padActions[0])); i++) {
+        if (!Q_stricmp(b, s_padActions[i].cmd)) {
+            return i;
+        }
+    }
+    // the stock reload / weapon-next binds count as the mod's own
+    if (!Q_stricmp(b, "reload")) {
+        return 5;
+    }
+    if (!Q_stricmp(b, "weapnext")) {
+        return 6;
+    }
+    return -1;
+}
+
+static void CL_PadBinds_f(void)
+{
+    int i;
+    for (i = 0; i < (int)(sizeof(s_padButtons) / sizeof(s_padButtons[0])); i++) {
+        int         k = Key_StringToKeynum(va("PAD0_%s", s_padButtons[i]));
+        const char *b = (k >= 0) ? keys[k].binding : NULL;
+        int         a = CL_PadActionIndex(b);
+        Cvar_Set(va("ui_padb_%s", s_padButtons[i]), a >= 0 ? s_padActions[a].name : (b ? b : ""));
+    }
+    {   // the picture follows the connected pad: ps / xbox / generic (Auto mode publishes in_padType when a pad opens)
+        const char *t = Cvar_VariableString("in_padType");
+        Cvar_Set("ui_padPic", (!Q_stricmp(t, "ps")) ? "ps" : (!Q_stricmp(t, "xbox") ? "xbox" : "generic"));
+    }
+}
+
+static void CL_PadBindCycle_f(void)
+{
+    const int n = (int)(sizeof(s_padActions) / sizeof(s_padActions[0]));
+    int       k, a, dir;
+
+    if (Cmd_Argc() < 2) {
+        Com_Printf("Usage: padbind_cycle <A|B|X|Y|LEFTSHOULDER|...> [-1]\n");
+        return;
+    }
+    k = Key_StringToKeynum(va("PAD0_%s", Cmd_Argv(1)));
+    if (k < 0) {
+        Com_Printf("padbind_cycle: no pad button %s\n", Cmd_Argv(1));
+        return;
+    }
+    dir = (Cmd_Argc() > 2 && atoi(Cmd_Argv(2)) < 0) ? -1 : 1;
+    a   = CL_PadActionIndex(keys[k].binding);
+    a   = (a < 0) ? 0 : (a + dir + n) % n;
+    Key_SetBinding(k, s_padActions[a].cmd);
+    CL_PadBinds_f();
+}
+
 void CL_InitKeyCommands(void)
 {
     int i;
@@ -1203,6 +1284,8 @@ void CL_InitKeyCommands(void)
     Cvar_Get("coop_hideObjCards", "0", CVAR_USERINFO | CVAR_ARCHIVE);
     Cmd_AddCommand("coop_objkey", CL_CoopObjKey_f);
     Cmd_AddCommand("bind", Key_Bind_f);
+    Cmd_AddCommand("ui_padbinds", CL_PadBinds_f);      // [v1.10.46] controller layout page
+    Cmd_AddCommand("padbind_cycle", CL_PadBindCycle_f);
     Cmd_AddCommand("unbind", Key_Unbind_f);
     Cmd_AddCommand("keytokens", CL_KeyTokens_f);
     Cmd_AddCommand("altbind", Key_AltBind_f);
