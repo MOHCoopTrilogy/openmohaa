@@ -3231,6 +3231,25 @@ void UI_After_f(void)
 UI_ListMenus_f
 ====================
 */
+/*
+====================
+UI_Veil_f - [HZM attic-main] uiveil <alpha 0..1> <seconds>: fade the full-screen black veil (the dip around an attic -> flat menu cut)
+====================
+*/
+void UI_Veil_f(void)
+{
+    if (Cmd_Argc() < 3) {
+        Com_Printf("Usage: uiveil <alpha> <seconds>\n");
+        return;
+    }
+    UIWidget::VeilTo((float)atof(Cmd_Argv(1)), (float)atof(Cmd_Argv(2)));
+}
+
+/*
+====================
+UI_ListMenus_f
+====================
+*/
 void UI_ListMenus_f()
 {
     menuManager.ListMenus();
@@ -3323,6 +3342,10 @@ void UI_MenuEscape(const char *name)
     }
 
     if (menuManager.CurrentMenu() == mainmenu && clc.state == CA_DISCONNECTED) {
+        // [HZM attic-main] the attic IS this menu: ESC at the radio shelf flies back to the overview
+        if (UI_SceneEscape()) {
+            return;
+        }
         if (developer->integer) {
             if (UI_ConsoleIsVisible()) {
                 UI_CloseConsole();
@@ -3342,6 +3365,11 @@ void UI_MenuEscape(const char *name)
     if (UIWidget::CamMoveActive()) {
         UIWidget::CamMoveSkip();
         uWinMan.RunAfterDue(true);
+        return;
+    }
+
+    // [HZM attic-main] the root attic scene (ui_atticMain): ESC at the radio shelf flies back to the attic overview
+    if (UI_SceneEscape()) {
         return;
     }
 
@@ -5735,6 +5763,7 @@ void CL_ShutdownUI(void)
     Cmd_RemoveCommand("showmenu");
     Cmd_RemoveCommand("widgetcommand");
     Cmd_RemoveCommand("uiafter");
+    Cmd_RemoveCommand("uiveil");
     Cmd_RemoveCommand("listmenus");
     Cmd_RemoveCommand("togglemenu");
     Cmd_RemoveCommand("loadmenu");
@@ -6042,6 +6071,7 @@ void CL_InitializeUI(void)
     Cmd_AddCommand("widgetcommand", UI_WidgetCommand_f);
     Cmd_AddCommand("globalwidgetcommand", UI_GlobalWidgetCommand_f);
     Cmd_AddCommand("uiafter", UI_After_f);
+    Cmd_AddCommand("uiveil", UI_Veil_f);
     Cmd_AddCommand("listmenus", UI_ListMenus_f);
     Cmd_AddCommand("togglemenu", UI_ToggleMenu_f);
     Cmd_AddCommand("loadmenu", UI_LoadMenu_f);

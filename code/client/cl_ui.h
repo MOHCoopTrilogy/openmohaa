@@ -93,6 +93,8 @@ void     UI_CreateDialog(
         const char *cancelshader
     );
 void UI_ToggleDMConsole(int iMode);
+void UI_SceneRendererRestart(void);   // [HZM attic-main] cl_uiscene.cpp: renderer restarted, Scene3D model handles are stale
+bool UI_SceneEscape(void);   // [HZM attic-main] cl_uiscene.cpp: the root attic scene consumed ESC (shelf -> home)
 void UI_ShowScoreboard_f(const char *pszMenuName);
 void UI_HideScoreboard_f(void);
 void UI_SetScoreBoardItem(

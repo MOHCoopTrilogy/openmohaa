@@ -278,6 +278,12 @@ public:
     const str& GetEscapeCommand() const { return m_escapeCommand; }
     static void CamMoveSkip();
     static int  s_camEndMs, s_camSkipMs;
+    // [HZM attic-main] a full-screen black veil drawn over every menu (UIWindowManager::UpdateViews): the dip between the attic camera move and a flat menu
+    static void  VeilTo(float target, float seconds);   // fade the veil alpha to target over seconds (x ui_camslow)
+    static void  VeilSnap(float alpha);                  // jump to alpha at once
+    static float VeilAlphaNow();
+    static float s_veilFrom, s_veilTo;
+    static int   s_veilStart, s_veilDur;
     //====
 
     void            SetVirtualScale(vec2_t out);

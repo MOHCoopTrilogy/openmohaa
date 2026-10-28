@@ -1826,6 +1826,7 @@ void CL_Vid_Restart_f( void ) {
 		CL_SendPureChecksums();
 	}
 
+	UI_SceneRendererRestart(); // [HZM attic-main] the attic scene re-registers its models
 	cls.vid_restart = qfalse;
 	Com_Printf("----- finished CL_Vid_Restart_f ----\n");
 	HzmDiag_LongOp( HZF_VID_RESTART, 0, NULL ); // HZM coop [bug-3486]
@@ -2881,6 +2882,23 @@ void CL_Frame ( int msec ) {
 		if ( ingame != s_lastIngame ) {
 			Cvar_SetValue( "ui_ingame", ingame );
 			s_lastIngame = ingame;
+		}
+	}
+
+	/* [HZM attic-main] the 3D attic is the main menu only while NOT in a game: ui_atticActive = ui_atticMain && (disconnected || cinematic).
+	   main.urc gates the Scene3D and the flat room on ui_atticActive, so ESC > Main Menu on a live map shows the flat remastered room (OPTIONS -> the 2D radio menus,
+	   BACK TO GAME) and the scene never has to draw over a live world. Tracks the real connection state every frame. */
+	{
+		static int s_lastAttic = -1;
+		const int  attic = (Cvar_VariableIntegerValue( "ui_atticMain" ) == 1 && ( clc.state <= CA_DISCONNECTED || clc.state == CA_CINEMATIC )) ? 1 : 0;
+		if ( attic != s_lastAttic || Cvar_VariableIntegerValue( "ui_atticActive" ) != attic ) {
+			Cvar_SetValue( "ui_atticActive", attic );
+			s_lastAttic = attic;
+		}
+		/* the same for the 3D radio room twin of the OPTIONS door (ui_menu3d): in a game OPTIONS opens the flat 2D radio room */
+		const int m3d = (Cvar_VariableIntegerValue( "ui_menu3d" ) == 1 && ( clc.state <= CA_DISCONNECTED || clc.state == CA_CINEMATIC )) ? 1 : 0;
+		if ( Cvar_VariableIntegerValue( "ui_menu3dActive" ) != m3d || !Cvar_FindVar( "ui_menu3dActive" ) ) {
+			Cvar_SetValue( "ui_menu3dActive", m3d );
 		}
 	}
 

@@ -278,6 +278,18 @@ void UIWindowManager::UpdateViews(void)
         Display(m_frame, 1.0);
     }
 
+    {   // [HZM attic-main] the dip between an attic camera move and a flat menu: a full-screen black veil over every menu
+        const float veilA = UIWidget::VeilAlphaNow();
+
+        if (veilA >= 0.004f) {
+            vec4_t vcol = {0.0f, 0.0f, 0.0f, veilA > 1.0f ? 1.0f : veilA};
+
+            set2D();
+            uii.Rend_SetColor(vcol);
+            uii.Rend_DrawBox(0, 0, (float)uid.vidWidth, (float)uid.vidHeight);
+        }
+    }
+
     if (m_cursor && m_showcursor && uid.uiHasMouse) {
         vec4_t col;
 
