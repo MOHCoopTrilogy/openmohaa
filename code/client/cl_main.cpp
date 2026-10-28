@@ -4179,8 +4179,8 @@ static void CL_CoopDiscord_f( void )
         return;
     }
     s_lastMs = now;
-    if ( !Sys_OpenURL( "https://discord.gg/cVjMYPBFZ" ) ) {
-        Com_Printf( "coop_discord: could not open a browser - the invite is https://discord.gg/cVjMYPBFZ\n" );
+    if ( !Sys_OpenURL( "https://discord.gg/ukumnzBAhK" ) ) {
+        Com_Printf( "coop_discord: could not open a browser - the invite is https://discord.gg/ukumnzBAhK\n" );
     }
 }
 
