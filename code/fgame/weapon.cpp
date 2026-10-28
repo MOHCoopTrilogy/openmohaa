@@ -4640,7 +4640,21 @@ void Weapon::StartReloading(void)
         return;
     }
 
-    if (SetWeaponAnim("reload", EV_Weapon_DoneReloading)) {
+    // HZM coop [stress reload 2026-10-25] the row the owner's pick asks for (Player::CoopReloadPick): `reload_s` /
+    // `reload_m` when this tik has it, else the plain `reload` - a gun without the sibling rows reloads as ever (a
+    // missing row would fill the clip instantly, so the name is tested first).
+    const char *szReload = "reload";
+    if (owner->isSubclassOf(Player)) {
+        int v = static_cast<Player *>(owner.Pointer())->CoopReloadVar();
+        if (v > 0) {
+            const char *szAlt = (v == 2) ? "reload_m" : "reload_s";
+            if (gi.Anim_NumForName(edict->tiki, szAlt) != -1) {
+                szReload = szAlt;
+            }
+        }
+    }
+
+    if (SetWeaponAnim(szReload, EV_Weapon_DoneReloading)) {
         weaponstate = WEAPON_RELOADING;
     } else {
         ProcessEvent(EV_Weapon_FillClip);
@@ -4655,6 +4669,9 @@ void Weapon::StartReloading(void)
 //======================
 void Weapon::DoneReloading(Event *ev)
 {
+    if (owner && owner->isSubclassOf(Player)) {
+        static_cast<Player *>(owner.Pointer())->CoopReloadClear(); // HZM coop [stress reload]
+    }
     SetShouldReload(qfalse);
     weaponstate = WEAPON_READY;
 

@@ -374,6 +374,7 @@ public:
     // client number must never decide where a bullet goes. This is the authoritative mirror.
     float m_fCoopStressSupp;  // near-miss suppression 0..1, spiked by BulletAttack, decays
     float m_fCoopStress;      // eased composite 0..1
+    int   m_iCoopReloadVar;   // HZM coop [stress reload] the reload variant picked at the torso state entry: 0 calm, 1 stress, 2 mishap
     int   m_iCoopSuppHits;    // near-miss events since the last probe print
     bool  m_bCoopSprinting;
     // HZM coop [bug-3372] EXHAUSTION LATCH: set the moment the pool hits 0, cleared only once it has
@@ -1065,6 +1066,8 @@ public:
     void Holster(Event *ev);
     void HolsterToggle(Event *ev);
     void CoopLobbyPose(Event *ev);   // HZM coop lobby: freeze player as a parade-rest mannequin
+    void CoopReloadPick(Event *ev);  // HZM coop [stress reload] torso state entry: pick calm / stress / mishap for this reload
+    qboolean CondCoopReloadVar(Conditional& condition); // HZM coop [stress reload] COOP_RELOAD_VAR <0|1|2>
     void CoopLobbyUnpose(Event *ev); // HZM coop lobby: release the mannequin freeze
     void CoopLobbyRepose(Event *ev); // HZM coop lobby: atomically swap the frozen idle pose
     void CoopLobbyCycleAnim(Event *ev); // HZM coop lobby DEV: cycle candidate idle poses to ID one
@@ -1243,6 +1246,8 @@ public:
     void TickCoopBrace();   // HZM coop - gun bracing against geometry
     void  CoopAddSuppression(float amount); // HZM coop - a round cracked past this player
     float CoopStress() const { return m_fCoopStress; }
+    int   CoopReloadVar() const { return m_iCoopReloadVar; } // HZM coop [stress reload] read by Weapon::StartReloading
+    void  CoopReloadClear() { m_iCoopReloadVar = 0; }
     void  ApplyCoopBoneOffsets(); // HZM coop - MUST run after PmoveAdjustAngleSettings (bug-2101)
     void  CoopProneBodyYaw(vec3_t vAngles); // HZM coop - P1 fluidity: rate-limited prone body yaw
     void  CoopNadeDown();  // HZM coop - '+coopnade' pressed
