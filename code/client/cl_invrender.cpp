@@ -81,7 +81,20 @@ static void CL_InvHideLooseClips(refEntity_t &e)
 // straight from the skeleton, so no per-item tuning is needed. World math mirrors the engine's own
 // GetTagPositionAndOrientation (cg_commands.cpp). An optional 7-float cvar (offX offY offZ scale pitch
 // yaw roll, tag-local) nudges the seat for the fit-tuner. Caller decides the gate + which tag/cvar.
+void CL_CompositeAttachOnTagXf(refEntity_t &base, qhandle_t attachModel, const char *attachTag, const float *xfIn);
 static void CL_CompositeAttachOnTag(refEntity_t &base, qhandle_t attachModel, const char *attachTag, const char *xformCvar)
+{
+    float xf[7];
+    bool  have = false;
+    const char *xs = xformCvar ? Cvar_VariableString(xformCvar) : NULL;
+    if (xs && xs[0] && sscanf(xs, "%f %f %f %f %f %f %f", &xf[0], &xf[1], &xf[2], &xf[3], &xf[4], &xf[5], &xf[6]) == 7) {
+        have = true;
+    }
+    CL_CompositeAttachOnTagXf(base, attachModel, attachTag, have ? xf : NULL);
+}
+
+// the worker: xfIn = 7 floats (offX offY offZ scale pitch yaw roll, tag-local) or NULL
+void CL_CompositeAttachOnTagXf(refEntity_t &base, qhandle_t attachModel, const char *attachTag, const float *xfIn)
 {
     if (!attachModel || !attachTag || !attachTag[0] || !base.tiki) {
         return;
@@ -106,17 +119,13 @@ static void CL_CompositeAttachOnTag(refEntity_t &base, qhandle_t attachModel, co
         return;
     }
 
-    // optional tag-local nudge from the fit cvar
+    // optional tag-local nudge
     vec3_t loff = {0, 0, 0}, lang = {0, 0, 0};
     float  lscale = 1.0f;
-    const char *xs = xformCvar ? Cvar_VariableString(xformCvar) : NULL;
-    if (xs && xs[0]) {
-        float xf[7];
-        if (sscanf(xs, "%f %f %f %f %f %f %f", &xf[0], &xf[1], &xf[2], &xf[3], &xf[4], &xf[5], &xf[6]) == 7) {
-            loff[0] = xf[0]; loff[1] = xf[1]; loff[2] = xf[2];
-            lscale  = xf[3];
-            lang[0] = xf[4]; lang[1] = xf[5]; lang[2] = xf[6];
-        }
+    if (xfIn) {
+        loff[0] = xfIn[0]; loff[1] = xfIn[1]; loff[2] = xfIn[2];
+        lscale  = xfIn[3];
+        lang[0] = xfIn[4]; lang[1] = xfIn[5]; lang[2] = xfIn[6];
     }
     vec3_t lax[3];
     AnglesToAxis(lang, lax);

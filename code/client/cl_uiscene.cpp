@@ -17,6 +17,7 @@
  */
 
 #include "cl_ui.h"
+void CL_CompositeAttachOnTagXf(refEntity_t &base, qhandle_t attachModel, const char *attachTag, const float *xfIn);   // cl_invrender.cpp
 #include "../qcommon/tiki.h"
 
 // bumped after every renderer restart (vid_restart): the cached model handles of every Scene3D are stale then and must be registered again
@@ -28,7 +29,36 @@ void       UI_SceneRendererRestart(void)
 
 class UIScene3D : public UIWidget
 {
+    struct animPlay_t {
+        str   alts;
+        float t0;
+        bool  loop;
+        float rate;
+    };
+    // ---- staged actors (actorstage / actorcycle / actorprop): a model stands at a fixed spot and loops animation cycles; no walking ----
+    struct stageCycle_t {
+        float weight, tmin, tmax;
+        str   seq;             // comma list: 'a|alt' once, 'b|alt~' looped for the rest of the cycle
+    };
+    struct stageProp_t {
+        str       model, tag, when;   // when: attached only while the playing animation alias contains this text ('' = always)
+        float     xf[7];
+        qhandle_t handle;
+    };
+    struct stage_t {
+        float pos[2], yaw;
+        str   idle;
+        float idleMin, idleMax;
+        Container<stageCycle_t *> cycles;
+        Container<stageProp_t *>  props;
+        int   state, tok, cyc;
+        float clock, timer, total, cycT0, seqT0;
+        unsigned rng;
+        animPlay_t cur, prev;
+        float blendT0;
+    };
     struct sceneModel_t {
+        stage_t  *stage;
         str       name;
         qhandle_t handle;
         vec3_t    origin;
@@ -48,7 +78,14 @@ class UIScene3D : public UIWidget
         int    stop;                   // optional: the hotspot is live only while cvar ui_atcStop == stop (-1 = always)
         str    widget;                 // optional: name of a sibling Button that is re-framed to this hotspot every frame (mouse / keyboard / pad focus all work on it)
         SafePtr<UIWidget> w;
+        float  glow;                   // 0..1 hover light, faded smoothly (~0.2 s) toward 1 while hovered / focused
         float  box[4];                 // optional hit box (scenehotbox): centre offset x y and half size w h, in pixels at 1080 px screen height (scaled with the screen); box[2] == 0 = the square of `radius`
+    };
+    struct sceneLabel_t {
+        str               widget;            // a sibling Label re-framed every frame to the projected rectangle of a 3D board (the chalkboard under the MEDAL OF HONOR sign)
+        vec3_t            c;
+        float             hw, hh;           // half extents: hw along world Y, hh along world Z
+        SafePtr<UIWidget> w;
     };
     struct sceneLight_t {
         vec3_t org;
@@ -64,6 +101,8 @@ class UIScene3D : public UIWidget
     Container<sceneModel_t *> m_models;
     Container<sceneHot_t *>   m_hots;
     Container<sceneLight_t *> m_lights;
+    Container<sceneLabel_t *> m_labels;
+    int                       m_glowLast;
     int                       m_drawn;
     cam_t                     m_cur, m_from, m_to, m_home, m_ret;
     bool                      m_retSet;
@@ -104,16 +143,11 @@ class UIScene3D : public UIWidget
     float  m_seqT0, m_seqTotal;
     float  m_stClock0;          // director clock when the station sequence began (the stay is measured from here)
     unsigned m_rng;
-    struct animPlay_t {
-        str   alts;
-        float t0;
-        bool  loop;
-        float rate;
-    };
     animPlay_t m_aCur, m_aPrev;
     float      m_blendT0;
     int        m_dirLast;
     int        m_dirFrame;
+    int        m_stageLast;
 
 public:
     CLASS_PROTOTYPE(UIScene3D);
@@ -130,6 +164,12 @@ public:
     void ActorHub(Event *ev);
     void ActorStation(Event *ev);
     void ActorBreak(Event *ev);
+    void ActorStage(Event *ev);
+    void ActorCycle(Event *ev);
+    void ActorProp(Event *ev);
+    void StageUpdate(sceneModel_t *m, dtiki_t *tiki, float dt);
+    void StageSetAnim(stage_t *s, const str& alts, bool loop, float rate);
+    float StageRand(stage_t *s, float a, float b);
     float DirRand(float a, float b);
     void  DirSetAnim(const str& alts, bool loop, float rate);
     void  DirPickNext();
@@ -140,6 +180,7 @@ public:
     static UIScene3D *s_rootScene;
     static int        s_rootDrawn;
     void SceneHot(Event *ev);
+    void SceneLabel(Event *ev);
     void SceneHotBox(Event *ev);
     void SceneLight(Event *ev);
     void OnClick(Event *ev);
@@ -237,6 +278,33 @@ Event EV_Scene_ActorBreak
     "Scene3D: the pause between stations (idle / look-around alternatives, stay seconds)."
 );
 
+Event EV_Scene_ActorStage
+(
+    "actorstage",
+    EV_DEFAULT,
+    "sfffsff",
+    "model x y yaw idle idlemin idlemax",
+    "Scene3D: a staged actor - the named model stands at x y facing yaw and loops animation cycles in place (the idle alternatives between them, idlemin..idlemax seconds)."
+);
+
+Event EV_Scene_ActorCycle
+(
+    "actorcycle",
+    EV_DEFAULT,
+    "sfffs",
+    "model weight tmin tmax seq",
+    "Scene3D: a cycle of a staged actor: picked by weight, lasts tmin..tmax seconds; seq = comma list of animations (a|alt once, b|alt~ looped for the rest)."
+);
+
+Event EV_Scene_ActorProp
+(
+    "actorprop",
+    EV_DEFAULT,
+    "ssssfffffff",
+    "model propmodel tag when offx offy offz scale pitch yaw roll",
+    "Scene3D: a prop model held on a bone tag of a staged actor, shown only while the playing animation alias contains `when` (empty = always)."
+);
+
 Event EV_Scene_Hot
 (
     "scenehot",
@@ -245,6 +313,15 @@ Event EV_Scene_Hot
     "name x y z radius command [caption] [focuswidget] [stop]",
     "Scene3D: a clickable sphere in the scene; hover sets ui_scene_hot (1-based index, 0 = none) and prints the caption beside the object, a click stuffs the command."
 );
+Event EV_Scene_Label
+(
+    "scenelabel",
+    EV_DEFAULT,
+    "sfffff",
+    "widget x y z halfw halfh",
+    "Scene3D: a Label widget that is re-framed every frame (while the camera rests at home) to the projected rectangle of a 3D board centred at x y z, half width along world Y, half height along world Z - the chalk caption of the hovered hotspot."
+);
+
 Event EV_Scene_HotBox
 (
     "scenehotbox",
@@ -269,6 +346,7 @@ CLASS_DECLARATION(UIWidget, UIScene3D, NULL) {
     {&EV_Scene_Fly,    &UIScene3D::SceneFly  },
     {&EV_Scene_Hot,    &UIScene3D::SceneHot  },
     {&EV_Scene_HotBox, &UIScene3D::SceneHotBox},
+    {&EV_Scene_Label,  &UIScene3D::SceneLabel},
     {&EV_Scene_Return, &UIScene3D::SceneReturn},
     {&EV_Scene_Back,   &UIScene3D::SceneBack},
     {&EV_Scene_Root,   &UIScene3D::SceneRoot},
@@ -276,6 +354,9 @@ CLASS_DECLARATION(UIWidget, UIScene3D, NULL) {
     {&EV_Scene_ActorHub, &UIScene3D::ActorHub},
     {&EV_Scene_ActorStation, &UIScene3D::ActorStation},
     {&EV_Scene_ActorBreak, &UIScene3D::ActorBreak},
+    {&EV_Scene_ActorStage, &UIScene3D::ActorStage},
+    {&EV_Scene_ActorCycle, &UIScene3D::ActorCycle},
+    {&EV_Scene_ActorProp,  &UIScene3D::ActorProp},
     {&EV_Scene_Light,  &UIScene3D::SceneLight},
     {&W_LeftMouseDown, &UIScene3D::OnClick   },
     {NULL,             NULL                  }
@@ -297,6 +378,8 @@ UIScene3D::UIScene3D()
     m_hover    = -1;
     m_drawn    = 0;
     m_dirOn    = false;
+    m_stageLast = 0;
+    m_glowLast  = 0;
     m_rendEpoch = s_sceneRendererEpoch;
     m_speed    = 60.0f;
     m_turnRate = 150.0f;
@@ -331,6 +414,7 @@ void UIScene3D::SceneModel(Event *ev)
     m->group        = ev->NumArgs() >= 8 ? ev->GetString(8) : "";
     m->off          = false;
     m->animStart    = 0;
+    m->stage        = NULL;
     m_models.AddObject(m);
 }
 
@@ -417,6 +501,9 @@ bool UIScene3D::TryEscape()
 // ESC from cl_ui.cpp: true when the root attic scene consumed it (shelf -> home)
 bool UI_SceneEscape(void)
 {
+    if (Cvar_VariableIntegerValue("ui_atticActive") != 1) {
+        return false;          // in a game the flat main menu is shown: ESC pops it as usual
+    }
     return UIScene3D::s_rootScene && UIScene3D::s_rootScene->TryEscape();
 }
 
@@ -710,6 +797,193 @@ void UIScene3D::DirUpdate(dtiki_t *tiki, float dt)
     }
 }
 
+void UIScene3D::ActorStage(Event *ev)
+{
+    const str nm = ev->GetString(1);
+    for (int i = 1; i <= m_models.NumObjects(); i++) {
+        sceneModel_t *m = m_models.ObjectAt(i);
+        if (str::icmp(m->name, nm)) {
+            continue;
+        }
+        if (!m->stage) {
+            m->stage         = new stage_t;
+            m->stage->state  = 0;
+            m->stage->tok    = 0;
+            m->stage->cyc    = -1;
+            m->stage->clock  = m->stage->timer = m->stage->total = m->stage->cycT0 = m->stage->seqT0 = 0.0f;
+            m->stage->blendT0 = -10.0f;
+            m->stage->rng    = 2463534242u ^ (unsigned)(i * 40503);
+            m->stage->cur.t0 = m->stage->prev.t0 = 0.0f;
+            m->stage->cur.loop = m->stage->prev.loop = true;
+            m->stage->cur.rate = m->stage->prev.rate = 1.0f;
+        }
+        m->stage->pos[0]  = ev->GetFloat(2);
+        m->stage->pos[1]  = ev->GetFloat(3);
+        m->stage->yaw     = ev->GetFloat(4);
+        m->stage->idle    = ev->GetString(5);
+        m->stage->idleMin = ev->GetFloat(6);
+        m->stage->idleMax = ev->GetFloat(7);
+        return;
+    }
+}
+
+void UIScene3D::ActorCycle(Event *ev)
+{
+    const str nm = ev->GetString(1);
+    for (int i = 1; i <= m_models.NumObjects(); i++) {
+        sceneModel_t *m = m_models.ObjectAt(i);
+        if (!m->stage || str::icmp(m->name, nm)) {
+            continue;
+        }
+        stageCycle_t *c = new stageCycle_t;
+        c->weight = ev->GetFloat(2);
+        c->tmin   = ev->GetFloat(3);
+        c->tmax   = ev->GetFloat(4);
+        c->seq    = ev->GetString(5);
+        m->stage->cycles.AddObject(c);
+        return;
+    }
+}
+
+void UIScene3D::ActorProp(Event *ev)
+{
+    const str nm = ev->GetString(1);
+    for (int i = 1; i <= m_models.NumObjects(); i++) {
+        sceneModel_t *m = m_models.ObjectAt(i);
+        if (!m->stage || str::icmp(m->name, nm)) {
+            continue;
+        }
+        stageProp_t *p = new stageProp_t;
+        p->model  = ev->GetString(2);
+        p->tag    = ev->GetString(3);
+        p->when   = ev->GetString(4);
+        for (int k = 0; k < 7; k++) {
+            p->xf[k] = ev->GetFloat(5 + k);
+        }
+        p->handle = 0;
+        m->stage->props.AddObject(p);
+        return;
+    }
+}
+
+float UIScene3D::StageRand(stage_t *s, float a, float b)
+{
+    s->rng ^= s->rng << 13;
+    s->rng ^= s->rng >> 17;
+    s->rng ^= s->rng << 5;
+    return a + (b - a) * ((s->rng & 0xFFFFFF) / 16777215.0f);
+}
+
+void UIScene3D::StageSetAnim(stage_t *s, const str& alts, bool loop, float rate)
+{
+    if (!s->cur.alts.length() || str::cmp(s->cur.alts, alts) || s->cur.loop != loop) {
+        s->prev        = s->cur;
+        s->blendT0     = s->clock;
+        s->cur.alts    = alts;
+        s->cur.t0      = s->clock;
+        s->cur.loop    = loop;
+        s->cur.rate    = rate;
+    }
+}
+
+// one staged actor: idle -> (weighted) cycle -> idle ...; frozen when dt == 0 (camera away from home)
+void UIScene3D::StageUpdate(sceneModel_t *m, dtiki_t *tiki, float dt)
+{
+    stage_t *s = m->stage;
+    s->clock += dt;
+    if (s->state == 0) {
+        StageSetAnim(s, s->idle, true, 1.0f);
+        s->timer = StageRand(s, s->idleMin, s->idleMax);
+        s->state = 1;
+        return;
+    }
+    if (dt <= 0.0f) {
+        return;
+    }
+    if (s->state == 1) {
+        s->timer -= dt;
+        if (s->timer > 0.0f) {
+            return;
+        }
+        const int nc = s->cycles.NumObjects();
+        if (nc <= 0) {
+            s->timer = 3.0f;
+            return;
+        }
+        float tot = 0.0f;
+        for (int i = 1; i <= nc; i++) {
+            tot += s->cycles.ObjectAt(i)->weight;
+        }
+        float r = StageRand(s, 0.0f, tot);
+        int   pick = nc - 1;
+        for (int i = 1; i <= nc; i++) {
+            r -= s->cycles.ObjectAt(i)->weight;
+            if (r <= 0.0f) {
+                pick = i - 1;
+                break;
+            }
+        }
+        stageCycle_t *c = s->cycles.ObjectAt(pick + 1);
+        s->cyc    = pick;
+        s->tok    = 0;
+        s->total  = StageRand(s, c->tmin, c->tmax);
+        s->cycT0  = s->clock;
+        s->timer  = 0.0f;
+        s->state  = 2;
+        return;
+    }
+    // state 2: the cycle's animation sequence
+    stageCycle_t *c = s->cycles.ObjectAt(s->cyc + 1);
+    const char   *p = c->seq.c_str();
+    for (int k = 0; k < s->tok && *p; k++) {
+        const char *e = strchr(p, ',');
+        if (!e) {
+            p += strlen(p);
+            break;
+        }
+        p = e + 1;
+    }
+    if (!*p) {
+        StageSetAnim(s, s->idle, true, 1.0f);
+        s->timer = StageRand(s, s->idleMin, s->idleMax);
+        s->state = 1;
+        return;
+    }
+    const char *e = strchr(p, ',');
+    char        tok[96];
+    size_t      n = e ? (size_t)(e - p) : strlen(p);
+    if (n >= sizeof(tok)) {
+        n = sizeof(tok) - 1;
+    }
+    memcpy(tok, p, n);
+    tok[n] = 0;
+    bool loop = false;
+    if (n > 0 && tok[n - 1] == '~') {
+        loop       = true;
+        tok[n - 1] = 0;
+    }
+    const str alts(tok);
+    if (s->timer == 0.0f) {
+        StageSetAnim(s, alts, loop, 1.0f);
+        s->timer = 0.001f;
+        s->seqT0 = s->clock;
+    }
+    const int   idx    = DirResolve(tiki, alts);
+    const float len    = idx >= 0 ? TIKI_Anim_Time(tiki, idx) : 1.0f;
+    const float run    = s->clock - s->seqT0;
+    const float stayed = s->clock - s->cycT0;
+    bool        done;
+    if (loop) {
+        done = stayed >= s->total && run >= 1.5f;
+    } else {
+        done = run >= len - 0.05f || (stayed >= s->total && run >= 2.0f);
+    }
+    if (done) {
+        s->tok++;
+        s->timer = 0.0f;
+    }
+}
+
 void UIScene3D::SceneHot(Event *ev)
 {
     sceneHot_t *h = new sceneHot_t;
@@ -723,7 +997,20 @@ void UIScene3D::SceneHot(Event *ev)
     h->widget     = ev->NumArgs() >= 8 ? ev->GetString(8) : "";
     h->stop       = ev->NumArgs() >= 9 ? (int)ev->GetFloat(9) : -1;
     h->box[0] = h->box[1] = h->box[2] = h->box[3] = 0.0f;
+    h->glow   = 0.0f;
     m_hots.AddObject(h);
+}
+
+void UIScene3D::SceneLabel(Event *ev)
+{
+    sceneLabel_t *l = new sceneLabel_t;
+    l->widget = ev->GetString(1);
+    l->c[0]   = ev->GetFloat(2);
+    l->c[1]   = ev->GetFloat(3);
+    l->c[2]   = ev->GetFloat(4);
+    l->hw     = ev->GetFloat(5);
+    l->hh     = ev->GetFloat(6);
+    m_labels.AddObject(l);
 }
 
 void UIScene3D::SceneHotBox(Event *ev)
@@ -891,10 +1178,30 @@ void UIScene3D::Draw(void)
         // the renderer was restarted under us (vid_restart): every cached handle is stale - register all models again
         m_rendEpoch = s_sceneRendererEpoch;
         for (int i = 1; i <= m_models.NumObjects(); i++) {
-            m_models.ObjectAt(i)->handle = 0;
+            sceneModel_t *mm = m_models.ObjectAt(i);
+            mm->handle = 0;
+            if (mm->stage) {
+                for (int k = 1; k <= mm->stage->props.NumObjects(); k++) {
+                    mm->stage->props.ObjectAt(k)->handle = 0;
+                }
+            }
         }
     }
     const bool dbg = Cvar_VariableIntegerValue("ui_scene_debug") != 0;
+    const char *lifeCv0 = Cvar_VariableString("ui_atticActorLife");      // unset = on; 0 = the actors stand in a static idle
+    const bool  lifeOn  = !lifeCv0[0] || atoi(lifeCv0) != 0;
+    float       stageDt = 0.0f;
+    {
+        // staged actors advance only while the camera rests at the home view (frozen during a fly / at the shelf)
+        const bool atHome0 = !m_flying && VectorCompare(m_cur.org, m_home.org) && m_cur.fov == m_home.fov;
+        if (m_stageLast && atHome0) {
+            stageDt = (uid.time - m_stageLast) * 0.001f / UIWidget::CamSlow();
+            if (stageDt > 0.1f) {
+                stageDt = 0.1f;
+            }
+        }
+        m_stageLast = uid.time;
+    }
     for (int i = 1; i <= m_models.NumObjects(); i++) {
         sceneModel_t *m = m_models.ObjectAt(i);
         if (m->off) {
@@ -911,6 +1218,10 @@ void UIScene3D::Draw(void)
             }
             if (!m->handle) {
                 m->handle = -1;
+            } else if (Cvar_VariableIntegerValue("ui_atticStageDbg")) {
+                vec3_t bmn, bmx;
+                re.ModelBounds(m->handle, bmn, bmx);
+                Com_Printf("^~^~^ MODELBOUNDS %s mins %.1f %.1f %.1f maxs %.1f %.1f %.1f\n", m->name.c_str(), bmn[0], bmn[1], bmn[2], bmx[0], bmx[1], bmx[2]);
             }
         }
         if (m->handle <= 0) {
@@ -928,6 +1239,15 @@ void UIScene3D::Draw(void)
         vec3_t a = {0, m->yaw, 0};
         const char *lifeCv = Cvar_VariableString("ui_atticActorLife");      // unset = on; 0 = the old static idle
         const bool directed = m_dirOn && m->group.length() && (!lifeCv[0] || atoi(lifeCv) != 0);
+        const bool staged   = m->stage != NULL;
+        if (staged) {
+            if (lifeOn) {
+                StageUpdate(m, ent.tiki, stageDt);
+            }
+            ent.origin[0] = m->stage->pos[0];
+            ent.origin[1] = m->stage->pos[1];
+            a[1]          = m->stage->yaw;
+        }
         if (directed) {
             // the director advances only while the camera rests at the home view (frozen during a fly / at the shelf; a covered scene is not drawn at all)
             const bool atHome = !m_flying && VectorCompare(m_cur.org, m_home.org) && m_cur.fov == m_home.fov;
@@ -949,7 +1269,29 @@ void UIScene3D::Draw(void)
         }
         AnglesToAxis(a, ent.axis);
         ent.shaderRGBA[0] = ent.shaderRGBA[1] = ent.shaderRGBA[2] = ent.shaderRGBA[3] = 255;
-        if (m->anim.length() && directed) {
+        if (m->anim.length() && staged && lifeOn) {
+            stage_t *st = m->stage;
+            ent.shaderRGBA[0] = ent.shaderRGBA[1] = ent.shaderRGBA[2] = 150;
+            const int idxC = DirResolve(ent.tiki, st->cur.alts);
+            const int idxI = DirResolve(ent.tiki, st->idle);
+            const int idx0 = idxC >= 0 ? idxC : idxI;
+            float     w    = (st->clock - st->blendT0) / 0.30f;
+            w              = w < 0.0f ? 0.0f : (w > 1.0f ? 1.0f : w);
+            if (idx0 >= 0) {
+                ent.frameInfo[0].index  = idx0;
+                ent.frameInfo[0].time   = DirAnimTime(ent.tiki, idxC >= 0 ? st->cur.alts : st->idle, st->clock, st->cur, NULL);
+                ent.frameInfo[0].weight = w < 1.0f && st->prev.alts.length() ? w : 1.0f;
+                ent.actionWeight        = 1.0f;
+                if (w < 1.0f && st->prev.alts.length()) {
+                    const int idxP = DirResolve(ent.tiki, st->prev.alts);
+                    if (idxP >= 0) {
+                        ent.frameInfo[1].index  = idxP;
+                        ent.frameInfo[1].time   = DirAnimTime(ent.tiki, st->prev.alts, st->clock, st->prev, NULL);
+                        ent.frameInfo[1].weight = 1.0f - w;
+                    }
+                }
+            }
+        } else if (m->anim.length() && directed) {
             ent.shaderRGBA[0] = ent.shaderRGBA[1] = ent.shaderRGBA[2] = 150;
             const int idxC = DirResolve(ent.tiki, m_aCur.alts);
             const int idxI = DirResolve(ent.tiki, m_idleAlts);
@@ -1005,6 +1347,44 @@ void UIScene3D::Draw(void)
         }
         if (dbg && m->anim.length()) Com_Printf("^~^~^ SCENE3D actor add idx tiki=%p surfs=%d\n", (void *)ent.tiki, ent.tiki->num_surfaces);
         re.AddRefEntityToScene(&ent, ENTITYNUM_NONE);
+        if (m->stage && lifeOn) {
+            stage_t *st = m->stage;
+            for (int k = 1; k <= st->props.NumObjects(); k++) {
+                stageProp_t *pr = st->props.ObjectAt(k);
+                if (pr->when.length() && !strstr(st->cur.alts.c_str(), pr->when.c_str())) {
+                    continue;
+                }
+                if (!pr->handle) {
+                    pr->handle = re.RegisterModel(pr->model.c_str());
+                    if (!pr->handle) {
+                        pr->handle = -1;
+                    }
+                }
+                if (pr->handle > 0) {
+                    CL_CompositeAttachOnTagXf(ent, pr->handle, pr->tag.c_str(), pr->xf);
+                }
+            }
+            if (Cvar_VariableIntegerValue("ui_atticStageDbg")) {
+                static int lastDbg = 0;
+                if (uid.time - lastDbg > 500) {
+                    lastDbg = uid.time;
+                    static const char *tags[] = {"Bip01 L Hand", "Bip01 R Hand", "tag_weapon_left", "tag_weapon_right", "Bip01 L Finger1", "Bip01 R Finger1", "Bip01 Head"};
+                    for (int q = 0; q < 7; q++) {
+                        const int tn = TIKI_Tag_NameToNum(ent.tiki, tags[q]);
+                        if (tn < 0) {
+                            Com_Printf("^~^~^ STAGEDBG %s tag %s MISSING\n", m->name.c_str(), tags[q]);
+                            continue;
+                        }
+                        re.ForceUpdatePose(&ent);
+                        orientation_t o = re.TIKI_Orientation(&ent, tn);
+                        vec3_t        wv;
+                        MatrixTransformVector(o.origin, ent.axis, wv);
+                        VectorAdd(wv, ent.origin, wv);
+                        Com_Printf("^~^~^ STAGEDBG %s %s %.1f %.1f %.1f anim=%s\n", m->name.c_str(), tags[q], wv[0], wv[1], wv[2], st->cur.alts.c_str());
+                    }
+                }
+            }
+        }
         if (dbg && m->anim.length()) Com_Printf("^~^~^ SCENE3D actor added\n");
     }
     if (dbg) Com_Printf("^~^~^ SCENE3D render begin\n");
@@ -1076,6 +1456,35 @@ void UIScene3D::Draw(void)
             hover = i - 1;
         }
     }
+    {
+        // chalk captions: frame each label to its 3D board while the camera rests at home; off-screen otherwise
+        const bool atHomeL = !m_flying && VectorCompare(m_cur.org, m_home.org) && m_cur.fov == m_home.fov;
+        for (int i = 1; i <= m_labels.NumObjects(); i++) {
+            sceneLabel_t *l = m_labels.ObjectAt(i);
+            if (!l->w && m_parent) {
+                l->w = m_parent->FindWidgetByName(l->widget.c_str());
+            }
+            if (!l->w) {
+                continue;
+            }
+            float minx = 1e9f, miny = 1e9f, maxx = -1e9f, maxy = -1e9f;
+            bool  ok = atHomeL;
+            for (int k = 0; k < 4 && ok; k++) {
+                vec3_t p = {l->c[0], l->c[1] + ((k & 1) ? l->hw : -l->hw), l->c[2] + ((k & 2) ? l->hh : -l->hh)};
+                float  sx, sy, depth;
+                Project(p, rd.vieworg, rd.viewaxis, W, H, fovx, fovy, &sx, &sy, &depth);
+                if (depth < 1.0f) {
+                    ok = false;
+                    break;
+                }
+                minx = sx < minx ? sx : minx;
+                maxx = sx > maxx ? sx : maxx;
+                miny = sy < miny ? sy : miny;
+                maxy = sy > maxy ? sy : maxy;
+            }
+            l->w->setFrame(UIRect2D(ok ? minx - m_screenframe.pos.x : -9999.0f, ok ? miny - m_screenframe.pos.y : -9999.0f, ok ? maxx - minx : 1.0f, ok ? maxy - miny : 1.0f));
+        }
+    }
     m_snap = false;
     bool anyBound = false;
     for (int i = 1; i <= m_hots.NumObjects(); i++) {
@@ -1095,32 +1504,47 @@ void UIScene3D::Draw(void)
     }
     (void)cvarDriven;
     set2D();
-    if (m_hover >= 0 && m_hover < m_hots.NumObjects() && !m_flying) {
-        static UIReggedMaterial *s_ring = NULL;
-        if (!s_ring) {
-            s_ring = uWinMan.RegisterShader("hzm_hot_ring");
+    // hover light: the hovered / focused hotspot brightens as if its lamp were turned up - an additive warm glow over the object / area, faded smoothly (~0.2 s) in and out.
+    // (The room is baked, so a dynamic light cannot light it; the glow is the 2D stand-in.)  No ring, no caption: the name goes on the chalkboard (scenelabel).
+    {
+        static UIReggedMaterial *s_glow = NULL;
+        if (!s_glow) {
+            s_glow = uWinMan.RegisterShader("hzm_hot_glow");
         }
-        sceneHot_t *h = m_hots.ObjectAt(m_hover + 1);
-        float       sx, sy, depth;
-        Project(h->pos, rd.vieworg, rd.viewaxis, W, H, fovx, fovy, &sx, &sy, &depth);
-        if (s_ring && depth > 1.0f) {
-            const float rpx   = h->radius / depth * (H * 0.5f) / tan(fovy * M_PI / 360.0) * (1.12f + 0.04f * sin(uid.time * 0.006f));
-            vec4_t      col   = {0.45f, 0.82f, 1.0f, 0.85f};     // the 2D path takes the vertex colour as B,G,R,A: this reads amber
-            uii.Rend_SetColor(col);
-            uii.Rend_DrawPicStretched(sx - m_screenframe.pos.x - rpx, sy - m_screenframe.pos.y - rpx, rpx * 2.0f, rpx * 2.0f, 0, 0, 1, 1, s_ring->GetMaterial());   // 2D coords are relative to the widget origin (pillarbox offset in the centred layout)
+        float dtg = 0.0f;
+        if (m_glowLast) {
+            dtg = (uid.time - m_glowLast) * 0.001f / UIWidget::CamSlow();
+            if (dtg > 0.1f) {
+                dtg = 0.1f;
+            }
         }
-    }
-    if (m_hover >= 0 && m_hover < m_hots.NumObjects() && !m_flying && m_font) {
-        sceneHot_t *h = m_hots.ObjectAt(m_hover + 1);
-        if (h->caption.length()) {
+        m_glowLast = uid.time;
+        const float stepg = dtg / 0.2f;
+        for (int i = 1; i <= m_hots.NumObjects(); i++) {
+            sceneHot_t *h      = m_hots.ObjectAt(i);
+            const float target = (i - 1 == m_hover && !m_flying) ? 1.0f : 0.0f;
+            h->glow += (target > h->glow) ? (target - h->glow < stepg ? target - h->glow : stepg) : -(h->glow - target < stepg ? h->glow - target : stepg);
+            if (h->glow < 0.004f || !s_glow) {
+                continue;
+            }
             float sx, sy, depth;
             Project(h->pos, rd.vieworg, rd.viewaxis, W, H, fovx, fovy, &sx, &sy, &depth);
-            if (depth > 1.0f) {
-                const float sc[2] = {H / 480.0f, H / 480.0f};
-                const int   tw    = m_font->getWidth(h->caption.c_str(), -1);
-                const float rpx   = h->radius / depth * (H * 0.5f) / tan(fovy * M_PI / 360.0);
-                m_font->Print((sx - m_screenframe.pos.x - tw * sc[0] * 0.5f) / sc[0], (sy - m_screenframe.pos.y + rpx * 0.75f) / sc[1], h->caption.c_str(), (size_t)-1, sc);     // Print takes virtual units when a scale is given
+            if (depth < 1.0f) {
+                continue;
             }
+            const float rpx = h->radius / depth * (H * 0.5f) / tan(fovy * M_PI / 360.0);
+            float       cx = sx, cy = sy, hx = rpx * 1.9f, hy = rpx * 1.9f;
+            if (h->box[2] > 0.0f) {
+                const float kk = H / 1080.0f;
+                cx += h->box[0] * kk;
+                cy += h->box[1] * kk;
+                hx = h->box[2] * kk * 1.7f;
+                hy = h->box[3] * kk * 1.45f;
+            }
+            const float I = 0.62f * h->glow * h->glow * (3.0f - 2.0f * h->glow);     // smoothstep
+            vec4_t      col = {0.42f * I, 0.74f * I, 1.0f * I, 1.0f};                  // the 2D path takes the vertex colour as B,G,R,A: warm lamp light
+            uii.Rend_SetColor(col);
+            uii.Rend_DrawPicStretched(cx - m_screenframe.pos.x - hx, cy - m_screenframe.pos.y - hy, hx * 2.0f, hy * 2.0f, 0, 0, 1, 1, s_glow->GetMaterial());
         }
     }
 }
