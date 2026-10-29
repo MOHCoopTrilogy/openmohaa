@@ -642,7 +642,38 @@ void CL_JoystickMove( usercmd_t *cmd ) {
 	if ( in_buttons[13].active && joy_adsScale && joy_adsScale->value > 0.0f ) {
 		lookScale *= joy_adsScale->value;
 	}
+	// [v1.10.47] aim friction: cgame (CG_PadAimAssist) says how near the reticle is to a live enemy; the stick turns slower over him.
+	// Eased in and out (~12/s) so crossing a target never jerks. joy_aimAssist 0 = off; strength 0.40 from the hip, 0.55 aiming down sights.
+	{
+		static cvar_t *assist = NULL, *tgt = NULL, *strH = NULL, *strA = NULL;
+		static float   ease;
+		float          want = 0.0f, k;
+		if ( !assist ) {
+			assist = Cvar_Get( "joy_aimAssist", "1", CVAR_ARCHIVE );
+			tgt    = Cvar_Get( "cl_padAimTarget", "0", 0 );
+			strH   = Cvar_Get( "joy_aimFriction", "0.40", CVAR_ARCHIVE );
+			strA   = Cvar_Get( "joy_aimFrictionAds", "0.55", CVAR_ARCHIVE );
+		}
+		if ( assist->integer ) {
+			want = tgt->value;
+		}
+		k = cls.frametime * 0.012f;
+		if ( k > 1.0f ) k = 1.0f;
+		ease += ( want - ease ) * k;
+		{
+			float st = in_buttons[13].active ? strA->value : strH->value;
+			if ( st < 0.0f ) st = 0.0f;
+			if ( st > 0.8f ) st = 0.8f;
+			lookScale *= 1.0f - st * ease;
+		}
+	}
 	lookScale *= accelMul;
+	// no turn boost while the reticle is on someone - the boost is for swinging round, not for settling on a target
+	if ( accelMul > 1.0f ) {
+		static cvar_t *tgt2 = NULL;
+		if ( !tgt2 ) tgt2 = Cvar_Get( "cl_padAimTarget", "0", 0 );
+		if ( tgt2->value > 0.3f ) lookScale /= accelMul;
+	}
 	float yaw     = j_yaw->value     * CL_PadLookCurve( cl.joystickAxis[j_yaw_axis->integer] )   * lookScale * ( joy_lookX ? joy_lookX->value : 1.0f );
 	float right   = j_side->value    * cl.joystickAxis[j_side_axis->integer];
 	float forward = j_forward->value * cl.joystickAxis[j_forward_axis->integer];

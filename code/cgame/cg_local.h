@@ -738,6 +738,7 @@ const adsGunTune_t *CG_FindAdsTune(const char *wpn);
     // [v1.10.46] weapon / ability wheel (cg_consolecmds.c)
     qboolean CG_WheelCaptureKey(int key, qboolean down);
     void     CG_DrawWheel(void);
+    void     CG_PadAimAssist(void); // [v1.10.47] controller aim friction
     void     CG_WheelInv_f(void);
     qboolean CG_LootArtLookup(const char *name, const char **tex, const char **shortName, float *vw, float *vh);
     void     CG_WheelDown_f(void);

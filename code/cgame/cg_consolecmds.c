@@ -1240,6 +1240,72 @@ static void CG_WheelTextFit(fontheader_t *font, const char *t, float px, float p
     CG_WheelText(font, t, px, py, scale, rgba);
 }
 
+/*
+===================
+[v1.10.47] CONTROLLER AIM FRICTION (aim assist "slowdown", the console-shooter standard)
+user: "refine this to aim and play smoother with whatever controller is detected. I feel like modern games feel so much better".
+Each frame: the live enemy soldier (AI actor, EF_AXIS, not dead, not surrendering) nearest the reticle, in clear view, within reach.
+How close the reticle is to him (1 = dead on, 0 = outside his friction zone) goes to the client as cl_padAimTarget, and the STICK's
+turn speed is scaled down by it there (cl_input.cpp CL_JoystickMove, joy_aimAssist). The mouse is never touched. The zone is the
+body's own width plus a margin that grows a little with range, so a far target is not harder to settle on than a near one.
+No pull, no snap: the reticle only gets heavier over a target, so it is never moved for the player.
+===================
+*/
+void CG_PadAimAssist(void)
+{
+    static float s_last = -1.0f;
+    float        best   = 0.0f;
+    int          i;
+
+    if (cg.snap && cgi.Cvar_Get("joy_aimAssist", "1", 0)->integer) {
+        const float *org = cg.refdef.vieworg;
+        for (i = 0; i < cg.snap->numEntities; i++) {
+            const entityState_t *es = &cg.snap->entities[i];
+            const centity_t     *ce;
+            vec3_t               d, pt;
+            float                dist, along, perp, zone, t;
+            int                  k;
+            if ((es->eType != ET_MODELANIM && es->eType != ET_MODELANIM_SKEL) || !(es->eFlags & EF_AXIS) || (es->eFlags & EF_DEAD)
+                || (es->renderfx & RF_LIGHTSTYLE_DLIGHT)) {
+                continue;
+            }
+            ce = &cg_entities[es->number];
+            // three points up the body - pelvis, chest, head - and the one nearest the reticle line
+            for (k = 0; k < 3; k++) {
+                static const float z[3] = {30.0f, 46.0f, 62.0f};
+                VectorCopy(ce->lerpOrigin, pt);
+                pt[2] += z[k];
+                VectorSubtract(pt, org, d);
+                dist = VectorLength(d);
+                if (dist < 48.0f || dist > 4000.0f) {
+                    break;
+                }
+                along = DotProduct(d, cg.refdef.viewaxis[0]);
+                if (along <= 0.0f) {
+                    break;
+                }
+                perp = sqrtf(dist * dist - along * along > 0.0f ? dist * dist - along * along : 0.0f);
+                zone = 22.0f + dist * 0.012f;
+                if (perp >= zone) {
+                    continue;
+                }
+                t = 1.0f - perp / zone;
+                if (t > best) {
+                    trace_t tr;
+                    CG_Trace(&tr, org, vec3_origin, vec3_origin, pt, cg.snap->ps.clientNum, MASK_SOLID, qfalse, qfalse, "aimassist");
+                    if (tr.fraction > 0.98f) {
+                        best = t;
+                    }
+                }
+            }
+        }
+    }
+    if (fabsf(best - s_last) > 0.04f || (best == 0.0f && s_last != 0.0f)) {
+        s_last = best;
+        cgi.Cvar_Set("cl_padAimTarget", va("%.2f", best));
+    }
+}
+
 void CG_DrawWheel(void)
 {
     static fontheader_t *font = NULL, *fontBig = NULL;

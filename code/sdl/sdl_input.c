@@ -1324,6 +1324,33 @@ static void IN_GamepadUI( void )
 IN_GamepadMove
 ===============
 */
+/*
+[v1.10.47] CONTROLLER FEEL - user: "refine this to aim and play smoother with whatever controller is detected. I feel like modern games
+feel so much better". Two changes to how the sticks are read:
+ - RADIAL dead zone. Each axis used to be dead-zoned on its own (a square), so a small diagonal push lost its small component and
+   snapped to the nearest axis - the "sticky" feel. Now the stick's whole (x, y) vector is measured, the dead zone is taken off its
+   length, and the rest is rescaled so the travel just outside the dead zone starts at zero speed (no jump), direction intact.
+ - The dead zone follows the pad that was detected (joy_autoDeadzone 1, default): DualSense / DualShock sticks are tight (0.06),
+   Xbox 0.10, Switch Pro 0.09, unknown / cheap pads drift so they get 0.15. joy_autoDeadzone 0 uses joy_threshold as before.
+The triggers keep the per-axis ramp.
+*/
+static float IN_PadDeadzone( void )
+{
+	static cvar_t *autoDz = NULL;
+	const char    *t;
+	if ( !autoDz ) {
+		autoDz = Cvar_Get( "joy_autoDeadzone", "1", CVAR_ARCHIVE );
+	}
+	if ( autoDz->integer ) {
+		t = Cvar_VariableString( "in_padType" );
+		if ( !Q_stricmp( t, "ps" ) ) return 0.06f;
+		if ( !Q_stricmp( t, "xbox" ) ) return 0.10f;
+		if ( !Q_stricmp( t, "nintendo" ) ) return 0.09f;
+		if ( t[0] ) return 0.15f;
+	}
+	return in_joystickThreshold->value;
+}
+
 static void IN_GamepadMove( void )
 {
 	int i;
@@ -1426,18 +1453,36 @@ static void IN_GamepadMove( void )
 	}
 
 	// check axes
+	int   rawAxes[SDL_CONTROLLER_AXIS_MAX];
+	float padDz = IN_PadDeadzone();
+	for (i = 0; i < SDL_CONTROLLER_AXIS_MAX; i++)
+		rawAxes[i] = SDL_GameControllerGetAxis(gamepad, SDL_CONTROLLER_AXIS_LEFTX + i);
 	for (i = 0; i < SDL_CONTROLLER_AXIS_MAX; i++)
 	{
-		int axis = SDL_GameControllerGetAxis(gamepad, SDL_CONTROLLER_AXIS_LEFTX + i);
+		int axis = rawAxes[i];
 		int oldAxis = stick_state.oldaaxes[i];
 
-		// Smoothly ramp from dead zone to maximum value
-		float f = ((float)abs(axis) / 32767.0f - in_joystickThreshold->value) / (1.0f - in_joystickThreshold->value);
+		if (i < 4) {
+			// [v1.10.47] radial dead zone over the stick's (x, y) pair - see IN_PadDeadzone
+			float x = rawAxes[i & ~1] / 32767.0f, y = rawAxes[(i & ~1) + 1] / 32767.0f;
+			float m = sqrtf(x * x + y * y);
+			float r = (padDz < 0.9f && m > padDz) ? (m - padDz) / (1.0f - padDz) : 0.0f;
+			float v;
+			if (r > 1.0f)
+				r = 1.0f;
+			v = (m > 0.0001f) ? (axis / 32767.0f) * (r / m) : 0.0f;
+			if (v > 1.0f) v = 1.0f;
+			if (v < -1.0f) v = -1.0f;
+			axis = (int)(32767 * v);
+		} else {
+			// Smoothly ramp from dead zone to maximum value
+			float f = ((float)abs(axis) / 32767.0f - in_joystickThreshold->value) / (1.0f - in_joystickThreshold->value);
 
-		if (f < 0.0f)
-			f = 0.0f;
+			if (f < 0.0f)
+				f = 0.0f;
 
-		axis = (int)(32767 * ((axis < 0) ? -f : f));
+			axis = (int)(32767 * ((axis < 0) ? -f : f));
+		}
 
 		if (i < 2) {
 			in_padStick[i] = axis / 32767.0f;

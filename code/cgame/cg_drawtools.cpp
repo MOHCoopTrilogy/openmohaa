@@ -4273,6 +4273,7 @@ void CG_Draw2D(void)
     CG_UpdateAttackerDisplay();
     CG_DrawVote();
     CG_DrawInstantMessageMenu();
+    CG_PadAimAssist(); // [v1.10.47] controller aim friction (publishes cl_padAimTarget)
     CG_DrawWheel(); // [v1.10.46] weapon / ability wheel
     // HZM coop [user 2026-09-03] "ensure crosshair is off during the full intro and cinematic".
     // All three go together: the brace pip and the hit marker are drawn AT the crosshair's aim
