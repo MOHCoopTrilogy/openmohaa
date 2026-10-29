@@ -927,7 +927,9 @@ static const wheelSlice_t s_wheelAbilities[] = {
     {"Airstrike", "use models/items/binoculars.tik", "textures/hud/loot/coop_act_binoc"},
     {"Paradrop", "use models/weapons/coop_smoke_grenade.tik", "textures/hud/coop_paradrop_icon"},
 };
-static int s_wheelOpen, s_wheelPage, s_wheelPad, s_wheelHover = -1;
+// s_wheelOpen: the button is held; s_wheelShown: held long enough (WHEEL_HOLD_MS) that the wheel is up. A tap never shows it.
+#define WHEEL_HOLD_MS 200
+static int s_wheelOpen, s_wheelShown, s_wheelPage, s_wheelPad, s_wheelHover = -1;
 static int s_wheelT0;
 
 // the carried guns, from the server feed: CS_WEAPONS index, ammo, wheel slot (0..5)
@@ -1125,16 +1127,26 @@ static void CG_WheelOpen(int pad)
             }
         }
     }
-    cgi.Cvar_Set("cg_wheelOpen", "1");
-    cgi.S_StartLocalSound("sound/menu/scroll.wav", qfalse);
+    s_wheelShown = 0; // [v1.10.47] user: "when you tap ... the wheel still appears and then disappears" - it shows only once held
+}
+
+// held past the threshold: show it and take over the mouse / right stick (called every frame from CG_DrawWheel)
+static void CG_WheelMaybeShow(void)
+{
+    if (s_wheelOpen && !s_wheelShown && cg.time - s_wheelT0 >= WHEEL_HOLD_MS) {
+        s_wheelShown = 1;
+        cgi.Cvar_Set("cg_wheelOpen", "1");
+        cgi.S_StartLocalSound("sound/menu/scroll.wav", qfalse);
+    }
 }
 
 // pick = run the hovered slot; otherwise just close (a pad tap falls back to the old Y action)
 static void CG_WheelClose(qboolean pick)
 {
-    int sel   = CG_WheelPick();
-    int quick = (cg.time - s_wheelT0) < 220;
-    s_wheelOpen = 0;
+    int sel   = s_wheelShown ? CG_WheelPick() : -1;
+    int quick = !s_wheelShown;
+    s_wheelOpen  = 0;
+    s_wheelShown = 0;
     cgi.Cvar_Set("cg_wheelOpen", "0");
     if (pick && sel >= 0 && CG_WheelUsable(s_wheelPage, sel)) {
         int g = (s_wheelPage == 0) ? CG_WheelShownGun(sel) : -1;
@@ -1174,7 +1186,7 @@ static qboolean CG_WheelCycle(int dir)
 // called from CG_CheckCaptureKey: while the wheel is open its keys are swallowed so the binds never fire
 qboolean CG_WheelCaptureKey(int key, qboolean down)
 {
-    if (!s_wheelOpen) {
+    if (!s_wheelOpen || !s_wheelShown) {
         return qfalse;
     }
     // mouse wheel / D-pad left-right: the next gun of the hovered slot
@@ -1244,8 +1256,13 @@ void CG_DrawWheel(void)
     if (!s_wheelOpen) {
         return;
     }
+    if (!s_wheelShown) {
+        CG_WheelMaybeShow();
+        return; // shown from the next frame, once the client has reset the pointer
+    }
     if (!cgi.Cvar_Get("cg_wheelOpen", "0", 0)->integer) {
-        s_wheelOpen = 0; // the client closed it (a menu / the console opened)
+        s_wheelOpen  = 0; // the client closed it (a menu / the console opened)
+        s_wheelShown = 0;
         return;
     }
     if (!font) {

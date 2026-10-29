@@ -1122,6 +1122,7 @@ void UIScene3D::Draw(void)
         }
         m_cur.fov = m_from.fov + (m_to.fov - m_from.fov) * e;
         if (u >= 1.0f) {
+            m_cur    = m_to; // land EXACTLY on the target: from + (to - from) * 1 is not always to in floats (the chalk's at-home test)
             m_flying = false;
             m_snap   = true;
         }
@@ -1460,7 +1461,11 @@ void UIScene3D::Draw(void)
     }
     {
         // chalk captions: frame each label to its 3D board while the camera rests at home; off-screen otherwise
-        const bool atHomeL = !m_flying && VectorCompare(m_cur.org, m_home.org) && m_cur.fov == m_home.fov;
+        // [v1.10.47] user: "after you go into any one of the menus the chalk stops working" - the flight back from a door / submenu
+        // lands a hair off home (float error), and an EXACT compare then hid the captions for good. Near enough is home.
+        vec3_t     dHome;
+        VectorSubtract(m_cur.org, m_home.org, dHome);
+        const bool atHomeL = !m_flying && VectorLength(dHome) < 1.0f && fabsf(m_cur.fov - m_home.fov) < 0.5f;
         for (int i = 1; i <= m_labels.NumObjects(); i++) {
             sceneLabel_t *l = m_labels.ObjectAt(i);
             if (!l->w && m_parent) {
