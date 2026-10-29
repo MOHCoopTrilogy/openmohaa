@@ -389,6 +389,7 @@ public:
     void       UseAmmo(int amount, firemode_t mode);
     void       SetAmmoClipSize(Event *ev);
     void       SetAmmoInClip(Event *ev);
+    void       EventCoopUseLoot(Event *ev); // [v1.10.47] script: press-Use pickup for a placed gun
     void       SetShareClip(Event *ev);
     void       SetTagBarrel(const char *tagBarrel); // Added in 2.0
     str        GetTagBarrel() const;                // Added in 2.0

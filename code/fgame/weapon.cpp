@@ -114,6 +114,18 @@ Event EV_Weapon_SetAmmoClipSize
     "Set the amount of rounds a clip of the weapon holds",
     EV_NORMAL
 );
+// [v1.10.47] user: "for the weapons that you spawned in the storage room, can you ensure they are press F to pickup so people dont
+// accidentally grab all of them". Makes a placed gun a USE-TO-LOOT gun, exactly like an enemy's dropped one (tap Use = take it,
+// hold = its ammo; walking over it does nothing). Guns with a magazine only - a grenade keeps touch pickup.
+Event EV_Weapon_CoopUseLoot
+(
+    "coopuseloot",
+    EV_DEFAULT,
+    NULL,
+    NULL,
+    "HZM coop: this gun is picked up with Use (like an enemy's dropped gun), never by walking over it",
+    EV_NORMAL
+);
 Event EV_Weapon_SetAmmoInClip
 (
     "ammo_in_clip",
@@ -928,6 +940,7 @@ CLASS_DECLARATION(Item, Weapon, NULL) {
     {&EV_Weapon_DoneReloading,          &Weapon::DoneReloading          },
     {&EV_Weapon_SetAmmoClipSize,        &Weapon::SetAmmoClipSize        },
     {&EV_Weapon_SetAmmoInClip,          &Weapon::SetAmmoInClip          },
+    {&EV_Weapon_CoopUseLoot,            &Weapon::EventCoopUseLoot       },
     {&EV_Weapon_SetShareClip,           &Weapon::SetShareClip           },
     {&EV_Weapon_FillClip,               &Weapon::FillAmmoClip           },
     {&EV_Weapon_EmptyClip,              &Weapon::EmptyAmmoClip          },
@@ -4265,6 +4278,12 @@ bool G_CoopLootAmmoFull(Sentient *pSen, const str& sType)
 // A gun the loot tick may offer: flagged at the drop, still lying there (no owner, visible), and made
 // triggerable by the script (coop_mod/itemhandler.scr::enableWeapon does that for the gun the enemy held; the
 // spare guns off his back stay untriggerable, exactly as they were for touch pickup).
+void Weapon::EventCoopUseLoot(Event *ev)
+{
+    m_bCoopUseLoot     = ammo_clip_size[FIRE_PRIMARY] > 0 && !(weapon_class & WEAPON_CLASS_THROWABLE);
+    m_iCoopLootGrantTo = -1;
+}
+
 bool Weapon::CoopLootCandidate(void)
 {
     return m_bCoopUseLoot && !owner && triggerable && edict && edict->inuse && !hidden()
