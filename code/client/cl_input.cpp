@@ -454,7 +454,56 @@ void CL_PadMoveCursor( int dx, int dy )
 CL_MouseEvent
 =================
 */
+/*
+[v1.10.46] WEAPON / ABILITY WHEEL (cgame cg_wheel.c draws it; user: "a weapon wheel out of tab ... for both controller and mouse/keyboard").
+While cgame holds cg_wheelOpen 1, mouse motion and the right stick aim a pointer instead of turning the view: the pointer lives
+here (s_wheelX / s_wheelY, a vector of at most WHEEL_R) and is published as cl_wheelX / cl_wheelY for cgame to pick a slice.
+*/
+#define WHEEL_R 120.0f
+static float s_wheelX, s_wheelY;
+static int   s_wheelWasOpen;
+
+static qboolean CL_WheelOpen( void ) {
+	static cvar_t *open = NULL;
+	if ( !open ) {
+		open = Cvar_Get( "cg_wheelOpen", "0", 0 );
+	}
+	if ( !open->integer ) {
+		s_wheelWasOpen = 0;
+		return qfalse;
+	}
+	// a menu, the console or a disconnect took over: close it so the view can never stay frozen
+	if ( clc.state != CA_ACTIVE || ( Key_GetCatcher() & ( KEYCATCH_UI | KEYCATCH_CONSOLE ) ) ) {
+		Cvar_Set( "cg_wheelOpen", "0" );
+		s_wheelWasOpen = 0;
+		return qfalse;
+	}
+	if ( !s_wheelWasOpen ) {
+		s_wheelWasOpen = 1;
+		s_wheelX = s_wheelY = 0.0f;
+		Cvar_Set( "cl_wheelX", "0" );
+		Cvar_Set( "cl_wheelY", "0" );
+	}
+	return qtrue;
+}
+
+static void CL_WheelPublish( void ) {
+	float l = sqrtf( s_wheelX * s_wheelX + s_wheelY * s_wheelY );
+	if ( l > WHEEL_R ) {
+		s_wheelX *= WHEEL_R / l;
+		s_wheelY *= WHEEL_R / l;
+	}
+	Cvar_Set( "cl_wheelX", va( "%.1f", s_wheelX ) );
+	Cvar_Set( "cl_wheelY", va( "%.1f", s_wheelY ) );
+}
+
 void CL_MouseEvent( int dx, int dy, int time ) {
+	if ( !in_guimouse && CL_WheelOpen() ) {
+		s_wheelX += dx * 0.6f;
+		s_wheelY += dy * 0.6f;
+		CL_WheelPublish();
+		return;
+	}
 	if( in_guimouse )
 	{
 		cl.mousex += dx;
@@ -599,6 +648,18 @@ void CL_JoystickMove( usercmd_t *cmd ) {
 	float forward = j_forward->value * cl.joystickAxis[j_forward_axis->integer];
 	float pitch   = j_pitch->value   * CL_PadLookCurve( cl.joystickAxis[j_pitch_axis->integer] ) * lookScale * ( joy_lookY ? joy_lookY->value : 1.0f ) * ( ( joy_invertY && joy_invertY->integer ) ? -1.0f : 1.0f );
 	float up      = j_up->value      * cl.joystickAxis[j_up_axis->integer];
+
+	// [v1.10.46] wheel open: the right stick points at a slice (its deflection IS the pointer) and the view holds still
+	if ( CL_WheelOpen() ) {
+		float sx = (float)cl.joystickAxis[j_yaw_axis->integer] / 32767.0f, sy = (float)cl.joystickAxis[j_pitch_axis->integer] / 32767.0f;
+		if ( sx * sx + sy * sy > 0.16f ) {
+			s_wheelX = sx * WHEEL_R;
+			s_wheelY = sy * WHEEL_R;
+			CL_WheelPublish();
+		}
+		yaw   = 0.0f;
+		pitch = 0.0f;
+	}
 
 	if ( in_speed.active ^ cl_run->integer ) {
 		cmd->buttons |= BUTTON_RUN;

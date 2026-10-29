@@ -9225,6 +9225,40 @@ void Player::CopyStats(Player *player)
     }
 }
 
+/*
+[v1.10.46] WEAPON WHEEL inventory feed. The wheel (cgame cg_consolecmds.c) shows the actual gun in each slot, like modern games,
+but the client only ever sees the gun in hand. So the server tells it
+about every gun carried: "hzmwinv <n>" then n x "<CS_WEAPONS index> <ammo> <slot>", slot 0..5 = pistol rifle smg mg heavy grenade
+(a player with two rifles lists both - the wheel cycles them). Sent only when it changes, at most every 400 ms,
+and re-sent every 5 s so a late cgame (map change, reconnect) catches up.
+*/
+static const int s_hzmWheelBits[6] = {WEAPON_CLASS_PISTOL, WEAPON_CLASS_RIFLE, WEAPON_CLASS_SMG,
+                                      WEAPON_CLASS_MG,     WEAPON_CLASS_HEAVY, WEAPON_CLASS_GRENADE};
+static char s_hzmWheelLast[MAX_CLIENTS][960];
+static int  s_hzmWheelTime[MAX_CLIENTS];
+
+static void HzmSendWheelInv(int cl, int n, const int *idx, const int *ammo, const int *slot)
+{
+    char buf[960];
+    int  now = level.inttime, k;
+    if (cl < 0 || cl >= MAX_CLIENTS) {
+        return;
+    }
+    Com_sprintf(buf, sizeof(buf), "%d", n);
+    for (k = 0; k < n; k++) {
+        Q_strcat(buf, sizeof(buf), va(" %d %d %d", idx[k], ammo[k], slot[k]));
+    }
+    if (now < s_hzmWheelTime[cl]) {
+        s_hzmWheelTime[cl] = 0; // map restart: level time went back
+    }
+    if (strcmp(buf, s_hzmWheelLast[cl]) ? (now - s_hzmWheelTime[cl] < 400) : (now - s_hzmWheelTime[cl] < 5000)) {
+        return;
+    }
+    Q_strncpyz(s_hzmWheelLast[cl], buf, sizeof(s_hzmWheelLast[cl]));
+    s_hzmWheelTime[cl] = now;
+    gi.SendServerCommand(cl, "hzmwinv %s", buf);
+}
+
 void Player::UpdateStats(void)
 {
     int    i, count;
@@ -9564,6 +9598,7 @@ void Player::UpdateStats(void)
     count = inventory.NumObjects();
 
     int iItem = 0;
+    int hzmWn = 0, hzmWinv[64], hzmWammo[64], hzmWslot[64];
 
     for (i = 1; i <= count; i++) {
         int     entnum = inventory.ObjectAt(i);
@@ -9594,9 +9629,23 @@ void Player::UpdateStats(void)
                 } else {
                     client->ps.stats[STAT_WEAPONS] |= weapon_class;
                 }
+                // [v1.10.46] weapon wheel: every gun carried, its ammo and its wheel slot (two of a class are both listed)
+                for (int k = 0; k < 6 && hzmWn < 64; k++) {
+                    if ((weapon_class & s_hzmWheelBits[k])
+                        && (!(weapon_class & WEAPON_CLASS_GRENADE) || weapon->HasAmmo(FIRE_PRIMARY))) {
+                        hzmWinv[hzmWn]  = weapon->getIndex();
+                        hzmWammo[hzmWn] = (weapon_class & WEAPON_CLASS_GRENADE)
+                                            ? weapon->AmmoAvailable(FIRE_PRIMARY)
+                                            : weapon->ClipAmmo(FIRE_PRIMARY) + weapon->AmmoAvailable(FIRE_PRIMARY);
+                        hzmWslot[hzmWn] = k;
+                        hzmWn++;
+                        break;
+                    }
+                }
             }
         }
     }
+    HzmSendWheelInv(edict - g_entities, hzmWn, hzmWinv, hzmWammo, hzmWslot);
 
     // Go through all the player's ammo and send over the names/amounts
     memset(client->ps.ammo_amount, 0, sizeof(client->ps.ammo_amount));

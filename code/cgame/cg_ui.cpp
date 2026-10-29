@@ -197,6 +197,11 @@ qboolean CG_CheckCaptureKey(int key, qboolean down, unsigned int time)
 {
     char minKey = '1', maxKey = '9';
 
+    // [v1.10.46] weapon / ability wheel owns its keys while it is open (cg_consolecmds.c)
+    if (CG_WheelCaptureKey(key, down)) {
+        return qtrue;
+    }
+
     // HZM coop - STAGED 3P ADS wheel capture. While a third-person player HOLDS the ADS button, the
     // mouse wheel changes the ADS stage instead of running its weapnext/weapprev binds: wheel-UP =
     // into first-person irons (cg_adsStage 1), wheel-DOWN = back to the shoulder view (cg_adsStage 0).

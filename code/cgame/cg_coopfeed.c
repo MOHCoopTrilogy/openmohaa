@@ -1958,6 +1958,33 @@ static const lootArt_t s_lootArt[] = {
 };
 #define LOOT_ART_N ((int)(sizeof(s_lootArt) / sizeof(s_lootArt[0])))
 
+// [v1.10.46] the weapon wheel shows the exact gun too: same rule as the prompt - the full item name, then without a " (finish)"
+qboolean CG_LootArtLookup(const char *name, const char **tex, const char **shortName, float *vw, float *vh)
+{
+    char        base[64], *p;
+    int         i, pass;
+    for (pass = 0; pass < 2; pass++) {
+        Q_strncpyz(base, name ? name : "", sizeof(base));
+        if (pass) {
+            p = strstr(base, " (");
+            if (!p) {
+                break;
+            }
+            *p = 0;
+        }
+        for (i = 0; i < LOOT_ART_N; i++) {
+            if (!Q_stricmp(base, s_lootArt[i].name)) {
+                *tex       = s_lootArt[i].tex;
+                *shortName = s_lootArt[i].shortName;
+                *vw        = s_lootArt[i].vw;
+                *vh        = s_lootArt[i].vh;
+                return qtrue;
+            }
+        }
+    }
+    return qfalse;
+}
+
 static const lootArt_t s_lootGeneric[3] = {
     {"", "coop_loot_gun",    "", 0.965f, 0.414f},
     {"", "coop_loot_pistol", "", 0.434f, 0.598f},

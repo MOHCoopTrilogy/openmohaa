@@ -1205,7 +1205,8 @@ static const struct {
     {"Crouch / prone", "+movedown"}, {"Reload", "vstr coop_padX"}, {"Swap weapon", "vstr coop_padY"}, {"Quick grenade", "+coopnade"},
     {"Sprint / hold breath", "+speed"}, {"Melee", "+attacksecondary"}, {"Medkit", "append name ,8mk"}, {"Take cover", "append name ,9cv"},
     {"Sidearm", "+coopsidearm"}, {"Ammo box", "append name ,abx"}, {"Lean left", "+leanleft"}, {"Lean right", "+leanright"},
-    {"Objectives", "vstr coop_obj"}, {"Scoreboard", "+scores"}, {"Pause menu", "pushmenu main"}, {"Walk", "+button12"},
+    {"Objectives", "vstr coop_obj"}, {"Scoreboard", "+scores"}, {"Pause menu", "pushmenu main"}, {"Walk", "+button12"}, {"Wheel (tap: swap)", "+coopwheelpad"},
+    {"Airstrike", "use models/items/binoculars.tik"}, {"Paradrop", "use models/weapons/coop_smoke_grenade.tik"},
     {"Nothing", ""},
 };
 static const char *s_padButtons[] = {"A", "B", "X", "Y", "LEFTSHOULDER", "RIGHTSHOULDER", "LEFTTRIGGER", "RIGHTTRIGGER", "DPAD_UP", "DPAD_DOWN",

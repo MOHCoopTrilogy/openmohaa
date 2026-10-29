@@ -735,6 +735,15 @@ const adsGunTune_t *CG_FindAdsTune(const char *wpn);
     qboolean CG_GetStamina(float *outFrac); // HZM coop - sprint pool 0..1; FIRST PERSON ONLY (mirror only advances there)
     float    CG_GetLandingSeverity(void);   // HZM coop - 0..1 shared landing latch (cg_view.c); 0 = no recent landing
     float CG_AdsShoulderFrac(void); // HZM coop - shoulder-stage camera envelope 0..1 (2D ADS effects follow the camera ease)
+    // [v1.10.46] weapon / ability wheel (cg_consolecmds.c)
+    qboolean CG_WheelCaptureKey(int key, qboolean down);
+    void     CG_DrawWheel(void);
+    void     CG_WheelInv_f(void);
+    qboolean CG_LootArtLookup(const char *name, const char **tex, const char **shortName, float *vw, float *vh);
+    void     CG_WheelDown_f(void);
+    void     CG_WheelUp_f(void);
+    void     CG_WheelPadDown_f(void);
+    void     CG_WheelPadUp_f(void);
     qboolean CG_AdsShoulderWheelActive(void); // HZM coop - wheel steals ADS-stage events this frame (FALSE for scoped rifles)
     // HZM coop [user 2026-09-01] lens splash - raised by anything that throws water at the eye
     void  CG_CoopLensSplash(float amt);

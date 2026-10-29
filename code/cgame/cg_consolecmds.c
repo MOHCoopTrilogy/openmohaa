@@ -25,6 +25,7 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 // text commands typed in at the local console, or executed by a key binding
 
 #include "cg_local.h"
+#include "../client/keycodes.h"
 #include "../fgame/bg_voteoptions.h"
 
 void CG_TargetCommand_f(void);
@@ -776,6 +777,10 @@ static consoleCommand_t commands[] = {
     {"pushcallvotesubtext",    &CG_PushCallVoteSubText_f   },
     {"pushcallvotesubinteger", &CG_PushCallVoteSubInteger_f},
     {"+coopnade",             &CG_CoopNadeDown_f          }, // HZM coop bug-2460 - see above
+    {"+coopwheel",            &CG_WheelDown_f             }, // [v1.10.46] weapon / ability wheel
+    {"-coopwheel",            &CG_WheelUp_f               },
+    {"+coopwheelpad",         &CG_WheelPadDown_f          },
+    {"-coopwheelpad",         &CG_WheelPadUp_f            },
     {"-coopnade",             &CG_CoopNadeUp_f            }, // HZM coop bug-2460
     {"pushcallvotesubfloat",   &CG_PushCallVoteSubFloat_f  },
     {"pushcallvotesubclient",  &CG_PushCallVoteSubClient_f },
@@ -881,6 +886,520 @@ static qboolean CG_HzmSkipAutoPicker(const char *what)
     }
     cgi.Printf("^~^~^ UIPICKER skipped the auto %s picker: already on a team at map entry\n", what);
     return qtrue;
+}
+
+/*
+===================
+[v1.10.46] WEAPON / ABILITY WHEEL
+user: "a weapon wheel out of tab ... change between your weapons, and then switch to the abilities wheel for ammo, sandbag, medkit,
+airstrike, and paradrop ... for both controller and mouse/keyboard" - "Do it how modern games do it" - "show amounts and icons in
+the actual wheel slot" - "list the exact gun it is ... with their exact icon" - "a way to switch between multiple weapons of the
+same class".
+  +coopwheel     (Tab)      hold: the wheel; release on a slot (or click it) picks it. A tap does nothing.
+  +coopwheelpad  (pad Y)    hold: the wheel; a quick tap runs "vstr coop_padY" (weapon swap, Service Record in the lobby).
+While cg_wheelOpen is 1 the client (cl_input.cpp) turns mouse / right-stick motion into a pointer (cl_wheelX / cl_wheelY) instead
+of turning the view; you can still walk.
+  page (weapons <-> abilities): right mouse, Q / E, pad LB / RB
+  next / previous gun in the hovered slot when you carry two of a class: mouse wheel, pad D-pad left / right
+The look: segmented ring (textures/hud/coop_wheel_*, docs/tools/gen_wheel_art.py), the hovered wedge lit, in every wedge the exact
+gun you carry there - its own silhouette and short name from the loot table (cg_coopfeed_loot.h) - with its ammo, or the ability's
+icon and count; empty slots dimmed and unselectable; the hovered item's name and ammo in the centre. The inventory comes from the
+server feed "hzmwinv" (player.cpp HzmSendWheelInv). The page opens where you left it, each slot on the gun you last chose.
+===================
+*/
+typedef struct {
+    const char *label, *cmd, *icon;
+} wheelSlice_t;
+static const wheelSlice_t s_wheelWeapons[] = {
+    {"Pistol", "useweaponclass pistol", "textures/hud/loot/coop_loot_pistol"},
+    {"Rifle", "useweaponclass rifle", "textures/hud/loot/coop_loot_gun"},
+    {"SMG", "useweaponclass smg", "textures/hud/loot/w_thompson"},
+    {"Machine gun", "useweaponclass mg", "textures/hud/loot/w_bar"},
+    {"Heavy", "useweaponclass heavy", "textures/hud/loot/w_bazooka"},
+    {"Grenade", "useweaponclass grenade", "textures/hud/coop_wheel_nade"},
+};
+static const int s_wheelClassBits[6] = {WEAPON_CLASS_PISTOL, WEAPON_CLASS_RIFLE, WEAPON_CLASS_SMG,
+                                        WEAPON_CLASS_MG,     WEAPON_CLASS_HEAVY, WEAPON_CLASS_GRENADE};
+static const wheelSlice_t s_wheelAbilities[] = {
+    {"Ammo box", "append name ,abx", "textures/hud/loot/coop_act_ammocrate"},
+    {"Sandbags", "append name ,9cv", "textures/hud/loot/coop_act_sandbag"},
+    {"Medkit", "append name ,8mk", "textures/hud/loot/coop_act_heal"},
+    {"Airstrike", "use models/items/binoculars.tik", "textures/hud/loot/coop_act_binoc"},
+    {"Paradrop", "use models/weapons/coop_smoke_grenade.tik", "textures/hud/coop_paradrop_icon"},
+};
+static int s_wheelOpen, s_wheelPage, s_wheelPad, s_wheelHover = -1;
+static int s_wheelT0;
+
+// the carried guns, from the server feed: CS_WEAPONS index, ammo, wheel slot (0..5)
+#define WHEEL_MAXGUNS 64
+static int s_wheelGunN, s_wheelGunIdx[WHEEL_MAXGUNS], s_wheelGunAmmo[WHEEL_MAXGUNS], s_wheelGunSlot[WHEEL_MAXGUNS];
+static int s_wheelVar[6]; // which of a slot's guns is showing (index among that slot's guns)
+
+// server feed: "hzmwinv <n> then n x <idx> <ammo> <slot>" (CG_ServerCommand)
+void CG_WheelInv_f(void)
+{
+    int k, n = atoi(cgi.Argv(1));
+    if (n > WHEEL_MAXGUNS) {
+        n = WHEEL_MAXGUNS;
+    }
+    for (k = 0; k < n; k++) {
+        s_wheelGunIdx[k]  = atoi(cgi.Argv(2 + k * 3));
+        s_wheelGunAmmo[k] = atoi(cgi.Argv(3 + k * 3));
+        s_wheelGunSlot[k] = atoi(cgi.Argv(4 + k * 3));
+    }
+    s_wheelGunN = n;
+    if (cgi.Cvar_Get("cg_wheelDebug", "0", 0)->integer) {
+        cgi.Printf("^~^~^ WHEELINV %s\n", cgi.Args());
+    }
+}
+
+static int CG_WheelCount(int page)
+{
+    return page ? (int)(sizeof(s_wheelAbilities) / sizeof(s_wheelAbilities[0])) : (int)(sizeof(s_wheelWeapons) / sizeof(s_wheelWeapons[0]));
+}
+
+static const wheelSlice_t *CG_WheelSlice(int page, int i)
+{
+    return page ? &s_wheelAbilities[i] : &s_wheelWeapons[i];
+}
+
+// how many guns sit in a slot, and the feed entry of the v-th one (-1 = none)
+static int CG_WheelSlotGuns(int slot)
+{
+    int k, n = 0;
+    for (k = 0; k < s_wheelGunN; k++) {
+        if (s_wheelGunSlot[k] == slot) {
+            n++;
+        }
+    }
+    return n;
+}
+
+static int CG_WheelSlotGun(int slot, int v)
+{
+    int k;
+    for (k = 0; k < s_wheelGunN; k++) {
+        if (s_wheelGunSlot[k] == slot && !v--) {
+            return k;
+        }
+    }
+    return -1;
+}
+
+// the gun a slot shows: the chosen one, kept in range when the inventory changes
+static int CG_WheelShownGun(int slot)
+{
+    int n = CG_WheelSlotGuns(slot);
+    if (!n) {
+        return -1;
+    }
+    if (s_wheelVar[slot] < 0 || s_wheelVar[slot] >= n) {
+        s_wheelVar[slot] = 0;
+    }
+    return CG_WheelSlotGun(slot, s_wheelVar[slot]);
+}
+
+// does the player have something in this weapon slot? The stat is the truth; the feed names it.
+static qboolean CG_WheelOwned(int i)
+{
+    return cg.snap && (cg.snap->ps.stats[STAT_WEAPONS] & s_wheelClassBits[i]) ? qtrue : qfalse;
+}
+
+// ability counts: the same client cvars the HUD counters use (ammobox.scr, cover.scr, medkit.scr, officer.scr rewards).
+// "-" / empty = not published (lobby, briefing) - shown blank and left usable, the server has the final say.
+static const char *s_wheelAbilCvar[5] = {"coop_hudAmmo", "coop_hudCov", "coop_hudMed", "coop_hudBinoc", "coop_hudSmoke"};
+
+static int CG_WheelAbilCount(int i)
+{
+    const char *v = cgi.Cvar_Get(s_wheelAbilCvar[i], "", 0)->string;
+    // airstrike / paradrop are officer rewards: "-" means you hold none, paradrop publishes "y" while armed (officer.scr)
+    if (i >= 3) {
+        if (!v || !*v || *v == '-') {
+            return 0;
+        }
+        return (*v == 'y') ? 1 : atoi(v);
+    }
+    if (!v || !*v || *v == '-') {
+        return -1;
+    }
+    return atoi(v);
+}
+
+static qboolean CG_WheelUsable(int page, int i)
+{
+    return page ? (CG_WheelAbilCount(i) != 0) : CG_WheelOwned(i);
+}
+
+// CS_WEAPONS name of the gun a slot shows ("" = unknown): the feed, else the gun in hand when it is that class
+static const char *CG_WheelGunName(int i)
+{
+    int g = CG_WheelShownGun(i);
+    if (g >= 0) {
+        return CG_ConfigString(CS_WEAPONS + s_wheelGunIdx[g]);
+    }
+    if (cg.snap && (cg.snap->ps.stats[STAT_EQUIPPED_WEAPON] & s_wheelClassBits[i]) && cg.snap->ps.activeItems[1] >= 0) {
+        return CG_ConfigString(CS_WEAPONS + cg.snap->ps.activeItems[1]);
+    }
+    return "";
+}
+
+// the exact gun's art, through the loot prompt's table (its own silhouette + short name + how much of the 2:1 canvas it fills)
+typedef struct {
+    char      name[64];
+    qhandle_t sh;
+    char      shortName[48];
+    float     vw, vh;
+} wheelArt_t;
+
+static const wheelArt_t *CG_WheelGunArt(const char *name)
+{
+    static wheelArt_t cache[24];
+    static int        used;
+    const char       *tex = NULL, *sn = NULL;
+    float             vw = 0.9f, vh = 0.4f;
+    wheelArt_t       *a;
+    int               i;
+
+    if (!name || !*name) {
+        return NULL;
+    }
+    for (i = 0; i < used; i++) {
+        if (!strcmp(cache[i].name, name)) {
+            return cache[i].sh ? &cache[i] : NULL;
+        }
+    }
+    a = &cache[used < 24 ? used++ : 23];
+    Q_strncpyz(a->name, name, sizeof(a->name));
+    a->sh = 0;
+    if (CG_LootArtLookup(name, &tex, &sn, &vw, &vh) && tex) {
+        a->sh = cgi.R_RegisterShader(va("textures/hud/loot/%s", tex));
+        Q_strncpyz(a->shortName, sn ? sn : name, sizeof(a->shortName));
+        a->vw = vw;
+        a->vh = vh;
+    }
+    return a->sh ? a : NULL;
+}
+
+// the name a slot shows: the gun's short name when the table knows it, else its item name
+static const char *CG_WheelGunLabel(int i)
+{
+    const char       *nm = CG_WheelGunName(i);
+    const wheelArt_t *a  = CG_WheelGunArt(nm);
+    return a ? a->shortName : nm;
+}
+
+// the slot the pointer is on, -1 in the dead centre. Slot 0 is straight up, then clockwise.
+static int CG_WheelPick(void)
+{
+    float x = cgi.Cvar_Get("cl_wheelX", "0", 0)->value, y = cgi.Cvar_Get("cl_wheelY", "0", 0)->value;
+    int   n = CG_WheelCount(s_wheelPage);
+    float a;
+    if (x * x + y * y < 34.0f * 34.0f) {
+        return -1;
+    }
+    a = (float)atan2(x, -y); // 0 = up, clockwise positive
+    if (a < 0.0f) {
+        a += 2.0f * (float)M_PI;
+    }
+    return ((int)floor(a / (2.0f * (float)M_PI / n) + 0.5f)) % n;
+}
+
+static void CG_WheelOpen(int pad)
+{
+    int s;
+    if (s_wheelOpen) {
+        return;
+    }
+    s_wheelOpen  = 1;
+    s_wheelPad   = pad;
+    s_wheelHover = -1;
+    s_wheelT0    = cg.time;
+    // each slot starts on the gun in your hands when that is one of its guns
+    if (cg.snap && cg.snap->ps.activeItems[1] >= 0) {
+        for (s = 0; s < 6; s++) {
+            int v, n = CG_WheelSlotGuns(s);
+            for (v = 0; v < n; v++) {
+                if (s_wheelGunIdx[CG_WheelSlotGun(s, v)] == cg.snap->ps.activeItems[1]) {
+                    s_wheelVar[s] = v;
+                }
+            }
+        }
+    }
+    cgi.Cvar_Set("cg_wheelOpen", "1");
+    cgi.S_StartLocalSound("sound/menu/scroll.wav", qfalse);
+}
+
+// pick = run the hovered slot; otherwise just close (a pad tap falls back to the old Y action)
+static void CG_WheelClose(qboolean pick)
+{
+    int sel   = CG_WheelPick();
+    int quick = (cg.time - s_wheelT0) < 220;
+    s_wheelOpen = 0;
+    cgi.Cvar_Set("cg_wheelOpen", "0");
+    if (pick && sel >= 0 && CG_WheelUsable(s_wheelPage, sel)) {
+        int g = (s_wheelPage == 0) ? CG_WheelShownGun(sel) : -1;
+        if (g >= 0 && CG_WheelSlotGuns(sel) > 1) {
+            // two of a class: equip that exact one by its item name ("use" finds it by name)
+            cgi.Cmd_Execute(EXEC_APPEND, va("use \"%s\"\n", CG_ConfigString(CS_WEAPONS + s_wheelGunIdx[g])));
+        } else {
+            cgi.Cmd_Execute(EXEC_APPEND, va("%s\n", CG_WheelSlice(s_wheelPage, sel)->cmd));
+        }
+        cgi.S_StartLocalSound("sound/menu/apply.wav", qfalse);
+    } else if (pick && sel < 0 && quick && s_wheelPad) {
+        cgi.Cmd_Execute(EXEC_APPEND, "vstr coop_padY\n");
+    }
+}
+
+void CG_WheelDown_f(void) { CG_WheelOpen(0); }
+void CG_WheelUp_f(void) { if (s_wheelOpen) { CG_WheelClose(qtrue); } }
+void CG_WheelPadDown_f(void) { CG_WheelOpen(1); }
+void CG_WheelPadUp_f(void) { if (s_wheelOpen) { CG_WheelClose(qtrue); } }
+
+// step the hovered weapon slot to its next / previous gun; qfalse when there is nothing to step
+static qboolean CG_WheelCycle(int dir)
+{
+    int sel = CG_WheelPick(), n;
+    if (s_wheelPage != 0 || sel < 0) {
+        return qfalse;
+    }
+    n = CG_WheelSlotGuns(sel);
+    if (n < 2) {
+        return qfalse;
+    }
+    s_wheelVar[sel] = (s_wheelVar[sel] + dir + n) % n;
+    cgi.S_StartLocalSound("sound/menu/scroll.wav", qfalse);
+    return qtrue;
+}
+
+// called from CG_CheckCaptureKey: while the wheel is open its keys are swallowed so the binds never fire
+qboolean CG_WheelCaptureKey(int key, qboolean down)
+{
+    if (!s_wheelOpen) {
+        return qfalse;
+    }
+    // mouse wheel / D-pad left-right: the next gun of the hovered slot
+    if (key == K_MWHEELUP || key == K_MWHEELDOWN || key == K_PAD0_DPAD_LEFT || key == K_PAD0_DPAD_RIGHT) {
+        if (down) {
+            CG_WheelCycle((key == K_MWHEELUP || key == K_PAD0_DPAD_LEFT) ? -1 : 1);
+        }
+        return qtrue;
+    }
+    if (key == K_MOUSE2 || key == 'q' || key == 'e' || key == K_PAD0_LEFTSHOULDER || key == K_PAD0_RIGHTSHOULDER) {
+        if (down) {
+            s_wheelPage  = !s_wheelPage;
+            s_wheelHover = -1;
+            cgi.S_StartLocalSound("sound/menu/scroll.wav", qfalse);
+        }
+        return qtrue;
+    }
+    // click / A picks the hovered slot at once (fire never goes off while the wheel is up)
+    if (key == K_MOUSE1 || key == K_PAD0_A) {
+        if (down && CG_WheelPick() >= 0) {
+            CG_WheelClose(qtrue);
+        }
+        return qtrue;
+    }
+    if (key == K_ESCAPE || key == K_PAD0_B) {
+        if (down) {
+            CG_WheelClose(qfalse);
+        }
+        return qtrue;
+    }
+    return qfalse;
+}
+
+// text helpers: the wheel is laid out in real pixels (one scale for both axes, so it stays round on any aspect)
+static void CG_WheelText(fontheader_t *font, const char *t, float px, float py, float scale, const float *rgba)
+{
+    vec2_t sc;
+    float  tw = (float)cgi.UI_FontStringWidth(font, t, -1) * scale;
+    sc[0] = sc[1] = scale;
+    cgi.R_SetColor(rgba);
+    cgi.R_DrawString(font, t, (px - tw * 0.5f) / scale, py / scale, -1, sc);
+}
+
+// the same, shrunk to fit maxw
+static void CG_WheelTextFit(fontheader_t *font, const char *t, float px, float py, float scale, float maxw, const float *rgba)
+{
+    float tw = (float)cgi.UI_FontStringWidth(font, t, -1) * scale;
+    if (tw > maxw && tw > 0.0f) {
+        scale *= maxw / tw;
+    }
+    CG_WheelText(font, t, px, py, scale, rgba);
+}
+
+void CG_DrawWheel(void)
+{
+    static fontheader_t *font = NULL, *fontBig = NULL;
+    static qhandle_t     ring[2], lit[2][6], icons[2][6];
+    static const float   white[4] = {0.92f, 0.90f, 0.84f, 1.0f}, gold[4] = {1.0f, 0.86f, 0.52f, 1.0f},
+                       grey[4] = {0.55f, 0.55f, 0.52f, 1.0f}, ink[4] = {0.10f, 0.08f, 0.04f, 1.0f};
+    float  k  = cgs.uiHiResScale[1] > 0.0f ? cgs.uiHiResScale[1] : 1.0f;
+    float  W  = (float)cgs.glconfig.vidWidth, H = (float)cgs.glconfig.vidHeight;
+    float  cx = W * 0.5f, cy = H * 0.5f;
+    float  RO = 165.0f * k * 0.98f, RI = 165.0f * k * 0.44f, RM = (RO + RI) * 0.5f;
+    vec4_t c;
+    int    i, n, sel, pg;
+
+    if (!s_wheelOpen) {
+        return;
+    }
+    if (!cgi.Cvar_Get("cg_wheelOpen", "0", 0)->integer) {
+        s_wheelOpen = 0; // the client closed it (a menu / the console opened)
+        return;
+    }
+    if (!font) {
+        font    = cgi.R_LoadFont("verdana-12");
+        fontBig = cgi.R_LoadFont("verdana-14");
+        for (pg = 0; pg < 2; pg++) {
+            n        = CG_WheelCount(pg);
+            ring[pg] = cgi.R_RegisterShaderNoMip(va("textures/hud/coop_wheel_ring%d", n));
+            for (i = 0; i < n; i++) {
+                lit[pg][i]   = cgi.R_RegisterShaderNoMip(va("textures/hud/coop_wheel_hl%d_%d", n, i));
+                icons[pg][i] = cgi.R_RegisterShader(CG_WheelSlice(pg, i)->icon);
+            }
+        }
+    }
+    if (!font || !fontBig) {
+        return;
+    }
+    pg  = s_wheelPage;
+    n   = CG_WheelCount(pg);
+    sel = CG_WheelPick();
+    if (sel != s_wheelHover) {
+        if (sel >= 0 && CG_WheelUsable(pg, sel)) {
+            cgi.S_StartLocalSound("sound/menu/scroll.wav", qfalse);
+        }
+        s_wheelHover = sel;
+    }
+
+    // dim the world behind it
+    c[0] = c[1] = c[2] = 0.0f;
+    c[3]               = 0.38f;
+    cgi.R_SetColor(c);
+    cgi.R_DrawBox(0, 0, W, H);
+
+    // the ring, then the lit wedge (texture covers 2*165 units, wedges reach 0.98 of it)
+    cgi.R_SetColor(NULL);
+    cgi.R_DrawStretchPic(cx - 165.0f * k, cy - 165.0f * k, 330.0f * k, 330.0f * k, 0, 0, 1, 1, ring[pg]);
+    if (sel >= 0 && CG_WheelUsable(pg, sel)) {
+        cgi.R_DrawStretchPic(cx - 165.0f * k, cy - 165.0f * k, 330.0f * k, 330.0f * k, 0, 0, 1, 1, lit[pg][sel]);
+    }
+
+    // in every wedge: the icon, then its name and amount under it
+    for (i = 0; i < n; i++) {
+        float        a    = (float)i * 2.0f * (float)M_PI / n;
+        float        px   = cx + (float)sin(a) * RM, py = cy - (float)cos(a) * RM;
+        float        maxw = RM * 2.0f * (float)sin(M_PI / n) * 0.86f;
+        qboolean     ok   = CG_WheelUsable(pg, i);
+        qboolean     hot  = (i == sel && ok);
+        qhandle_t    ic   = icons[pg][i];
+        const char  *nm   = CG_WheelSlice(pg, i)->label;
+        const float *col  = !ok ? grey : (hot ? ink : white);
+        float        iw, ih;
+        char         sub[32], cap[80];
+        sub[0] = 0;
+        if (pg == 0) {
+            const wheelArt_t *art = ok ? CG_WheelGunArt(CG_WheelGunName(i)) : NULL;
+            int               g   = ok ? CG_WheelShownGun(i) : -1;
+            iw                    = 74.0f * k; // the silhouettes are 2:1
+            ih                    = 37.0f * k;
+            if (art) {
+                // the exact gun, sized by how much of its canvas it fills so a pistol and a rifle read at the same weight
+                float fw = 64.0f * k / (art->vw > 0.2f ? art->vw : 0.2f), fh = 2.0f * 28.0f * k / (art->vh > 0.2f ? art->vh : 0.2f);
+                ic = art->sh;
+                iw = fw < fh ? fw : fh;
+                ih = iw * 0.5f;
+            }
+            if (ok && *CG_WheelGunLabel(i)) {
+                nm = CG_WheelGunLabel(i);
+            }
+            if (g >= 0) {
+                Com_sprintf(sub, sizeof(sub), i == 5 ? "x%d" : "%d", s_wheelGunAmmo[g]);
+            }
+            // two of a class: "< 1/2 >" over the icon
+            if (ok && CG_WheelSlotGuns(i) > 1) {
+                CG_WheelText(font, va("<  %d / %d  >", s_wheelVar[i] + 1, CG_WheelSlotGuns(i)), px, py - 30.0f * k, k * 0.8f, hot ? ink : gold);
+            }
+        } else {
+            int cnt = CG_WheelAbilCount(i);
+            iw = ih = 42.0f * k;
+            if (cnt >= 0) {
+                Com_sprintf(sub, sizeof(sub), "x%d", cnt);
+            }
+        }
+        c[0] = c[1] = c[2] = 1.0f;
+        if (hot) {
+            c[0] = 0.16f; c[1] = 0.12f; c[2] = 0.06f; // dark ink on the gold wedge, cream elsewhere
+        }
+        c[3] = ok ? 1.0f : 0.22f;
+        cgi.R_SetColor(c);
+        cgi.R_DrawStretchPic(px - iw * 0.5f, py - ih * 0.5f - 6.0f * k, iw, ih, 0, 0, 1, 1, ic);
+        if (sub[0]) {
+            Com_sprintf(cap, sizeof(cap), "%s  %s", nm, sub);
+        } else {
+            Q_strncpyz(cap, nm, sizeof(cap));
+        }
+        CG_WheelTextFit(font, cap, px, py + 14.0f * k, k * 0.85f, maxw, col);
+    }
+
+    // centre: what you are pointing at
+    {
+        const char *big = "", *small = "";
+        char        ammo[48];
+        ammo[0] = 0;
+        if (sel >= 0) {
+            if (pg == 0) {
+                int g = CG_WheelShownGun(sel);
+                big   = CG_WheelOwned(sel) && *CG_WheelGunLabel(sel) ? CG_WheelGunLabel(sel) : CG_WheelSlice(0, sel)->label;
+                if (!CG_WheelOwned(sel)) {
+                    small = "Empty";
+                } else if (g >= 0) {
+                    Com_sprintf(ammo, sizeof(ammo), sel == 5 ? "x%d" : "%d rounds", s_wheelGunAmmo[g]);
+                    if (CG_WheelSlotGuns(sel) > 1) {
+                        Q_strcat(ammo, sizeof(ammo), s_wheelPad ? "   D-pad: next" : "   Scroll: next");
+                    }
+                    small = ammo;
+                }
+            } else {
+                int cnt = CG_WheelAbilCount(sel);
+                big     = CG_WheelSlice(1, sel)->label;
+                if (cnt == 0) {
+                    small = sel >= 3 ? "Earn it from an officer" : "None left";
+                } else if (cnt > 0) {
+                    Com_sprintf(ammo, sizeof(ammo), "%d left", cnt);
+                    small = ammo;
+                }
+            }
+        } else {
+            big   = pg ? "ABILITIES" : "WEAPONS";
+            small = "Point at a slot";
+        }
+        CG_WheelTextFit(fontBig, big, cx, cy - 14.0f * k, k * 1.05f, RI * 1.8f, gold);
+        if (*small) {
+            CG_WheelTextFit(font, small, cx, cy + 6.0f * k, k * 0.9f, RI * 1.8f, white);
+        }
+    }
+
+    // page tabs above the ring, and how to switch / pick below it
+    {
+        float ty = cy - 165.0f * k - 26.0f * k;
+        float w1 = 120.0f * k, h1 = 20.0f * k;
+        for (i = 0; i < 2; i++) {
+            float x0 = cx + (i ? 10.0f * k : -w1 - 10.0f * k);
+            c[0] = c[1] = c[2] = 0.05f;
+            c[3]               = 0.72f;
+            if (i == pg) {
+                c[0] = 0.80f; c[1] = 0.64f; c[2] = 0.30f; c[3] = 0.95f;
+            }
+            cgi.R_SetColor(c);
+            cgi.R_DrawBox(x0, ty, w1, h1);
+            CG_WheelText(font, i ? "ABILITIES" : "WEAPONS", x0 + w1 * 0.5f, ty + 3.0f * k, k * 0.95f, i == pg ? ink : white);
+        }
+        CG_WheelText(font, s_wheelPad ? "LB / RB  page      Release Y  select      B  cancel" : "Right-click / Q / E  page      Release / Click  select",
+                     cx, cy + 165.0f * k + 8.0f * k, k * 0.85f, grey);
+    }
+    cgi.R_SetColor(NULL);
 }
 
 void CG_PushMenuTeamSelect_f(void)

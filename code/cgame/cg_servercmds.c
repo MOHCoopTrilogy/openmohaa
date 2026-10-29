@@ -555,6 +555,11 @@ static void CG_ServerCommand(qboolean modelOnly)
         return;
     }
 
+    if (!strcmp(cmd, "hzmwinv")) { // [v1.10.46] weapon wheel inventory feed
+        CG_WheelInv_f();
+        return;
+    }
+
     if (!strcmp(cmd, "stopwatch")) {
         CG_Stopwatch_f();
         return;

@@ -919,6 +919,7 @@ extern int g_hzmCgInitMs; // cg_consolecmds.c - map-entry guard for the auto tea
 void CG_Init(clientGameImport_t *imported, int serverMessageNum, int serverCommandSequence, int clientNum)
 {
     g_hzmCgInitMs = imported->Milliseconds ? imported->Milliseconds() : 0;
+    imported->Cvar_Set("cg_wheelOpen", "0"); // [v1.10.46] a wheel held across a map change must not freeze the view
     // HZM coop - ragdoll: renderer table must start clean (plan section-5)
     if (imported->R_ClearAllRagdolls) {
         imported->R_ClearAllRagdolls();
