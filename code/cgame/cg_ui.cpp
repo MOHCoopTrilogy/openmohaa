@@ -266,6 +266,27 @@ qboolean CG_CheckCaptureKey(int key, qboolean down, unsigned int time)
         }
     }
 
+    // [v1.10.47] THE SAME TWO ON A CONTROLLER. user: "when in cover in 3p with controller there isnt a way to quick switch shoulders or
+    // between ads 1p and back to 3p... pushing left thumbstick would make sense for going into ads 1p and right thumbstick to switch
+    // shoulders". While aiming in the staged shoulder view (3P or behind cover): L3 = in / out of the first-person irons (the mouse
+    // wheel's job), R3 = swap shoulders (MOUSE3's). Behind cover R3 swaps even without aiming, like MOUSE3. Anywhere else both
+    // buttons keep their own binds (sprint / melee).
+    if (key == K_PAD0_LEFTSTICK_CLICK && CG_AdsShoulderWheelActive()) {
+        if (down) {
+            cvar_t *pStage = cgi.Cvar_Get("cg_adsStage", "0", 0);
+            cgi.Cvar_Set("cg_adsStage", pStage->integer ? "0" : "1");
+        }
+        return qtrue;
+    }
+    if (key == K_PAD0_RIGHTSTICK_CLICK
+        && (CG_AdsShoulderWheelActive() || (cg.snap && (cg.snap->ps.pm_flags & PMF_COOP_COVER)))) {
+        if (down) {
+            cvar_t *pRight = cgi.Cvar_Get("cg_adsShoulderRight", "1", CVAR_ARCHIVE);
+            cgi.Cvar_Set("cg_adsShoulderRight", pRight->integer ? "0" : "1");
+        }
+        return qtrue;
+    }
+
     if (!cg.iInstaMessageMenu || !down) {
         return qfalse;
     }
