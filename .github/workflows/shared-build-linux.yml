@@ -23,6 +23,7 @@ env:
 jobs:
   build:
     strategy:
+      fail-fast: false # HZM: one exotic platform failing must not cancel linux-amd64 (Steam Deck) or windows-x64
       matrix:
         architecture: [
           {name: 'amd64',   os: "ubuntu-22.04-arm", package: 'x86-64-linux-gnu',      triple: 'x86_64-linux-gnu',      arch_option: 'linux-x86_64'},

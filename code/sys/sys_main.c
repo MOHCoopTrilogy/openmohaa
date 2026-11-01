@@ -310,11 +310,15 @@ command to a client.
 */
 qboolean Sys_OpenURL( const char *url )
 {
+	// The dedicated build does not include SDL (see the include block at the top), so SDL_VERSION_ATLEAST is
+	// undefined there and an unguarded #if on it is a hard error on GCC/Clang (Linux/macOS CI, 2026-11-01).
+#ifndef DEDICATED
 #if SDL_VERSION_ATLEAST(2, 0, 14)
 	if ( SDL_OpenURL( url ) == 0 ) {
 		return qtrue;
 	}
 	Com_Printf( "Sys_OpenURL: %s\n", SDL_GetError() );
+#endif
 #endif
 	return qfalse;
 }

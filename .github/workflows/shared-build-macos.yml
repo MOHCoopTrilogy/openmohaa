@@ -22,6 +22,7 @@ env:
 jobs:
   build:
     strategy:
+      fail-fast: false # HZM: one exotic platform failing must not cancel linux-amd64 (Steam Deck) or windows-x64
       matrix:
         architecture: [
           #{name: 'x86_64',   triple: 'x86_64-apple-macos10.8'},

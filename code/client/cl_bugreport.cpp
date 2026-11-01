@@ -1007,6 +1007,15 @@ static void BR_ShotPath( char *out, size_t sz ) {
 									 "screenshots/coop_report_shot.jpg" ), (int)sz );
 }
 
+// [2026-11-01] Portable, so it lives outside the _WIN32 block below: the cross-platform system-info and cvar-dump
+// code calls it, and GCC/Clang (Linux CI) stop on an undeclared identifier when it is Windows-only.
+static void BR_ScrubStr( const char *in, const brscrub_t *ctx, char *out, size_t outsz ) {
+	brbuf_t b = {0};
+	BR_Scrub( in, strlen( in ), ctx, &b );
+	Q_strncpyz( out, BR_P( &b ), (int)outsz );
+	BR_Free( &b );
+}
+
 #ifdef _WIN32
 
 static void BR_EnvBoth( const wchar_t *name, char ansi[], char utf8[], size_t sz ) {
@@ -1035,13 +1044,6 @@ static void BR_ScrubCtx( brscrub_t *ctx ) {
 		memcpy( ctx->cdkey, cl_cdkey, 16 );
 		ctx->cdkey[16] = 0;
 	}
-}
-
-static void BR_ScrubStr( const char *in, const brscrub_t *ctx, char *out, size_t outsz ) {
-	brbuf_t b = {0};
-	BR_Scrub( in, strlen( in ), ctx, &b );
-	Q_strncpyz( out, BR_P( &b ), (int)outsz );
-	BR_Free( &b );
 }
 
 static qboolean BR_WriteFile( const char *path, const char *data, size_t n ) {
