@@ -4348,4 +4348,5 @@ static qboolean DrawSurfIsOffscreen(drawSurf_t* drawSurf) {
 	R_DecomposeSort(drawSurf->sort, &entityNum, &shader, &dlighted, &bStaticModel);
 	return SurfIsOffscreen2((srfBspSurface_t*)drawSurf->surface, shader, entityNum);
 #endif
+	return qfalse; // HZM [2026-11-01] body is #if 0 and nothing calls this; GCC/Clang -Werror=return-type needs a value
 }
