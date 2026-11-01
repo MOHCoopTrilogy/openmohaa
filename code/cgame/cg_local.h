@@ -749,6 +749,16 @@ const adsGunTune_t *CG_FindAdsTune(const char *wpn);
     // HZM coop [user 2026-09-01] lens splash - raised by anything that throws water at the eye
     void  CG_CoopLensSplash(float amt);
     float CG_CoopLensSplashLevel(float dt);
+    // HZM coop - demo editor (cg_demoedit.c)
+    qboolean CG_DemoCamActive(void);
+    int      CG_DemoCamView(void);
+    int      CG_DemoHudMode(void);
+    qboolean CG_DemoEdDraw2D(void);
+    void     CG_DemoEdDraw2DTail(void);
+    void     CG_DemoEdNeutralLens(void);
+    void     CG_DemoEdCs_f(void);
+    void     CG_DemoEdReset_f(void);
+    void     CG_DemoEdResetSnapshots(int snapNum, int cmdSeq);
     qboolean CG_FreecamCaptureActive(void); // HZM coop - free-cam orbit owns the mouse this frame (crosshair hides: camera != aim)
     void  CG_HudFadeTouch(void); // HZM coop - HUD fade: mark HUD-relevant activity (objective updates, suppression, ...)
     void  CG_AddSuppression(float amount); // HZM coop - bump the under-fire suppression FX (near-miss zings / hits)

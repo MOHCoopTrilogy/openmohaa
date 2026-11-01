@@ -719,6 +719,8 @@ static void CG_HzmArmory_f(void)
 }
 
 static consoleCommand_t commands[] = {
+    {"demoed_cs",              &CG_DemoEdCs_f              }, // HZM coop demo editor: a configstring changed in a seek
+    {"demoed_reset",           &CG_DemoEdReset_f           }, // HZM coop demo editor: rebuild the snapshots after a seek
     {"footprintfill",          &CG_FootprintFill_f         }, // HZM coop footprints: QA/perf helper
     {"shoulderswap",           &CG_AdsSwapShoulder_f       },
     {"useweaponclass",         &CG_UseWeaponClass_f        },

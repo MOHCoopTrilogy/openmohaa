@@ -552,9 +552,12 @@ void CG_RainGlobal(void)
     {
         trace_t roofTr;
         vec3_t  vpStart, vpEnd;
-        vpStart[0] = cg.predicted_player_state.origin[0];
-        vpStart[1] = cg.predicted_player_state.origin[1];
-        vpStart[2] = cg.predicted_player_state.origin[2] + 40.0f; // ~chest height, off the floor
+        // HZM coop - demo editor: under the free camera the roof test belongs to the CAMERA (an indoor recorded
+        // player must not kill the rain the camera is standing in)
+        const float *pRoofOrg = CG_DemoCamActive() ? cg.refdef.vieworg : cg.predicted_player_state.origin;
+        vpStart[0] = pRoofOrg[0];
+        vpStart[1] = pRoofOrg[1];
+        vpStart[2] = pRoofOrg[2] + (CG_DemoCamActive() ? 0.0f : 40.0f); // ~chest height, off the floor
         vpEnd[0]   = vpStart[0];
         vpEnd[1]   = vpStart[1];
         // HZM coop [user 2026-08-24] RAIN INDOORS. The old test read
@@ -652,8 +655,9 @@ void CG_RainGlobal(void)
         }
         if (bEntRoof) {
             // under a vehicle / model roof: nothing within 256 units of the player (a truck bed, a covered boat)
-            float dx = vStart[0] - cg.predicted_player_state.origin[0];
-            float dy = vStart[1] - cg.predicted_player_state.origin[1];
+            const float *pOrg = CG_DemoCamActive() ? cg.refdef.vieworg : cg.predicted_player_state.origin; // demo editor
+            float dx = vStart[0] - pOrg[0];
+            float dy = vStart[1] - pOrg[1];
 
             if (dx * dx + dy * dy < 256.0f * 256.0f) {
                 continue;

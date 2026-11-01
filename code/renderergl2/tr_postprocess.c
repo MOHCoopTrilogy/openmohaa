@@ -2242,3 +2242,25 @@ void RB_HZMExtraFx(FBO_t *srcFbo, ivec4_t srcBox)
 		FBO_FastBlit(tr.screenScratchFbo, srcBox, srcFbo, srcBox, GL_COLOR_BUFFER_BIT, GL_NEAREST);
 	}
 }
+
+// HZM coop - visual filters (r_ppFilter 1..HZM_NUM_FILTERS, r_ppFilterStrength). The client's KP* / KP/ and
+// the `filter` command set r_ppFilter; names in qcommon/hzm_filters.h. Same look as gl1's FILTER_FS.
+void RB_HZMFilter(FBO_t *srcFbo, ivec4_t srcBox)
+{
+	static cvar_t *r_ppFilter = NULL, *r_ppFilterStrength = NULL;
+	vec4_t         color;
+	float          aspect;
+
+	if (!r_ppFilter) {
+		r_ppFilter         = ri.Cvar_Get("r_ppFilter",         "0", 0);
+		r_ppFilterStrength = ri.Cvar_Get("r_ppFilterStrength", "1", CVAR_ARCHIVE);
+	}
+	if (r_ppFilter->integer <= 0 || r_ppFilter->integer > 10 || !srcFbo || !tr.screenScratchFbo
+	    || !tr.hzmFilterShader.program || r_ppFilterStrength->value <= 0.0f) {
+		return;
+	}
+	aspect = (srcBox[3] > 0) ? (float)srcBox[2] / (float)srcBox[3] : 1.7778f;
+	VectorSet4(color, (float)r_ppFilter->integer, backEnd.refdef.floatTime, r_ppFilterStrength->value, aspect);
+	FBO_Blit(srcFbo, srcBox, NULL, tr.screenScratchFbo, srcBox, &tr.hzmFilterShader, color, 0);
+	FBO_FastBlit(tr.screenScratchFbo, srcBox, srcFbo, srcBox, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+}

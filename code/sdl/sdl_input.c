@@ -201,6 +201,10 @@ static qboolean IN_IsConsoleKey( keyNum_t key, int character )
 		}
 	}
 
+	// HZM coop - the section sign (top-left key on Nordic / UK ISO layouts) always opens the console
+	if( character == 0xA7 || key == 0xA7 )
+		return qtrue;
+
 	// If the character is the same as the key, prefer the character
 	if( key == character )
 		key = 0;
@@ -356,7 +360,9 @@ static keyNum_t IN_TranslateSDLToQ3Key( SDL_Keysym *keysym, qboolean down )
 	if( in_keyboardDebug->integer )
 		IN_PrintKey( keysym, key, down );
 
-	if( IN_IsConsoleKey( key, 0 ) )
+	// HZM coop: the section sign, and the top-left key by POSITION (scancode GRAVE: ` on US, the section sign on
+	// Nordic / UK ISO boards, ^ on German) open the console on every layout
+	if( IN_IsConsoleKey( key, 0 ) || keysym->sym == 0xA7 || keysym->scancode == SDL_SCANCODE_GRAVE )
 	{
 		// Console keys can't be bound or generate characters
 		key = K_CONSOLE;
@@ -783,6 +789,8 @@ it, so movement / look / fire / menu navigation can be proven without a physical
     <ms> lx ly rx ry lt rt buttons                 sticks -32768..32767, triggers 0..32767, buttons = bit mask
                                                    (SDL order: A0 B1 X2 Y3 BACK4 GUIDE5 START6 LS7 RS8 LB9 RB10
                                                    DUP11 DDOWN12 DLEFT13 DRIGHT14), decimal or 0x hex
+    @mouse <ms> dx dy                              test only: one mouse motion event, queued exactly as SDL's
+                                                   relative motion is (proves mouse look without focus)
 ===============
 */
 typedef struct {
@@ -828,6 +836,9 @@ static void IN_PadTestLoad( void )
 		} else if ( !strncmp( line, "@cursor", 7 ) ) {
 			st->kind = 4;      // test only: put the UI cursor somewhere known
 			if ( sscanf( line + 7, "%d %d %d", &st->t, &st->ax[0], &st->ax[1] ) == 3 ) padNumSteps++;
+		} else if ( !strncmp( line, "@mouse", 6 ) ) {
+			st->kind = 6;      // test only: a relative mouse motion event
+			if ( sscanf( line + 6, "%d %d %d", &st->t, &st->ax[0], &st->ax[1] ) == 3 ) padNumSteps++;
 		} else if ( !strncmp( line, "@kbm", 4 ) ) {
 			st->kind = 5;      // test only: act as if the keyboard / mouse was just used (key prompts switch to key names)
 			if ( sscanf( line + 4, "%d", &st->t ) == 1 ) padNumSteps++;
@@ -901,6 +912,8 @@ static void IN_PadTestDrive( void )
 			i          = SDL_JoystickAttachVirtualEx( &d );
 			Com_Printf( "^~^~^ PADTEST attach -> %d\n", i );
 			padWantOpen = qtrue;
+		} else if ( st->kind == 6 ) {
+			Com_QueueEvent( Sys_Milliseconds(), SE_MOUSE, st->ax[0], st->ax[1], 0, NULL );
 		} else if ( st->kind == 5 ) {
 			IN_PadNoteKbm();
 		} else if ( st->kind == 4 ) {

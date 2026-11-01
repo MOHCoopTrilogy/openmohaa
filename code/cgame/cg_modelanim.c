@@ -3090,6 +3090,11 @@ void CG_ModelAnim(centity_t *cent, qboolean bDoShaderTime)
     if (CG_MpRealismOffActive(MPREALISM_NO3P)) {
         bThirdPerson = qfalse;
     }
+    // HZM coop - demo editor free camera: the recorded player is a full third-person character from any
+    // angle - never the first-person arms, never hidden (lockstep with CG_CalcViewValues)
+    if (CG_DemoCamActive()) {
+        bThirdPerson = qtrue;
+    }
     // HZM coop - REMOVED the 3rd-person MG42 experiment's `bThirdPerson |= PMF_TURRET` line. It force-drew
     // your own body in 3rd person on EVERY turret (MG42 nest, jeep .30cal, halftrack), overriding the
     // upstream line above (which deliberately excludes turrets so the mounted view stays clean first-person).
@@ -3205,7 +3210,10 @@ void CG_ModelAnim(centity_t *cent, qboolean bDoShaderTime)
     VectorSubtract(vMins, vMaxs, vTmp);
     model.radius = VectorLength(vTmp) * 0.5;
 
-    if (s1->number == cg.snap->ps.clientNum) {
+    // HZM coop - demo editor: under the free camera the recorded player is a body like any other, so his
+    // bone controllers (head / torso aim) are slerped between snapshots too; the raw ones step at the
+    // snapshot rate when you watch him from outside.
+    if (s1->number == cg.snap->ps.clientNum && !CG_DemoCamActive()) {
         if (!bThirdPerson) {
             PmoveAdjustAngleSettings_Client(
                 cg.refdefViewAngles, cent->lerpAngles, &cg.predicted_player_state, &cent->currentState

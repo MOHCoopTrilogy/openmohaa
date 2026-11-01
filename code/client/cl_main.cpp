@@ -637,6 +637,12 @@ void CL_ReadDemoMessage( void ) {
 		CL_DemoCompleted ();
 		return;
 	}
+	// HZM coop - the demo editor holds the last frame at the end of the file instead of leaving
+	// (a message is an 8-byte header plus data: 8 bytes or less left is the end, or the -1 -1 trailer)
+	if ( clc.demoplaying && CL_DemoEd_Enabled()
+		&& FS_filelength( clc.demofile ) - FS_FTell( clc.demofile ) <= 8 && CL_DemoEd_HoldAtEnd() ) {
+		return;
+	}
 
 	// get the sequence number
 	r = FS_Read( &s, 4, clc.demofile);
@@ -722,7 +728,17 @@ void CL_PlayDemo_f( void ) {
 	// 2 means don't force disconnect of local client
 	Cvar_Set( "sv_killserver", "2" );
 
-	CL_Disconnect();
+	// HZM coop - a demo started over a running game or demo (console "demo x" while one plays, the demo
+	// editor's reload): free the loaded map the way the disconnect command does, or the renderer refuses the
+	// new demo's world ("attempted to redundantly load world map") and drops to the menu.
+	{
+		qboolean bWasIn = ( clc.state >= CA_CONNECTED || clc.demoplaying ) ? qtrue : qfalse;
+		CL_Disconnect();
+		if ( bWasIn && com_cl_running && com_cl_running->integer ) {
+			CL_FlushMemory();
+			CL_StartHunkUsers( qfalse );
+		}
+	}
 
 	// open the demo file
 	arg = Cmd_Argv(1);
@@ -1096,6 +1112,8 @@ void CL_Disconnect() {
 	if ( !com_cl_running || !com_cl_running->integer ) {
 		return;
 	}
+
+	CL_DemoEd_Reset(); // HZM coop - demo editor state is per demo
 
 	// HZM coop [SEC2] leaving a server other than our own listen server: drop every command-buffer byte it
 	// queued (a wait-deferred stufftext remainder), keeping local bytes in order, so none of it can run
@@ -4484,6 +4502,7 @@ void CL_Init( void ) {
 	Cmd_AddCommand ("disconnect", CL_Disconnect_f);
 	Cmd_AddCommand ("record", CL_Record_f);
 	Cmd_AddCommand ("demo", CL_PlayDemo_f);
+	CL_DemoEd_Init(); // HZM coop - demo editor commands + cvars
 	Cmd_AddCommand ("cinematic", CL_PlayCinematic_f);
 	Cmd_AddCommand ("stoprecord", CL_StopRecord_f);
 	Cmd_AddCommand ("connect", CL_Connect_f);

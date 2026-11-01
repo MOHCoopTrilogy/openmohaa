@@ -265,7 +265,7 @@ static void CG_HzmScopePublish(void)
     hs.eye  = 1.18f; // with the pupil's 0.86..1.0 fall-off: a centred eye casts no shadow at all
     {
         char buf[128];
-        if (!hs.pip && hs.frac <= 0.0f) {
+        if ((!hs.pip && hs.frac <= 0.0f) || CG_DemoCamActive()) {
             Q_strncpyz(buf, "0", sizeof(buf));
         } else {
             Com_sprintf(
@@ -287,7 +287,7 @@ static void CG_HzmScopePublish(void)
         }
         {   // the optic's reticle image name for the lens pass (in-lens reticle)
             static char s_ret[32];
-            const char *rn = (hs.pip && hs.optic >= 0) ? s_hzmOptics[hs.optic].tex : "";
+            const char *rn = (hs.pip && hs.optic >= 0 && !CG_DemoCamActive()) ? s_hzmOptics[hs.optic].tex : "";
             if (strcmp(rn, s_ret)) {
                 Q_strncpyz(s_ret, rn, sizeof(s_ret));
                 cgi.Cvar_Set("r_ppScopeRet", rn);
@@ -605,6 +605,9 @@ void CG_HzmScopeSetOcular(float x, float y, float glassR)
 
 qboolean CG_HzmScopeActive(void)
 {
+    if (CG_DemoCamActive()) {
+        return qfalse; // HZM coop - demo free camera: no scope effects on it
+    }
     return (cg_hzmScope && hs.frac > 0.0f) ? qtrue : qfalse;
 }
 

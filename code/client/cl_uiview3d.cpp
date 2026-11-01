@@ -506,13 +506,15 @@ void View3D::Draw2D(void)
             cge->CG_Draw2D();
         }
 
-        if (m_locationprint) {
+        if (CL_DemoEd_HudMode() != 0) {
+            // HZM coop - demo editor: names-only / no-HUD modes drop the prints and subtitles too
+        } else if (m_locationprint) {
             LocationPrint();
         } else {
             CenterPrint();
         }
 
-        if (!cls.no_menus) {
+        if (!cls.no_menus && CL_DemoEd_HudMode() == 0) {
             DrawSoundOverlay();
             DrawNetProfile();
             DrawSubtitleOverlay();

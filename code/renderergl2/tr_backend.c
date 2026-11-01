@@ -2624,6 +2624,8 @@ const void *RB_PostProcess(const void *data)
 			// HZM coop [bug-3462] modern scope optics: LAST, it IS the image through the glass (cgame draws the reticle)
 			RB_HZMScope(srcFbo, srcBox);
 			RB_HZMScopeLive(qtrue);
+			// HZM coop - visual filter (r_ppFilter): over everything in the scene, under the HUD
+			RB_HZMFilter(srcFbo, srcBox);
 		}
 	}
 
