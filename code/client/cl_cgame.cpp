@@ -485,6 +485,7 @@ qboolean CL_GetServerCommand( int serverCommandNumber, qboolean differentServer 
 	cl_cgPendingNewline = qfalse;
 	if (!strcmp(cmd, "stufftext")) {
 		Q_strncpyz(cl_cgPendingStuffText, Cmd_Argv(1), sizeof(cl_cgPendingStuffText));
+		CL_DemoEd_NoteStuff(cl_cgPendingStuffText); // HZM coop - demo editor: remember what it changes (seek-safe)
 		cl_cgPendingStuff = qtrue;
 	}
 

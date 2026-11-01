@@ -4271,6 +4271,7 @@ void CG_Draw2D(void)
             CG_DrawAdsVignette();
         }
         CG_DemoEdDraw2D();
+        CG_DemoEdNeutralLens(); // last in the frame: no lens / injury effect on the free camera
         return;
     }
 
@@ -4323,4 +4324,5 @@ void CG_Draw2D(void)
     CG_SeedAdsTuneFromBaked(); // seed live cvars from the baked table so tune mode doesn't snap the gun
     CG_DrawAdsTune();
     CG_DemoEdDraw2DTail(); // HZM coop - demo editor: name tags under the free camera + status line
+    CG_DemoEdNeutralLens(); // HZM coop - demo editor: LAST, so nothing the 2D pass published reaches the free camera
 }

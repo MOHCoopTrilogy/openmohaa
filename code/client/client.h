@@ -171,6 +171,7 @@ qboolean    CL_DemoEd_KeyEvent(int key, qboolean down);
 qboolean    CL_DemoEd_FreecamActive(void);
 qboolean    CL_DemoEd_MouseLook(float mx, float my);
 const char *CL_DemoEd_FilterConfigstring(int index, const char *s);
+void        CL_DemoEd_NoteStuff(const char *text);
 int         CL_DemoEd_HudMode(void);
 qboolean    CL_DemoEd_HoldAtEnd(void);
 void        CL_DemoEd_SetFile(const char *name);
