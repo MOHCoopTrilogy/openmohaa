@@ -505,6 +505,7 @@ void View3D::Draw2D(void)
         if (cge) {
             cge->CG_Draw2D();
         }
+        CL_DemoEd_DrawTimeline(); // HZM coop - demo editor timeline (full HUD only, never in an F10 render)
 
         if (CL_DemoEd_HudMode() != 0) {
             // HZM coop - demo editor: names-only / no-HUD modes drop the prints and subtitles too

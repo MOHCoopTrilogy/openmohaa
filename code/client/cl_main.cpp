@@ -774,6 +774,7 @@ void CL_PlayDemo_f( void ) {
 		return;
 	}
 	Q_strncpyz( clc.demoName, Cmd_Argv(1), sizeof( clc.demoName ) );
+	CL_DemoEd_SetFile( name ); // HZM coop - demo editor timeline: scans this file for its length and markers
 
     UI_CloseConsole();
 
