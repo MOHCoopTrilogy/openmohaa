@@ -2175,6 +2175,9 @@ static int CG_AdsAnimClass(void)
     if (CG_VMAimedCycleActive()) {
         return 1;
     }
+    if (CG_VMScopeHoldClip()) {   // [scopehold] the scoped aim pose held through a bolt / reload IS the aim pose: the target keeps following it
+        return 0;
+    }
     if (CG_VMScopedReloadAdsClip()) {   // [scopes1025] an authored scoped reload clip: hold the solved aim, the clip's own gun motion plays on top
         return 1;
     }
@@ -2290,6 +2293,123 @@ static void CG_ScopeOcular(refEntity_t *pREnt, const adsSight_t *s, vec3_t cam[3
     if (dep > 0.3f && cg_fAdsWeaponFov > 1.0f && cg.refdef.width > 0) {
         tanY = (float)tan(DEG2RAD(cg_fAdsWeaponFov * 0.5f)) * (float)cg.refdef.height / (float)cg.refdef.width;
         CG_HzmScopeSetOcular(-DotProduct(d2, cam[1]) / dep / (2.0f * tanY), -DotProduct(d2, cam[2]) / dep / (2.0f * tanY), (s->relief / 2.38f) / 1.5f / dep / (2.0f * tanY));
+    }
+}
+
+/*
+[scopehold 2026-11-01] user: "when the bolt is being cycled the pip inside the scope spazzes out". The lens centre was projected from the HANDS' tag_weapon_right
+(CG_ScopeOcular), but through every bolt cycle and reload the server hands the rifle to tag_weapon_left (attachtohand offhand): the gun rode the still left
+hand while the picture and the reticle followed the right hand working the bolt - they slid round inside the eyepiece frame to frame. Called from
+cg_modelanim.c with the gun's FINAL transform (after the tag hand-off fade), so the lens is wherever the glass really is. coop_scopeOcularGun 0 = as before.
+*/
+/*
+[scopehold 2026-11-01] BOLT JOLTS at the eye. User: "there should be slight jolts by the bolt being pulled when in ads", "realistic weight movement".
+A bolt cycle is four impulses into a damped spring (the rifle's weight against the shoulder, under-damped: a small overshoot, settled in ~0.3 s),
+timed on the bolt row's length: the handle lifted (a roll), the bolt hitting the back stop (muzzle up a touch), rammed home (the biggest:
+muzzle down), the handle locked (the roll back). The view takes the whole motion and the rifle 65 percent of it, so the gun visibly carries
+weight against the eye. Degrees of view angle, peak ~0.3; coop_scopeBoltJolt scales it (0 = off).
+*/
+static int   s_boltT0 = 0, s_boltDone = 0, s_boltLast = 0;
+static float s_boltLen = 1.0f, s_boltX[3], s_boltV[3];
+
+void CG_ScopeBoltStart(float fLen)
+{
+    s_boltT0   = cg.time;
+    s_boltLen  = (fLen > 0.2f && fLen < 4.0f) ? fLen : 1.0f;
+    s_boltDone = 0;
+}
+
+static void CG_ScopeBoltJolt(refEntity_t *pREnt, const vec3_t eye)
+{
+    // fraction of the cycle, impulse (deg/s): pitch (+ = muzzle down), yaw (+ = left), roll
+    static const float kEv[4][4] = {{0.12f, -2.0f, 0.0f, 9.0f}, {0.34f, -7.0f, 2.5f, 0.0f}, {0.64f, 10.0f, -3.0f, -3.0f}, {0.84f, 2.5f, 0.0f, -8.5f}};
+    static cvar_t     *pK = NULL;
+    const float        w = 16.0f, z = 0.45f;
+    float              dt, t, k;
+    vec3_t             J, before[3], after[3], d, o, a;
+    int                e, q, i;
+
+    if (!pK) {
+        pK = cgi.Cvar_Get("coop_scopeBoltJolt", "1", CVAR_ARCHIVE);
+    }
+    dt = (s_boltLast > 0 && cg.time > s_boltLast) ? (cg.time - s_boltLast) * 0.001f : 0.0f;
+    s_boltLast = cg.time;
+    if (dt > 0.1f) {
+        dt = 0.1f;
+    }
+    k = pK->value;
+    if (s_boltT0) {
+        t = (cg.time - s_boltT0) * 0.001f / s_boltLen;
+        for (e = 0; e < 4; e++) {
+            if (!(s_boltDone & (1 << e)) && t >= kEv[e][0]) {
+                s_boltDone |= 1 << e;
+                for (q = 0; q < 3 && k > 0.0f; q++) {
+                    s_boltV[q] += kEv[e][1 + q] * k;
+                }
+            }
+        }
+        if (s_boltDone == 15 || t > 2.0f) {
+            s_boltT0 = 0;
+        }
+    }
+    while (dt > 0.0f) {   // fixed substeps: frame-rate independent
+        const float h = dt > 0.004f ? 0.004f : dt;
+        for (q = 0; q < 3; q++) {
+            s_boltV[q] += (-w * w * s_boltX[q] - 2.0f * z * w * s_boltV[q]) * h;
+            s_boltX[q] += s_boltV[q] * h;
+        }
+        dt -= h;
+    }
+    if (fabs(s_boltX[0]) + fabs(s_boltX[1]) + fabs(s_boltX[2]) < 0.0005f && fabs(s_boltV[0]) + fabs(s_boltV[1]) + fabs(s_boltV[2]) < 0.005f) {
+        return;
+    }
+    VectorCopy(s_boltX, J);
+    AnglesToAxis(cg.refdefViewAngles, before);
+    VectorAdd(cg.refdefViewAngles, J, cg.refdefViewAngles);
+    if (pREnt) {   // the rifle takes 65 percent of it, turned about the eye: expressed in the old camera frame, re-expressed in one turned by 0.65 J
+        VectorMA(cg.refdefViewAngles, -0.35f, J, a);
+        AnglesToAxis(a, after);
+        VectorSubtract(pREnt->origin, eye, d);
+        VectorCopy(eye, o);
+        for (i = 0; i < 3; i++) {
+            VectorMA(o, DotProduct(d, before[i]), after[i], o);
+        }
+        VectorCopy(o, pREnt->origin);
+        for (q = 0; q < 3; q++) {
+            vec3_t ax;
+            VectorClear(ax);
+            for (i = 0; i < 3; i++) {
+                VectorMA(ax, DotProduct(pREnt->axis[q], before[i]), after[i], ax);
+            }
+            VectorCopy(ax, pREnt->axis[q]);
+        }
+    }
+}
+
+void CG_ScopeOcularGun(const refEntity_t *gun)
+{
+    static cvar_t *pOn = NULL;
+    vec3_t         cam[3], R2w, d2;
+    float          dep, tanY;
+    int            q;
+
+    if (!pOn) {
+        pOn = cgi.Cvar_Get("coop_scopeOcularGun", "1", 0);
+    }
+    if (!pOn->integer || !gun || !s_ocRow || s_ocTime != cg.time || !CG_HzmScopeHeld()) {
+        return;
+    }
+    AnglesToAxis(cg.refdefViewAngles, cam);
+    VectorCopy(gun->origin, R2w);
+    for (q = 0; q < 3; q++) {
+        VectorMA(R2w, s_ocRow->R[q], gun->axis[q], R2w);
+    }
+    VectorSubtract(R2w, cg.refdef.vieworg, d2);
+    dep = DotProduct(d2, cam[0]);
+    if (dep > 0.3f && cg_fAdsWeaponFov > 1.0f && cg.refdef.width > 0) {
+        tanY = (float)tan(DEG2RAD(cg_fAdsWeaponFov * 0.5f)) * (float)cg.refdef.height / (float)cg.refdef.width;
+        CG_HzmScopeSetOcular(-DotProduct(d2, cam[1]) / dep / (2.0f * tanY), -DotProduct(d2, cam[2]) / dep / (2.0f * tanY),
+                             (s_ocRow->relief / 2.38f) / 1.5f / dep / (2.0f * tanY));
     }
 }
 
@@ -2463,7 +2583,12 @@ static void CG_AdsRigSolve(refEntity_t *pREnt)
                 const float lim = (s >= s_adsSightsScope && s < s_adsSightsScope + sizeof(s_adsSightsScope) / sizeof(s_adsSightsScope[0])) ? 40.0f : 4.0f;
                 if (s_rigTgt[7] > lim) { s_rigTgt[7] = lim; } else if (s_rigTgt[7] < -lim) { s_rigTgt[7] = -lim; }
             }
-            if (!s_rigTgtOk && s_rigFreshGun && s_rigW >= 0.001f) {
+            // [scopehold 2026-11-01] ...and ANY first target that arrives while the correction already has visible weight: the target is taken only
+            // once the hands are fully in an aim pose (aim weight > 0.999), which on a scope raise just after another clip came at rig weight ~0.9 -
+            // nothing was applied before it (no target), so the whole correction landed in one frame: the rifle hopped ~0.45 u sideways and the
+            // lens 0.11-0.16 of the screen near the end of the raise, then settled (runs b10 / b12 / b14, release too). Now it eases in from zero.
+            // cg_adsRigEaseFirst 0 = only for a freshly drawn gun, as before.
+            if (!s_rigTgtOk && (s_rigFreshGun || cgi.Cvar_Get("cg_adsRigEaseFirst", "1", 0)->integer) && s_rigW >= 0.001f) {
                 // [quick-draw motion] the new gun's first aim pose: nothing applied yet, so ease in from zero
                 for (k = 0; k < 8; k++) {
                     s_rigOff[k]  = -s_rigTgt[k];
@@ -6000,6 +6125,8 @@ void CG_OffsetFirstPersonView(refEntity_t *pREnt, qboolean bUseWorldPosition)
         VectorAdd(origin, camOfs, origin);
         cg.refdefViewAngles[2] += s_camRoll;
     }
+
+    CG_ScopeBoltJolt(pREnt, origin);   // [scopehold] bolt cycle at the eye: the rifle's weight (no-op otherwise)
 
     VectorCopy(origin, cg.playerHeadPos);
 

@@ -66,7 +66,7 @@ void RB_HZMScope(FBO_t *srcFbo, ivec4_t srcBox)
 	if (s_st[0] <= 0.001f || s_st[1] <= 0.01f) {
 		return;
 	}
-	if (R_HzmLensStateWantsPip() && tr.hzmLensFbo) {
+	if (R_HzmLensStateSelected() && tr.hzmLensFbo) {   // [scopehold] the whole raise / lower, not only once the live picture is on
 		return;   // HZM coop [scopes1025] picture-in-picture: RB_HZMLensComposite already drew the optics
 	}
 

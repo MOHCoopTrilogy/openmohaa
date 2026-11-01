@@ -81,6 +81,8 @@ static cvar_t *cg_scopeRaise;     // [scopes1025] 1 = the rifle stays in the vie
 static cvar_t *r_ppScopePipLive;  // renderer-published: the PiP composite can run
 static cvar_t *r_ppScopeState;
 static cvar_t *r_ppScopeLive;
+static cvar_t *r_ppScopeGhostFix;
+static cvar_t *cg_scopeLensFade;   // [scopehold] share of the scope ease over which the live picture fades into the glass (from the start of the raise)  // [scopehold] renderer cvar, read here too: 1 = the PiP amount starts at 0 where the composite starts
 
 static struct {
     float    frac;      // linear 0..1 scope presence
@@ -97,6 +99,8 @@ static struct {
     qboolean pip;       // [scopes1025] this scope is shown as a picture-in-picture lens (kept through the scope-out ease)
     float    lensFov;   // [scopes1025] square lens-scene fov (degrees) published to the renderer
     float    pipK;      // [scopes1025] glass -> live picture blend 0..1 (the lens is real glass until the scope reaches the eye)
+    qboolean eyeHidden; // [scopehold] the held gun's eyecup is not drawn this frame: the lens pass draws the eyepiece ring itself
+    float    blurK;     // [scopehold] how far the world round the lens is blurred / dimmed 0..1 (its own, later timing than pipK)
     float    glassR;    // [scopes1025] the glass surface's projected radius, screen-height units (0 = unknown)
     float    ocX, ocY;  // [scopes1025] the rifle's projected eyepiece centre (CG_HzmScopeSetOcular, last frame's)
     int      ocTime;
@@ -128,6 +132,8 @@ static void CG_HzmScopeCvars(void)
     coop_scopeScale = cgi.Cvar_Get("coop_scopeScale", "1", CVAR_ARCHIVE);
     cg_scopeRaise   = cgi.Cvar_Get("cg_scopeRaise", "1", CVAR_ARCHIVE);
     r_ppScopePipLive = cgi.Cvar_Get("r_ppScopePipLive", "0", 0);
+    r_ppScopeGhostFix = cgi.Cvar_Get("r_ppScopeGhostFix", "1", 0);
+    cg_scopeLensFade  = cgi.Cvar_Get("cg_scopeLensFade", "0.3", 0);
 }
 
 static qhandle_t s_hRet[HO_NUM];
@@ -271,8 +277,10 @@ static void CG_HzmScopePublish(void)
             Com_sprintf(
                 buf,
                 sizeof(buf),
-                "%.4f %.4f %.4f %.4f %.3f %.3f %.3f %.4f %.4f %d %.3f",
-                hs.ease * hs.lensK,
+                "%.4f %.4f %.4f %.4f %.3f %.3f %.3f %.4f %.4f %d %.3f %d",
+                // [scopehold] PiP: the amount (the blur / dim of the world round the lens) follows pipK, so it is 0 on the first frame the composite runs and
+                // grows from there; with ease it was already 0.55 on that frame - the world jumped from sharp to half blurred, a double image, on every raise
+                ((hs.pip && r_ppScopeGhostFix->integer) ? hs.blurK : hs.ease) * hs.lensK,
                 hs.lens,
                 hs.sx,
                 hs.sy,
@@ -282,7 +290,8 @@ static void CG_HzmScopePublish(void)
                 hs.lcX,
                 hs.lcY,
                 hs.mode,
-                hs.pipK
+                hs.pipK,
+                hs.eyeHidden ? 1 : 0
             );
         }
         {   // the optic's reticle image name for the lens pass (in-lens reticle)
@@ -488,6 +497,16 @@ static void CG_HzmScopeFrame(float camFov)
     // the live picture only exists while the scope is up: it fades in over the last part of the raise (~0.1-0.15 s) and out again on lowering; at the hip / sprint / hip reload the
     // gl2 pass is skipped entirely and the rifle's own glass shader shows
     hs.pipK = hs.pip ? CG_HzmSmooth((hs.ease - 0.55f) / 0.35f) : 0.0f;
+    hs.blurK = hs.pipK;
+    hs.eyeHidden = qfalse;   // set again by CG_HzmScopeEyeHide when the held gun is drawn this frame (it republishes through CG_HzmScopeSetOcular)
+    // [scopehold 2026-11-01] user: "That dark scope to pip is super obvious when going in and out... make it super seamless". The glass stayed the rifle's own BLACK
+    // glass for the first 55 percent of the raise and the picture cut in near the eye (and went black again early on the lower, a big black disk passing the
+    // camera). Now the live picture fades in from the FIRST frame of the raise (over cg_scopeLensFade of the ease, while the glass is still small and low) and stays
+    // until the rifle is back at the hip, so at the eye the glass is never dark; the world's blur keeps the late timing (blurK). r_ppScopeGhostFix 0 = as before.
+    if (hs.pip && r_ppScopeGhostFix->integer) {
+        const float f = cg_scopeLensFade->value > 0.01f ? cg_scopeLensFade->value : 0.01f;
+        hs.pipK = CG_HzmSmooth(hs.ease / f);
+    }
 
     // ---- publish to the gl2 pass (only on change; "0" once when the scope is down)
     CG_HzmScopePublish();
@@ -600,6 +619,56 @@ void CG_HzmScopeSetOcular(float x, float y, float glassR)
         if (len > 0.6f) { tx *= 0.6f / len; ty *= 0.6f / len; }
         hs.lcX = tx; hs.lcY = ty; hs.lvX = hs.lvY = 0.0f;
         CG_HzmScopePublish();
+    }
+}
+
+/*
+[scopehold 2026-11-01] the G43 Sniper's and the StG44 Scoped's ZF4 meshes (g43sniper_coop.skd, scopedmp44_coop.skd) carry a rubber eyecup whose
+flap sits ON the scope axis behind the glass: at the eye it covered ~70 percent of the eyepiece in glossy black (run b8 / b10), only a strip of
+the live picture showed. Once the scope is most of the way up (ease > 0.6) those surfaces are not drawn on the gun in the hands. The weapons
+(name prefixes) and surfaces are cvars so a mesh fix can retire this: coop_scopeEyeHideWpn ("" = off), coop_scopeEyeHide.
+*/
+void CG_HzmScopeEyeHide(refEntity_t *gun)
+{
+    static cvar_t *pW = NULL, *pS = NULL;
+    const char    *wpn;
+    char           list[256], *tok, *nx;
+    qboolean       hit = qfalse;
+
+    if (!pW) {
+        pW = cgi.Cvar_Get("coop_scopeEyeHideWpn", "G43 Sniper;StG44 Scoped", 0);
+        pS = cgi.Cvar_Get("coop_scopeEyeHide", "scopeb", 0);
+    }
+    if (!gun || !gun->tiki || !pW->string[0] || !pS->string[0] || !hs.pip || hs.ease <= 0.6f) {
+        return;
+    }
+    wpn = CG_HzmActiveWeaponName();
+    Q_strncpyz(list, pW->string, sizeof(list));
+    for (tok = list; tok; tok = nx) {   // ';'-separated, no strtok (not re-entrant / not portable)
+        nx = strchr(tok, ';');
+        if (nx) {
+            *nx++ = 0;
+        }
+        if (tok[0] && !Q_stricmpn(wpn, tok, strlen(tok))) {
+            hit = qtrue;
+            break;
+        }
+    }
+    if (!hit) {
+        return;
+    }
+    Q_strncpyz(list, pS->string, sizeof(list));
+    for (tok = list; tok; tok = nx) {
+        int sn;
+        nx = strchr(tok, ';');
+        if (nx) {
+            *nx++ = 0;
+        }
+        sn = tok[0] ? cgi.Surface_NameToNum(gun->tiki, tok) : -1;
+        if (sn >= 0 && sn < MAX_MODEL_SURFACES) {
+            gun->surfaces[sn] |= MDL_SURFACE_NODRAW;
+            hs.eyeHidden = qtrue;
+        }
     }
 }
 
