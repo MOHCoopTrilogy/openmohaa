@@ -116,7 +116,7 @@ static LPALDELETEEFFECTS             qalDeleteEffects             = NULL;
 static LPALEFFECTI                   qalEffecti                   = NULL;
 static LPALEFFECTF                   qalEffectf                   = NULL;
 static LPALEFFECTFV                  qalEffectfv                  = NULL;
-static LPALSOURCE3I                  qalSource3i                  = NULL;
+static LPALSOURCE3I                  hzm_alSource3i                  = NULL;
 
 static ALuint al_efx_effect = 0;
 static ALuint al_efx_slot   = 0;
@@ -423,13 +423,13 @@ static bool S_OPENAL_InitEFX()
     qalEffecti                   = (LPALEFFECTI)                    qalGetProcAddress("alEffecti");
     qalEffectf                   = (LPALEFFECTF)                    qalGetProcAddress("alEffectf");
     qalEffectfv                  = (LPALEFFECTFV)                   qalGetProcAddress("alEffectfv");
-    qalSource3i                  = (LPALSOURCE3I)                   qalGetProcAddress("alSource3i");
+    hzm_alSource3i                  = (LPALSOURCE3I)                   qalGetProcAddress("alSource3i");
 
     if (!qalGenAuxiliaryEffectSlots || !qalDeleteAuxiliaryEffectSlots ||
         !qalAuxiliaryEffectSloti    || !qalAuxiliaryEffectSlotf       ||
         !qalGenEffects              || !qalDeleteEffects              ||
         !qalEffecti                 || !qalEffectf                    ||
-        !qalEffectfv                || !qalSource3i) {
+        !qalEffectfv                || !hzm_alSource3i) {
         Com_Printf("OpenAL: Failed to load all EFX function pointers.\n");
         return false;
     }
@@ -3496,7 +3496,7 @@ static void S_OPENAL_reverb(int iChannel, int iReverbType, float fReverbLevel)
     openal_channel *pChan;
     ALuint          source;
 
-    if (!al_use_reverb || !al_efx_slot || !qalSource3i) {
+    if (!al_use_reverb || !al_efx_slot || !hzm_alSource3i) {
         return;
     }
 
@@ -3514,13 +3514,13 @@ static void S_OPENAL_reverb(int iChannel, int iReverbType, float fReverbLevel)
     // Sources are recycled and the send routing is sticky, so explicitly disconnect (rather than
     // just skip) in case this source was routed while living on a 3D channel earlier.
     if (iChannel >= MAX_SOUNDSYSTEM_CHANNELS_3D) {
-        qalSource3i(source, AL_AUXILIARY_SEND_FILTER, AL_EFFECTSLOT_NULL, 0, AL_FILTER_NULL);
+        hzm_alSource3i(source, AL_AUXILIARY_SEND_FILTER, AL_EFFECTSLOT_NULL, 0, AL_FILTER_NULL);
         qalGetError();
         return;
     }
 
     // Route send 0 of this source through the global reverb slot
-    qalSource3i(source, AL_AUXILIARY_SEND_FILTER, (ALint)al_efx_slot, 0, AL_FILTER_NULL);
+    hzm_alSource3i(source, AL_AUXILIARY_SEND_FILTER, (ALint)al_efx_slot, 0, AL_FILTER_NULL);
     qalGetError();
 }
 
