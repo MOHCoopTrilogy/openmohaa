@@ -216,6 +216,17 @@ Event EV_Weapon_NotDroppable
     NULL,
     "Makes a weapon not droppable"
 );
+// [v1.10.49] the reverse, for script: the coop itemhandler marks every world-spawned gun notdroppable when it initialises, so a gun a
+// script hands a player (Norway storage room: "all of those weapons should drop when people die but always be pickupable") would
+// otherwise vanish with him
+Event EV_Weapon_Droppable
+(
+    "droppable",
+    EV_DEFAULT,
+    NULL,
+    NULL,
+    "HZM coop: makes a weapon droppable again (undoes notdroppable)"
+);
 Event EV_Weapon_SetAimAnim
 (
     "setaimanim",
@@ -949,6 +960,7 @@ CLASS_DECLARATION(Item, Weapon, NULL) {
     {&EV_Weapon_SetMinRange,            &Weapon::SetMinRangeEvent       },
     {&EV_Weapon_FireDelay,              &Weapon::SetFireDelay           },
     {&EV_Weapon_NotDroppable,           &Weapon::NotDroppableEvent      },
+    {&EV_Weapon_Droppable,              &Weapon::DroppableEvent         },
     {&EV_Weapon_SetAimAnim,             &Weapon::SetAimAnim             },
     {&EV_Weapon_Shoot,                  &Weapon::Shoot                  },
     {&EV_Weapon_SetRank,                &Weapon::SetRankEvent           },
@@ -1057,6 +1069,7 @@ Weapon::Weapon()
     m_bCoopQDrawPosed     = false;
     // HZM coop [user 2026-10-05] use-to-loot: same rule - seeded before the savegame return, not archived
     m_bCoopUseLoot       = false;
+    m_bCoopKeepLoot      = false;
     m_iCoopLootGrantTo   = -1;
     m_fCoopLootGrantTime = 0.0f;
 
@@ -3392,6 +3405,11 @@ qboolean Weapon::Drop(void)
     // player drops, including a looted gun dropped again (the flag is rewritten on every drop).
     m_bCoopUseLoot     = (owner && !owner->isClient() && owner->IsSubclassOfActor() && ammo_clip_size[FIRE_PRIMARY] > 0
                       && !(weapon_class & WEAPON_CLASS_THROWABLE) && G_CoopLootActive());
+    // [v1.10.49] a gun a script made loot (Norway storage room) stays loot when a PLAYER dies with it: a walk-over pickup of a second
+    // primary is refused in team games (TouchStuff "doesn't have a primary weapon on DM modes"), only the loot tap gets past that
+    if (m_bCoopKeepLoot && ammo_clip_size[FIRE_PRIMARY] > 0 && !(weapon_class & WEAPON_CLASS_THROWABLE) && G_CoopLootActive()) {
+        m_bCoopUseLoot = true;
+    }
     m_iCoopLootGrantTo = -1;
 
     if (owner && owner->isClient()) {
@@ -4280,6 +4298,7 @@ bool G_CoopLootAmmoFull(Sentient *pSen, const str& sType)
 // spare guns off his back stay untriggerable, exactly as they were for touch pickup).
 void Weapon::EventCoopUseLoot(Event *ev)
 {
+    m_bCoopKeepLoot    = true;
     m_bCoopUseLoot     = ammo_clip_size[FIRE_PRIMARY] > 0 && !(weapon_class & WEAPON_CLASS_THROWABLE);
     m_iCoopLootGrantTo = -1;
 }
@@ -4805,6 +4824,11 @@ void Weapon::SetMinRangeEvent(Event *ev)
 //======================
 //Weapon::NotDroppableEvent
 //======================
+void Weapon::DroppableEvent(Event *ev)
+{
+    notdroppable = false;
+}
+
 void Weapon::NotDroppableEvent(Event *ev)
 {
     notdroppable = true;

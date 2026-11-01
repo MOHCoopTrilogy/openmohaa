@@ -345,6 +345,7 @@ public:
     // dropped in a coop session is taken with the Use key, never by walking over it. Constructor-seeded and
     // deliberately NOT archived (coop runs no saves; the single-player savegame layout is untouched).
     bool  m_bCoopUseLoot;       // set in Drop() when the owner was an Actor and the feature is on
+    bool  m_bCoopKeepLoot;      // [v1.10.49] script coopuseloot: stays a press-Use gun whoever drops it (a player too)
     int   m_iCoopLootGrantTo;   // entnum of the player Player::TickCoopLoot let through, -1 = nobody
     float m_fCoopLootGrantTime; // level.time of that grant (the pickup itself runs from a posted event)
     bool  CoopLootCandidate(void);         // lying there, flagged, and the script made it usable
@@ -447,6 +448,7 @@ public:
     void          ForceState(weaponstate_t state);
 
     void         NotDroppableEvent(Event *ev);
+    void DroppableEvent(Event *ev); // [v1.10.49]
     void         GiveStartingAmmoToOwner(Event *ev);
     void         AutoAim(Event *ev);
     void         Crosshair(Event *ev);
