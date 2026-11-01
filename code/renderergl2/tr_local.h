@@ -2768,6 +2768,7 @@ typedef struct {
 	shaderProgram_t bloodSpatterShader; // HZM NEW [bug-2360]: blood on the lens (r_ppBloodFx)
 	shaderProgram_t chromabShader;      // HZM NEW: chromatic aberration (r_ppChromaticAberration)
 	shaderProgram_t motionBlurShader;   // HZM NEW: camera motion blur (r_ppMotionBlur)
+	shaderProgram_t hzmFilterShader;    // HZM coop - visual filters (r_ppFilter)
 	shaderProgram_t filmgrainShader;    // HZM NEW: film grain (r_ppFilmGrain)
 	shaderProgram_t frostShader;        // HZM NEW: frost/ice crystals while it snows (r_ppFrost)
 	shaderProgram_t globalFogShader;

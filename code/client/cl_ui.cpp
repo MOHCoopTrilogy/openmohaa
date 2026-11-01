@@ -2106,7 +2106,7 @@ void UI_Update(void)
         frame = uWinMan.getFrame();
         view3d->Display(frame, 1.0);
 
-        if (ui_hud && !view3d->LetterboxActive()) {
+        if (ui_hud && !view3d->LetterboxActive() && CL_DemoEd_HudMode() == 0) {
             UI_ApplyHudFadeAlpha(); // HZM coop - HUD fade (m_alpha rides into the Displays below)
 
             // draw the health hud
@@ -2145,12 +2145,33 @@ void UI_Update(void)
         }
     }
 
+    // HZM coop - demo editor HUD modes (KP Minus): 1 = player names only, 2 = nothing. The ui_addhud
+    // panels and the weapon / item bars are hidden on the change and given back when it returns to 0.
+    {
+        static int s_iDemoHud = 0;
+        int        iDemoHud   = CL_DemoEd_HudMode();
+        if (iDemoHud != s_iDemoHud) {
+            if (iDemoHud) {
+                UI_HideHudList();
+                if (hud_weapons) {
+                    hud_weapons->ForceHide();
+                }
+                if (hud_items) {
+                    hud_items->ForceHide();
+                }
+            } else if (ui_hud) {
+                UI_ShowHudList();
+            }
+            s_iDemoHud = iDemoHud;
+        }
+    }
+
     if (gmbox) {
-        gmbox->setRealShow(true);
+        gmbox->setRealShow(CL_DemoEd_HudMode() == 0);
     }
 
     if (dmbox) {
-        dmbox->setRealShow(true);
+        dmbox->setRealShow(CL_DemoEd_HudMode() == 0);
     }
 
     currentMenu = menuManager.CurrentMenu();

@@ -640,6 +640,9 @@ void CL_ParseGamestate( msg_t *msg ) {
 	clc.checksumFeed = MSG_ReadLong( msg );
 	cls.serverFrameTime = MSG_ReadServerFrameTime(msg, &cl.gameState);
 
+	// HZM coop - demo editor: remember where the first snapshot starts (backward seeks rewind to it)
+	CL_DemoEd_GamestateParsed();
+
 	// parse serverId and other cvars
 	CL_SystemInfoChanged();
 

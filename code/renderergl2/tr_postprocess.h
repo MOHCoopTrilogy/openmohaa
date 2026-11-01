@@ -35,6 +35,7 @@ void RB_HZMBloom(FBO_t *srcFbo, ivec4_t srcBox);   // HZM gl1-parity bloom (r_pp
 void RB_HZMDof(FBO_t *srcFbo, ivec4_t srcBox);     // HZM gl1-parity depth of field (r_ppDoF), runs before bloom
 void RB_HZMScreenFx(FBO_t *srcFbo, ivec4_t srcBox); // HZM gl1-parity FXAA + sharpen + rain-on-lens, after the tone stage
 void RB_HZMExtraFx(FBO_t *srcFbo, ivec4_t srcBox);  // HZM NEW: underwater, frost, chromatic aberration, film grain - after RB_HZMScreenFx
+void RB_HZMFilter(FBO_t *srcFbo, ivec4_t srcBox);   // HZM coop - visual filters (r_ppFilter), after the scope
 void RB_HZMScope(FBO_t *srcFbo, ivec4_t srcBox);    // HZM coop [bug-3462] modern scope optics, last in the chain (tr_hzm_scope.c)
 void RB_HZMScopeLive(qboolean live);                // HZM coop [bug-3462] publishes r_ppScopeLive on change
 void RB_HZMLensComposite(FBO_t *srcFbo, ivec4_t srcBox);               // HZM coop [scopes1025] HDR composite, top of the post chain

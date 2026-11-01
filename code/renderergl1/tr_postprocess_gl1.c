@@ -8,6 +8,7 @@ Phase 1 effect: bloom (bright-pass -> separable Gaussian blur -> additive compos
 */
 #include "tr_local.h"
 #include "tr_postprocess_gl1.h"
+#include "../qcommon/hzm_filters.h" // HZM coop - visual filters
 
 // gl1 normally uses qgl_linked.h (direct #define qglX glX) and never declared the FBO/shader
 // proc pointers. Those pointers ARE loaded (sdl_glimp.c, gl1 path) and stored as globals there;
@@ -101,6 +102,8 @@ typedef struct {
 	GLuint   tonemapProgram;
 	qboolean fxaaOk;
 	GLuint   fxaaProgram;
+	qboolean filterOk;
+	GLuint   filterProgram;   // HZM coop - visual filters (r_ppFilter)
 	qboolean sharpenOk;
 	GLuint   sharpenProgram; // unsharp-mask crispen (counteracts FXAA/mip softening)
 	qboolean lowHealthOk;
@@ -293,6 +296,138 @@ static const char *TONEMAP_FS =
 	"  c = clamp(mix(vec3(l), c, u_saturation), 0.0, 1.0);\n"
 	"  c.r = clamp(c.r * (1.0 + u_temp), 0.0, 1.0);\n"   // tint: warm boosts red, cools blue
 	"  c.b = clamp(c.b * (1.0 - u_temp), 0.0, 1.0);\n"
+	"  gl_FragColor = vec4(c, 1.0);\n"
+	"}\n";
+
+
+// HZM coop - visual filters (r_ppFilter). GENERATED from renderergl2/glsl/hzmfilter_fp.glsl by the
+// demo-editor patch: keep the two in step (u_Color is two vec2 here - this gl1 has no Uniform4f).
+static const char *FILTER_FS =
+	"#version 120\n"
+	"uniform sampler2D u_tex;\n"
+	"uniform vec2 u_ca;\n"
+	"uniform vec2 u_cb;\n"
+	"#define u_Color vec4(u_ca, u_cb)\n"
+	"\n"
+	"varying vec2 v_uv;\n"
+	"#define var_TexCoords v_uv\n"
+	"\n"
+	"float h21(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }\n"
+	"float luma(vec3 c) { return dot(c, vec3(0.299, 0.587, 0.114)); }\n"
+	"\n"
+	"float vignette(vec2 uv, float amt)\n"
+	"{\n"
+	"  vec2 d = uv - 0.5;\n"
+	"  return 1.0 - amt * smoothstep(0.30, 0.78, length(d) * 1.1);\n"
+	"}\n"
+	"\n"
+	"float grain(vec2 uv, float t)\n"
+	"{\n"
+	"  return h21(uv * 4096.0 + vec2(t * 97.0, t * 57.0)) - 0.5;\n"
+	"}\n"
+	"\n"
+	"void main()\n"
+	"{\n"
+	"  float mode = floor(u_Color.x + 0.5);\n"
+	"  float t    = u_Color.y;\n"
+	"  vec2  uv   = var_TexCoords;\n"
+	"  float fr   = floor(t * 24.0); // film frame counter (24 fps)\n"
+	"\n"
+	"  if (mode == 8.0) {\n"
+	"    uv.y += (h21(vec2(fr, 3.0)) - 0.5) * 0.0025;\n"
+	"    uv.x += (h21(vec2(fr, 7.0)) - 0.5) * 0.0012;\n"
+	"  }\n"
+	"\n"
+	"  vec3  src = texture2D(u_tex, var_TexCoords).rgb;\n"
+	"  vec3  c   = texture2D(u_tex, uv).rgb;\n"
+	"  float l   = luma(c);\n"
+	"  float flick = h21(vec2(fr, 1.0)) - 0.5;\n"
+	"\n"
+	"  if (mode == 1.0) {          // Newsreel: black and white, punchy, grain, flicker\n"
+	"    l = clamp((l - 0.5) * 1.25 + 0.5, 0.0, 1.0);\n"
+	"    l *= 1.0 + 0.05 * flick;\n"
+	"    l += grain(uv, t) * 0.10;\n"
+	"    c = vec3(l) * vignette(uv, 0.55);\n"
+	"  } else if (mode == 2.0) {   // Sepia\n"
+	"    vec3 s = vec3(l) * vec3(1.07, 0.88, 0.66) + vec3(0.05, 0.025, 0.0);\n"
+	"    c = s * vignette(uv, 0.40) + grain(uv, t) * 0.035;\n"
+	"  } else if (mode == 3.0) {   // Noir: hard black and white, crushed blacks, heavy vignette\n"
+	"    l = smoothstep(0.07, 0.85, l);\n"
+	"    l = pow(l, 1.15);\n"
+	"    l += grain(uv, t) * 0.06;\n"
+	"    c = vec3(l) * vignette(uv, 0.80);\n"
+	"  } else if (mode == 4.0) {   // Technicolor: rich, saturated, warm\n"
+	"    c = mix(vec3(l), c, 1.55);\n"
+	"    c = (c - 0.5) * 1.08 + 0.5;\n"
+	"    c *= vec3(1.04, 1.0, 0.93);\n"
+	"  } else if (mode == 5.0) {   // Bleach bypass: silver, desaturated, contrasty\n"
+	"    vec3 lum = vec3(l);\n"
+	"    vec3 lo  = 2.0 * c * lum;\n"
+	"    vec3 hi  = 1.0 - 2.0 * (1.0 - c) * (1.0 - lum);\n"
+	"    vec3 ov  = mix(lo, hi, step(0.5, l));\n"
+	"    c = mix(c, ov, 0.85);\n"
+	"    c = mix(vec3(luma(c)), c, 0.55);\n"
+	"  } else if (mode == 6.0) {   // Cold front: steel blue, desaturated\n"
+	"    c = mix(vec3(l), c, 0.70);\n"
+	"    c = c * vec3(0.88, 0.98, 1.12) + vec3(0.0, 0.01, 0.03);\n"
+	"    c = (c - 0.5) * 1.08 + 0.5;\n"
+	"    c *= vignette(uv, 0.25);\n"
+	"  } else if (mode == 7.0) {   // Golden hour: warm Normandy light\n"
+	"    c = mix(vec3(l), c, 1.12);\n"
+	"    c *= vec3(1.12, 1.0, 0.80);\n"
+	"    c = pow(clamp(c, 0.0, 1.0), vec3(0.95));\n"
+	"    c *= vignette(uv, 0.25);\n"
+	"  } else if (mode == 8.0) {   // Old film: faded, yellowed, grain, scratches, dust\n"
+	"    c = mix(vec3(l), c, 0.45);\n"
+	"    c = c * 0.80 + vec3(0.11, 0.085, 0.04);\n"
+	"    c *= 1.0 + 0.06 * flick;\n"
+	"    c += grain(uv, t) * 0.13;\n"
+	"    for (int i = 0; i < 2; i++) {\n"
+	"      float fi = float(i);\n"
+	"      if (h21(vec2(fr, 11.0 + fi)) > 0.55) {\n"
+	"        float sx = h21(vec2(fr, 21.0 + fi));\n"
+	"        float w  = 0.0008 + 0.0012 * h21(vec2(fr, 31.0 + fi));\n"
+	"        float k  = 1.0 - smoothstep(0.0, w, abs(uv.x - sx));\n"
+	"        c = mix(c, vec3(0.92, 0.88, 0.78), k * 0.55);\n"
+	"      }\n"
+	"    }\n"
+	"    {\n"
+	"      vec2  cell = floor(uv * vec2(220.0, 124.0));\n"
+	"      float d    = h21(cell + vec2(fr * 1.37, fr * 0.71));\n"
+	"      if (d > 0.9988) {\n"
+	"        c *= 0.25;\n"
+	"      }\n"
+	"    }\n"
+	"    c *= vignette(uv, 0.65);\n"
+	"  } else if (mode == 9.0) {   // Gun camera: black and white, soft, very grainy, dark corners\n"
+	"    vec2 px = vec2(0.0015, 0.0015 * u_Color.w);\n"
+	"    vec3 b  = c + texture2D(u_tex, uv + vec2(px.x, 0.0)).rgb + texture2D(u_tex, uv - vec2(px.x, 0.0)).rgb\n"
+	"                + texture2D(u_tex, uv + vec2(0.0, px.y)).rgb + texture2D(u_tex, uv - vec2(0.0, px.y)).rgb;\n"
+	"    l = luma(b * 0.2);\n"
+	"    l = clamp((l - 0.5) * 1.35 + 0.5, 0.0, 1.0);\n"
+	"    l *= 1.0 + 0.08 * flick;\n"
+	"    l += grain(uv, t) * 0.18;\n"
+	"    c = vec3(l) * vignette(uv, 0.95);\n"
+	"  } else if (mode == 10.0) {  // Cinematic: teal shadows, warm highlights, 2.39:1 bars\n"
+	"    vec3 sh = c * vec3(0.86, 1.0, 1.08);\n"
+	"    vec3 hl = c * vec3(1.10, 1.0, 0.86);\n"
+	"    c = mix(sh, hl, smoothstep(0.2, 0.8, l));\n"
+	"    c = (c - 0.5) * 1.10 + 0.5;\n"
+	"    c *= vignette(uv, 0.20);\n"
+	"    if (u_Color.w < 2.38) {\n"
+	"      float bar = 0.5 * (1.0 - u_Color.w / 2.39);\n"
+	"      if (var_TexCoords.y < bar || var_TexCoords.y > 1.0 - bar) {\n"
+	"        c = vec3(0.0);\n"
+	"      }\n"
+	"    }\n"
+	"  } else {\n"
+	"    c = src;\n"
+	"  }\n"
+	"\n"
+	"  c = clamp(c, 0.0, 1.0);\n"
+	"  if (mode != 10.0) {\n"
+	"    c = mix(src, c, clamp(u_Color.z, 0.0, 1.0));\n"
+	"  }\n"
 	"  gl_FragColor = vec4(c, 1.0);\n"
 	"}\n";
 
@@ -684,6 +819,8 @@ void R_InitPostFxGL1( void ) {
 	s.tonemapProgram = R_PostFx_CompileProgram( PASS_VS, TONEMAP_FS );
 	s.tonemapOk = (qboolean)( s.inited && s.tonemapProgram && s.sceneColor );
 	s.fxaaProgram = R_PostFx_CompileProgram( PASS_VS, FXAA_FS );
+	s.filterProgram = R_PostFx_CompileProgram( PASS_VS, FILTER_FS );
+	s.filterOk = (qboolean)( s.inited && s.filterProgram && s.sceneColor );
 	s.fxaaOk = (qboolean)( s.inited && s.fxaaProgram && s.sceneColor );
 	s.sharpenProgram = R_PostFx_CompileProgram( PASS_VS, SHARPEN_FS );
 	s.sharpenOk = (qboolean)( s.inited && s.sharpenProgram && s.sceneColor );
@@ -714,6 +851,7 @@ void R_ShutdownPostFxGL1( void ) {
 	if ( s.dofProgram )      qglDeleteProgram( s.dofProgram );
 	if ( s.tonemapProgram )  qglDeleteProgram( s.tonemapProgram );
 	if ( s.fxaaProgram )     qglDeleteProgram( s.fxaaProgram );
+	if ( s.filterProgram )   qglDeleteProgram( s.filterProgram );
 	if ( s.sharpenProgram )  qglDeleteProgram( s.sharpenProgram );
 	if ( s.lowHealthProgram ) qglDeleteProgram( s.lowHealthProgram );
 	if ( s.suppressProgram )  qglDeleteProgram( s.suppressProgram );
@@ -736,7 +874,13 @@ qboolean R_PostFxActive( void ) {
 	// ESC menu keeps sv_running 1, so the live world behind it is still processed (it's the real scene).
 	static cvar_t *svRunning = NULL;
 	if ( !svRunning ) svRunning = ri.Cvar_Get( "sv_running", "0", 0 );
-	if ( svRunning && !svRunning->integer ) return qfalse;
+	// HZM coop - demo editor: a demo playing back has no server but is the real scene (demo_playing is
+	// set by the client while a demo plays)
+	{
+		static cvar_t *demoPlaying = NULL;
+		if ( !demoPlaying ) demoPlaying = ri.Cvar_Get( "demo_playing", "0", CVAR_ROM );
+		if ( svRunning && !svRunning->integer && !( demoPlaying && demoPlaying->integer ) ) return qfalse;
+	}
 	return (qboolean)( glPostFxProcsLoaded && s.inited && r_postProcess && r_postProcess->integer );
 }
 
@@ -1124,6 +1268,31 @@ void RB_PostFxApply( void ) {
 		loc = qglGetUniformLocation( s.tonemapProgram, "u_temp" );       if ( loc >= 0 ) qglUniform1f( loc, temp );
 		qglBindTexture( GL_TEXTURE_2D, s.sceneColor );
 		R_PostFx_FSQuad();
+	}
+
+	// ---- HZM coop: visual filter (r_ppFilter, KP* / KP/) over the graded scene, before FXAA
+	{
+		static cvar_t *pFilter = NULL, *pFilterStr = NULL;
+		if ( !pFilter ) {
+			pFilter    = ri.Cvar_Get( "r_ppFilter", "0", 0 );
+			pFilterStr = ri.Cvar_Get( "r_ppFilterStrength", "1", CVAR_ARCHIVE );
+		}
+		if ( s.filterOk && pFilter->integer > 0 && pFilter->integer <= HZM_NUM_FILTERS && pFilterStr->value > 0.0f ) {
+			qglBindTexture( GL_TEXTURE_2D, s.sceneColor );
+			glState.currenttextures[0] = s.sceneColor;
+			qglCopyTexSubImage2D( GL_TEXTURE_2D, 0, 0, 0, 0, 0, s.width, s.height );
+			qglBindFramebuffer( GL_FRAMEBUFFER, 0 );
+			qglViewport( 0, 0, glConfig.vidWidth, glConfig.vidHeight );
+			GL_State( GLS_DEPTHTEST_DISABLE );
+			qglUseProgram( s.filterProgram );
+			R_PostFx_SetTex( s.filterProgram );
+			loc = qglGetUniformLocation( s.filterProgram, "u_ca" );
+			if ( loc >= 0 ) qglUniform2f( loc, (float)pFilter->integer, backEnd.refdef.time * 0.001f );
+			loc = qglGetUniformLocation( s.filterProgram, "u_cb" );
+			if ( loc >= 0 ) qglUniform2f( loc, pFilterStr->value, s.height > 0 ? (float)s.width / (float)s.height : 1.7778f );
+			qglBindTexture( GL_TEXTURE_2D, s.sceneColor );
+			R_PostFx_FSQuad();
+		}
 	}
 
 	// ---- FXAA: copy the finished backbuffer into sceneColor, edge-AA it, draw back (replace). Runs last.

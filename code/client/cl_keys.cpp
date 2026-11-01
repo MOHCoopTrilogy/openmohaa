@@ -1462,9 +1462,15 @@ void CL_KeyEvent(int key, qboolean down, unsigned time)
         }
     }
 
+    // HZM coop - demo editor keypad controls (only while a demo plays, nothing bound is touched)
+    if (CL_DemoEd_KeyEvent(key, down)) {
+        return;
+    }
+
     // keys can still be used for bound actions
+    // HZM coop - with the demo editor on, WASD / Space etc. drive the free camera instead of ending the demo
     if (down && (key <= K_BACKSPACE || key == K_MOUSE4) && (clc.demoplaying || clc.state == CA_CINEMATIC)
-        && Key_GetCatcher() == 0) {
+        && !CL_DemoEd_Enabled() && Key_GetCatcher() == 0) {
         Cvar_Set("nextdemo", "");
         key = K_ESCAPE;
     }

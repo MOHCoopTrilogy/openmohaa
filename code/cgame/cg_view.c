@@ -6156,6 +6156,10 @@ qboolean CG_AimingDownSights(void)
 {
     usercmd_t cmd;
 
+    if (CG_DemoCamActive()) {
+        return qfalse; // HZM coop - demo free camera: ADS never touches it
+    }
+
     if (!cg.snap || cg.snap->ps.stats[STAT_HEALTH] <= 0) {
         return qfalse;
     }
@@ -8881,6 +8885,14 @@ static int CG_CalcViewValues(void)
         if (cg.renderingThirdPerson) { s_breathSteady = qfalse; }
     }
 
+    // HZM coop - demo editor free camera: the camera is the whole view. Nothing of the recorded player's
+    // view (zoom, scope, ADS, shoulder / turret / script cameras, shake, reload feel) is applied to it,
+    // and every player - the recorded one included - is drawn as the full third-person character.
+    if (CG_DemoCamActive()) {
+        cg.renderingThirdPerson = qtrue;
+        return CG_DemoCamView();
+    }
+
     if (cg.renderingThirdPerson) {
         // back away from character
         CG_OffsetThirdPersonView();
@@ -10237,9 +10249,15 @@ void CG_DrawActiveFrame(int serverTime, int frameTime, stereoFrame_t stereoView,
 
     cg.refdef.time = cg.time;
     memcpy(cg.refdef.areamask, cg.snap->areamask, sizeof(cg.refdef.areamask));
+    if (CG_DemoCamActive()) {
+        // HZM coop - demo free camera: the recorded player's areamask would cull the rooms the camera is in
+        memset(cg.refdef.areamask, 0, sizeof(cg.refdef.areamask));
+    }
 
     // update audio positions
-    cgi.S_Respatialize(cg.snap->ps.clientNum, cg.SoundOrg, cg.SoundAxis);
+    // HZM coop - demo editor: with the free camera up nobody is the listener, so the recorded player's own
+    // sounds come from where he stands instead of playing in the camera's ears
+    cgi.S_Respatialize(CG_DemoCamActive() ? ENTITYNUM_NONE : cg.snap->ps.clientNum, cg.SoundOrg, cg.SoundAxis);
 
     // make sure the lagometerSample and frame timing isn't done twice when in stereo
     if (stereoView != STEREO_RIGHT) {

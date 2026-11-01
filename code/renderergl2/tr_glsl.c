@@ -75,6 +75,7 @@ extern const char *fallbackShader_bloodspatter_fp;
 extern const char *fallbackShader_chromab_fp;
 extern const char *fallbackShader_motionblur_fp;
 extern const char *fallbackShader_filmgrain_fp;
+extern const char *fallbackShader_hzmfilter_fp; // HZM coop - visual filters (r_ppFilter)
 extern const char *fallbackShader_frost_fp;
 extern const char *fallbackShader_globalfog_vp;
 extern const char *fallbackShader_globalfog_fp;
@@ -2145,6 +2146,18 @@ void GLSL_InitGPUShaders(void)
 
 	numEtcShaders++;
 
+	// HZM coop - visual filters (r_ppFilter, KP* / KP/)
+	if (!GLSL_InitGPUShader(&tr.hzmFilterShader, "hzmfilter", attribs, qtrue, extradefines, qtrue, fallbackShader_tonemap_vp, fallbackShader_hzmfilter_fp))
+	{
+		ri.Error(ERR_FATAL, "Could not load hzmfilter shader!");
+	}
+
+	GLSL_InitUniforms(&tr.hzmFilterShader);
+	GLSL_SetUniformInt(&tr.hzmFilterShader, UNIFORM_TEXTUREMAP, TB_COLORMAP);
+	GLSL_FinishGPUShader(&tr.hzmFilterShader);
+
+	numEtcShaders++;
+
 	attribs = ATTR_POSITION | ATTR_TEXCOORD;
 	extradefines[0] = 0;
 
@@ -2483,6 +2496,7 @@ void GLSL_ShutdownGPUShaders(void)
 	GLSL_DeleteGPUShader(&tr.chromabShader);
 	GLSL_DeleteGPUShader(&tr.motionBlurShader);
 	GLSL_DeleteGPUShader(&tr.filmgrainShader);
+	GLSL_DeleteGPUShader(&tr.hzmFilterShader);
 	GLSL_DeleteGPUShader(&tr.frostShader);
 	GLSL_DeleteGPUShader(&tr.globalFogShader);
 	GLSL_DeleteGPUShader(&tr.msaaResolveDepthShader);   // HZM MSAA P2a (a no-op when it was never built)

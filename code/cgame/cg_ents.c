@@ -55,7 +55,8 @@ void CG_SetEntitySoundPosition(centity_t *cent)
 
         cgi.S_UpdateEntity(cent->currentState.number, origin, vel, qfalse);
     } else {
-        if (cent && cg.snap && cent->currentState.parent == cg.snap->ps.clientNum) {
+        // HZM coop - demo editor: under the free camera the recorded player's gear is heard where it is
+        if (cent && cg.snap && cent->currentState.parent == cg.snap->ps.clientNum && !CG_DemoCamActive()) {
             vec3_t origin;
             vec3_t velocity;
 

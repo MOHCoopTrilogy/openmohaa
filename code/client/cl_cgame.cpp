@@ -318,6 +318,8 @@ void CL_ConfigstringModified(int index, char* s) {
 		Com_Error( ERR_DROP, "configstring > MAX_CONFIGSTRINGS" );
 	}
 
+	s = (char *)CL_DemoEd_FilterConfigstring( index, s ); // HZM coop - demo editor name aliases
+
 	old = cl.gameState.stringData + cl.gameState.stringOffsets[ index ];
 	if ( !strcmp( old, s ) ) {
 		return;		// unchanged
@@ -1348,7 +1350,10 @@ void CL_SetCGameTime( void ) {
 
 	// get our current view of time
 
-	if ( clc.demoplaying && cl_freezeDemo->integer ) {
+	if ( CL_DemoEd_Enabled() ) {
+		// HZM coop - demo editor owns the playback clock (pause / speed / step / seek)
+		CL_DemoEd_SetTime();
+	} else if ( clc.demoplaying && cl_freezeDemo->integer ) {
 		// cl_freezeDemo is used to lock a demo in place for single frame advances
 
 	} else {

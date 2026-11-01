@@ -1000,6 +1000,11 @@ void CL_MouseMove( usercmd_t *cmd ) {
 		my *= cl_sensitivity->value;
 	}
 
+	// HZM coop - demo editor free camera: the recorded player's zoom must never change how it turns
+	if ( CL_DemoEd_MouseLook( mx, my ) ) {
+		return;
+	}
+
 	cgameSensitivity = 1.0f;
 	if( cge && !UI_MenuActive() )
 	{

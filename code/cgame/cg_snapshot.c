@@ -528,3 +528,28 @@ void CG_ProcessSnapshots(void)
         cgi.Error(ERR_DROP, "CG_ProcessSnapshots: cg.nextSnap->serverTime <= cg.time");
     }
 }
+
+/*
+============
+CG_DemoEdResetSnapshots
+
+HZM coop - demo editor seek: the client has moved its snapshot stream to another time (forward, or
+rewound to the start of the file and read up to the target). Take its newest snapshot as a fresh
+initial one, exactly like the first snapshot of a level, without replaying the server commands the
+seek skipped over (their configstrings were already applied by the client).
+============
+*/
+void CG_DemoEdResetSnapshots(int snapNum, int cmdSeq)
+{
+    snapshot_t *snap;
+
+    cgs.serverCommandSequence = cmdSeq;
+    cg.latestSnapshotNum      = snapNum;
+    cgs.processedSnapshotNum  = snapNum - 1;
+    cg.nextSnap               = NULL;
+
+    snap = CG_ReadNextSnapshot();
+    if (snap) {
+        CG_SetInitialSnapshot(snap);
+    }
+}

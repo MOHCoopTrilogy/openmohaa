@@ -4253,12 +4253,32 @@ static void CG_DrawBracePip(void)
 
 void CG_Draw2D(void)
 {
+    // HZM coop - demo editor / clean HUD (cleanhud, KP Minus - live play too): with the HUD hidden only the
+    // eye's own view effects are drawn (scope reticle, zoom and ADS overlays: they are the picture, not HUD),
+    // and none of those under the demo free camera. Names-only mode adds the name tags.
+    qboolean bDemoCam = CG_DemoCamActive();
+    if (CG_DemoHudMode() != 0 && cg.snap) {
+        CG_UpdateHudFade();
+        CG_UpdateCountdown();
+        (void)CG_CoopCineHudActive(); // the accessor ages its deadline every frame (see below)
+        if (!bDemoCam) {
+            CG_DrawGl2PostFxFallback();
+            CG_HzmScopeDrawReticle();
+            CG_DrawZoomOverlay();
+            CG_DrawAdsVignette();
+        }
+        CG_DemoEdDraw2D();
+        return;
+    }
+
     CG_UpdateHudFade();
     CG_UpdateCountdown();
     CG_DrawGl2PostFxFallback(); // HZM gl2 re-port: under the HUD, over the scene (gl2 only)
+    if (!bDemoCam) { // the recorded player's eye overlays never sit on the free camera
     CG_HzmScopeDrawReticle(); // [scopes1025] the live in-lens reticle, hip included
     CG_DrawZoomOverlay();
     CG_DrawAdsVignette();
+    }
     CG_DrawLagometer();
     // HZM coop [user 2026-09-13] top compass bar: over the ADS vignette, UNDER script huddraw, so full-screen
     // script dims (Service Record panel, e3l4 curtain) still cover it
@@ -4280,7 +4300,7 @@ void CG_Draw2D(void)
     // point and read as part of it. The accessor must be called every frame regardless of the
     // outcome - it is what consumes the cvar and ages the deadline - so it stays the condition,
     // never something short-circuited away.
-    if (!CG_CoopCineHudActive()) {
+    if (!CG_CoopCineHudActive() && !bDemoCam) {
         CG_DrawCrosshair();
         CG_DrawBracePip();      // HZM coop - gun-brace indicator, drawn over the crosshair
         CG_DrawHitMarker();     // HZM coop - hit/kill confirmation at the true aim point
@@ -4289,7 +4309,9 @@ void CG_Draw2D(void)
         CG_DrawLobbyKeys();     // HZM coop [user 2026-10-21] lobby LOADOUT / SERVICE RECORD key caps
         CG_DrawCoopAct();       // HZM coop [user 2026-10-18] icon action prompts (heal / resupply / plant ...), same slot as the loot prompt
     }
-    CG_DrawDamageIndicator();
+    if (!bDemoCam) {
+        CG_DrawDamageIndicator();
+    }
     CG_DrawCoopIcons();
     CG_DrawMGHeat();
     CG_DrawStaminaArc();
@@ -4297,4 +4319,5 @@ void CG_Draw2D(void)
     CG_DrawMagazines();
     CG_SeedAdsTuneFromBaked(); // seed live cvars from the baked table so tune mode doesn't snap the gun
     CG_DrawAdsTune();
+    CG_DemoEdDraw2DTail(); // HZM coop - demo editor: name tags under the free camera + status line
 }
