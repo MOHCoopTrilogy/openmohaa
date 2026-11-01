@@ -122,7 +122,7 @@ static const float *R_HzmLensState(void)
 		s_mod = r_ppScopeState->modificationCount;
 		memset(s_st, 0, sizeof(s_st));
 		s_st[10] = 1.0f;   /* older cgame without the glass->picture blend: the picture is fully on */
-		sscanf(r_ppScopeState->string, "%f %f %f %f %f %f %f %f %f %f %f", &s_st[0], &s_st[1], &s_st[2], &s_st[3], &s_st[4], &s_st[5], &s_st[6], &s_st[7], &s_st[8], &s_st[9], &s_st[10]);
+		sscanf(r_ppScopeState->string, "%f %f %f %f %f %f %f %f %f %f %f %f", &s_st[0], &s_st[1], &s_st[2], &s_st[3], &s_st[4], &s_st[5], &s_st[6], &s_st[7], &s_st[8], &s_st[9], &s_st[10], &s_st[11]);   /* [scopehold] 12th: draw the eyepiece ring (the gun's eyecup is hidden) */
 	}
 	return s_st;
 }
@@ -343,7 +343,7 @@ static image_t *R_HzmLensRetImage(void)
 }
 
 // per pass: viewinfo (lens centre offset, mode 0 = full composite / 1 = rim only) and the texture units (0 = scene, 1 = wide, 2 = 1/4 blurred wide)
-#define LENS_PASS(mode) do { 	vec4_t vi_; 	VectorSet4(vi_, st[7], st[8], (mode), ((tr.hzmGlassDrawn > 0) ? 1.0f : 0.0f) + ((st[9] > 0.5f) ? 2.0f : 0.0f)); 	GLSL_BindProgram(&tr.hzmLensShader); 	GLSL_SetUniformVec4(&tr.hzmLensShader, UNIFORM_VIEWINFO, vi_); { vec4_t bl_; image_t *ri_ = R_HzmLensRetImage(); VectorSet4(bl_, r_ppScopeBlur->value, ri_ ? 1.0f : 0.0f, st[10], r_ppScopeGhostFix->integer ? 1.0f : 0.0f); GL_BindToTMU(ri_ ? ri_ : tr.whiteImage, TB_SPECULARMAP); GLSL_SetUniformVec4(&tr.hzmLensShader, UNIFORM_FOGDISTANCE, bl_); } 	GL_BindToTMU(tr.hzmLensColor, TB_LEVELSMAP); 	GL_BindToTMU(tr.hzmLensQuartImg, TB_NORMALMAP); GL_BindToTMU(tr.hzmMaskImg, TB_DELUXEMAP); } while (0)
+#define LENS_PASS(mode) do { 	vec4_t vi_; 	VectorSet4(vi_, st[7], st[8], (mode), ((tr.hzmGlassDrawn > 0) ? 1.0f : 0.0f) + ((st[9] > 0.5f) ? 2.0f : 0.0f) + ((st[11] > 0.5f) ? 4.0f : 0.0f)); 	GLSL_BindProgram(&tr.hzmLensShader); 	GLSL_SetUniformVec4(&tr.hzmLensShader, UNIFORM_VIEWINFO, vi_); { vec4_t bl_; image_t *ri_ = R_HzmLensRetImage(); VectorSet4(bl_, r_ppScopeBlur->value, ri_ ? 1.0f : 0.0f, st[10], r_ppScopeGhostFix->integer ? 1.0f : 0.0f); GL_BindToTMU(ri_ ? ri_ : tr.whiteImage, TB_SPECULARMAP); GLSL_SetUniformVec4(&tr.hzmLensShader, UNIFORM_FOGDISTANCE, bl_); } 	GL_BindToTMU(tr.hzmLensColor, TB_LEVELSMAP); 	GL_BindToTMU(tr.hzmLensQuartImg, TB_NORMALMAP); GL_BindToTMU(tr.hzmMaskImg, TB_DELUXEMAP); } while (0)
 
 static qboolean R_HzmLensEnsureMask(void)
 {

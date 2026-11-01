@@ -99,6 +99,7 @@ static struct {
     qboolean pip;       // [scopes1025] this scope is shown as a picture-in-picture lens (kept through the scope-out ease)
     float    lensFov;   // [scopes1025] square lens-scene fov (degrees) published to the renderer
     float    pipK;      // [scopes1025] glass -> live picture blend 0..1 (the lens is real glass until the scope reaches the eye)
+    qboolean eyeHidden; // [scopehold] the held gun's eyecup is not drawn this frame: the lens pass draws the eyepiece ring itself
     float    blurK;     // [scopehold] how far the world round the lens is blurred / dimmed 0..1 (its own, later timing than pipK)
     float    glassR;    // [scopes1025] the glass surface's projected radius, screen-height units (0 = unknown)
     float    ocX, ocY;  // [scopes1025] the rifle's projected eyepiece centre (CG_HzmScopeSetOcular, last frame's)
@@ -276,7 +277,7 @@ static void CG_HzmScopePublish(void)
             Com_sprintf(
                 buf,
                 sizeof(buf),
-                "%.4f %.4f %.4f %.4f %.3f %.3f %.3f %.4f %.4f %d %.3f",
+                "%.4f %.4f %.4f %.4f %.3f %.3f %.3f %.4f %.4f %d %.3f %d",
                 // [scopehold] PiP: the amount (the blur / dim of the world round the lens) follows pipK, so it is 0 on the first frame the composite runs and
                 // grows from there; with ease it was already 0.55 on that frame - the world jumped from sharp to half blurred, a double image, on every raise
                 ((hs.pip && r_ppScopeGhostFix->integer) ? hs.blurK : hs.ease) * hs.lensK,
@@ -289,7 +290,8 @@ static void CG_HzmScopePublish(void)
                 hs.lcX,
                 hs.lcY,
                 hs.mode,
-                hs.pipK
+                hs.pipK,
+                hs.eyeHidden ? 1 : 0
             );
         }
         {   // the optic's reticle image name for the lens pass (in-lens reticle)
@@ -496,6 +498,7 @@ static void CG_HzmScopeFrame(float camFov)
     // gl2 pass is skipped entirely and the rifle's own glass shader shows
     hs.pipK = hs.pip ? CG_HzmSmooth((hs.ease - 0.55f) / 0.35f) : 0.0f;
     hs.blurK = hs.pipK;
+    hs.eyeHidden = qfalse;   // set again by CG_HzmScopeEyeHide when the held gun is drawn this frame (it republishes through CG_HzmScopeSetOcular)
     // [scopehold 2026-11-01] user: "That dark scope to pip is super obvious when going in and out... make it super seamless". The glass stayed the rifle's own BLACK
     // glass for the first 55 percent of the raise and the picture cut in near the eye (and went black again early on the lower, a big black disk passing the
     // camera). Now the live picture fades in from the FIRST frame of the raise (over cg_scopeLensFade of the ease, while the glass is still small and low) and stays
@@ -664,6 +667,7 @@ void CG_HzmScopeEyeHide(refEntity_t *gun)
         sn = tok[0] ? cgi.Surface_NameToNum(gun->tiki, tok) : -1;
         if (sn >= 0 && sn < MAX_MODEL_SURFACES) {
             gun->surfaces[sn] |= MDL_SURFACE_NODRAW;
+            hs.eyeHidden = qtrue;
         }
     }
 }

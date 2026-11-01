@@ -44,7 +44,8 @@ void main()
 	float r      = length(q);
 	float vw     = u_ViewInfo.w;
 	bool  glass  = (mod(vw, 2.0) > 0.5);       // the rifle has a real glass surface (coverage mask)
-	bool  adsMode = (vw > 1.5);                // 1: MAIN = the magnified picture, aux = the wide world; 0: MAIN = the hip view, aux = the magnified LENS picture
+	bool  adsMode = (mod(floor(vw * 0.5 + 0.01), 2.0) > 0.5);   // 1: MAIN = the magnified picture, aux = the wide world; 0: MAIN = the hip view, aux = the magnified LENS picture
+	bool  ringOn = (vw > 3.5);                 // [scopehold] the gun's eyecup is hidden: draw the eyepiece ring here even over real glass
 
 	// ---- the rim, pass 1
 	float band  = smoothstep(0.995, 1.004, r) * (1.0 - smoothstep(1.50, 1.58, r));   // out to the bell's outer radius: its faceted silhouette is covered
@@ -61,7 +62,7 @@ void main()
 		float gm      = pic.a;
 		float restore = glass ? gm : (1.0 - smoothstep(0.985, 1.0, r));
 		vec3  base    = mix(scene, pic.rgb, restore);
-		vec3 outc = mix(base, metal, glass ? 0.0 : ringK);
+		vec3 outc = mix(base, metal, (glass && !ringOn) ? 0.0 : ringK);
 		if (glass)   // a faint rim highlight on a DARK ring (upper-left arc) so a black eyepiece ring does not read as a flat disc; bright metal bells are left alone
 		{
 			float hl  = arc * smoothstep(1.0, 1.04, r) * (1.0 - smoothstep(1.15, 1.32, r));

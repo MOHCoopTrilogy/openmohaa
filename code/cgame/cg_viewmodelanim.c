@@ -655,8 +655,10 @@ qboolean CG_VMAdsTagRight(void)
     }
     // ...and while the scope is up with the hands in an aim pose at all: the server's offhand hand-off can arrive a frame before the reload row that starts the
     // hold (run b8 Carcano: the lens jumped 0.17 of the screen on the reload's first frame and eased back with the tag fade)
+    // (not inside an authored aimed BOLT clip: its right hand travels to the bolt, the still left hand must carry the gun - below)
     if (cgi.anim && CG_HzmScopeRaiseOwns() && cgi.Cvar_Get("coop_scopeHoldCycle", "1", CVAR_ARCHIVE)->integer
-        && s_coopSlotAim[cgi.anim->g_iCurrentVMAnimSlot]) {
+        && s_coopSlotAim[cgi.anim->g_iCurrentVMAnimSlot]
+        && !(s_coopAdsBolt && s_coopAdsSlot >= 0 && s_coopAdsSlot == cgi.anim->g_iCurrentVMAnimSlot)) {
         return qtrue;
     }
     return (s_coopAdsSlot >= 0 && s_coopAdsSlot == cgi.anim->g_iCurrentVMAnimSlot && s_coopAdsBolt
@@ -1308,10 +1310,13 @@ void CG_ViewModelAnimation(refEntity_t *pModel)
                         char szKey[MAX_QPATH], szPer[MAX_QPATH];
                         CoopWeaponKey(CG_ConfigString(CS_WEAPONS + cg.snap->ps.activeItems[1]), szKey, sizeof(szKey));
                         Com_sprintf(szPer, sizeof(szPer), "coopr_%s_%s_ads", szKey, pszSfx);
-                        // [scopehold 2026-11-01] the Springfield's baked scoped rows end with the rifle flipped upright for ~3 frames (run b4, frames 692-696) and
-                        // their bolt drags the lens about: by default every scoped gun takes the held aim pose instead (one behaviour for all of them).
-                        // coop_scopeAuthoredRows 1 = play the baked rows again.
-                        if (cgi.Anim_NumForName(pTiki, szPer) != -1 && cgi.Cvar_Get("coop_scopeAuthoredRows", "0", 0)->integer) {
+                        // [scopehold 2026-11-01] the Springfield's baked scoped RELOAD rows hold the scope off to the left, far too close, with the fingers
+                        // sweeping across it, and end with the rifle flipped upright for ~3 frames (runs b4 / b13): by default a scoped reload takes the held
+                        // aim pose instead (coop_scopeAuthoredRows 1 = the baked reload rows again). Its baked BOLT row is clean now that the lens follows the
+                        // rifle and the gun rides the still hand (run b14: reticle centred through the cycle) - played (coop_scopeAuthoredBolt 0 = held pose).
+                        if (cgi.Anim_NumForName(pTiki, szPer) != -1
+                            && (cgi.Cvar_Get("coop_scopeAuthoredRows", "0", 0)->integer
+                                || (a == VM_ANIM_RECHAMBER && cgi.Cvar_Get("coop_scopeAuthoredBolt", "1", 0)->integer))) {
                             Q_strncpyz(szAds, szPer, sizeof(szAds));
                             bPerWpnScoped = qtrue;
                         }

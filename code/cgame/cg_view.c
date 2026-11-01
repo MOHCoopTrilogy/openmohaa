@@ -2499,7 +2499,12 @@ static void CG_AdsRigSolve(refEntity_t *pREnt)
                 const float lim = (s >= s_adsSightsScope && s < s_adsSightsScope + sizeof(s_adsSightsScope) / sizeof(s_adsSightsScope[0])) ? 40.0f : 4.0f;
                 if (s_rigTgt[7] > lim) { s_rigTgt[7] = lim; } else if (s_rigTgt[7] < -lim) { s_rigTgt[7] = -lim; }
             }
-            if (!s_rigTgtOk && s_rigFreshGun && s_rigW >= 0.001f) {
+            // [scopehold 2026-11-01] ...and ANY first target that arrives while the correction already has visible weight: the target is taken only
+            // once the hands are fully in an aim pose (aim weight > 0.999), which on a scope raise just after another clip came at rig weight ~0.9 -
+            // nothing was applied before it (no target), so the whole correction landed in one frame: the rifle hopped ~0.45 u sideways and the
+            // lens 0.11-0.16 of the screen near the end of the raise, then settled (runs b10 / b12 / b14, release too). Now it eases in from zero.
+            // cg_adsRigEaseFirst 0 = only for a freshly drawn gun, as before.
+            if (!s_rigTgtOk && (s_rigFreshGun || cgi.Cvar_Get("cg_adsRigEaseFirst", "1", 0)->integer) && s_rigW >= 0.001f) {
                 // [quick-draw motion] the new gun's first aim pose: nothing applied yet, so ease in from zero
                 for (k = 0; k < 8; k++) {
                     s_rigOff[k]  = -s_rigTgt[k];
