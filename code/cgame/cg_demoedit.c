@@ -437,4 +437,9 @@ void CG_DemoEdReset_f(void)
     CG_ResetVSSSources();
     CG_DemoEdResetSnapshots(atoi(cgi.Argv(1)), atoi(cgi.Argv(2)));
     cg.thisFrameTeleport = qtrue;
+    // a seek is a cut: no blood from before it stays on the lens. r_ppBlood 0 is the authoritative clear
+    // (cg_view.c drops its decaying s_bloodAmt), and a coop_lensBlood poke the seek's stufftext replay
+    // just re-applied would raise it again
+    cgi.Cvar_Set("coop_lensBlood", "0");
+    cgi.Cvar_Set("r_ppBlood", "0");
 }

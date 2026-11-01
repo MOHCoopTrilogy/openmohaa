@@ -630,7 +630,10 @@ void CL_DemoEd_GamestateParsed(void)
         de.atEnd      = qfalse;
         de.pathPlaying = qfalse;
         de.freecam     = qfalse; // the old level's camera spot means nothing in the new one
-        Com_Printf("Demo editor: level %d of this demo starts at %.1f s\n", de.segIndex + 1, de.segBase / 1000.0f);
+        Com_Printf(
+            "Demo editor: level %d of this demo starts at %.1f s - loading it (the keypad waits until it is up)\n",
+            de.segIndex + 1, de.segBase / 1000.0f
+        );
     } else {
         DE_SetBaseName();
     }
@@ -2810,7 +2813,7 @@ static void TL_UpdateHover(void)
     tol = 6.0f * L.s;
     for (i = 0; i < TL_NumMarks(); i++) {
         int  ms, kind;
-        char lb[8];
+        char lb[96];
         float d;
         TL_GetMark(i, &ms, &kind, lb, sizeof(lb));
         if (ms < 0) {
@@ -3077,7 +3080,7 @@ void CL_DemoEd_DrawTimeline(void)
     n = TL_NumMarks();
     for (i = 0; i < n; i++) {
         int  ms, kind;
-        char lb[8];
+        char lb[96];
         float big = (i == tlc.hoverMark) ? 1.5f : 1.0f;
         TL_GetMark(i, &ms, &kind, lb, sizeof(lb));
         if (ms < 0) {
