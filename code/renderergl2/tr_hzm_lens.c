@@ -36,6 +36,7 @@ static cvar_t *r_ppScopeShadows = NULL;
 static cvar_t *r_ppScopeOutside = NULL;
 static cvar_t *r_ppScopeBlur    = NULL;
 static cvar_t *r_ppScopeCA      = NULL;
+static cvar_t *r_ppScopeGhostFix = NULL;   // [scopehold] 1 (default): no second scope pass / crossfaded double image on the raise and the lower; 0 = as before
 
 qboolean R_CheckFBO(const FBO_t *fbo);   // tr_fbo.c (no header declares it)
 FBO_t   *FBO_Create(const char *name, int width, int height);   // same: undeclared, so C would have truncated the pointer to int
@@ -106,6 +107,7 @@ static void R_HzmLensCvars(void)
 		r_ppScopeOutside = ri.Cvar_Get("r_ppScopeOutside", "0.9", 0);
 		r_ppScopeBlur    = ri.Cvar_Get("r_ppScopeBlur", "0.62", 0);
 		r_ppScopeCA      = ri.Cvar_Get("r_ppScopeCA", "0.5", 0);
+		r_ppScopeGhostFix = ri.Cvar_Get("r_ppScopeGhostFix", "1", 0);
 	}
 }
 
@@ -123,6 +125,24 @@ static const float *R_HzmLensState(void)
 		sscanf(r_ppScopeState->string, "%f %f %f %f %f %f %f %f %f %f %f", &s_st[0], &s_st[1], &s_st[2], &s_st[3], &s_st[4], &s_st[5], &s_st[6], &s_st[7], &s_st[8], &s_st[9], &s_st[10]);
 	}
 	return s_st;
+}
+
+/*
+[scopehold 2026-11-01] cgame has put the scope in picture-in-picture mode (a lens fov is published), whether or not the live picture has faded in yet.
+The bug-3462 full-screen pass must step aside for the WHOLE raise and lower, not only once the picture is on: R_HzmLensStateWantsPip is false for
+the first ~55 percent of the raise (and the last of the lower) and that pass then drew a second, screen-centred scope housing over the hip view - a
+dark ghost lens that matched nothing on the rifle - and the frame after, the real lens popped in over the rifle's glass.
+*/
+static qboolean R_HzmLensCapable(void);
+
+qboolean R_HzmLensStateSelected(void)
+{
+	const float *st = R_HzmLensState();
+
+	if (!r_ppScopeGhostFix->integer) {
+		return R_HzmLensStateWantsPip();
+	}
+	return (st[1] > 0.01f && st[6] > 4.0f && R_HzmLensCapable()) ? qtrue : qfalse;
 }
 
 qboolean R_HzmLensStateWantsPip(void)
@@ -192,6 +212,8 @@ static qboolean R_HzmLensEnsureFbo(void)
 Front end. Called from RE_RenderScene with the MAIN view's parms (already complete), right before the main
 R_RenderView, so tr.viewParms ends the frame as the main view. A world scene only.
 */
+static float s_frameSt[12];   // [scopehold] r_ppScopeState as the front end used it this frame
+
 void R_HzmLensRenderView(viewParms_t *mainParms)
 {
 	const float *st;
@@ -236,6 +258,9 @@ void R_HzmLensRenderView(viewParms_t *mainParms)
 		lens.flags |= (mainParms->flags & VPF_USESUNLIGHT);
 	}
 
+	// [scopehold] the back end composites with the state THIS view was set up from (the aux view's fov and role are decided here): a cgame write to
+	// r_ppScopeState later in the frame cannot pair a lens picture with the wide-world role (or the reverse) for a frame
+	memcpy(s_frameSt, st, sizeof(s_frameSt));
 	LENS_STAGE(10);
 	R_RenderView(&lens);
 	LENS_STAGE(11);
@@ -318,7 +343,7 @@ static image_t *R_HzmLensRetImage(void)
 }
 
 // per pass: viewinfo (lens centre offset, mode 0 = full composite / 1 = rim only) and the texture units (0 = scene, 1 = wide, 2 = 1/4 blurred wide)
-#define LENS_PASS(mode) do { 	vec4_t vi_; 	VectorSet4(vi_, st[7], st[8], (mode), ((tr.hzmGlassDrawn > 0) ? 1.0f : 0.0f) + ((st[9] > 0.5f) ? 2.0f : 0.0f)); 	GLSL_BindProgram(&tr.hzmLensShader); 	GLSL_SetUniformVec4(&tr.hzmLensShader, UNIFORM_VIEWINFO, vi_); { vec4_t bl_; image_t *ri_ = R_HzmLensRetImage(); VectorSet4(bl_, r_ppScopeBlur->value, ri_ ? 1.0f : 0.0f, st[10], 0.0f); GL_BindToTMU(ri_ ? ri_ : tr.whiteImage, TB_SPECULARMAP); GLSL_SetUniformVec4(&tr.hzmLensShader, UNIFORM_FOGDISTANCE, bl_); } 	GL_BindToTMU(tr.hzmLensColor, TB_LEVELSMAP); 	GL_BindToTMU(tr.hzmLensQuartImg, TB_NORMALMAP); GL_BindToTMU(tr.hzmMaskImg, TB_DELUXEMAP); } while (0)
+#define LENS_PASS(mode) do { 	vec4_t vi_; 	VectorSet4(vi_, st[7], st[8], (mode), ((tr.hzmGlassDrawn > 0) ? 1.0f : 0.0f) + ((st[9] > 0.5f) ? 2.0f : 0.0f)); 	GLSL_BindProgram(&tr.hzmLensShader); 	GLSL_SetUniformVec4(&tr.hzmLensShader, UNIFORM_VIEWINFO, vi_); { vec4_t bl_; image_t *ri_ = R_HzmLensRetImage(); VectorSet4(bl_, r_ppScopeBlur->value, ri_ ? 1.0f : 0.0f, st[10], r_ppScopeGhostFix->integer ? 1.0f : 0.0f); GL_BindToTMU(ri_ ? ri_ : tr.whiteImage, TB_SPECULARMAP); GLSL_SetUniformVec4(&tr.hzmLensShader, UNIFORM_FOGDISTANCE, bl_); } 	GL_BindToTMU(tr.hzmLensColor, TB_LEVELSMAP); 	GL_BindToTMU(tr.hzmLensQuartImg, TB_NORMALMAP); GL_BindToTMU(tr.hzmMaskImg, TB_DELUXEMAP); } while (0)
 
 static qboolean R_HzmLensEnsureMask(void)
 {
@@ -358,8 +383,9 @@ void RB_HZMLensComposite(FBO_t *srcFbo, ivec4_t srcBox)
 	if (backEnd.refdef.rdflags & RDF_NOWORLDMODEL) {
 		return;
 	}
-	st = R_HzmLensState();
+	st = r_ppScopeGhostFix->integer ? s_frameSt : R_HzmLensState();
 	if (st[1] <= 0.01f) {
+		s_lateGunValid = qfalse;   // the weapon view queued with this frame must not be drawn on a later one
 		return;
 	}
 

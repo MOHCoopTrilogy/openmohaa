@@ -2175,6 +2175,9 @@ static int CG_AdsAnimClass(void)
     if (CG_VMAimedCycleActive()) {
         return 1;
     }
+    if (CG_VMScopeHoldClip()) {   // [scopehold] the scoped aim pose held through a bolt / reload IS the aim pose: the target keeps following it
+        return 0;
+    }
     if (CG_VMScopedReloadAdsClip()) {   // [scopes1025] an authored scoped reload clip: hold the solved aim, the clip's own gun motion plays on top
         return 1;
     }
@@ -2290,6 +2293,39 @@ static void CG_ScopeOcular(refEntity_t *pREnt, const adsSight_t *s, vec3_t cam[3
     if (dep > 0.3f && cg_fAdsWeaponFov > 1.0f && cg.refdef.width > 0) {
         tanY = (float)tan(DEG2RAD(cg_fAdsWeaponFov * 0.5f)) * (float)cg.refdef.height / (float)cg.refdef.width;
         CG_HzmScopeSetOcular(-DotProduct(d2, cam[1]) / dep / (2.0f * tanY), -DotProduct(d2, cam[2]) / dep / (2.0f * tanY), (s->relief / 2.38f) / 1.5f / dep / (2.0f * tanY));
+    }
+}
+
+/*
+[scopehold 2026-11-01] user: "when the bolt is being cycled the pip inside the scope spazzes out". The lens centre was projected from the HANDS' tag_weapon_right
+(CG_ScopeOcular), but through every bolt cycle and reload the server hands the rifle to tag_weapon_left (attachtohand offhand): the gun rode the still left
+hand while the picture and the reticle followed the right hand working the bolt - they slid round inside the eyepiece frame to frame. Called from
+cg_modelanim.c with the gun's FINAL transform (after the tag hand-off fade), so the lens is wherever the glass really is. coop_scopeOcularGun 0 = as before.
+*/
+void CG_ScopeOcularGun(const refEntity_t *gun)
+{
+    static cvar_t *pOn = NULL;
+    vec3_t         cam[3], R2w, d2;
+    float          dep, tanY;
+    int            q;
+
+    if (!pOn) {
+        pOn = cgi.Cvar_Get("coop_scopeOcularGun", "1", 0);
+    }
+    if (!pOn->integer || !gun || !s_ocRow || s_ocTime != cg.time || !CG_HzmScopeHeld()) {
+        return;
+    }
+    AnglesToAxis(cg.refdefViewAngles, cam);
+    VectorCopy(gun->origin, R2w);
+    for (q = 0; q < 3; q++) {
+        VectorMA(R2w, s_ocRow->R[q], gun->axis[q], R2w);
+    }
+    VectorSubtract(R2w, cg.refdef.vieworg, d2);
+    dep = DotProduct(d2, cam[0]);
+    if (dep > 0.3f && cg_fAdsWeaponFov > 1.0f && cg.refdef.width > 0) {
+        tanY = (float)tan(DEG2RAD(cg_fAdsWeaponFov * 0.5f)) * (float)cg.refdef.height / (float)cg.refdef.width;
+        CG_HzmScopeSetOcular(-DotProduct(d2, cam[1]) / dep / (2.0f * tanY), -DotProduct(d2, cam[2]) / dep / (2.0f * tanY),
+                             (s_ocRow->relief / 2.38f) / 1.5f / dep / (2.0f * tanY));
     }
 }
 

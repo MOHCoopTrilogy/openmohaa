@@ -3049,6 +3049,7 @@ void CG_ModelAnim(centity_t *cent, qboolean bDoShaderTime)
     qboolean       bThirdPerson = qfalse;
     qboolean       bCoopHideDraw = qfalse; // HZM coop - process commands/sounds but do not render [219]
     qboolean       bCoopFpBody   = qfalse; // HZM coop [bug-2569] full-body first-person copies built this frame
+    qboolean       bCoopHandGun  = qfalse; // [scopehold] this entity is the gun in the first-person hands (either weapon tag)
     qboolean       bCoopDustVeil = qfalse; // HZM coop [bug-2963] dust-storm veil: camera-locked in every view mode
     static refEntity_t s_coopFpBodyDraw;   // static: refEntity_t is large and CG_ModelAnim is not re-entrant
     static refEntity_t s_coopFpBodyShadow;
@@ -3992,6 +3993,7 @@ coopOthersDone:;
                 iTagNum = cgi.Tag_NumForName(tiki, szTagName);
                 CG_AttachEntity(&model, parent, tiki, iTagNum & TAG_MASK, s1->attach_use_angles, s1->attach_offset);
                 CG_VmTagHandoff(&model, &mVmPre, parent, tiki, iTagNum, s1);
+                bCoopHandGun = qtrue;
                 AxisCopy(model.axis, vVmhAttAxis);
                 VectorCopy(model.origin, vVmhAttOrg);
 
@@ -5048,6 +5050,9 @@ coopOthersDone:;
         CG_HZM_AircraftView(cent, &model); // HZM coop [aircraft 2026-10-05] fog see-through, debug log
         if (cg.snap && s1->parent == cg.snap->ps.clientNum && (model.renderfx & RF_FIRST_PERSON) && model.tiki) {
             CG_CoopMuzzleHazeProbe(&model); // HZM coop [haze-muzzle 2026-10-25] where the barrel is on screen
+            if (bCoopHandGun) {
+                CG_ScopeOcularGun(&model);   // [scopehold] the lens centre from the RIFLE as drawn (it rides the left hand through a bolt / reload)
+            }
         }
         cgi.R_AddRefEntityToScene(&model, s1->parent);
 

@@ -587,12 +587,18 @@ static qboolean CoopAdsClipFitsHeldGun(const char *prefix)
         // Mosin / Enfield lost their authored aimed bolt).
         static const char *kScoped[] = {"kar98sniper", "springfield"};
         int                j;
-        if (CG_HzmScopeRaiseOwns() && cgi.Cvar_Get("coop_scopeBoltAds", "1", CVAR_ARCHIVE)->integer) {
-            for (j = 0; j < 2; j++) {
-                if (!Q_stricmp(prefix, kScoped[j])) {
-                    return qtrue;
+        if (CG_HzmScopeRaiseOwns()) {
+            // [scopehold 2026-11-01] under the scope a PREFIX `_ads` row is never trusted by default: the prefix is shared with iron-sight guns (garand -> the
+            // Garand sniper / silenced Garand, springfield -> the iron M1903) and every clip baked for the scoped eye so far swung the rifle out of the eye
+            // (BOLT_HANDOFF.md). The held scoped aim pose takes the bolt / reload instead (CoopScopeHoldRow). coop_scopePrefixAds 1 = the old test path.
+            if (cgi.Cvar_Get("coop_scopePrefixAds", "0", 0)->integer && cgi.Cvar_Get("coop_scopeBoltAds", "1", CVAR_ARCHIVE)->integer) {
+                for (j = 0; j < 2; j++) {
+                    if (!Q_stricmp(prefix, kScoped[j])) {
+                        return qtrue;
+                    }
                 }
             }
+            return qfalse;
         }
     }
     for (i = 0; i < (int)(sizeof(kAuthored) / sizeof(kAuthored[0])); i++) {
@@ -613,6 +619,9 @@ qboolean CG_VMAmmoPropEarly(dtiki_t *tiki)
 
     if (!name || !strstr(name, "ammo/")) {
         return qfalse;
+    }
+    if (CG_VMScopeHoldClip()) {
+        return qtrue;   // [scopehold] the hands hold the scoped aim pose through the reload: the clip / round would hang beside the rifle
     }
     a = cgi.anim->g_iLastVMAnim;
     if ((a == VM_ANIM_RELOAD || a == VM_ANIM_RELOAD_SINGLE || a == VM_ANIM_RELOAD_END || a == VM_ANIM_RECHAMBER)
@@ -639,6 +648,11 @@ qboolean CG_VMAdsTagRight(void)
     // so the rifle jittered 10-20 px (about 1 deg, single rendered frames up to 3 deg) for the 0.2 s of the reach and
     // again on the hand's way back to the grip - the "3-8 % at the two ends of each clip" of runs ra5-ra7, and the
     // same in the shipped hand-keyed clips (run rb3, VMH probe: tag R for all 69 frames, gun y -0.82..-1.11..-0.57).
+    // [scopehold] the held scoped aim pose: the gun stays in the right hand for the whole bolt / reload - the pose's tag_weapon_left sits up the fore-end,
+    // so following the server's attachtohand offhand would shove the rifle (and the lens) off the eye
+    if (CG_VMScopeHoldClip()) {
+        return qtrue;
+    }
     return (s_coopAdsSlot >= 0 && s_coopAdsSlot == cgi.anim->g_iCurrentVMAnimSlot && s_coopAdsBolt
             && s_fCoopVMCurW < 0.999f)
              ? qtrue
@@ -656,6 +670,13 @@ qboolean CG_VMAdsBoltClip(void)
 qboolean CG_VMScopedReloadAdsClip(void)
 {
     return (cgi.anim && s_coopAdsSlot >= 0 && s_coopAdsSlot == cgi.anim->g_iCurrentVMAnimSlot && s_coopAdsScopedReload) ? qtrue : qfalse;
+}
+
+// [scopehold 2026-11-01] the newest view clip is the held scoped aim pose standing in for a bolt / reload (no hands motion, no ammo prop)
+static qboolean s_coopScopeHold = qfalse;
+qboolean CG_VMScopeHoldClip(void)
+{
+    return (cgi.anim && s_coopAdsSlot >= 0 && s_coopAdsSlot == cgi.anim->g_iCurrentVMAnimSlot && s_coopScopeHold) ? qtrue : qfalse;
 }
 
 // HZM coop [ads rifles 2026-10-12] an aimed bolt clip is the only clip on screen: both weapon tags hold the gun
@@ -914,6 +935,21 @@ void CG_ViewModelAnimation(refEntity_t *pModel)
         s_iCoopPrevVMAnim              = cgi.anim->g_iLastVMAnim; // what we are blending FROM
         cgi.anim->g_iLastVMAnim        = cg.snap->ps.iViewModelAnim;
         cgi.anim->g_iLastVMAnimChanged = cg.snap->ps.iViewModelAnimChanged;
+    }
+    // [scopehold 2026-11-01] SCOPED IN WHILE a hip bolt / reload clip plays (it started at the hip, or the scope was dropped and taken again): pick the row again
+    // now, as if the clip had just started, so the scoped hold below takes it - otherwise the scope came up on the hip reload and the picture fell back to the
+    // hip view until the reload ended (run b4 new_fire, gate 0 for the whole raise)
+    {   // edge only: the frame the scoped aim begins (never every frame - a gun with no idle row would restart its clip each frame)
+        static qboolean s_prevScopedAim = qfalse;
+        const qboolean  bScopedAim      = (CG_HzmScopeRaiseOwns() && CG_AimingDownSights()) ? qtrue : qfalse;
+        if (bScopedAim && !s_prevScopedAim && !bAnimChanged && !bWeaponChanged && s_coopAdsSlot < 0 && cg.snap->ps.stats[STAT_HEALTH] > 0
+            && (cgi.anim->g_iLastVMAnim == VM_ANIM_RECHAMBER || cgi.anim->g_iLastVMAnim == VM_ANIM_RELOAD
+                || cgi.anim->g_iLastVMAnim == VM_ANIM_RELOAD_SINGLE || cgi.anim->g_iLastVMAnim == VM_ANIM_RELOAD_END)
+            && cgi.Cvar_Get("coop_scopeHoldCycle", "1", CVAR_ARCHIVE)->integer) {
+            bAnimChanged      = qtrue;
+            s_iCoopPrevVMAnim = cgi.anim->g_iLastVMAnim;
+        }
+        s_prevScopedAim = bScopedAim;
     }
 
     // HZM coop [aimed per-shot cycle 2026-10-12] user: "That hi standard needs a first person ads cock animation
@@ -1266,7 +1302,10 @@ void CG_ViewModelAnimation(refEntity_t *pModel)
                         char szKey[MAX_QPATH], szPer[MAX_QPATH];
                         CoopWeaponKey(CG_ConfigString(CS_WEAPONS + cg.snap->ps.activeItems[1]), szKey, sizeof(szKey));
                         Com_sprintf(szPer, sizeof(szPer), "coopr_%s_%s_ads", szKey, pszSfx);
-                        if (cgi.Anim_NumForName(pTiki, szPer) != -1) {
+                        // [scopehold 2026-11-01] the Springfield's baked scoped rows end with the rifle flipped upright for ~3 frames (run b4, frames 692-696) and
+                        // their bolt drags the lens about: by default every scoped gun takes the held aim pose instead (one behaviour for all of them).
+                        // coop_scopeAuthoredRows 1 = play the baked rows again.
+                        if (cgi.Anim_NumForName(pTiki, szPer) != -1 && cgi.Cvar_Get("coop_scopeAuthoredRows", "0", 0)->integer) {
                             Q_strncpyz(szAds, szPer, sizeof(szAds));
                             bPerWpnScoped = qtrue;
                         }
@@ -1309,6 +1348,31 @@ void CG_ViewModelAnimation(refEntity_t *pModel)
                 Q_strncpyz(szAnimName, szTry, sizeof(szAnimName));
                 s_coopAdsClip = qtrue;
                 s_coopAdsBolt = qfalse;
+            }
+        }
+        // [scopehold 2026-11-01] user: "make sure all scoped ads bolt cocks and reloads occur with the player still looking down the scope". A SCOPED rifle up at
+        // the eye played the HIP bolt / reload clip (no scoped gun has a scoped row: the baked ones swung the rifle out of the eye), the aim slot lost its weight,
+        // the lens left the magnified-main mode (cg_hzmscope.c: gate < 0.5) and the view fell back to the hip picture with the rifle at the hip. Now the bolt
+        // (rechamber, the aimed cycle) and every reload row with no scoped row of its own HOLD the scoped aim pose, as the shot already does: the aim slot keeps
+        // its weight, the rig stays solved, the main view stays the magnified picture. The server's timing and the gun's own bolt / reload sounds (weapon tik)
+        // are untouched; scoping out mid-reload hands over to the hip clip at the same clip time (the ADS-release swap below). coop_scopeHoldCycle 0 = as before.
+        s_coopScopeHold = qfalse;
+        {
+            const int a = cgi.anim->g_iLastVMAnim;
+            if ((a == VM_ANIM_RECHAMBER || a == COOP_VM_ANIM_CYCLE || a == VM_ANIM_RELOAD || a == VM_ANIM_RELOAD_SINGLE || a == VM_ANIM_RELOAD_END)
+                && !bWeaponChanged && !s_coopAdsClip && cg.snap && cg.snap->ps.activeItems[1] >= 0 && CG_HzmScopeRaiseOwns() && CG_AimingDownSights()
+                && cgi.Cvar_Get("coop_scopeHoldCycle", "1", CVAR_ARCHIVE)->integer) {
+                char szTry[MAX_QPATH];
+                // the scoped ADS pose is the server's IDLE clip + the rig correction (see the shot above: `charge` is another pose)
+                Com_sprintf(szTry, sizeof(szTry), "%s_idle", AnimPrefixList[iAnimPrefixIndex]);
+                CoopPerWeaponReloadAnim(pTiki, "idle", szTry, sizeof(szTry));
+                if (cgi.Anim_NumForName(pTiki, szTry) != -1) {
+                    Q_strncpyz(s_szCoopHipAnim, szAnimName, sizeof(s_szCoopHipAnim));
+                    Q_strncpyz(szAnimName, szTry, sizeof(szAnimName));
+                    s_coopAdsClip = qtrue;
+                    s_coopAdsBolt = qfalse;
+                    s_coopScopeHold = qtrue;
+                }
             }
         }
         {   // HZM coop [heavy lane 2026-10-13] harness trace of the row that starts now (apply_vmtrace.py)

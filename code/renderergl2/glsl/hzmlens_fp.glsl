@@ -114,7 +114,10 @@ void main()
 	if (amt > 0.0)
 	{
 		float ign = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));
-		float br  = 0.05 * u_FogDistance.x;
+		// [scopehold] u_FogDistance.w 1: outside the lens (hip view as main = the raise / the lower) the blur RADIUS and the dimming grow with the scope instead of a
+		// sharp copy crossfaded into a blurred one - that crossfade is two pictures at once, a double image on every raise and lower. In ADS mode the source is the wide view.
+		bool  grow = (u_FogDistance.w > 0.5) && !adsMode;
+		float br  = 0.05 * u_FogDistance.x * (grow ? amt : 1.0);
 		vec3  b   = min(adsMode ? texture2D(u_ScreenImageMap, var_TexCoords).rgb : mainC, vec3(1.5)) * 0.04;
 		for (int k = 0; k < 24; k++)
 		{
@@ -125,6 +128,11 @@ void main()
 		}
 		float rimShade = mix(0.62, 1.0, smoothstep(1.0, 1.9, r));   // the tube shadow: deepest at the ring, gone toward the screen edge
 		outside = b * clamp(u_HzmParams.w, 0.0, 1.0) * rimShade;
+		if (grow)
+		{
+			outside = b * mix(1.0, clamp(u_HzmParams.w, 0.0, 1.0) * rimShade, amt);
+			outside = mix(wide, outside, smoothstep(0.0, 0.12, amt));   // the 1.5 HDR clamp of the taps, eased in (no step on a bright sky at amt 0+)
+		}
 	}
 
 	// debug views (r_ppScopeCA): 10 = the wide view alone, 20 = the blurred outside, 30 = the main picture
@@ -144,7 +152,7 @@ void main()
 	vec3 lensCol   = mix(glassFake, mix(shadowCol, inside, pupil), kPip);
 	if (u_HzmParams.z > 47.0 && u_HzmParams.z < 53.0) lensCol = vec3(1.0, 0.0, 1.0);   // r_ppScopeCA 50: QA marker - the picture is painted magenta (tools/pip_leak_check.py)
 
-	vec3  ring     = mix(wide, outside, amt);
+	vec3  ring     = (u_FogDistance.w > 0.5 && !adsMode) ? outside : mix(wide, outside, amt);
 	float lensFade = lens;   // the live magnified picture is on the glass ALWAYS (hip, raise, bolt, reload)
 	gl_FragColor   = vec4(mix(ring, lensCol, lensFade), lens);   // alpha = the lens / glass coverage, for the restore in pass 1
 }

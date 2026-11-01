@@ -39,6 +39,7 @@ void RB_HZMScope(FBO_t *srcFbo, ivec4_t srcBox);    // HZM coop [bug-3462] moder
 void RB_HZMScopeLive(qboolean live);                // HZM coop [bug-3462] publishes r_ppScopeLive on change
 void RB_HZMLensComposite(FBO_t *srcFbo, ivec4_t srcBox);               // HZM coop [scopes1025] HDR composite, top of the post chain
 void R_HzmLensPublishLive(qboolean live);                              // HZM coop [scopes1025] publishes r_ppScopePipLive on change
+qboolean R_HzmLensStateSelected(void);                                  // HZM coop [scopehold] cgame chose the picture-in-picture scope (raise / lower included)
 qboolean R_HzmLensStateWantsPip(void);                                  // HZM coop [scopes1025] r_ppScopeState carries a lens fov
 void RB_BokehBlur(FBO_t *src, ivec4_t srcBox, FBO_t *dst, ivec4_t dstBox, float blur);
 void RB_SunRays(FBO_t *srcFbo, ivec4_t srcBox, FBO_t *dstFbo, ivec4_t dstBox);
