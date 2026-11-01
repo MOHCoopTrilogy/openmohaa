@@ -1713,6 +1713,9 @@ void CG_DrawSpectatorView_ver_6()
 
 void CG_DrawSpectatorView()
 {
+    if (cg.demoPlayback) {
+        return; // HZM coop - demo editor: "Press Fire to join" / "Press Use to spectate" are for a live player
+    }
     if (cg_protocol >= PROTOCOL_MOHTA_MIN) {
         CG_DrawSpectatorView_ver_15();
     } else {

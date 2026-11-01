@@ -23,6 +23,8 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 #include "client.h"
 #include "snd_local.h"
 
+void FS_HomeRemove( const char *homePath ); // files.cpp
+
 #define INDEX_FILE_EXTENSION ".index.dat"
 
 #define MAX_RIFF_CHUNKS 16
@@ -334,9 +336,8 @@ writing the actual data can begin
 */
 qboolean CL_OpenAVIForWriting( const char *fileName )
 {
-    return qfalse;
-    // Removed in OPM
-#if 0
+  // HZM coop - back on (OPM had it stubbed, so F10 renders wrote nothing - bug-10285). Video only: the
+  // sound runs on OpenAL here, and the audio capture below only works with the old DMA mixer.
   if( afd.fileOpen )
     return qfalse;
 
@@ -374,10 +375,10 @@ qboolean CL_OpenAVIForWriting( const char *fileName )
   afd.cBuffer = ( byte * )Z_Malloc( afd.width * afd.height * 4 );
   afd.eBuffer = ( byte * )Z_Malloc( afd.width * afd.height * 4 );
 
-  afd.a.rate = dma.speed;
-  afd.a.format = WAV_FORMAT_PCM;
-  afd.a.channels = dma.channels;
-  afd.a.bits = dma.samplebits;
+  afd.a.rate = 44100; // HZM coop - no DMA mixer here: a plain 44.1 kHz stereo header (no audio is written)
+  afd.a.format = 1; // WAV_FORMAT_PCM
+  afd.a.channels = 2;
+  afd.a.bits = 16;
   afd.a.sampleSize = ( afd.a.bits / 8 ) * afd.a.channels;
 
   if( afd.a.rate % afd.frameRate )
@@ -391,7 +392,7 @@ qboolean CL_OpenAVIForWriting( const char *fileName )
         "of the audio rate, suggest %d\n", suggestRate );
   }
 
-  if( !Cvar_VariableIntegerValue( "s_initsound" ) )
+  if( 1 ) // HZM coop - OpenAL: no capture (see above)
   {
     afd.audio = qfalse;
   }
@@ -427,8 +428,8 @@ qboolean CL_OpenAVIForWriting( const char *fileName )
   afd.moviSize = 4; // For the "movi"
   afd.fileOpen = qtrue;
 
+  Com_Printf( "Recording %dx%d at %d fps to %s (video only)\n", afd.width, afd.height, afd.frameRate, afd.fileName );
   return qtrue;
-#endif
 }
 
 /*
@@ -586,8 +587,8 @@ void CL_TakeVideoFrame( void )
   if( !afd.fileOpen )
     return;
 
-//  RE_TakeVideoFrame( afd.width, afd.height,
-//      afd.cBuffer, afd.eBuffer, afd.motionJpeg );
+  re.TakeVideoFrame( afd.width, afd.height,
+      afd.cBuffer, afd.eBuffer, afd.motionJpeg );
 }
 
 /*
@@ -641,7 +642,7 @@ qboolean CL_CloseAVI( void )
   FS_FCloseFile( afd.idxF );
 
   // Remove temp index file
-  FS_Remove( idxFileName );
+  FS_HomeRemove( idxFileName ); // HZM coop - FS_Remove wants an OS path: the temp index was left behind
 
   // Write the real header
   FS_Seek( afd.f, 0, FS_SEEK_SET );

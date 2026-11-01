@@ -498,6 +498,10 @@ static void CL_WheelPublish( void ) {
 }
 
 void CL_MouseEvent( int dx, int dy, int time ) {
+	// HZM coop - demo editor timeline: its cursor takes the mouse while it is up
+	if ( !in_guimouse && CL_DemoEd_CursorMouse( dx, dy ) ) {
+		return;
+	}
 	if ( !in_guimouse && CL_WheelOpen() ) {
 		s_wheelX += dx * 0.6f;
 		s_wheelY += dy * 0.6f;

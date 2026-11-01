@@ -105,6 +105,10 @@ static cvar_t *demo_status;
 
 static void DE_SaveCam(void);
 static void DE_LoadCam(void);
+static void TL_Frame(void);
+static void DE_CpLevelStart(qboolean firstOfDemo);
+static qboolean TL_MouseKey(int key, qboolean down);
+static void TL_ResetInput(void);
 static void DE_SaveNames(void);
 static void DE_LoadNames(void);
 
@@ -594,6 +598,7 @@ void CL_DemoEd_Reset(void)
     // keep the rewind buffers allocated, drop everything per-demo
     memset(&de, 0, sizeof(de));
     de.speed = 1.0f;
+    TL_ResetInput();
     if (demo_cam) {
         Cvar_Set("demo_cam", "");
         Cvar_Set("demo_status", "");
@@ -612,6 +617,7 @@ void CL_DemoEd_GamestateParsed(void)
         return;
     }
     Cvar_Set("demo_playing", "1");
+    DE_CpLevelStart(de.gamestates == 0); // checkpoints: a new demo drops them, a restart of the SAME one keeps them
     if (de.gamestates++ > 0) {
         // a level change inside the demo: a new segment. The clock carries on from the old level's last
         // snapshot; the new level's first snapshot re-anchors it (CL_DemoEd_SetTime)
@@ -866,11 +872,288 @@ static void DE_SeekDisplay(int ms)
     DE_SeekTo(de.firstSnapTime + (ms - de.segBase));
 }
 
+
+/*
+==================
+rewind checkpoints
+
+A backward seek used to re-read its level from the start: 60 ms at 32 s in, a second or more deep into a
+long level. Every demo message passes CL_DemoEd_MessageRead; every few seconds of each level it copies what
+a later message needs: the file offset, the configstrings, the command sequence, the last snapshots a delta
+can reference and their entities. A seek starts from the nearest checkpoint before its target. They fill in
+as the demo is played or read through (a seek's own read-ahead included), so after one pass every point of a
+level is close to one. The command ring is not copied: like the level-start rewind, only the sequence number
+matters (every configstring command up to it is already in the copied configstrings).
+==================
+*/
+#define DE_CP_SEGS    32
+#define DE_CP_PER_SEG 128          // thinned to every other one (and the spacing doubled) when full
+#define DE_CP_TOTAL   1024
+#define DE_CP_BUDGET  (512 << 20)  // bytes, all levels of one demo
+#define DE_CP_SPACING 4000         // ms of demo between checkpoints, to start with
+
+typedef struct {
+    int            segIndex;
+    int            snapTime;
+    int            offset;
+    int            msgSeq;
+    int            cmdSeq;
+    int            parseEntitiesNum;
+    int            numSnaps;
+    clSnapshot_t  *snaps; // oldest first, the last one is cl.snap
+    int            entFirst, numEnts;
+    entityState_t *ents;
+    char          *gsData;
+    int           *gsOffsets;
+    int            gsCount;
+    int            bytes;
+    qboolean       bad; // a seek from it could not decode: never used again
+    deStuff_t     *stuff; // the stuffed cvars (DE_StuffScan) as they stood here
+    int            numStuff;
+} deCheckpoint_t;
+
+static deCheckpoint_t s_cp[DE_CP_TOTAL];
+static int            s_numCp, s_cpBytes;
+static char           s_cpDemo[MAX_QPATH];
+static int            s_cpSpacing[DE_CP_SEGS];
+static int            s_maxDelta; // the furthest back a delta reached in this level so far
+
+static void DE_CpFree(deCheckpoint_t *c)
+{
+    free(c->snaps);
+    free(c->ents);
+    free(c->gsData);
+    free(c->gsOffsets);
+    free(c->stuff);
+    s_cpBytes -= c->bytes;
+    memset(c, 0, sizeof(*c));
+}
+
+static void DE_CpClear(void)
+{
+    int i;
+    for (i = 0; i < s_numCp; i++) {
+        DE_CpFree(&s_cp[i]);
+    }
+    s_numCp   = 0;
+    s_cpBytes = 0;
+    for (i = 0; i < DE_CP_SEGS; i++) {
+        s_cpSpacing[i] = DE_CP_SPACING;
+    }
+}
+
+static void DE_CpRemove(int i)
+{
+    DE_CpFree(&s_cp[i]);
+    memmove(&s_cp[i], &s_cp[i + 1], (s_numCp - i - 1) * sizeof(s_cp[0]));
+    s_numCp--;
+    memset(&s_cp[s_numCp], 0, sizeof(s_cp[0]));
+}
+
+static void DE_CpCapture(void)
+{
+    deCheckpoint_t c;
+    clSnapshot_t  *list[PACKET_BACKUP];
+    int            i, k, n = 0, seg = de.segIndex, t = cl.snap.serverTime, at, count = 0;
+
+    if (seg < 0 || seg >= DE_CP_SEGS || s_numCp >= DE_CP_TOTAL || s_cpBytes > DE_CP_BUDGET) {
+        return;
+    }
+    for (i = 0; i < s_numCp; i++) {
+        if (s_cp[i].segIndex == seg) {
+            count++;
+            if (abs(s_cp[i].snapTime - t) < s_cpSpacing[seg]) {
+                return;
+            }
+        }
+    }
+    k = s_maxDelta + 3;
+    if (k < 3) {
+        k = 3;
+    } else if (k > PACKET_BACKUP - 1) {
+        k = PACKET_BACKUP - 1;
+    }
+    for (i = k - 1; i >= 0; i--) {
+        int           m = cl.snap.messageNum - i;
+        clSnapshot_t *s = &cl.snapshots[m & PACKET_MASK];
+        if (s->valid && s->messageNum == m) {
+            list[n++] = s;
+        }
+    }
+    if (!n || list[n - 1]->messageNum != cl.snap.messageNum) {
+        return;
+    }
+    memset(&c, 0, sizeof(c));
+    c.segIndex         = seg;
+    c.snapTime         = t;
+    c.offset           = FS_FTell(clc.demofile);
+    c.msgSeq           = clc.serverMessageSequence;
+    c.cmdSeq           = clc.serverCommandSequence;
+    c.parseEntitiesNum = cl.parseEntitiesNum;
+    c.numSnaps         = n;
+    c.entFirst         = list[0]->parseEntitiesNum;
+    c.numEnts          = cl.parseEntitiesNum - c.entFirst;
+    if (c.numEnts < 0 || c.numEnts > MAX_PARSE_ENTITIES) {
+        return;
+    }
+    c.gsCount   = cl.gameState.dataCount;
+    c.snaps     = (clSnapshot_t *)malloc(n * sizeof(clSnapshot_t));
+    c.ents      = (entityState_t *)malloc((c.numEnts ? c.numEnts : 1) * sizeof(entityState_t));
+    c.gsData    = (char *)malloc(c.gsCount ? c.gsCount : 1);
+    c.gsOffsets = (int *)malloc(sizeof(cl.gameState.stringOffsets));
+    if (!c.snaps || !c.ents || !c.gsData || !c.gsOffsets) {
+        free(c.snaps);
+        free(c.ents);
+        free(c.gsData);
+        free(c.gsOffsets);
+        return;
+    }
+    for (i = 0; i < n; i++) {
+        c.snaps[i] = *list[i];
+    }
+    c.snaps[n - 1] = cl.snap;
+    for (i = 0; i < c.numEnts; i++) {
+        c.ents[i] = cl.parseEntities[(c.entFirst + i) & (MAX_PARSE_ENTITIES - 1)];
+    }
+    memcpy(c.gsData, cl.gameState.stringData, c.gsCount);
+    if (s_numStuffOrig) {
+        // the value each stuffed cvar has at this point of the demo: one a seek has read but not yet
+        // applied (pending), else the live one
+        c.stuff = (deStuff_t *)malloc(s_numStuffOrig * sizeof(deStuff_t));
+        if (c.stuff) {
+            for (i = 0; i < s_numStuffOrig; i++) {
+                int j;
+                Q_strncpyz(c.stuff[i].name, s_stuffOrig[i].name, sizeof(c.stuff[i].name));
+                Q_strncpyz(c.stuff[i].val, Cvar_VariableString(s_stuffOrig[i].name), sizeof(c.stuff[i].val));
+                for (j = 0; j < s_numStuffPend; j++) {
+                    if (!Q_stricmp(s_stuffPend[j].name, s_stuffOrig[i].name)) {
+                        Q_strncpyz(c.stuff[i].val, s_stuffPend[j].val, sizeof(c.stuff[i].val));
+                    }
+                }
+            }
+            c.numStuff = s_numStuffOrig;
+        }
+    }
+    memcpy(c.gsOffsets, cl.gameState.stringOffsets, sizeof(cl.gameState.stringOffsets));
+    c.bytes = n * sizeof(clSnapshot_t) + c.numEnts * sizeof(entityState_t) + c.gsCount
+            + sizeof(cl.gameState.stringOffsets);
+
+    // sorted by level, then time
+    for (at = 0; at < s_numCp; at++) {
+        if (s_cp[at].segIndex > seg || (s_cp[at].segIndex == seg && s_cp[at].snapTime > t)) {
+            break;
+        }
+    }
+    memmove(&s_cp[at + 1], &s_cp[at], (s_numCp - at) * sizeof(s_cp[0]));
+    s_cp[at] = c;
+    s_numCp++;
+    s_cpBytes += c.bytes;
+
+    if (count + 1 > DE_CP_PER_SEG) {
+        // a long level: keep every other one, twice as far apart from now on
+        int keep = 0;
+        for (i = 0; i < s_numCp; i++) {
+            if (s_cp[i].segIndex == seg && (keep++ & 1)) {
+                DE_CpRemove(i);
+                i--;
+            }
+        }
+        s_cpSpacing[seg] *= 2;
+    }
+}
+
+// the latest usable checkpoint of the loaded level at or before t (server ms)
+static deCheckpoint_t *DE_CpFind(int t)
+{
+    deCheckpoint_t *best = NULL;
+    int             i;
+    for (i = 0; i < s_numCp; i++) {
+        if (s_cp[i].segIndex == de.segIndex && !s_cp[i].bad && s_cp[i].snapTime <= t) {
+            best = &s_cp[i];
+        }
+    }
+    return best;
+}
+
+static void DE_CpRestore(const deCheckpoint_t *c)
+{
+    int i;
+    FS_Seek(clc.demofile, c->offset, FS_SEEK_SET);
+    memcpy(cl.gameState.stringOffsets, c->gsOffsets, sizeof(cl.gameState.stringOffsets));
+    memcpy(cl.gameState.stringData, c->gsData, c->gsCount);
+    cl.gameState.dataCount        = c->gsCount;
+    clc.serverCommandSequence     = c->cmdSeq;
+    clc.lastExecutedServerCommand = c->cmdSeq;
+    clc.serverMessageSequence     = c->msgSeq;
+    for (i = 0; i < PACKET_BACKUP; i++) {
+        cl.snapshots[i].valid = qfalse;
+    }
+    for (i = 0; i < c->numSnaps; i++) {
+        cl.snapshots[c->snaps[i].messageNum & PACKET_MASK] = c->snaps[i];
+    }
+    for (i = 0; i < c->numEnts; i++) {
+        cl.parseEntities[(c->entFirst + i) & (MAX_PARSE_ENTITIES - 1)] = c->ents[i];
+    }
+    cl.parseEntitiesNum = c->parseEntitiesNum;
+    cl.snap             = c->snaps[c->numSnaps - 1];
+    // the stuffed client state: back to the level's originals, then as it stood at the checkpoint
+    DE_StuffRestoreOriginals();
+    s_numStuffPend = 0;
+    for (i = 0; i < c->numStuff; i++) {
+        Cvar_Set(c->stuff[i].name, c->stuff[i].val);
+    }
+}
+
+static void DE_CpLevelStart(qboolean firstOfDemo)
+{
+    s_maxDelta = 0;
+    if (firstOfDemo && Q_stricmp(s_cpDemo, clc.demoName)) {
+        DE_CpClear(); // checkpoints are file offsets
+        Q_strncpyz(s_cpDemo, clc.demoName, sizeof(s_cpDemo));
+    }
+}
+
+// after every demo message (CL_ReadDemoMessage): note how far back deltas reach, and take a checkpoint
+void CL_DemoEd_MessageRead(void)
+{
+    clSnapshot_t *s;
+    if (!CL_DemoEd_Enabled() || !de.started || !clc.demofile) {
+        return;
+    }
+    s = &cl.snapshots[clc.serverMessageSequence & PACKET_MASK];
+    if (!s->valid || s->messageNum != clc.serverMessageSequence) {
+        return;
+    }
+    if (s->deltaNum > 0 && s->messageNum - s->deltaNum > s_maxDelta) {
+        s_maxDelta = s->messageNum - s->deltaNum;
+    }
+    if (cl.snap.messageNum == s->messageNum) {
+        DE_CpCapture();
+    }
+}
+
+static void DE_LevelStartRewind(void)
+{
+    int i;
+    FS_Seek(clc.demofile, de.rewindOffset, FS_SEEK_SET);
+    cl.gameState = de_rewindGS;
+    memcpy(cl.entityBaselines, de_rewindBaselines, sizeof(cl.entityBaselines));
+    clc.serverCommandSequence     = de.rewindCmdSeq;
+    clc.lastExecutedServerCommand = de.rewindCmdSeq;
+    for (i = 0; i < PACKET_BACKUP; i++) {
+        cl.snapshots[i].valid = qfalse;
+    }
+    cl.snap.valid = qfalse;
+    DE_StuffRestoreOriginals(); // the stuffed client state as this level started
+    s_numStuffPend = 0;
+}
+
 static void DE_SeekTo(int target)
 {
     static gameState_t before;
-    int                applied, i;
-    qboolean           rewound = qfalse;
+    int                applied, i, badSnaps = 0;
+    int                rewound = 0; // 1 from the level start, 2 from a checkpoint
+    deCheckpoint_t    *cp      = NULL;
     int                targetD;
     int                t0      = Sys_Milliseconds();
 
@@ -880,26 +1163,29 @@ static void DE_SeekTo(int target)
     before = cl.gameState;
     targetD = de.segBase + (target - de.firstSnapTime); // display ms, for a seek a level change interrupts
 
-    if (target < cl.snap.serverTime - 1 || target < de.demoTime) {
-        if (!de.haveRewind) {
-            Com_Printf("Demo editor: this demo cannot be rewound.\n");
-            return;
+    {
+        qboolean back = (target < cl.snap.serverTime - 1 || target < de.demoTime) ? qtrue : qfalse;
+        cp            = DE_CpFind(target);
+        if (cp && (back || cp->snapTime > cl.snap.serverTime + 1000)) {
+            // from the nearest checkpoint (also a long jump forward: no need to read the gap)
+            DE_CpRestore(cp);
+            DE_ApplyAllAliasesRaw(qfalse);
+            rewound  = 2;
+            de.atEnd = qfalse;
+        } else if (back) {
+            cp = NULL;
+            if (!de.haveRewind) {
+                Com_Printf("Demo editor: this demo cannot be rewound.\n");
+                return;
+            }
+            // back to just after the gamestate: the next message is the first, non-delta snapshot
+            DE_LevelStartRewind();
+            DE_ApplyAllAliasesRaw(qfalse);
+            rewound  = qtrue;
+            de.atEnd = qfalse;
+        } else {
+            cp = NULL;
         }
-        // back to just after the gamestate: the next message is the first, non-delta snapshot
-        FS_Seek(clc.demofile, de.rewindOffset, FS_SEEK_SET);
-        cl.gameState = de_rewindGS;
-        memcpy(cl.entityBaselines, de_rewindBaselines, sizeof(cl.entityBaselines));
-        clc.serverCommandSequence     = de.rewindCmdSeq;
-        clc.lastExecutedServerCommand = de.rewindCmdSeq;
-        for (i = 0; i < PACKET_BACKUP; i++) {
-            cl.snapshots[i].valid = qfalse;
-        }
-        cl.snap.valid = qfalse;
-        DE_ApplyAllAliasesRaw(qfalse);
-        rewound  = qtrue;
-        DE_StuffRestoreOriginals(); // the stuffed client state as this level started
-        s_numStuffPend = 0;
-        de.atEnd = qfalse;
     }
 
     applied = clc.serverCommandSequence;
@@ -909,6 +1195,20 @@ static void DE_SeekTo(int target)
             de.lastSnapTime = cl.snap.serverTime;
         }
         CL_ReadDemoMessage();
+        if (cp && clc.demoplaying && de.segIndex == segWas) {
+            clSnapshot_t *s = &cl.snapshots[clc.serverMessageSequence & PACKET_MASK];
+            if (s->messageNum == clc.serverMessageSequence && !s->valid && ++badSnaps > 3) {
+                // a delta reached past what the checkpoint kept: never use it again, start the level over
+                Com_Printf("Demo editor: a rewind checkpoint could not be read on - rewinding the level instead\n");
+                cp->bad = qtrue;
+                cp      = NULL;
+                DE_LevelStartRewind();
+                DE_ApplyAllAliasesRaw(qfalse);
+                rewound = qtrue;
+                applied = clc.serverCommandSequence;
+                continue;
+            }
+        }
         if (clc.demoplaying && de.segIndex != segWas) {
             // a new level: it loads over the next frames; the rest of the seek runs once it is up
             DE_Pend(targetD, qfalse);
@@ -948,8 +1248,8 @@ static void DE_SeekTo(int target)
 
     if (developer && developer->integer) {
         Com_Printf(
-            "^~^~^ DEMOED seek t=%.1f rewound=%d snap=%d took=%dms\n", DE_Clock(), rewound, cl.snap.messageNum,
-            Sys_Milliseconds() - t0
+            "^~^~^ DEMOED seek t=%.1f rewound=%d snap=%d took=%dms cps=%d (%d KB)\n", DE_Clock(), rewound,
+            cl.snap.messageNum, Sys_Milliseconds() - t0, s_numCp, s_cpBytes / 1024
         );
     }
 }
@@ -1023,6 +1323,9 @@ static void DE_Publish(void)
         de.freecam ? "  FREECAM" : "", de.pathPlaying ? "  PATH" : "", de.numWp,
         de.pathRealtime && de.numWp > 1 ? " (timed)" : ""
     );
+    if (CL_VideoRecording()) {
+        buf[0] = 0; // nothing of the editor in an F10 render
+    }
     if (strcmp(buf, demo_status->string)) {
         Cvar_Set("demo_status", buf);
     }
@@ -1033,7 +1336,7 @@ static void DE_Publish(void)
 
 void CL_DemoEd_SetTime(void)
 {
-    int   now = Sys_Milliseconds();
+    int   now = cls.realtime; // the client's frame clock: real time, or the fixed AVI step while F10 renders
     int   dt;
     float dtSec;
 
@@ -1044,6 +1347,9 @@ void CL_DemoEd_SetTime(void)
         de.lastRealMs    = now;
         de.speed         = de.speed > 0 ? de.speed : 1.0f;
         DE_LoadCam(); // waypoint times are display ms
+        if (de.segIndex == 0 && !s_pend.active && Cvar_VariableIntegerValue("demo_startPaused")) {
+            de.paused = qtrue; // hold on the first frame (test scripts: the load time varies)
+        }
         de.lastSnapTime  = cl.snap.serverTime;
         if (s_pend.active && !Q_stricmp(s_pend.demo, clc.demoName)) {
             s_pend.active = qfalse;
@@ -1105,6 +1411,7 @@ void CL_DemoEd_SetTime(void)
         de.lastSnapTime = cl.snap.serverTime;
     }
 
+    TL_Frame(); // the timeline: its scan of the file, and a scrub in progress
     DE_Publish();
 }
 
@@ -1294,8 +1601,14 @@ qboolean CL_DemoEd_KeyEvent(int key, qboolean down)
         }
         return qtrue;
     }
+    if (key == K_MOUSE2 && !down) {
+        TL_MouseKey(key, down); // a release always clears the hold, whatever is up now
+    }
     if (!CL_DemoEd_Enabled() || clc.state != CA_ACTIVE || !de.started || Key_GetCatcher() != 0) {
         return qfalse;
+    }
+    if (key == K_MOUSE1 || key == K_MOUSE2 || key == K_MWHEELUP || key == K_MWHEELDOWN) {
+        return TL_MouseKey(key, down); // the timeline
     }
     switch (key) {
     case K_KP_INS:
@@ -1769,6 +2082,1106 @@ static void DE_SetName_f(void)
     );
 }
 
+/*
+==================
+TIMELINE - a YouTube-style bar along the bottom while a demo plays with the full HUD
+
+The length, the level boundaries and the kill / death / objective markers come from a second read of the
+demo file (TL_ScanStep, a few ms a frame, so a long demo never stalls a frame). It reads each message only
+up to its snapshot's server time: server commands come before svc_snapshot in every message, and a
+gamestate starts a new level. Its display clock is the same one the editor runs (segBase): a level starts
+one snapshot (DE_SegStartGap) after the previous level's last snapshot.
+
+The mouse drives a cursor of its own (TL_CursorActive): always while you watch through the recorded
+player's eyes, and while the right button is held with the free camera on (the mouse turns the camera
+otherwise). Click the bar to jump, drag to scrub (the seeks are throttled, and stay inside the level
+that is loaded; letting go lands anywhere, loading another level if it must). Never drawn in the clean
+HUD modes or into an F10 render.
+==================
+*/
+#define TL_MAX_SEG  32
+#define TL_MAX_MARK 1024
+
+enum { TLM_KILL, TLM_DEATH, TLM_OBJ, TLM_WP, TLM_FRAG }; // KILL = a player or allied death, FRAG = an enemy soldier killed
+
+typedef struct {
+    int  ms;     // display ms, -1 until the message's snapshot is read
+    int  kind;
+    char label[96];
+    char victim[MAX_NAME_LENGTH];
+} tlMark_t;
+
+static struct {
+    char         file[MAX_OSPATH]; // the demo file the scan belongs to
+    fileHandle_t f;
+    qboolean     scanning, done;
+    int          bytes, msgs, t0;
+    int          numSeg;
+    int          segStart[TL_MAX_SEG]; // display ms
+    int          segFirst[TL_MAX_SEG], segLast[TL_MAX_SEG];
+    qboolean     segHasSnap[TL_MAX_SEG];
+    int          cmdSeq;
+    int          pendFrom;
+    tlMark_t     mark[TL_MAX_MARK];
+    int          numMark;
+    int          objFlags[MAX_OBJECTIVES];
+    // a full decode of every snapshot (CL_ParseSnapshot / CL_ParsePacketEntities, into the scan's own buffers):
+    // an AI that dies gets EF_DEAD on its entity (actor.cpp, bug-780)
+    playerState_t ps[PACKET_BACKUP];
+    struct {
+        int msg, first, num;
+    } sn[PACKET_BACKUP];               // msg -1 = not decoded
+    entityState_t *base;               // MAX_GENTITIES baselines, from each level's gamestate
+    entityState_t *ents;               // MAX_PARSE_ENTITIES ring
+    int            parseNum;
+    int           *seenMsg;            // MAX_GENTITIES: the message an entity was last seen in (this level)
+    int           *lastFlags;          // and its eFlags then
+    int            decoded, skipped, aiDeaths;
+    char         objText[MAX_OBJECTIVES][MAX_STRING_CHARS / 4];
+} tl;
+
+// the cursor, the drag, the hover (per demo play, not per file)
+static struct {
+    float    x, y;
+    qboolean placed;
+    int      movedAt;
+    qboolean rmb;
+    qboolean drag;
+    qboolean wasPaused;
+    int      dragMs, lastSeekMs, nextSeekAt;
+    float    pressX; // where the drag began: no scrub seek until the mouse moves (a marker press keeps its moment)
+    qboolean hoverBar, hoverPanel, hoverPlay;
+    int      hoverMs;
+    int      hoverMark; // index into the merged list below, -1 none
+} tlc;
+
+static cvar_t *demo_timeline;
+static cvar_t *demo_tlDump;
+
+static void TL_ResetInput(void)
+{
+    tlc.drag = qfalse;
+    tlc.rmb  = qfalse;
+}
+static char    s_demoFile[MAX_OSPATH];
+static byte    s_tlMsg[MAX_MSGLEN];
+int            CL_FontStringWidth(fontheader_t *pFont, const char *pszString, int iMaxLen); // cl_ui.cpp
+
+void CL_DemoEd_SetFile(const char *name)
+{
+    Q_strncpyz(s_demoFile, name, sizeof(s_demoFile));
+}
+
+static int TL_TotalMs(void)
+{
+    int k = tl.numSeg - 1, t;
+    if (k < 0) {
+        return 0;
+    }
+    t = tl.segStart[k] + (tl.segHasSnap[k] ? tl.segLast[k] - tl.segFirst[k] : 0);
+    if (!tl.done && DE_DisplayMs() > t) {
+        t = (int)DE_DisplayMs();
+    }
+    return t > 1 ? t : 1;
+}
+
+// end of the level that is loaded, display ms
+static int TL_SegEndMs(int seg)
+{
+    if (seg < 0 || seg >= tl.numSeg) {
+        return TL_TotalMs();
+    }
+    if (seg + 1 < tl.numSeg) {
+        return tl.segStart[seg + 1] - DE_SegStartGap();
+    }
+    return TL_TotalMs();
+}
+
+static const char *TL_Quoted(const char *s, char *out, int size)
+{
+    int n = 0;
+    while (*s && *s != '"') {
+        s++;
+    }
+    if (*s != '"') {
+        out[0] = 0;
+        return s;
+    }
+    s++;
+    while (*s && *s != '"') {
+        if (n < size - 1) {
+            out[n++] = *s;
+        }
+        s++;
+    }
+    out[n] = 0;
+    return *s ? s + 1 : s;
+}
+
+static tlMark_t *TL_NewMark(int kind)
+{
+    tlMark_t *m;
+    if (tl.numMark >= TL_MAX_MARK) {
+        return NULL;
+    }
+    m = &tl.mark[tl.numMark++];
+    memset(m, 0, sizeof(*m));
+    m->ms   = -1;
+    m->kind = kind;
+    return m;
+}
+
+static void TL_Command(const char *s)
+{
+    if (demo_tlDump && demo_tlDump->integer) {
+        Com_Printf("^~^~^ TLCMD seg=%d %.150s\n", tl.numSeg, s);
+    }
+    if (!strncmp(s, "printdeathmsg ", 14)) {
+        char      s1[64], s2[64], att[MAX_NAME_LENGTH], vic[MAX_NAME_LENGTH], a[MAX_NAME_LENGTH], v[MAX_NAME_LENGTH];
+        const char *p = s + 14;
+        tlMark_t  *m;
+        p = TL_Quoted(p, s1, sizeof(s1));
+        p = TL_Quoted(p, s2, sizeof(s2));
+        p = TL_Quoted(p, att, sizeof(att));
+        p = TL_Quoted(p, vic, sizeof(vic));
+        while (*p == ' ') {
+            p++;
+        }
+        DE_CleanName(att, a, sizeof(a));
+        DE_CleanName(vic, v, sizeof(v));
+        if (!v[0] || !(m = TL_NewMark(TLM_KILL))) {
+            return;
+        }
+        Q_strncpyz(m->victim, v, sizeof(m->victim));
+        // the cgame's own obituary wording (CG_ServerCommand printdeathmsg): "x" is an empty part;
+        // type p = killed by a player, s = suicide, w = the world (and every AI kill in coop)
+        if (s1[0] == 'x' && !s1[1]) {
+            s1[0] = 0;
+        }
+        if (s2[0] == 'x' && !s2[1]) {
+            s2[0] = 0;
+        }
+        if (tolower(*p) == 'p' && a[0]) {
+            Com_sprintf(m->label, sizeof(m->label), "%s %s %s%s", v, s1[0] ? s1 : "killed by", a, s2);
+        } else {
+            Com_sprintf(m->label, sizeof(m->label), "%s %s", v, s1[0] ? s1 : "died");
+        }
+        return;
+    }
+    if (!strncmp(s, "cs ", 3)) {
+        int         idx = atoi(s + 3), o, flags;
+        const char *p   = s + 3;
+        char        val[MAX_STRING_CHARS], text[MAX_STRING_CHARS / 4];
+        tlMark_t   *m;
+
+        if (idx < CS_OBJECTIVES || idx >= CS_OBJECTIVES + MAX_OBJECTIVES) {
+            return;
+        }
+        o = idx - CS_OBJECTIVES;
+        while (*p && *p != ' ') {
+            p++;
+        }
+        while (*p == ' ') {
+            p++;
+        }
+        if (*p == '"') {
+            TL_Quoted(p, val, sizeof(val));
+        } else {
+            Q_strncpyz(val, p, sizeof(val));
+        }
+        flags = atoi(Info_ValueForKey(val, "flags"));
+        Q_strncpyz(text, Info_ValueForKey(val, "text"), sizeof(text));
+        if (flags == tl.objFlags[o] && !strcmp(text, tl.objText[o])) {
+            return; // the same objective pushed again
+        }
+        tl.objFlags[o] = flags;
+        Q_strncpyz(tl.objText[o], text, sizeof(tl.objText[o]));
+        if (flags == OBJ_FLAG_NONE || (flags & OBJ_FLAG_HIDDEN) || !text[0] || !(m = TL_NewMark(TLM_OBJ))) {
+            return;
+        }
+        Com_sprintf(
+            m->label, sizeof(m->label), "%s: %s", (flags & OBJ_FLAG_COMPLETED) ? "Objective complete" : "Objective", text
+        );
+    }
+}
+
+static void TL_FinishPending(int ms)
+{
+    int i;
+    for (i = tl.pendFrom; i < tl.numMark; i++) {
+        if (tl.mark[i].ms < 0) {
+            tl.mark[i].ms = ms;
+        }
+    }
+    tl.pendFrom = tl.numMark;
+}
+
+static void TL_NewSegment(void)
+{
+    int k = tl.numSeg;
+    if (k > 0) {
+        TL_FinishPending(tl.segStart[k - 1] + (tl.segHasSnap[k - 1] ? tl.segLast[k - 1] - tl.segFirst[k - 1] : 0));
+    }
+    if (k >= TL_MAX_SEG) {
+        return;
+    }
+    if (k == 0) {
+        tl.segStart[0] = 0;
+    } else {
+        // the same sum CL_DemoEd_GamestateParsed makes
+        tl.segStart[k] = tl.segStart[k - 1]
+                       + (tl.segHasSnap[k - 1] ? tl.segLast[k - 1] - tl.segFirst[k - 1] + DE_SegStartGap() : 0);
+    }
+    tl.segHasSnap[k] = qfalse;
+    tl.numSeg++;
+    for (k = 0; k < PACKET_BACKUP; k++) {
+        tl.sn[k].msg = -1;
+    }
+    if (tl.seenMsg) {
+        memset(tl.seenMsg, 0xff, MAX_GENTITIES * sizeof(int));
+    }
+    memset(tl.objFlags, 0, sizeof(tl.objFlags));
+    memset(tl.objText, 0, sizeof(tl.objText));
+}
+
+static void TL_DeltaEntity(msg_t *m, int newnum, entityState_t *old, qboolean unchanged, int *count)
+{
+    entityState_t *state = &tl.ents[tl.parseNum & (MAX_PARSE_ENTITIES - 1)];
+    if (unchanged) {
+        *state = *old;
+    } else {
+        MSG_ReadDeltaEntity(m, old, state, newnum, cls.serverFrameTime);
+    }
+    if (state->number == (MAX_GENTITIES - 1)) {
+        return; // delta removed
+    }
+    tl.parseNum++;
+    (*count)++;
+}
+
+// CL_ParsePacketEntities, on the scan's buffers
+static void TL_ParseEntities(msg_t *m, int oldSlot, int newSlot)
+{
+    int            newnum, oldindex = 0, oldnum, count = 0;
+    entityState_t *oldstate = NULL;
+
+    tl.sn[newSlot].first = tl.parseNum;
+#define TL_OLD()                                                                                                \
+    do {                                                                                                        \
+        if (oldSlot < 0 || oldindex >= tl.sn[oldSlot].num) {                                                    \
+            oldnum = 99999;                                                                                     \
+        } else {                                                                                                \
+            oldstate = &tl.ents[(tl.sn[oldSlot].first + oldindex) & (MAX_PARSE_ENTITIES - 1)];                  \
+            oldnum   = oldstate->number;                                                                        \
+        }                                                                                                       \
+    } while (0)
+    TL_OLD();
+    while (1) {
+        newnum = MSG_ReadEntityNum(m);
+        if (newnum == (MAX_GENTITIES - 1) || m->readcount > m->cursize) {
+            break;
+        }
+        while (oldnum < newnum) {
+            TL_DeltaEntity(m, oldnum, oldstate, qtrue, &count);
+            oldindex++;
+            TL_OLD();
+        }
+        if (oldnum == newnum) {
+            TL_DeltaEntity(m, newnum, oldstate, qfalse, &count);
+            oldindex++;
+            TL_OLD();
+            continue;
+        }
+        if (oldnum > newnum) {
+            TL_DeltaEntity(m, newnum, &tl.base[newnum], qfalse, &count);
+        }
+    }
+    while (oldnum != 99999) {
+        TL_DeltaEntity(m, oldnum, oldstate, qtrue, &count);
+        oldindex++;
+        TL_OLD();
+    }
+#undef TL_OLD
+    tl.sn[newSlot].num = count;
+}
+
+// a snapshot, after its server time: playerstate and entities; an AI turning EF_DEAD is a death marker
+static void TL_ReadSnapshot(msg_t *m, int seq)
+{
+    byte area[MAX_MAP_AREA_BYTES];
+    int  deltaB, alen, oldSlot = -1, slot = seq & PACKET_MASK, i;
+
+    MSG_ReadByte(m); // serverTimeResidual
+    deltaB = MSG_ReadByte(m);
+    MSG_ReadByte(m); // snapFlags
+    tl.sn[slot].msg = -1;
+    if (!tl.ents) {
+        return;
+    }
+    if (deltaB) {
+        int dn = seq - deltaB;
+        if (tl.sn[dn & PACKET_MASK].msg != dn) {
+            tl.skipped++;
+            return; // its base was not decoded: wait for a full snapshot
+        }
+        oldSlot = dn & PACKET_MASK;
+    }
+    alen = MSG_ReadByte(m);
+    if (alen > (int)sizeof(area)) {
+        return;
+    }
+    MSG_ReadData(m, area, alen);
+    MSG_ReadDeltaPlayerstate(m, oldSlot >= 0 ? &tl.ps[oldSlot] : NULL, &tl.ps[slot], cls.serverFrameTime);
+    TL_ParseEntities(m, oldSlot, slot);
+    tl.sn[slot].msg = seq;
+    tl.decoded++;
+
+    for (i = 0; i < tl.sn[slot].num; i++) {
+        const entityState_t *es = &tl.ents[(tl.sn[slot].first + i) & (MAX_PARSE_ENTITIES - 1)];
+        int                  n  = es->number;
+        if (n < 0 || n >= MAX_GENTITIES) {
+            continue;
+        }
+        if ((es->eType == ET_MODELANIM || es->eType == ET_MODELANIM_SKEL) && (es->eFlags & (EF_AXIS | EF_ALLIES))
+            && (es->eFlags & EF_DEAD) && tl.seenMsg[n] >= 0 && !(tl.lastFlags[n] & EF_DEAD)) {
+            tlMark_t *mk = TL_NewMark((es->eFlags & EF_AXIS) ? TLM_FRAG : TLM_KILL);
+            if (mk) {
+                tl.aiDeaths++;
+                Q_strncpyz(
+                    mk->label, (es->eFlags & EF_AXIS) ? "Enemy soldier killed" : "Allied soldier killed",
+                    sizeof(mk->label)
+                );
+            }
+        }
+        tl.seenMsg[n]   = seq;
+        tl.lastFlags[n] = es->eFlags;
+    }
+}
+
+// the level's baselines (CL_ParseGamestate); configstrings are read past
+static void TL_ParseGamestate(msg_t *m)
+{
+    entityState_t nullstate;
+    int           cmd, newnum;
+
+    while (m->readcount <= m->cursize) {
+        cmd = MSG_ReadByte(m);
+        if (cmd == svc_EOF) {
+            break;
+        }
+        if (cmd == svc_configstring) {
+            MSG_ReadShort(m);
+            MSG_ReadScrambledBigString(m);
+        } else if (cmd == svc_baseline && tl.base) {
+            newnum = MSG_ReadEntityNum(m);
+            if (newnum < 0 || newnum >= MAX_GENTITIES) {
+                break;
+            }
+            MSG_GetNullEntityState(&nullstate);
+            MSG_ReadDeltaEntity(m, &nullstate, &tl.base[newnum], newnum, cls.serverFrameTime);
+        } else {
+            break;
+        }
+    }
+}
+
+static void TL_ParseMsg(int seq, int len)
+{
+    msg_t m;
+    int   cmd;
+
+    MSG_Init(&m, s_tlMsg, sizeof(s_tlMsg));
+    m.cursize = len;
+    MSG_Bitstream(&m);
+    MSG_ReadLong(&m); // reliable acknowledge
+    tl.pendFrom = tl.numMark;
+    while (m.readcount <= m.cursize) {
+        cmd = MSG_ReadByte(&m);
+        if (cmd == svc_nop) {
+            continue;
+        }
+        if (cmd == svc_serverCommand) {
+            int         seq = MSG_ReadLong(&m);
+            const char *s   = MSG_ReadScrambledString(&m);
+            if (seq > tl.cmdSeq) {
+                tl.cmdSeq = seq;
+                TL_Command(s);
+            }
+            continue;
+        }
+        if (cmd == svc_gamestate) {
+            tl.cmdSeq = MSG_ReadLong(&m);
+            TL_NewSegment();
+            TL_ParseGamestate(&m);
+            return;
+        }
+        if (cmd == svc_snapshot) {
+            int t = MSG_ReadLong(&m), k = tl.numSeg - 1;
+            if (k >= 0 && k < TL_MAX_SEG) {
+                TL_ReadSnapshot(&m, seq);
+                if (!tl.segHasSnap[k]) {
+                    tl.segHasSnap[k] = qtrue;
+                    tl.segFirst[k]   = t;
+                    tl.segLast[k]    = t;
+                }
+                if (t > tl.segLast[k]) {
+                    tl.segLast[k] = t;
+                }
+                TL_FinishPending(tl.segStart[k] + tl.segLast[k] - tl.segFirst[k]);
+            }
+            return;
+        }
+        return; // centerprints and cgame messages only follow the snapshot
+    }
+}
+
+static void TL_ScanFinish(void)
+{
+    int k = tl.numSeg - 1;
+    if (k >= 0) {
+        TL_FinishPending(tl.segStart[k] + (tl.segHasSnap[k] ? tl.segLast[k] - tl.segFirst[k] : 0));
+    }
+    if (tl.f) {
+        FS_FCloseFile(tl.f);
+        tl.f = 0;
+    }
+    tl.scanning = qfalse;
+    tl.done     = qtrue;
+    free(tl.base);
+    free(tl.ents);
+    free(tl.seenMsg);
+    free(tl.lastFlags);
+    tl.base = tl.ents = NULL;
+    tl.seenMsg = tl.lastFlags = NULL;
+    if (developer && developer->integer) {
+        Com_Printf(
+            "^~^~^ DEMOED timeline scan %s: %d levels, %.1f s, %d markers, %d msgs, %d KB, %d ms\n", tl.file, tl.numSeg,
+            TL_TotalMs() / 1000.0f, tl.numMark, tl.msgs, tl.bytes / 1024, Sys_Milliseconds() - tl.t0
+        );
+        for (k = 0; k < tl.numSeg; k++) {
+            Com_Printf("^~^~^ DEMOED timeline level %d at %.2f s\n", k + 1, tl.segStart[k] / 1000.0f);
+        }
+        Com_Printf(
+            "^~^~^ DEMOED timeline snapshots decoded %d skipped %d, AI deaths %d\n", tl.decoded, tl.skipped, tl.aiDeaths
+        );
+        for (k = 0; k < tl.numMark; k++) {
+            Com_Printf("^~^~^ DEMOED timeline mark %.2f s %s\n", tl.mark[k].ms / 1000.0f, tl.mark[k].label);
+        }
+    }
+}
+
+// a few ms of the scan per frame
+static void TL_ScanStep(void)
+{
+    int t0, n = 0;
+
+    if (!s_demoFile[0]) {
+        return;
+    }
+    if (Q_stricmp(tl.file, s_demoFile)) {
+        // a new demo (a restart of the same one keeps what was found)
+        if (tl.f) {
+            FS_FCloseFile(tl.f);
+        }
+        free(tl.base);
+        free(tl.ents);
+        free(tl.seenMsg);
+        free(tl.lastFlags);
+        memset(&tl, 0, sizeof(tl));
+        tl.base      = (entityState_t *)calloc(MAX_GENTITIES, sizeof(entityState_t));
+        tl.ents      = (entityState_t *)calloc(MAX_PARSE_ENTITIES, sizeof(entityState_t));
+        tl.seenMsg   = (int *)malloc(MAX_GENTITIES * sizeof(int));
+        tl.lastFlags = (int *)calloc(MAX_GENTITIES, sizeof(int));
+        if (!tl.base || !tl.ents || !tl.seenMsg || !tl.lastFlags) {
+            free(tl.base);
+            free(tl.ents);
+            free(tl.seenMsg);
+            free(tl.lastFlags);
+            tl.base = tl.ents = NULL; // markers without the AI deaths
+            tl.seenMsg = tl.lastFlags = NULL;
+        } else {
+            memset(tl.seenMsg, 0xff, MAX_GENTITIES * sizeof(int));
+        }
+        Q_strncpyz(tl.file, s_demoFile, sizeof(tl.file));
+        FS_FOpenFileRead(tl.file, &tl.f, qtrue, qtrue);
+        if (!tl.f) {
+            tl.done = qtrue;
+            return;
+        }
+        tl.scanning = qtrue;
+        tl.t0       = Sys_Milliseconds();
+    }
+    if (!tl.scanning) {
+        return;
+    }
+    t0 = Sys_Milliseconds();
+    while (Sys_Milliseconds() - t0 < 3) {
+        int seq, len;
+        if (FS_Read(&seq, 4, tl.f) != 4 || FS_Read(&len, 4, tl.f) != 4) {
+            TL_ScanFinish();
+            return;
+        }
+        len = LittleLong(len);
+        if (len < 0 || len > (int)sizeof(s_tlMsg) || FS_Read(s_tlMsg, len, tl.f) != len) {
+            TL_ScanFinish();
+            return;
+        }
+        tl.bytes += len + 8;
+        tl.msgs++;
+        TL_ParseMsg(LittleLong(seq), len);
+        if (++n > 4000) {
+            break;
+        }
+    }
+}
+
+/*
+---- layout, shared by the drawing and the mouse
+*/
+typedef struct {
+    float s, W, H;
+    float px, py, pw, ph;       // panel
+    float bx, bw;               // play / pause button
+    float tx0, tx1, ty;         // track ends, track centre line
+    float speedX, timeX;
+} tlLayout_t;
+
+static fontheader_t *TL_Font(void)
+{
+    return re.LoadFont("verdana-14");
+}
+
+static float TL_TextW(const char *t, float scale)
+{
+    fontheader_t *f = TL_Font();
+    return f ? (float)CL_FontStringWidth(f, t, -1) * scale : 0.0f;
+}
+
+static void TL_Text(const char *t, float x, float y, float scale, const float *rgba)
+{
+    fontheader_t *font = TL_Font();
+    vec2_t        sc;
+    vec4_t        shadow = {0, 0, 0, rgba[3] * 0.8f};
+    if (!font) {
+        return;
+    }
+    sc[0] = sc[1] = scale;
+    re.SetColor(shadow);
+    re.DrawString(font, t, (x + 1.0f) / scale, (y + 1.0f) / scale, -1, sc);
+    re.SetColor(rgba);
+    re.DrawString(font, t, x / scale, y / scale, -1, sc);
+    re.SetColor(NULL);
+}
+
+static void TL_Box(float x, float y, float w, float h, const float *rgba)
+{
+    re.SetColor(rgba);
+    re.DrawBox(x, y, w, h);
+}
+
+static void TL_TimeText(char *out, int size)
+{
+    char a[32], b[32];
+    DE_FmtTime(DE_Clock(), a, sizeof(a));
+    DE_FmtTime(TL_TotalMs() / 1000.0f, b, sizeof(b));
+    Com_sprintf(out, size, "%s / %s%s", a, b, tl.done ? "" : "+");
+}
+
+static void TL_Layout(tlLayout_t *L)
+{
+    float sw;
+
+    L->W = (float)cls.glconfig.vidWidth;
+    L->H = (float)cls.glconfig.vidHeight;
+    L->s = L->H / 720.0f;
+    if (L->s < 0.8f) {
+        L->s = 0.8f;
+    }
+    // just above the editor's status panel (CG_DemoEdDrawStatus: 46 high, 14 off the bottom)
+    L->ph = 30.0f * L->s;
+    L->px = 24.0f * L->s;
+    L->pw = L->W - 48.0f * L->s;
+    L->py = L->H - (14.0f + 46.0f + 8.0f + 24.0f) * L->s - L->ph; // +24: clear of the health / ammo HUD
+    L->bx = L->px + 10.0f * L->s;
+    L->bw = 18.0f * L->s;
+    L->speedX = L->bx + L->bw + 10.0f * L->s;
+    sw     = TL_TextW("0.25x", L->s * 0.8f);
+    L->tx0   = L->speedX + sw + 14.0f * L->s;
+    L->timeX = L->px + L->pw - 12.0f * L->s - TL_TextW("00:00.0 / 00:00.0+", L->s * 0.8f);
+    L->tx1   = L->timeX - 14.0f * L->s;
+    L->ty    = L->py + L->ph * 0.5f;
+}
+
+static float TL_MsToX(const tlLayout_t *L, int ms)
+{
+    float f = (float)ms / (float)TL_TotalMs();
+    if (f < 0) {
+        f = 0;
+    } else if (f > 1) {
+        f = 1;
+    }
+    return L->tx0 + f * (L->tx1 - L->tx0);
+}
+
+static int TL_XToMs(const tlLayout_t *L, float x)
+{
+    float f = (x - L->tx0) / (L->tx1 - L->tx0);
+    if (f < 0) {
+        f = 0;
+    } else if (f > 1) {
+        f = 1;
+    }
+    return (int)(f * TL_TotalMs());
+}
+
+// every marker: the scanned ones, then the camera waypoints (index >= tl.numMark)
+static int TL_NumMarks(void)
+{
+    return tl.numMark + de.numWp;
+}
+
+static void TL_GetMark(int i, int *ms, int *kind, char *label, int size)
+{
+    if (i < tl.numMark) {
+        const tlMark_t *m = &tl.mark[i];
+        char            me[MAX_NAME_LENGTH];
+        *ms   = m->ms;
+        *kind = m->kind;
+        Q_strncpyz(label, m->label, size);
+        if (m->kind == TLM_FRAG) {
+            return;
+        }
+        if (m->kind == TLM_KILL) {
+            // the recorded player's own death stands out
+            DE_CleanName(Info_ValueForKey(DE_CS(CS_PLAYERS + clc.clientNum), "name"), me, sizeof(me));
+            if ((me[0] && !Q_stricmp(me, m->victim))
+                || (de.origName[clc.clientNum][0] && !Q_stricmp(de.origName[clc.clientNum], m->victim))) {
+                *kind = TLM_DEATH;
+            }
+        }
+        return;
+    }
+    i -= tl.numMark;
+    *ms   = (int)DE_WpTime(i);
+    *kind = TLM_WP;
+    Com_sprintf(label, size, "Camera waypoint %d", i + 1);
+}
+
+static qboolean TL_Visible(void)
+{
+    return (CL_DemoEd_Enabled() && clc.state == CA_ACTIVE && de.started && s_hudMode == 0 && demo_timeline
+            && demo_timeline->integer && !CL_VideoRecording() && !(Key_GetCatcher() & ~KEYCATCH_CONSOLE))
+             ? qtrue
+             : qfalse;
+}
+
+static qboolean TL_CursorActive(void)
+{
+    if (!TL_Visible() || Key_GetCatcher() != 0) {
+        return qfalse;
+    }
+    return (!de.freecam || de.pathPlaying || tlc.rmb || tlc.drag) ? qtrue : qfalse;
+}
+
+static void TL_UpdateHover(void)
+{
+    tlLayout_t L;
+    float      best = 1e9f, tol;
+    int        i;
+
+    tlc.hoverBar = tlc.hoverPanel = tlc.hoverPlay = qfalse;
+    tlc.hoverMark = -1;
+    if (!TL_CursorActive()) {
+        return;
+    }
+    TL_Layout(&L);
+    tlc.hoverPanel = (tlc.x >= L.px && tlc.x <= L.px + L.pw && tlc.y >= L.py - 16.0f * L.s && tlc.y <= L.py + L.ph)
+                       ? qtrue
+                       : qfalse;
+    if (!tlc.hoverPanel && !tlc.drag) {
+        return;
+    }
+    tlc.hoverPlay = (tlc.x >= L.bx - 4.0f * L.s && tlc.x <= L.bx + L.bw + 4.0f * L.s) ? qtrue : qfalse;
+    tlc.hoverBar  = (tlc.drag || (tlc.x >= L.tx0 - 6.0f * L.s && tlc.x <= L.tx1 + 6.0f * L.s)) ? qtrue : qfalse;
+    tlc.hoverMs   = TL_XToMs(&L, tlc.x);
+    if (!tlc.hoverBar || tlc.drag) {
+        return;
+    }
+    tol = 6.0f * L.s;
+    for (i = 0; i < TL_NumMarks(); i++) {
+        int  ms, kind;
+        char lb[8];
+        float d;
+        TL_GetMark(i, &ms, &kind, lb, sizeof(lb));
+        if (ms < 0) {
+            continue;
+        }
+        d = fabs(TL_MsToX(&L, ms) - tlc.x);
+        if (d <= tol && d < best) {
+            best          = d;
+            tlc.hoverMark = i;
+        }
+    }
+}
+
+// mouse motion: qtrue when the cursor took it (the camera and the view never see it)
+qboolean CL_DemoEd_CursorMouse(int dx, int dy)
+{
+    float k;
+    if (!TL_CursorActive()) {
+        return qfalse;
+    }
+    if (!tlc.placed) {
+        tlc.x      = cls.glconfig.vidWidth * 0.5f;
+        tlc.y      = cls.glconfig.vidHeight * 0.5f;
+        tlc.placed = qtrue;
+    }
+    k = cls.glconfig.vidHeight / 900.0f;
+    if (k < 0.5f) {
+        k = 0.5f;
+    }
+    tlc.x += dx * k;
+    tlc.y += dy * k;
+    tlc.x = tlc.x < 0 ? 0 : (tlc.x > cls.glconfig.vidWidth - 1 ? cls.glconfig.vidWidth - 1 : tlc.x);
+    tlc.y = tlc.y < 0 ? 0 : (tlc.y > cls.glconfig.vidHeight - 1 ? cls.glconfig.vidHeight - 1 : tlc.y);
+    tlc.movedAt = cls.realtime;
+    return qtrue;
+}
+
+static void TL_Seek(int ms, const char *why)
+{
+    int t0 = Sys_Milliseconds();
+    DE_SeekDisplay(ms);
+    tlc.lastSeekMs = ms;
+    // scrub throttle: never spend more than about a third of the time seeking
+    t0            = Sys_Milliseconds() - t0;
+    tlc.nextSeekAt = Sys_Milliseconds() + (t0 * 2 > 30 ? t0 * 2 : 30);
+    if (developer && developer->integer) {
+        Com_Printf("^~^~^ DEMOED timeline %s %.2f s (took %d ms)\n", why, ms / 1000.0f, t0);
+    }
+}
+
+static void TL_EndDrag(void)
+{
+    int segEnd;
+    if (!tlc.drag) {
+        return;
+    }
+    tlc.drag = qfalse;
+    segEnd   = TL_SegEndMs(de.segIndex) - 2 * DE_SegStartGap();
+    de.paused = tlc.wasPaused;
+    if (tlc.dragMs != tlc.lastSeekMs || tlc.dragMs < de.segBase || tlc.dragMs > segEnd) {
+        TL_Seek(tlc.dragMs, "release"); // the drag may have left the loaded level: land there now
+    }
+}
+
+// mouse buttons and wheel: qtrue when used
+static qboolean TL_MouseKey(int key, qboolean down)
+{
+    if (key == K_MOUSE2) {
+        tlc.rmb = down && TL_Visible() && de.freecam ? qtrue : qfalse;
+        if (!down) {
+            TL_EndDrag();
+        }
+        return TL_Visible();
+    }
+    if (key == K_MOUSE1 && !down) {
+        if (tlc.drag) {
+            TL_EndDrag();
+            return qtrue;
+        }
+        return TL_CursorActive();
+    }
+    if (!TL_CursorActive()) {
+        return qfalse;
+    }
+    TL_UpdateHover();
+    if (key == K_MWHEELUP || key == K_MWHEELDOWN) {
+        if (!tlc.hoverPanel) {
+            return qfalse;
+        }
+        TL_Seek((int)DE_DisplayMs() + (key == K_MWHEELUP ? DE_SEEK_STEP_MS : -DE_SEEK_STEP_MS), "wheel");
+        return qtrue;
+    }
+    if (key != K_MOUSE1) {
+        return qfalse;
+    }
+    tlc.movedAt = cls.realtime;
+    if (tlc.hoverPlay) {
+        de.paused = !de.paused;
+        Com_Printf("Demo editor: %s\n", de.paused ? "paused" : "playing");
+        return qtrue;
+    }
+    if (tlc.hoverBar) {
+        int ms = tlc.hoverMs, kind, segEnd = TL_SegEndMs(de.segIndex) - 2 * DE_SegStartGap();
+        char lb[96];
+        if (tlc.hoverMark >= 0) {
+            TL_GetMark(tlc.hoverMark, &ms, &kind, lb, sizeof(lb)); // a marker: its exact moment
+        }
+        tlc.wasPaused = de.paused;
+        TL_Seek(ms, tlc.hoverMark >= 0 ? "marker" : "click");
+        if (de.started && ms >= de.segBase && ms <= segEnd) {
+            // inside the loaded level: hold the picture still and scrub with the mouse
+            tlc.drag   = qtrue;
+            tlc.dragMs = ms;
+            tlc.pressX = tlc.x;
+            de.paused  = qtrue;
+        }
+        return qtrue;
+    }
+    if (!tlc.hoverPanel) {
+        // a click in the picture: pause / play, as in a video player
+        de.paused = !de.paused;
+        Com_Printf("Demo editor: %s\n", de.paused ? "paused" : "playing");
+    }
+    return qtrue;
+}
+
+// per frame (from CL_DemoEd_SetTime): the scan, the scrub
+static void TL_Frame(void)
+{
+    TL_ScanStep();
+    if (!tlc.drag) {
+        return;
+    }
+    if (!TL_CursorActive() || !de.started) {
+        tlc.drag  = qfalse;
+        de.paused = tlc.wasPaused;
+        return;
+    }
+    {
+        tlLayout_t L;
+        // a seek reads until the snapshot AFTER its target: stop two snapshots short of the level's last
+        // one, or the read runs into the next level's gamestate and loads it with the button still down
+        int        ms, lo = de.segBase, hi = TL_SegEndMs(de.segIndex) - 2 * DE_SegStartGap();
+        TL_Layout(&L);
+        if (tlc.pressX >= 0 && fabs(tlc.x - tlc.pressX) < 1.0f) {
+            return; // not moved yet
+        }
+        tlc.pressX = -1;
+        ms = TL_XToMs(&L, tlc.x);
+        tlc.dragMs = ms;
+        if (ms < lo) {
+            ms = lo; // no level loads while the button is down
+        } else if (ms > hi) {
+            ms = hi;
+        }
+        if (ms != tlc.lastSeekMs && Sys_Milliseconds() >= tlc.nextSeekAt) {
+            TL_Seek(ms, "scrub");
+        }
+    }
+}
+
+static void TL_DrawCursor(float x, float y, float s)
+{
+    vec4_t dark = {0, 0, 0, 0.85f}, lite = {1.0f, 0.95f, 0.82f, 1.0f};
+    int    i;
+    float  u = s < 1.0f ? 1.0f : s;
+    for (i = 0; i < 14; i++) {
+        float w = (i < 10 ? i : 19 - i) + 1.0f;
+        TL_Box(x - u, y + (i - 1) * u, (w + 2.0f) * u, 3.0f * u, dark);
+    }
+    for (i = 0; i < 13; i++) {
+        float w = (i < 10 ? i : 19 - i);
+        if (w > 0) {
+            TL_Box(x, y + i * u, w * u, u, lite);
+        }
+    }
+    re.SetColor(NULL);
+}
+
+void CL_DemoEd_DrawTimeline(void)
+{
+    tlLayout_t L;
+    char       buf[160];
+    float      s, x, h, phx;
+    int        i, n, cur;
+    qboolean   showCursor;
+    vec4_t bg     = {0.04f, 0.04f, 0.05f, 0.62f};
+    vec4_t edge   = {1.0f, 0.86f, 0.52f, 0.55f};
+    vec4_t gold   = {1.0f, 0.86f, 0.52f, 1.0f};
+    vec4_t dim    = {0.86f, 0.84f, 0.79f, 0.85f};
+    vec4_t trackC = {0.86f, 0.84f, 0.79f, 0.22f};
+    vec4_t ahead  = {0.86f, 0.84f, 0.79f, 0.10f};
+    vec4_t kill   = {1.0f, 0.55f, 0.35f, 0.95f};
+    vec4_t death  = {1.0f, 0.18f, 0.15f, 1.0f};
+    vec4_t frag   = {0.70f, 1.0f, 0.55f, 0.90f};
+    vec4_t obj    = {1.0f, 0.86f, 0.52f, 1.0f};
+    vec4_t wpC    = {0.55f, 0.85f, 1.0f, 1.0f};
+    vec4_t sep    = {0.95f, 0.95f, 0.95f, 0.85f};
+    vec4_t black  = {0, 0, 0, 0.9f};
+    vec4_t hoverC = {1.0f, 1.0f, 1.0f, 0.45f};
+
+    if (!TL_Visible()) {
+        return;
+    }
+    TL_UpdateHover();
+    TL_Layout(&L);
+    s = L.s;
+
+    TL_Box(L.px, L.py, L.pw, L.ph, bg);
+    TL_Box(L.px, L.py, L.pw, 2.0f, edge);
+
+    // play / pause
+    {
+        vec4_t *c = tlc.hoverPlay ? &gold : &dim;
+        float   by = L.ty - 7.0f * s;
+        if (de.paused || de.atEnd) {
+            // play triangle, in steps
+            for (i = 0; i < 7; i++) {
+                float hh = (14.0f - 2.0f * i) * s;
+                TL_Box(L.bx + 3.0f * s + i * 2.0f * s, L.ty - hh * 0.5f, 2.0f * s, hh, *c);
+            }
+        } else {
+            TL_Box(L.bx + 3.0f * s, by, 4.0f * s, 14.0f * s, *c);
+            TL_Box(L.bx + 11.0f * s, by, 4.0f * s, 14.0f * s, *c);
+        }
+    }
+    // speed
+    Com_sprintf(buf, sizeof(buf), "%gx", de.speed);
+    TL_Text(buf, L.speedX, L.ty - 8.0f * s, s * 0.8f, de.speed != 1.0f ? gold : dim);
+    // time
+    TL_TimeText(buf, sizeof(buf));
+    TL_Text(buf, L.timeX, L.ty - 8.0f * s, s * 0.8f, dim);
+
+    // the track
+    h   = (tlc.hoverBar ? 7.0f : 4.0f) * s;
+    phx = TL_MsToX(&L, (int)DE_DisplayMs());
+    TL_Box(L.tx0, L.ty - h * 0.5f, L.tx1 - L.tx0, h, trackC);
+    if (!tl.done) {
+        // not scanned yet: the rest of the bar is a guess
+        float sx = TL_MsToX(&L, TL_TotalMs());
+        TL_Box(sx, L.ty - h * 0.5f, L.tx1 - sx, h, ahead);
+    }
+    TL_Box(L.tx0, L.ty - h * 0.5f, phx - L.tx0, h, gold);
+
+    // the loaded level, faintly framed
+    if (tl.numSeg > 1) {
+        float a = TL_MsToX(&L, de.segBase), b = TL_MsToX(&L, TL_SegEndMs(de.segIndex));
+        vec4_t lv = {1.0f, 0.86f, 0.52f, 0.12f};
+        TL_Box(a, L.ty - 9.0f * s, b - a, 18.0f * s, lv);
+    }
+    // level boundaries
+    for (i = 1; i < tl.numSeg; i++) {
+        x = TL_MsToX(&L, tl.segStart[i]);
+        TL_Box(x - 1.5f * s, L.ty - 9.0f * s, 3.0f * s, 18.0f * s, black);
+        TL_Box(x - 0.5f * s, L.ty - 9.0f * s, 1.0f * s, 18.0f * s, sep);
+        Com_sprintf(buf, sizeof(buf), "L%d", i + 1);
+        TL_Text(buf, x + 3.0f * s, L.py + 1.0f * s, s * 0.55f, dim);
+    }
+    if (tl.numSeg > 1) {
+        TL_Text("L1", L.tx0 + 3.0f * s, L.py + 1.0f * s, s * 0.55f, dim);
+    }
+
+    // markers
+    n = TL_NumMarks();
+    for (i = 0; i < n; i++) {
+        int  ms, kind;
+        char lb[8];
+        float big = (i == tlc.hoverMark) ? 1.5f : 1.0f;
+        TL_GetMark(i, &ms, &kind, lb, sizeof(lb));
+        if (ms < 0) {
+            continue;
+        }
+        x = TL_MsToX(&L, ms);
+        switch (kind) {
+        case TLM_KILL:
+            TL_Box(x - 1.0f * s * big, L.ty - 12.0f * s * big, 2.0f * s * big, 8.0f * s * big, kill);
+            break;
+        case TLM_DEATH:
+            TL_Box(x - 2.0f * s * big, L.ty - 14.0f * s * big, 4.0f * s * big, 10.0f * s * big, death);
+            TL_Box(x - 4.0f * s * big, L.ty - 14.0f * s * big, 8.0f * s * big, 2.0f * s * big, death);
+            break;
+        case TLM_FRAG:
+            TL_Box(x - 0.75f * s * big, L.ty - 9.0f * s * big, 1.5f * s * big, 5.0f * s * big, frag);
+            break;
+        case TLM_OBJ:
+            TL_Box(x - 3.5f * s * big, L.ty - 3.5f * s * big, 7.0f * s * big, 7.0f * s * big, black);
+            TL_Box(x - 2.5f * s * big, L.ty - 2.5f * s * big, 5.0f * s * big, 5.0f * s * big, obj);
+            break;
+        default:
+            TL_Box(x - 1.5f * s * big, L.ty + 4.0f * s, 3.0f * s * big, 7.0f * s * big, wpC);
+            break;
+        }
+    }
+
+    // playhead
+    TL_Box(phx - 3.0f * s, L.ty - 8.0f * s, 6.0f * s, 16.0f * s, black);
+    TL_Box(phx - 2.0f * s, L.ty - 7.0f * s, 4.0f * s, 14.0f * s, gold);
+
+    // hover: a line and the time (and the marker) above the panel
+    if (tlc.hoverBar) {
+        char tb[32], lb[96];
+        int  ms = tlc.drag ? tlc.dragMs : tlc.hoverMs, kind;
+        float tw, bw, bx, by, lh = 18.0f * s;
+        lb[0] = 0;
+        if (tlc.hoverMark >= 0) {
+            TL_GetMark(tlc.hoverMark, &ms, &kind, lb, sizeof(lb));
+        }
+        x = TL_MsToX(&L, ms);
+        TL_Box(x - 0.5f * s, L.ty - 9.0f * s, 1.0f * s, 18.0f * s, hoverC);
+        DE_FmtTime(ms / 1000.0f, tb, sizeof(tb));
+        cur = 0;
+        for (i = 0; i < tl.numSeg; i++) {
+            if (ms >= tl.segStart[i]) {
+                cur = i;
+            }
+        }
+        if (tl.numSeg > 1) {
+            Q_strcat(tb, sizeof(tb), va("   L%d", cur + 1));
+        }
+        tw = TL_TextW(tb, s * 0.8f);
+        bw = tw;
+        if (lb[0] && TL_TextW(lb, s * 0.72f) > bw) {
+            bw = TL_TextW(lb, s * 0.72f);
+        }
+        bw += 20.0f * s;
+        bx = x - bw * 0.5f;
+        if (bx < L.px) {
+            bx = L.px;
+        } else if (bx + bw > L.px + L.pw) {
+            bx = L.px + L.pw - bw;
+        }
+        by = L.py - (lb[0] ? 2.0f : 1.0f) * lh - 12.0f * s;
+        TL_Box(bx, by, bw, (lb[0] ? 2.0f : 1.0f) * lh + 6.0f * s, bg);
+        TL_Box(bx, by + (lb[0] ? 2.0f : 1.0f) * lh + 4.0f * s, bw, 2.0f, edge);
+        TL_Text(tb, bx + (bw - tw) * 0.5f, by + 3.0f * s, s * 0.8f, gold);
+        if (lb[0]) {
+            TL_Text(lb, bx + (bw - TL_TextW(lb, s * 0.72f)) * 0.5f, by + 3.0f * s + lh, s * 0.72f, dim);
+        }
+    }
+
+    showCursor = TL_CursorActive() && (tlc.drag || tlc.hoverPanel || cls.realtime - tlc.movedAt < 2500) && tlc.placed;
+    if (showCursor) {
+        TL_DrawCursor(tlc.x, tlc.y, s);
+    }
+    re.SetColor(NULL);
+}
+
+// test aid (the harness has no OS cursor to aim with): demo_tlcursor <seconds> puts the timeline cursor on
+// the bar at that moment, demo_tlcursor xy <x> <y> anywhere. The press itself is a real mouse button.
+static void TL_Cursor_f(void)
+{
+    tlLayout_t L;
+    if (!DE_Ready()) {
+        return;
+    }
+    TL_Layout(&L);
+    if (Cmd_Argc() >= 4 && !Q_stricmp(Cmd_Argv(1), "xy")) {
+        tlc.x = (float)atof(Cmd_Argv(2));
+        tlc.y = (float)atof(Cmd_Argv(3));
+    } else if (Cmd_Argc() >= 2) {
+        tlc.x = TL_MsToX(&L, (int)(atof(Cmd_Argv(1)) * 1000.0f));
+        tlc.y = L.ty;
+    }
+    tlc.placed  = qtrue;
+    tlc.movedAt = cls.realtime;
+    Com_Printf(
+        "^~^~^ DEMOED timeline cursor %.1f %.1f (track %.1f..%.1f y %.1f, total %.2f s, %d px/s)\n", tlc.x, tlc.y, L.tx0,
+        L.tx1, L.ty, TL_TotalMs() / 1000.0f, (int)((L.tx1 - L.tx0) * 1000.0f / TL_TotalMs())
+    );
+}
+
 void CL_DemoEd_Init(void)
 {
     demo_editor      = Cvar_Get("demo_editor", "1", CVAR_ARCHIVE);
@@ -1780,6 +3193,9 @@ void CL_DemoEd_Init(void)
     demo_playing     = Cvar_Get("demo_playing", "0", CVAR_ROM);
     r_ppFilterCv     = Cvar_Get("r_ppFilter", "0", 0);
     demo_status      = Cvar_Get("demo_status", "", CVAR_ROM);
+    demo_timeline    = Cvar_Get("demo_timeline", "1", CVAR_ARCHIVE); // the bar along the bottom (full HUD only)
+    demo_tlDump      = Cvar_Get("demo_tlDump", "0", 0);
+    Cvar_Get("demo_startPaused", "0", 0); // 1: a demo starts paused on its first frame              // print every server command the scan reads
 
     Cmd_AddCommand("demo_seek", DE_Seek_f);
     Cmd_AddCommand("demo_seekby", DE_SeekBy_f);
@@ -1795,6 +3211,7 @@ void CL_DemoEd_Init(void)
     Cmd_AddCommand("demo_setname", DE_SetName_f);
     Cmd_AddCommand("cleanhud", DE_CleanHud_f);
     Cmd_AddCommand("filter", DE_Filter_f);
+    Cmd_AddCommand("demo_tlcursor", TL_Cursor_f);
 
     CL_DemoEd_Reset();
 }

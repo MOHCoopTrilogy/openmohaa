@@ -228,7 +228,7 @@ static void CG_DemoEdDrawNames(void)
 static void CG_DemoEdDrawStatus(void)
 {
     static const char *hint =
-        "KP0 free cam    KP4 / KP6  -5 s / +5 s    KP5 step    Del pause    KP1 2 3 7 9 speed    KP Enter waypoint    KP+ path    KP- HUD    KP* / KP/ filter";
+        "KP0 free cam    KP4 / KP6  -5 s / +5 s    KP5 step    Del pause    KP1 2 3 7 9 speed    KP Enter waypoint    KP+ path    KP- HUD    KP* / KP/ filter    Mouse timeline (free cam: hold RMB)";
     fontheader_t *font = CG_DemoEdFont();
     float         W = (float)cgs.glconfig.vidWidth, H = (float)cgs.glconfig.vidHeight;
     float         s1 = H / 720.0f, s2, w1, w2, pw, ph, px, py;
