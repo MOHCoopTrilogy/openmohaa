@@ -27,6 +27,11 @@ endif()
 target_compile_features(omohrenderergl2 PUBLIC cxx_nullptr)
 target_compile_features(omohrenderergl2 PUBLIC c_variadic_macros)
 target_link_libraries(omohrenderergl2 PRIVATE omohrenderer_common)
+# HZM [2026-11-01] gl2 (from ioquake3, where it is C) names a struct member `or`, which is a reserved alternative
+# token in C++. MSVC does not enforce that by default; GCC/Clang do, so every gl2 .cpp failed on Linux.
+if(NOT MSVC)
+	target_compile_options(omohrenderergl2 PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-fno-operator-names>)
+endif()
 
 get_target_property(target_type omohrenderergl2 TYPE)
 if (target_type STREQUAL "SHARED_LIBRARY")

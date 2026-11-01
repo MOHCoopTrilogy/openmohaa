@@ -256,8 +256,9 @@ R_MarkFragments
 
 =================
 */
+// HZM [2026-11-01] fRadiusSquared added to match tr_local.h and refexport_t::MarkFragments (tr_public.h); unused here.
 int R_MarkFragments( int numPoints, const vec3_t *points, const vec3_t projection,
-				   int maxPoints, vec3_t pointBuffer, int maxFragments, markFragment_t *fragmentBuffer ) {
+				   int maxPoints, vec3_t pointBuffer, int maxFragments, markFragment_t *fragmentBuffer, float fRadiusSquared ) {
 	int				numsurfaces, numPlanes;
 	int				i, j, k, m, n;
 	surfaceType_t	*surfaces[64];

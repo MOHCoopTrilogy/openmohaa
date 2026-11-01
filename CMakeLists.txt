@@ -1,6 +1,10 @@
 cmake_minimum_required(VERSION 3.12)
 project(openmohaa)
 
+# HZM [2026-11-01] Static libs (renderer_common, sdl_gl, tiki...) are linked into the renderer .so modules, which
+# needs PIC on Linux ("relocation R_X86_64_PC32 ... can not be used when making a shared object"). No-op on Windows.
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+
 include(misc/cmake/TargetArch.cmake)
 
 target_architecture(TARGET_ARCH)

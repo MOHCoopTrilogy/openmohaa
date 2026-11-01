@@ -104,7 +104,7 @@ static void Matrix34Invert( const float *inMat, float *outMat ) {
 	outMat[ 7] = -DotProduct(outMat + 4, trans);
 	outMat[11] = -DotProduct(outMat + 8, trans);
 }
-static void QuatSlerp(const quat_t from, const quat_t _to, float fraction, quat_t out) {
+static void IQM_QuatSlerp(const quat_t from, const quat_t _to, float fraction, quat_t out) {
 	float angle, cosAngle, sinAngle, backlerp, lerp;
 	quat_t to;
 
@@ -1374,7 +1374,7 @@ static void ComputePoseMats( iqmData_t *data, int frame, int oldframe,
 			relativeJoint->scale[1] = oldpose->scale[1] * backlerp + pose->scale[1] * lerp;
 			relativeJoint->scale[2] = oldpose->scale[2] * backlerp + pose->scale[2] * lerp;
 
-			QuatSlerp( oldpose->rotate, pose->rotate, lerp, relativeJoint->rotate );
+			IQM_QuatSlerp( oldpose->rotate, pose->rotate, lerp, relativeJoint->rotate );
 		}
 	}
 
