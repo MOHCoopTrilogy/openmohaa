@@ -345,6 +345,16 @@ public:
     // dropped in a coop session is taken with the Use key, never by walking over it. Constructor-seeded and
     // deliberately NOT archived (coop runs no saves; the single-player savegame layout is untouched).
     bool  m_bCoopUseLoot;       // set in Drop() when the owner was an Actor and the feature is on
+    // [v1.10.51] user 2026-11-01: the carried MG42 / .30 cal "should also have overheat mechanics in general like any other pre
+    // existing mg42". The mounted guns' cycle (TurretGun: 50 heat/s firing, 8/s bleed, 25/s cool when cooked, 2 s dead-gun lock, 125/s
+    // firing while hot), driven per SHOT (heat += rate x fire delay) and decayed lazily from the last update time.
+    float m_fCoopHandHeat;
+    float m_fCoopHandHeatT;
+    float m_fCoopHandLock;
+    bool  m_bCoopHandHot;
+    int   m_iCoopHandHeatGun;    // -1 not yet decided, 0 no, 1 a carried MG42 / .30 cal
+    bool  CoopHandHeatGun(void);
+    void  CoopHandHeatDecay(void);
     bool  m_bCoopKeepLoot;      // [v1.10.49] script coopuseloot: stays a press-Use gun whoever drops it (a player too)
     int   m_iCoopLootGrantTo;   // entnum of the player Player::TickCoopLoot let through, -1 = nobody
     float m_fCoopLootGrantTime; // level.time of that grant (the pickup itself runs from a posted event)

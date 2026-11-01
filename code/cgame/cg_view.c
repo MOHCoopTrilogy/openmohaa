@@ -3315,6 +3315,13 @@ void CG_OffsetFirstPersonView(refEntity_t *pREnt, qboolean bUseWorldPosition)
                 if (!pHW) { pHW = cgi.Cvar_Get("coop_kickHeft", "0.55", CVAR_ARCHIVE); }
                 fClassKick *= 1.0f + CoopGunHeft() * pHW->value;
             }
+            // [v1.10.51] user 2026-11-01: a braced MG42 / .30 cal punched at 90 % (coop_braceShove) of a 1.5x MG kick, so the
+            // mount barely helped. An MG on its bipod: coop_braceShoveMG of the punch at full brace.
+            if (fBrace > 0.0f && (iClass & WEAPON_CLASS_MG)) {
+                static cvar_t *pBrShoveMG = NULL;
+                if (!pBrShoveMG) { pBrShoveMG = cgi.Cvar_Get("coop_braceShoveMG", "0.3", 0); }
+                fBrShove = 1.0f - fBrace * (1.0f - pBrShoveMG->value);
+            }
             fClassKick *= fBrShove;
 
             // HOLD BREATH (steady aim): while ADS, holding the run/walk key (Shift / BUTTON_RUN) suppresses

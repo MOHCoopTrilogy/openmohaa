@@ -1070,6 +1070,11 @@ Weapon::Weapon()
     // HZM coop [user 2026-10-05] use-to-loot: same rule - seeded before the savegame return, not archived
     m_bCoopUseLoot       = false;
     m_bCoopKeepLoot      = false;
+    m_fCoopHandHeat      = 0;
+    m_fCoopHandHeatT     = 0;
+    m_fCoopHandLock      = 0;
+    m_bCoopHandHot       = false;
+    m_iCoopHandHeatGun   = -1;
     m_iCoopLootGrantTo   = -1;
     m_fCoopLootGrantTime = 0.0f;
 
@@ -1858,6 +1863,23 @@ void Weapon::Shoot(Event *ev)
     Vector     pos, forward, right, up, vBarrel, delta;
     firemode_t mode = FIRE_PRIMARY;
     qboolean   mc;
+    // [v1.10.51] carried-MG heat: every round fired adds its share; a cook-off locks the gun and hisses (turret recipe)
+    if (CoopHandHeatGun()) {
+        CoopHandHeatDecay();
+        m_fCoopHandHeat += (m_bCoopHandHot ? 125.0f : 50.0f) * FireDelay(FIRE_PRIMARY);
+        if (m_fCoopHandHeat >= 100.0f) {
+            m_fCoopHandHeat = 100.0f;
+            if (!m_bCoopHandHot) {
+                m_bCoopHandHot  = true;
+                m_fCoopHandLock = level.time + 2.0f;
+                Sound("coop_mg_overheat");
+                if (gi.Cvar_Get("coop_fireDebug", "0", 0)->integer) {
+                    gi.Printf("^~^~^ HANDHEAT cooked %s t=%.2f\n", item_name.c_str(), level.time);
+                }
+            }
+        }
+    }
+
 
     // HZM coop [user 07-12] fire diagnostics counterpart: confirms a shot actually reached Shoot
     {
@@ -2916,6 +2938,13 @@ qboolean Weapon::CoopApplyAuthoredKick(Player *player)
     }
     {
         float fBr = player->CoopBraceEnv();
+        if (fBr > 0.0f && (GetWeaponClass() & WEAPON_CLASS_MG)) {
+            // [v1.10.51] user 2026-11-01: "when you deploy the mount for mg42/30cal the recoil needs to be way less" - an MG on its
+            // bipod: the support takes almost all of the climb
+            cvar_t *pBKM = gi.Cvar_Get("coop_braceKickMG", "0.92", 0);
+            fBr *= (pBKM ? pBKM->value : 0.92f) / 0.75f;
+            if (fBr > 1.0f / 0.75f) { fBr = 1.0f / 0.75f; }
+        }
         if (fBr > 0.0f) {
             cvar_t *pBK = gi.Cvar_Get("coop_braceKick", "0.75", CVAR_ARCHIVE);
             fMult *= 1.0f - fBr * ((pBK ? pBK->value : 0.75f));
@@ -3010,6 +3039,13 @@ void Weapon::ApplyFireKickback(const Vector& org, float kickback)
     // you just do not have to fight the gun afterwards.
     {
         float fBr = player->CoopBraceEnv();
+        if (fBr > 0.0f && (GetWeaponClass() & WEAPON_CLASS_MG)) {
+            // [v1.10.51] user 2026-11-01: "when you deploy the mount for mg42/30cal the recoil needs to be way less" - an MG on its
+            // bipod: the support takes almost all of the climb
+            cvar_t *pBKM = gi.Cvar_Get("coop_braceKickMG", "0.92", 0);
+            fBr *= (pBKM ? pBKM->value : 0.92f) / 0.75f;
+            if (fBr > 1.0f / 0.75f) { fBr = 1.0f / 0.75f; }
+        }
         if (fBr > 0.0f) {
             cvar_t *pBK = gi.Cvar_Get("coop_braceKick", "0.75", CVAR_ARCHIVE);
             amt *= 1.0f - fBr * ((pBK ? pBK->value : 0.75f));
@@ -3155,8 +3191,47 @@ qboolean Weapon::HasAmmoInClip(firemode_t mode)
 //======================
 //Weapon::ReadyToFire
 //======================
+//======================
+// [v1.10.51] carried-MG heat (see weapon.h). coop_handMgHeat 0 switches it off.
+//======================
+bool Weapon::CoopHandHeatGun(void)
+{
+    static cvar_t *pOn = NULL;
+    if (!pOn) { pOn = gi.Cvar_Get("coop_handMgHeat", "1", 0); }
+    if (!pOn->integer) { return false; }
+    if (m_iCoopHandHeatGun < 0) {
+        const char *m = model.c_str();
+        m_iCoopHandHeatGun = (strstr(m, "mg42portable") || strstr(m, "30calportable")) ? 1 : 0;
+    }
+    return m_iCoopHandHeatGun == 1 && owner && owner->IsSubclassOfPlayer();
+}
+
+void Weapon::CoopHandHeatDecay(void)
+{
+    float dt = level.time - m_fCoopHandHeatT;
+    m_fCoopHandHeatT = level.time;
+    if (dt <= 0.0f) { return; }
+    if (dt > 30.0f) { dt = 30.0f; }
+    if (m_bCoopHandHot && level.time < m_fCoopHandLock) {
+        m_fCoopHandHeat -= 25.0f * dt;          // cooling through the lock
+    } else {
+        m_fCoopHandHeat -= (m_bCoopHandHot ? 25.0f : 8.0f) * dt;
+    }
+    if (m_fCoopHandHeat <= 0.0f) {
+        m_fCoopHandHeat = 0.0f;
+        m_bCoopHandHot  = false;
+    }
+}
+
 qboolean Weapon::ReadyToFire(firemode_t mode, qboolean playsound)
 {
+    // [v1.10.51] a cooked carried MG is dead for its 2 s lock, like the mounted guns
+    if (CoopHandHeatGun()) {
+        CoopHandHeatDecay();
+        if (m_bCoopHandHot && level.time < m_fCoopHandLock) {
+            return qfalse;
+        }
+    }
     // HZM coop [user 07-12] FIRE DIAGNOSTICS: `set coop_fireDebug 1` prints (rate-limited) every value
     // this function decides on, into the console/qconsole.log - no `developer` needed. Added to hunt
     // the "imported guns only fire in ADS" bug; zero cost when off.
