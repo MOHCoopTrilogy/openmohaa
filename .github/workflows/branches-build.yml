@@ -66,6 +66,9 @@ jobs:
       run: |
         cat smoke.log | head -400
         fail=0
+        grep -q 'SDL using driver "x11"' smoke.log || { echo "::error::bundled SDL2 did not use X11 (a Deck runs games through XWayland): $(grep -o 'SDL using driver "[a-z]*"' smoke.log | head -1)"; fail=1; }
+        grep -q "adopting native desktop resolution 1280x800" smoke.log || { echo "::error::first launch did not adopt the 1280x800 (Deck) desktop"; fail=1; }
+        grep -aqiE "pipewire|pulseaudio" hzm/libopenal.so.1 || { echo "::error::bundled OpenAL has no PipeWire/PulseAudio backend (no sound on a Deck)"; fail=1; }
         grep -q "GL_RENDERER: .*llvmpipe" smoke.log || { echo "::error::gl2 did not create a Mesa GL context"; fail=1; }
         grep -q "loaded [0-9]* GLSL shaders" smoke.log || { echo "::error::gl2 never finished compiling its GLSL shaders"; fail=1; }
         if grep -nE "Couldn't compile shader|shaders failed to link|ERROR: 0:[0-9]+" smoke.log; then echo "::error::a gl2 shader failed on Mesa"; fail=1; fi

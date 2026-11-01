@@ -26,7 +26,10 @@ jobs:
       fail-fast: false # HZM: one exotic platform failing must not cancel linux-amd64 (Steam Deck) or windows-x64
       matrix:
         architecture: [
-          {name: 'amd64',   os: "ubuntu-22.04-arm", package: 'x86-64-linux-gnu',      triple: 'x86_64-linux-gnu',      arch_option: 'linux-x86_64'},
+          # HZM: amd64 builds NATIVELY on an x86_64 runner. Cross-built from the ARM runner, the bundled SDL2 had no
+          # X11/Wayland video driver (only "offscreen") and OpenAL no Pulse/PipeWire output, since the -dev packages
+          # below are host-arch: on a Steam Deck that is no window and no sound.
+          {name: 'amd64',   os: "ubuntu-22.04", package: 'x86-64-linux-gnu',      triple: 'x86_64-linux-gnu',      arch_option: 'linux-x86_64'},
           {name: 'i686',    os: "ubuntu-22.04-arm", package: 'i686-linux-gnu',        triple: 'i686-linux-gnu',        arch_option: 'linux-x86'},
           {name: 'arm64',   os: "ubuntu-22.04-arm", package: 'aarch64-linux-gnu',     triple: 'aarch64-linux-gnu',     arch_option: 'linux-aarch64'},
           {name: 'armhf',   os: "ubuntu-22.04-arm", package: 'arm-linux-gnueabihf',   triple: 'arm-linux-gnueabihf',   arch_option: 'linux-armv4'},
@@ -52,8 +55,8 @@ jobs:
     - uses: awalsh128/cache-apt-pkgs-action@latest
       name: Install required packages
       with:
-        packages: flex bison ninja-build cmake clang libpulse-dev portaudio19-dev libasound2-dev libjack-dev libpipewire-0.3-dev qtbase5-dev libdbus-1-dev
-        version: "${{ runner.os }}-${{ runner.arch }}-v1"
+        packages: flex bison ninja-build cmake clang libpulse-dev portaudio19-dev libasound2-dev libjack-dev libpipewire-0.3-dev qtbase5-dev libdbus-1-dev libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev libxinerama-dev libxss-dev libxfixes-dev libxkbcommon-dev libwayland-dev wayland-protocols libegl-dev libgl-dev libudev-dev libdecor-0-dev
+        version: "${{ runner.os }}-${{ runner.arch }}-v2"
 
     - name: Settings
       working-directory: ${{github.workspace}}
@@ -86,7 +89,7 @@ jobs:
       uses: actions/cache@v4
       with:
         path: 'thirdparties/SDL2/install'
-        key: ${{ runner.os }}-${{ matrix.architecture.name }}-sdl2-${{ env.sdl2-branch }}-v1
+        key: ${{ runner.os }}-${{ matrix.architecture.name }}-sdl2-${{ env.sdl2-branch }}-v2
 
     # SDL2 setup
     - name: Checkout SDL2
@@ -114,7 +117,7 @@ jobs:
       uses: actions/cache@v4
       with:
         path: 'thirdparties/soft-oal/install'
-        key: ${{ runner.os }}-${{ matrix.architecture.name }}-openal-soft-${{ env.openal-soft-branch }}-v1
+        key: ${{ runner.os }}-${{ matrix.architecture.name }}-openal-soft-${{ env.openal-soft-branch }}-v2
 
     # soft-oal setup
     - name: Checkout soft-oal
