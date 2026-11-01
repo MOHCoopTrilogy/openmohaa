@@ -197,7 +197,17 @@ if (NOT BUILD_NO_CLIENT)
 	target_link_libraries(openmohaa PRIVATE syslib)
 	target_link_libraries(openmohaa PRIVATE omohserver)
 	target_link_libraries(openmohaa PRIVATE omohclient)
-	target_link_libraries(openmohaa PRIVATE omohrenderer)
+	if(USE_RENDERER_DLOPEN AND NOT WIN32)
+		# HZM [2026-11-01] Do NOT link the renderer modules into the exe on Linux/macOS. Linking makes both .so files
+		# load-time dependencies, so gl1 is loaded first and ELF symbol interposition sends gl2's own calls
+		# (RE_BeginRegistration...) into gl1's code: SIGSEGV in renderergl1 R_LevelMarksFree while running gl2
+		# (CI linux-smoke). Windows DLLs do not interpose, so Windows keeps the link and its current exe.
+		# The exe still needs the define (omohclient's sources compile in this target) and both modules built.
+		target_compile_definitions(openmohaa PRIVATE USE_RENDERER_DLOPEN=1)
+		add_dependencies(openmohaa omohrenderergl1 omohrenderergl2)
+	else()
+		target_link_libraries(openmohaa PRIVATE omohrenderer)
+	endif()
 	target_link_libraries(openmohaa PRIVATE qcommon qcommon_standalone)
 
 	# Add the gamespy dependency
