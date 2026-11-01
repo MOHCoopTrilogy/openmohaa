@@ -19,6 +19,57 @@ jobs:
    with:
       environment: 'testing'
 
+  # HZM [2026-11-01] Steam Deck guardrail: start the linux-amd64 build on Mesa (llvmpipe, the same GLSL front end as
+  # the Deck's radeonsi) at the Deck's 1280x800 and fail if the gl2 renderer or any of its shaders does not come up.
+  # No game data on CI (it is the player's GOG copy), so this checks renderer init, not a map load: a stub
+  # default.cfg is all the engine needs to reach R_Init. Plan: mod repo docs/proposals/steamdeck_2026-11-01.
+  linux-smoke:
+    if: ${{ !cancelled() }}
+    needs: [build-all]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+    - uses: actions/download-artifact@v4
+      with:
+        name: 'out-linux-amd64'
+        path: ${{github.workspace}}/hzm
+
+    - name: Install Mesa and a virtual display
+      run: |
+        sudo apt-get update -qq
+        sudo apt-get install -y -qq xvfb xauth libgl1 libgl1-mesa-dri libglx-mesa0 libegl1 mesa-utils > /dev/null
+
+    - name: Start the engine on gl2 at 1280x800
+      working-directory: ${{github.workspace}}/hzm
+      run: |
+        chmod +x openmohaa omohaaded
+        mkdir -p ../data/main ../home
+        echo '// CI stub: lets the engine start without game data' > ../data/main/default.cfg
+        export LD_LIBRARY_PATH="$PWD" LIBGL_ALWAYS_SOFTWARE=1
+        set +e
+        timeout 150 xvfb-run -a -s "-screen 0 1280x800x24" ./openmohaa \
+          +set fs_basepath "$GITHUB_WORKSPACE/data" +set fs_homepath "$GITHUB_WORKSPACE/home" \
+          +set com_target_game 0 +set cl_renderer opengl2 +set r_fullscreen 0 \
+          +set r_mode -1 +set r_customwidth 1280 +set r_customheight 800 \
+          +set developer 1 +set s_initsound 0 +set in_gamepad 0 > ../smoke.log 2>&1
+        echo "engine exit code: $?" >> ../smoke.log
+        exit 0
+
+    - name: Check the renderer came up
+      run: |
+        cat smoke.log | head -400
+        fail=0
+        grep -q "GL_RENDERER: .*llvmpipe" smoke.log || { echo "::error::gl2 did not create a Mesa GL context"; fail=1; }
+        grep -q "loaded [0-9]* GLSL shaders" smoke.log || { echo "::error::gl2 never finished compiling its GLSL shaders"; fail=1; }
+        if grep -nE "Couldn't compile shader|shaders failed to link|ERROR: 0:[0-9]+" smoke.log; then echo "::error::a gl2 shader failed on Mesa"; fail=1; fi
+        exit $fail
+
+    - uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: linux-smoke-log
+        path: ${{github.workspace}}/smoke.log
+
   # Initially create a release with 1 job
   # so multiple files can be uploaded at the same time afterwards
   create-release:
