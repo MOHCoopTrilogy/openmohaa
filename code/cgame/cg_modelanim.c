@@ -5051,6 +5051,7 @@ coopOthersDone:;
         if (cg.snap && s1->parent == cg.snap->ps.clientNum && (model.renderfx & RF_FIRST_PERSON) && model.tiki) {
             CG_CoopMuzzleHazeProbe(&model); // HZM coop [haze-muzzle 2026-10-25] where the barrel is on screen
             if (bCoopHandGun) {
+                CG_HzmScopeEyeHide(&model);  // [scopehold] the ZF4 eyecup that covers the glass at the eye (G43 Sniper, StG44 Scoped)
                 CG_ScopeOcularGun(&model);   // [scopehold] the lens centre from the RIFLE as drawn (it rides the left hand through a bolt / reload)
             }
         }

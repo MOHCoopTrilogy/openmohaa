@@ -708,7 +708,8 @@ const adsGunTune_t *CG_FindAdsTune(const char *wpn);
     qboolean CG_VMAdsBoltSolo(void); // HZM coop [ads rifles] an aimed bolt clip alone on screen: both tags hold the gun
     qboolean CG_VMScopedReloadAdsClip(void); // [scopes1025] a scoped per-weapon reload _ads row is the newest view clip
     qboolean CG_VMScopeHoldClip(void);
-    void     CG_ScopeOcularGun(const refEntity_t *gun); // [scopehold] lens centre / radius from the held rifle's final transform       // [scopehold] the held scoped aim pose stands in for a bolt / reload
+    void     CG_ScopeOcularGun(const refEntity_t *gun);
+    void     CG_HzmScopeEyeHide(refEntity_t *gun);       // [scopehold] hide the eyecup surfaces that cover the glass at the eye // [scopehold] lens centre / radius from the held rifle's final transform       // [scopehold] the held scoped aim pose stands in for a bolt / reload
     qboolean CG_VMAdsBoltClip(void); // HZM coop [ads rifles] the view model's newest clip is an aimed bolt clip
     qboolean CG_VMAmmoPropEarly(dtiki_t *tiki); // HZM coop [adsprop] ammo prop attached before the reload clip leads
     extern int g_iCoopVmTagSnap;     // HZM coop [adsbolt] cg.time of an ADS-release swap to the hip clip

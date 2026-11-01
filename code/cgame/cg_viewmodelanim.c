@@ -653,6 +653,12 @@ qboolean CG_VMAdsTagRight(void)
     if (CG_VMScopeHoldClip()) {
         return qtrue;
     }
+    // ...and while the scope is up with the hands in an aim pose at all: the server's offhand hand-off can arrive a frame before the reload row that starts the
+    // hold (run b8 Carcano: the lens jumped 0.17 of the screen on the reload's first frame and eased back with the tag fade)
+    if (cgi.anim && CG_HzmScopeRaiseOwns() && cgi.Cvar_Get("coop_scopeHoldCycle", "1", CVAR_ARCHIVE)->integer
+        && s_coopSlotAim[cgi.anim->g_iCurrentVMAnimSlot]) {
+        return qtrue;
+    }
     return (s_coopAdsSlot >= 0 && s_coopAdsSlot == cgi.anim->g_iCurrentVMAnimSlot && s_coopAdsBolt
             && s_fCoopVMCurW < 0.999f)
              ? qtrue

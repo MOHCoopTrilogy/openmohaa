@@ -619,6 +619,55 @@ void CG_HzmScopeSetOcular(float x, float y, float glassR)
     }
 }
 
+/*
+[scopehold 2026-11-01] the G43 Sniper's and the StG44 Scoped's ZF4 meshes (g43sniper_coop.skd, scopedmp44_coop.skd) carry a rubber eyecup whose
+flap sits ON the scope axis behind the glass: at the eye it covered ~70 percent of the eyepiece in glossy black (run b8 / b10), only a strip of
+the live picture showed. Once the scope is most of the way up (ease > 0.6) those surfaces are not drawn on the gun in the hands. The weapons
+(name prefixes) and surfaces are cvars so a mesh fix can retire this: coop_scopeEyeHideWpn ("" = off), coop_scopeEyeHide.
+*/
+void CG_HzmScopeEyeHide(refEntity_t *gun)
+{
+    static cvar_t *pW = NULL, *pS = NULL;
+    const char    *wpn;
+    char           list[256], *tok, *nx;
+    qboolean       hit = qfalse;
+
+    if (!pW) {
+        pW = cgi.Cvar_Get("coop_scopeEyeHideWpn", "G43 Sniper;StG44 Scoped", 0);
+        pS = cgi.Cvar_Get("coop_scopeEyeHide", "scopeb", 0);
+    }
+    if (!gun || !gun->tiki || !pW->string[0] || !pS->string[0] || !hs.pip || hs.ease <= 0.6f) {
+        return;
+    }
+    wpn = CG_HzmActiveWeaponName();
+    Q_strncpyz(list, pW->string, sizeof(list));
+    for (tok = list; tok; tok = nx) {   // ';'-separated, no strtok (not re-entrant / not portable)
+        nx = strchr(tok, ';');
+        if (nx) {
+            *nx++ = 0;
+        }
+        if (tok[0] && !Q_stricmpn(wpn, tok, strlen(tok))) {
+            hit = qtrue;
+            break;
+        }
+    }
+    if (!hit) {
+        return;
+    }
+    Q_strncpyz(list, pS->string, sizeof(list));
+    for (tok = list; tok; tok = nx) {
+        int sn;
+        nx = strchr(tok, ';');
+        if (nx) {
+            *nx++ = 0;
+        }
+        sn = tok[0] ? cgi.Surface_NameToNum(gun->tiki, tok) : -1;
+        if (sn >= 0 && sn < MAX_MODEL_SURFACES) {
+            gun->surfaces[sn] |= MDL_SURFACE_NODRAW;
+        }
+    }
+}
+
 qboolean CG_HzmScopeActive(void)
 {
     return (cg_hzmScope && hs.frac > 0.0f) ? qtrue : qfalse;
