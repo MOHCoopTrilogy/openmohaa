@@ -173,7 +173,8 @@ qboolean    CL_DemoEd_MouseLook(float mx, float my);
 const char *CL_DemoEd_FilterConfigstring(int index, const char *s);
 int         CL_DemoEd_HudMode(void);
 qboolean    CL_DemoEd_HoldAtEnd(void);
-void        CL_DemoEd_SetFile(const char *name);     // the demo file that is playing (the timeline scans it)
+void        CL_DemoEd_SetFile(const char *name);
+void        CL_DemoEd_MessageRead(void);            // after each demo message: rewind checkpoints     // the demo file that is playing (the timeline scans it)
 qboolean    CL_DemoEd_CursorMouse(int dx, int dy);   // the timeline cursor takes the mouse
 void        CL_DemoEd_DrawTimeline(void);
 

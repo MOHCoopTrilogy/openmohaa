@@ -106,6 +106,7 @@ static cvar_t *demo_status;
 static void DE_SaveCam(void);
 static void DE_LoadCam(void);
 static void TL_Frame(void);
+static void DE_CpLevelStart(qboolean firstOfDemo);
 static qboolean TL_MouseKey(int key, qboolean down);
 static void TL_ResetInput(void);
 static void DE_SaveNames(void);
@@ -612,6 +613,7 @@ void CL_DemoEd_GamestateParsed(void)
         return;
     }
     Cvar_Set("demo_playing", "1");
+    DE_CpLevelStart(de.gamestates == 0); // checkpoints: a new demo drops them, a restart of the SAME one keeps them
     if (de.gamestates++ > 0) {
         // a level change inside the demo: a new segment. The clock carries on from the old level's last
         // snapshot; the new level's first snapshot re-anchors it (CL_DemoEd_SetTime)
@@ -703,11 +705,259 @@ static void DE_SeekDisplay(int ms)
     DE_SeekTo(de.firstSnapTime + (ms - de.segBase));
 }
 
+
+/*
+==================
+rewind checkpoints
+
+A backward seek used to re-read its level from the start: 60 ms at 32 s in, a second or more deep into a
+long level. Every demo message passes CL_DemoEd_MessageRead; every few seconds of each level it copies what
+a later message needs: the file offset, the configstrings, the command sequence, the last snapshots a delta
+can reference and their entities. A seek starts from the nearest checkpoint before its target. They fill in
+as the demo is played or read through (a seek's own read-ahead included), so after one pass every point of a
+level is close to one. The command ring is not copied: like the level-start rewind, only the sequence number
+matters (every configstring command up to it is already in the copied configstrings).
+==================
+*/
+#define DE_CP_SEGS    32
+#define DE_CP_PER_SEG 128          // thinned to every other one (and the spacing doubled) when full
+#define DE_CP_TOTAL   1024
+#define DE_CP_BUDGET  (512 << 20)  // bytes, all levels of one demo
+#define DE_CP_SPACING 4000         // ms of demo between checkpoints, to start with
+
+typedef struct {
+    int            segIndex;
+    int            snapTime;
+    int            offset;
+    int            msgSeq;
+    int            cmdSeq;
+    int            parseEntitiesNum;
+    int            numSnaps;
+    clSnapshot_t  *snaps; // oldest first, the last one is cl.snap
+    int            entFirst, numEnts;
+    entityState_t *ents;
+    char          *gsData;
+    int           *gsOffsets;
+    int            gsCount;
+    int            bytes;
+    qboolean       bad; // a seek from it could not decode: never used again
+} deCheckpoint_t;
+
+static deCheckpoint_t s_cp[DE_CP_TOTAL];
+static int            s_numCp, s_cpBytes;
+static char           s_cpDemo[MAX_QPATH];
+static int            s_cpSpacing[DE_CP_SEGS];
+static int            s_maxDelta; // the furthest back a delta reached in this level so far
+
+static void DE_CpFree(deCheckpoint_t *c)
+{
+    free(c->snaps);
+    free(c->ents);
+    free(c->gsData);
+    free(c->gsOffsets);
+    s_cpBytes -= c->bytes;
+    memset(c, 0, sizeof(*c));
+}
+
+static void DE_CpClear(void)
+{
+    int i;
+    for (i = 0; i < s_numCp; i++) {
+        DE_CpFree(&s_cp[i]);
+    }
+    s_numCp   = 0;
+    s_cpBytes = 0;
+    for (i = 0; i < DE_CP_SEGS; i++) {
+        s_cpSpacing[i] = DE_CP_SPACING;
+    }
+}
+
+static void DE_CpRemove(int i)
+{
+    DE_CpFree(&s_cp[i]);
+    memmove(&s_cp[i], &s_cp[i + 1], (s_numCp - i - 1) * sizeof(s_cp[0]));
+    s_numCp--;
+    memset(&s_cp[s_numCp], 0, sizeof(s_cp[0]));
+}
+
+static void DE_CpCapture(void)
+{
+    deCheckpoint_t c;
+    clSnapshot_t  *list[PACKET_BACKUP];
+    int            i, k, n = 0, seg = de.segIndex, t = cl.snap.serverTime, at, count = 0;
+
+    if (seg < 0 || seg >= DE_CP_SEGS || s_numCp >= DE_CP_TOTAL || s_cpBytes > DE_CP_BUDGET) {
+        return;
+    }
+    for (i = 0; i < s_numCp; i++) {
+        if (s_cp[i].segIndex == seg) {
+            count++;
+            if (abs(s_cp[i].snapTime - t) < s_cpSpacing[seg]) {
+                return;
+            }
+        }
+    }
+    k = s_maxDelta + 3;
+    if (k < 3) {
+        k = 3;
+    } else if (k > PACKET_BACKUP - 1) {
+        k = PACKET_BACKUP - 1;
+    }
+    for (i = k - 1; i >= 0; i--) {
+        int           m = cl.snap.messageNum - i;
+        clSnapshot_t *s = &cl.snapshots[m & PACKET_MASK];
+        if (s->valid && s->messageNum == m) {
+            list[n++] = s;
+        }
+    }
+    if (!n || list[n - 1]->messageNum != cl.snap.messageNum) {
+        return;
+    }
+    memset(&c, 0, sizeof(c));
+    c.segIndex         = seg;
+    c.snapTime         = t;
+    c.offset           = FS_FTell(clc.demofile);
+    c.msgSeq           = clc.serverMessageSequence;
+    c.cmdSeq           = clc.serverCommandSequence;
+    c.parseEntitiesNum = cl.parseEntitiesNum;
+    c.numSnaps         = n;
+    c.entFirst         = list[0]->parseEntitiesNum;
+    c.numEnts          = cl.parseEntitiesNum - c.entFirst;
+    if (c.numEnts < 0 || c.numEnts > MAX_PARSE_ENTITIES) {
+        return;
+    }
+    c.gsCount   = cl.gameState.dataCount;
+    c.snaps     = (clSnapshot_t *)malloc(n * sizeof(clSnapshot_t));
+    c.ents      = (entityState_t *)malloc((c.numEnts ? c.numEnts : 1) * sizeof(entityState_t));
+    c.gsData    = (char *)malloc(c.gsCount ? c.gsCount : 1);
+    c.gsOffsets = (int *)malloc(sizeof(cl.gameState.stringOffsets));
+    if (!c.snaps || !c.ents || !c.gsData || !c.gsOffsets) {
+        free(c.snaps);
+        free(c.ents);
+        free(c.gsData);
+        free(c.gsOffsets);
+        return;
+    }
+    for (i = 0; i < n; i++) {
+        c.snaps[i] = *list[i];
+    }
+    c.snaps[n - 1] = cl.snap;
+    for (i = 0; i < c.numEnts; i++) {
+        c.ents[i] = cl.parseEntities[(c.entFirst + i) & (MAX_PARSE_ENTITIES - 1)];
+    }
+    memcpy(c.gsData, cl.gameState.stringData, c.gsCount);
+    memcpy(c.gsOffsets, cl.gameState.stringOffsets, sizeof(cl.gameState.stringOffsets));
+    c.bytes = n * sizeof(clSnapshot_t) + c.numEnts * sizeof(entityState_t) + c.gsCount
+            + sizeof(cl.gameState.stringOffsets);
+
+    // sorted by level, then time
+    for (at = 0; at < s_numCp; at++) {
+        if (s_cp[at].segIndex > seg || (s_cp[at].segIndex == seg && s_cp[at].snapTime > t)) {
+            break;
+        }
+    }
+    memmove(&s_cp[at + 1], &s_cp[at], (s_numCp - at) * sizeof(s_cp[0]));
+    s_cp[at] = c;
+    s_numCp++;
+    s_cpBytes += c.bytes;
+
+    if (count + 1 > DE_CP_PER_SEG) {
+        // a long level: keep every other one, twice as far apart from now on
+        int keep = 0;
+        for (i = 0; i < s_numCp; i++) {
+            if (s_cp[i].segIndex == seg && (keep++ & 1)) {
+                DE_CpRemove(i);
+                i--;
+            }
+        }
+        s_cpSpacing[seg] *= 2;
+    }
+}
+
+// the latest usable checkpoint of the loaded level at or before t (server ms)
+static deCheckpoint_t *DE_CpFind(int t)
+{
+    deCheckpoint_t *best = NULL;
+    int             i;
+    for (i = 0; i < s_numCp; i++) {
+        if (s_cp[i].segIndex == de.segIndex && !s_cp[i].bad && s_cp[i].snapTime <= t) {
+            best = &s_cp[i];
+        }
+    }
+    return best;
+}
+
+static void DE_CpRestore(const deCheckpoint_t *c)
+{
+    int i;
+    FS_Seek(clc.demofile, c->offset, FS_SEEK_SET);
+    memcpy(cl.gameState.stringOffsets, c->gsOffsets, sizeof(cl.gameState.stringOffsets));
+    memcpy(cl.gameState.stringData, c->gsData, c->gsCount);
+    cl.gameState.dataCount        = c->gsCount;
+    clc.serverCommandSequence     = c->cmdSeq;
+    clc.lastExecutedServerCommand = c->cmdSeq;
+    clc.serverMessageSequence     = c->msgSeq;
+    for (i = 0; i < PACKET_BACKUP; i++) {
+        cl.snapshots[i].valid = qfalse;
+    }
+    for (i = 0; i < c->numSnaps; i++) {
+        cl.snapshots[c->snaps[i].messageNum & PACKET_MASK] = c->snaps[i];
+    }
+    for (i = 0; i < c->numEnts; i++) {
+        cl.parseEntities[(c->entFirst + i) & (MAX_PARSE_ENTITIES - 1)] = c->ents[i];
+    }
+    cl.parseEntitiesNum = c->parseEntitiesNum;
+    cl.snap             = c->snaps[c->numSnaps - 1];
+}
+
+static void DE_CpLevelStart(qboolean firstOfDemo)
+{
+    s_maxDelta = 0;
+    if (firstOfDemo && Q_stricmp(s_cpDemo, clc.demoName)) {
+        DE_CpClear(); // checkpoints are file offsets
+        Q_strncpyz(s_cpDemo, clc.demoName, sizeof(s_cpDemo));
+    }
+}
+
+// after every demo message (CL_ReadDemoMessage): note how far back deltas reach, and take a checkpoint
+void CL_DemoEd_MessageRead(void)
+{
+    clSnapshot_t *s;
+    if (!CL_DemoEd_Enabled() || !de.started || !clc.demofile) {
+        return;
+    }
+    s = &cl.snapshots[clc.serverMessageSequence & PACKET_MASK];
+    if (!s->valid || s->messageNum != clc.serverMessageSequence) {
+        return;
+    }
+    if (s->deltaNum > 0 && s->messageNum - s->deltaNum > s_maxDelta) {
+        s_maxDelta = s->messageNum - s->deltaNum;
+    }
+    if (cl.snap.messageNum == s->messageNum) {
+        DE_CpCapture();
+    }
+}
+
+static void DE_LevelStartRewind(void)
+{
+    int i;
+    FS_Seek(clc.demofile, de.rewindOffset, FS_SEEK_SET);
+    cl.gameState = de_rewindGS;
+    memcpy(cl.entityBaselines, de_rewindBaselines, sizeof(cl.entityBaselines));
+    clc.serverCommandSequence     = de.rewindCmdSeq;
+    clc.lastExecutedServerCommand = de.rewindCmdSeq;
+    for (i = 0; i < PACKET_BACKUP; i++) {
+        cl.snapshots[i].valid = qfalse;
+    }
+    cl.snap.valid = qfalse;
+}
+
 static void DE_SeekTo(int target)
 {
     static gameState_t before;
-    int                applied, i;
-    qboolean           rewound = qfalse;
+    int                applied, i, badSnaps = 0;
+    int                rewound = 0; // 1 from the level start, 2 from a checkpoint
+    deCheckpoint_t    *cp      = NULL;
     int                targetD;
     int                t0      = Sys_Milliseconds();
 
@@ -717,24 +967,29 @@ static void DE_SeekTo(int target)
     before = cl.gameState;
     targetD = de.segBase + (target - de.firstSnapTime); // display ms, for a seek a level change interrupts
 
-    if (target < cl.snap.serverTime - 1 || target < de.demoTime) {
-        if (!de.haveRewind) {
-            Com_Printf("Demo editor: this demo cannot be rewound.\n");
-            return;
+    {
+        qboolean back = (target < cl.snap.serverTime - 1 || target < de.demoTime) ? qtrue : qfalse;
+        cp            = DE_CpFind(target);
+        if (cp && (back || cp->snapTime > cl.snap.serverTime + 1000)) {
+            // from the nearest checkpoint (also a long jump forward: no need to read the gap)
+            DE_CpRestore(cp);
+            DE_ApplyAllAliasesRaw(qfalse);
+            rewound  = 2;
+            de.atEnd = qfalse;
+        } else if (back) {
+            cp = NULL;
+            if (!de.haveRewind) {
+                Com_Printf("Demo editor: this demo cannot be rewound.\n");
+                return;
+            }
+            // back to just after the gamestate: the next message is the first, non-delta snapshot
+            DE_LevelStartRewind();
+            DE_ApplyAllAliasesRaw(qfalse);
+            rewound  = qtrue;
+            de.atEnd = qfalse;
+        } else {
+            cp = NULL;
         }
-        // back to just after the gamestate: the next message is the first, non-delta snapshot
-        FS_Seek(clc.demofile, de.rewindOffset, FS_SEEK_SET);
-        cl.gameState = de_rewindGS;
-        memcpy(cl.entityBaselines, de_rewindBaselines, sizeof(cl.entityBaselines));
-        clc.serverCommandSequence     = de.rewindCmdSeq;
-        clc.lastExecutedServerCommand = de.rewindCmdSeq;
-        for (i = 0; i < PACKET_BACKUP; i++) {
-            cl.snapshots[i].valid = qfalse;
-        }
-        cl.snap.valid = qfalse;
-        DE_ApplyAllAliasesRaw(qfalse);
-        rewound  = qtrue;
-        de.atEnd = qfalse;
     }
 
     applied = clc.serverCommandSequence;
@@ -744,6 +999,20 @@ static void DE_SeekTo(int target)
             de.lastSnapTime = cl.snap.serverTime;
         }
         CL_ReadDemoMessage();
+        if (cp && clc.demoplaying && de.segIndex == segWas) {
+            clSnapshot_t *s = &cl.snapshots[clc.serverMessageSequence & PACKET_MASK];
+            if (s->messageNum == clc.serverMessageSequence && !s->valid && ++badSnaps > 3) {
+                // a delta reached past what the checkpoint kept: never use it again, start the level over
+                Com_Printf("Demo editor: a rewind checkpoint could not be read on - rewinding the level instead\n");
+                cp->bad = qtrue;
+                cp      = NULL;
+                DE_LevelStartRewind();
+                DE_ApplyAllAliasesRaw(qfalse);
+                rewound = qtrue;
+                applied = clc.serverCommandSequence;
+                continue;
+            }
+        }
         if (clc.demoplaying && de.segIndex != segWas) {
             // a new level: it loads over the next frames; the rest of the seek runs once it is up
             DE_Pend(targetD, qfalse);
@@ -782,8 +1051,8 @@ static void DE_SeekTo(int target)
 
     if (developer && developer->integer) {
         Com_Printf(
-            "^~^~^ DEMOED seek t=%.1f rewound=%d snap=%d took=%dms\n", DE_Clock(), rewound, cl.snap.messageNum,
-            Sys_Milliseconds() - t0
+            "^~^~^ DEMOED seek t=%.1f rewound=%d snap=%d took=%dms cps=%d (%d KB)\n", DE_Clock(), rewound,
+            cl.snap.messageNum, Sys_Milliseconds() - t0, s_numCp, s_cpBytes / 1024
         );
     }
 }
@@ -857,6 +1126,9 @@ static void DE_Publish(void)
         de.freecam ? "  FREECAM" : "", de.pathPlaying ? "  PATH" : "", de.numWp,
         de.pathRealtime && de.numWp > 1 ? " (timed)" : ""
     );
+    if (CL_VideoRecording()) {
+        buf[0] = 0; // nothing of the editor in an F10 render
+    }
     if (strcmp(buf, demo_status->string)) {
         Cvar_Set("demo_status", buf);
     }
@@ -867,7 +1139,7 @@ static void DE_Publish(void)
 
 void CL_DemoEd_SetTime(void)
 {
-    int   now = Sys_Milliseconds();
+    int   now = cls.realtime; // the client's frame clock: real time, or the fixed AVI step while F10 renders
     int   dt;
     float dtSec;
 
@@ -1633,7 +1905,7 @@ HUD modes or into an F10 render.
 #define TL_MAX_SEG  32
 #define TL_MAX_MARK 1024
 
-enum { TLM_KILL, TLM_DEATH, TLM_OBJ, TLM_WP };
+enum { TLM_KILL, TLM_DEATH, TLM_OBJ, TLM_WP, TLM_FRAG }; // KILL = a player or allied death, FRAG = an enemy soldier killed
 
 typedef struct {
     int  ms;     // display ms, -1 until the message's snapshot is read
@@ -1656,6 +1928,18 @@ static struct {
     tlMark_t     mark[TL_MAX_MARK];
     int          numMark;
     int          objFlags[MAX_OBJECTIVES];
+    // a full decode of every snapshot (CL_ParseSnapshot / CL_ParsePacketEntities, into the scan's own buffers):
+    // an AI that dies gets EF_DEAD on its entity (actor.cpp, bug-780)
+    playerState_t ps[PACKET_BACKUP];
+    struct {
+        int msg, first, num;
+    } sn[PACKET_BACKUP];               // msg -1 = not decoded
+    entityState_t *base;               // MAX_GENTITIES baselines, from each level's gamestate
+    entityState_t *ents;               // MAX_PARSE_ENTITIES ring
+    int            parseNum;
+    int           *seenMsg;            // MAX_GENTITIES: the message an entity was last seen in (this level)
+    int           *lastFlags;          // and its eFlags then
+    int            decoded, skipped, aiDeaths;
     char         objText[MAX_OBJECTIVES][MAX_STRING_CHARS / 4];
 } tl;
 
@@ -1853,11 +2137,158 @@ static void TL_NewSegment(void)
     }
     tl.segHasSnap[k] = qfalse;
     tl.numSeg++;
+    for (k = 0; k < PACKET_BACKUP; k++) {
+        tl.sn[k].msg = -1;
+    }
+    if (tl.seenMsg) {
+        memset(tl.seenMsg, 0xff, MAX_GENTITIES * sizeof(int));
+    }
     memset(tl.objFlags, 0, sizeof(tl.objFlags));
     memset(tl.objText, 0, sizeof(tl.objText));
 }
 
-static void TL_ParseMsg(int len)
+static void TL_DeltaEntity(msg_t *m, int newnum, entityState_t *old, qboolean unchanged, int *count)
+{
+    entityState_t *state = &tl.ents[tl.parseNum & (MAX_PARSE_ENTITIES - 1)];
+    if (unchanged) {
+        *state = *old;
+    } else {
+        MSG_ReadDeltaEntity(m, old, state, newnum, cls.serverFrameTime);
+    }
+    if (state->number == (MAX_GENTITIES - 1)) {
+        return; // delta removed
+    }
+    tl.parseNum++;
+    (*count)++;
+}
+
+// CL_ParsePacketEntities, on the scan's buffers
+static void TL_ParseEntities(msg_t *m, int oldSlot, int newSlot)
+{
+    int            newnum, oldindex = 0, oldnum, count = 0;
+    entityState_t *oldstate = NULL;
+
+    tl.sn[newSlot].first = tl.parseNum;
+#define TL_OLD()                                                                                                \
+    do {                                                                                                        \
+        if (oldSlot < 0 || oldindex >= tl.sn[oldSlot].num) {                                                    \
+            oldnum = 99999;                                                                                     \
+        } else {                                                                                                \
+            oldstate = &tl.ents[(tl.sn[oldSlot].first + oldindex) & (MAX_PARSE_ENTITIES - 1)];                  \
+            oldnum   = oldstate->number;                                                                        \
+        }                                                                                                       \
+    } while (0)
+    TL_OLD();
+    while (1) {
+        newnum = MSG_ReadEntityNum(m);
+        if (newnum == (MAX_GENTITIES - 1) || m->readcount > m->cursize) {
+            break;
+        }
+        while (oldnum < newnum) {
+            TL_DeltaEntity(m, oldnum, oldstate, qtrue, &count);
+            oldindex++;
+            TL_OLD();
+        }
+        if (oldnum == newnum) {
+            TL_DeltaEntity(m, newnum, oldstate, qfalse, &count);
+            oldindex++;
+            TL_OLD();
+            continue;
+        }
+        if (oldnum > newnum) {
+            TL_DeltaEntity(m, newnum, &tl.base[newnum], qfalse, &count);
+        }
+    }
+    while (oldnum != 99999) {
+        TL_DeltaEntity(m, oldnum, oldstate, qtrue, &count);
+        oldindex++;
+        TL_OLD();
+    }
+#undef TL_OLD
+    tl.sn[newSlot].num = count;
+}
+
+// a snapshot, after its server time: playerstate and entities; an AI turning EF_DEAD is a death marker
+static void TL_ReadSnapshot(msg_t *m, int seq)
+{
+    byte area[MAX_MAP_AREA_BYTES];
+    int  deltaB, alen, oldSlot = -1, slot = seq & PACKET_MASK, i;
+
+    MSG_ReadByte(m); // serverTimeResidual
+    deltaB = MSG_ReadByte(m);
+    MSG_ReadByte(m); // snapFlags
+    tl.sn[slot].msg = -1;
+    if (!tl.ents) {
+        return;
+    }
+    if (deltaB) {
+        int dn = seq - deltaB;
+        if (tl.sn[dn & PACKET_MASK].msg != dn) {
+            tl.skipped++;
+            return; // its base was not decoded: wait for a full snapshot
+        }
+        oldSlot = dn & PACKET_MASK;
+    }
+    alen = MSG_ReadByte(m);
+    if (alen > (int)sizeof(area)) {
+        return;
+    }
+    MSG_ReadData(m, area, alen);
+    MSG_ReadDeltaPlayerstate(m, oldSlot >= 0 ? &tl.ps[oldSlot] : NULL, &tl.ps[slot], cls.serverFrameTime);
+    TL_ParseEntities(m, oldSlot, slot);
+    tl.sn[slot].msg = seq;
+    tl.decoded++;
+
+    for (i = 0; i < tl.sn[slot].num; i++) {
+        const entityState_t *es = &tl.ents[(tl.sn[slot].first + i) & (MAX_PARSE_ENTITIES - 1)];
+        int                  n  = es->number;
+        if (n < 0 || n >= MAX_GENTITIES) {
+            continue;
+        }
+        if ((es->eType == ET_MODELANIM || es->eType == ET_MODELANIM_SKEL) && (es->eFlags & (EF_AXIS | EF_ALLIES))
+            && (es->eFlags & EF_DEAD) && tl.seenMsg[n] >= 0 && !(tl.lastFlags[n] & EF_DEAD)) {
+            tlMark_t *mk = TL_NewMark((es->eFlags & EF_AXIS) ? TLM_FRAG : TLM_KILL);
+            if (mk) {
+                tl.aiDeaths++;
+                Q_strncpyz(
+                    mk->label, (es->eFlags & EF_AXIS) ? "Enemy soldier killed" : "Allied soldier killed",
+                    sizeof(mk->label)
+                );
+            }
+        }
+        tl.seenMsg[n]   = seq;
+        tl.lastFlags[n] = es->eFlags;
+    }
+}
+
+// the level's baselines (CL_ParseGamestate); configstrings are read past
+static void TL_ParseGamestate(msg_t *m)
+{
+    entityState_t nullstate;
+    int           cmd, newnum;
+
+    while (m->readcount <= m->cursize) {
+        cmd = MSG_ReadByte(m);
+        if (cmd == svc_EOF) {
+            break;
+        }
+        if (cmd == svc_configstring) {
+            MSG_ReadShort(m);
+            MSG_ReadScrambledBigString(m);
+        } else if (cmd == svc_baseline && tl.base) {
+            newnum = MSG_ReadEntityNum(m);
+            if (newnum < 0 || newnum >= MAX_GENTITIES) {
+                break;
+            }
+            MSG_GetNullEntityState(&nullstate);
+            MSG_ReadDeltaEntity(m, &nullstate, &tl.base[newnum], newnum, cls.serverFrameTime);
+        } else {
+            break;
+        }
+    }
+}
+
+static void TL_ParseMsg(int seq, int len)
 {
     msg_t m;
     int   cmd;
@@ -1884,11 +2315,13 @@ static void TL_ParseMsg(int len)
         if (cmd == svc_gamestate) {
             tl.cmdSeq = MSG_ReadLong(&m);
             TL_NewSegment();
+            TL_ParseGamestate(&m);
             return;
         }
         if (cmd == svc_snapshot) {
             int t = MSG_ReadLong(&m), k = tl.numSeg - 1;
             if (k >= 0 && k < TL_MAX_SEG) {
+                TL_ReadSnapshot(&m, seq);
                 if (!tl.segHasSnap[k]) {
                     tl.segHasSnap[k] = qtrue;
                     tl.segFirst[k]   = t;
@@ -1917,6 +2350,12 @@ static void TL_ScanFinish(void)
     }
     tl.scanning = qfalse;
     tl.done     = qtrue;
+    free(tl.base);
+    free(tl.ents);
+    free(tl.seenMsg);
+    free(tl.lastFlags);
+    tl.base = tl.ents = NULL;
+    tl.seenMsg = tl.lastFlags = NULL;
     if (developer && developer->integer) {
         Com_Printf(
             "^~^~^ DEMOED timeline scan %s: %d levels, %.1f s, %d markers, %d msgs, %d KB, %d ms\n", tl.file, tl.numSeg,
@@ -1925,6 +2364,9 @@ static void TL_ScanFinish(void)
         for (k = 0; k < tl.numSeg; k++) {
             Com_Printf("^~^~^ DEMOED timeline level %d at %.2f s\n", k + 1, tl.segStart[k] / 1000.0f);
         }
+        Com_Printf(
+            "^~^~^ DEMOED timeline snapshots decoded %d skipped %d, AI deaths %d\n", tl.decoded, tl.skipped, tl.aiDeaths
+        );
         for (k = 0; k < tl.numMark; k++) {
             Com_Printf("^~^~^ DEMOED timeline mark %.2f s %s\n", tl.mark[k].ms / 1000.0f, tl.mark[k].label);
         }
@@ -1944,7 +2386,25 @@ static void TL_ScanStep(void)
         if (tl.f) {
             FS_FCloseFile(tl.f);
         }
+        free(tl.base);
+        free(tl.ents);
+        free(tl.seenMsg);
+        free(tl.lastFlags);
         memset(&tl, 0, sizeof(tl));
+        tl.base      = (entityState_t *)calloc(MAX_GENTITIES, sizeof(entityState_t));
+        tl.ents      = (entityState_t *)calloc(MAX_PARSE_ENTITIES, sizeof(entityState_t));
+        tl.seenMsg   = (int *)malloc(MAX_GENTITIES * sizeof(int));
+        tl.lastFlags = (int *)calloc(MAX_GENTITIES, sizeof(int));
+        if (!tl.base || !tl.ents || !tl.seenMsg || !tl.lastFlags) {
+            free(tl.base);
+            free(tl.ents);
+            free(tl.seenMsg);
+            free(tl.lastFlags);
+            tl.base = tl.ents = NULL; // markers without the AI deaths
+            tl.seenMsg = tl.lastFlags = NULL;
+        } else {
+            memset(tl.seenMsg, 0xff, MAX_GENTITIES * sizeof(int));
+        }
         Q_strncpyz(tl.file, s_demoFile, sizeof(tl.file));
         FS_FOpenFileRead(tl.file, &tl.f, qtrue, qtrue);
         if (!tl.f) {
@@ -1971,7 +2431,7 @@ static void TL_ScanStep(void)
         }
         tl.bytes += len + 8;
         tl.msgs++;
-        TL_ParseMsg(len);
+        TL_ParseMsg(LittleLong(seq), len);
         if (++n > 4000) {
             break;
         }
@@ -2044,7 +2504,7 @@ static void TL_Layout(tlLayout_t *L)
     L->ph = 30.0f * L->s;
     L->px = 24.0f * L->s;
     L->pw = L->W - 48.0f * L->s;
-    L->py = L->H - (14.0f + 46.0f + 8.0f) * L->s - L->ph;
+    L->py = L->H - (14.0f + 46.0f + 8.0f + 24.0f) * L->s - L->ph; // +24: clear of the health / ammo HUD
     L->bx = L->px + 10.0f * L->s;
     L->bw = 18.0f * L->s;
     L->speedX = L->bx + L->bw + 10.0f * L->s;
@@ -2091,6 +2551,9 @@ static void TL_GetMark(int i, int *ms, int *kind, char *label, int size)
         *ms   = m->ms;
         *kind = m->kind;
         Q_strncpyz(label, m->label, size);
+        if (m->kind == TLM_FRAG) {
+            return;
+        }
         if (m->kind == TLM_KILL) {
             // the recorded player's own death stands out
             DE_CleanName(Info_ValueForKey(DE_CS(CS_PLAYERS + clc.clientNum), "name"), me, sizeof(me));
@@ -2345,6 +2808,7 @@ void CL_DemoEd_DrawTimeline(void)
     vec4_t ahead  = {0.86f, 0.84f, 0.79f, 0.10f};
     vec4_t kill   = {1.0f, 0.55f, 0.35f, 0.95f};
     vec4_t death  = {1.0f, 0.18f, 0.15f, 1.0f};
+    vec4_t frag   = {0.70f, 1.0f, 0.55f, 0.90f};
     vec4_t obj    = {1.0f, 0.86f, 0.52f, 1.0f};
     vec4_t wpC    = {0.55f, 0.85f, 1.0f, 1.0f};
     vec4_t sep    = {0.95f, 0.95f, 0.95f, 0.85f};
@@ -2430,6 +2894,9 @@ void CL_DemoEd_DrawTimeline(void)
         case TLM_DEATH:
             TL_Box(x - 2.0f * s * big, L.ty - 14.0f * s * big, 4.0f * s * big, 10.0f * s * big, death);
             TL_Box(x - 4.0f * s * big, L.ty - 14.0f * s * big, 8.0f * s * big, 2.0f * s * big, death);
+            break;
+        case TLM_FRAG:
+            TL_Box(x - 0.75f * s * big, L.ty - 9.0f * s * big, 1.5f * s * big, 5.0f * s * big, frag);
             break;
         case TLM_OBJ:
             TL_Box(x - 3.5f * s * big, L.ty - 3.5f * s * big, 7.0f * s * big, 7.0f * s * big, black);

@@ -679,6 +679,7 @@ void CL_ReadDemoMessage( void ) {
 	clc.lastPacketTime = cls.realtime;
 	buf.readcount = 0;
 	CL_ParseServerMessage( &buf );
+	CL_DemoEd_MessageRead(); // HZM coop - demo editor rewind checkpoints
 }
 
 /*
