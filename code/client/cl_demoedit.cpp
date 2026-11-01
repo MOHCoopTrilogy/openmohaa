@@ -585,8 +585,12 @@ static void DE_LoadNames(void)
 lifecycle
 ==================
 */
+static void DE_StuffResetAll(void);
+static void DE_StuffForget(void);
+
 void CL_DemoEd_Reset(void)
 {
+    DE_StuffResetAll(); // give back what the demo's stufftexts changed
     // keep the rewind buffers allocated, drop everything per-demo
     memset(&de, 0, sizeof(de));
     de.speed = 1.0f;
@@ -615,6 +619,7 @@ void CL_DemoEd_GamestateParsed(void)
             de.segBase += (int)(de.lastSnapTime - de.firstSnapTime) + 50; // one snapshot between levels (DE_SegStartGap)
         }
         de.segIndex++;
+        DE_StuffForget(); // the remembered originals belong to the old level
         de.started    = qfalse;
         de.atEnd      = qfalse;
         de.pathPlaying = qfalse;
@@ -642,6 +647,167 @@ void CL_DemoEd_GamestateParsed(void)
 seeking
 ==================
 */
+
+/*
+==================
+server-stuffed client state across seeks
+
+The server sets a lot of per-client state by stufftext ("set coop_dbnoView 1" = the downed haze, storm,
+map grade, suppression, HUD toggles ...). Played forward, a demo runs them; a seek skips them, and a
+rewind never undoes them - seek back past a DBNO and the first-person view kept the bleed-out haze.
+So: the value a cvar had before the demo first set it is remembered (per level), a rewind restores
+those, and the stufftexts a seek runs over are replayed (last value per cvar). Only plain `set` of the
+mod's own cvars (coop_*, r_pp*, cg_*) - never seta (that would write the player's config) and nothing
+else, whatever the demo file says.
+==================
+*/
+#define DE_MAX_STUFF 128
+typedef struct {
+    char name[64];
+    char val[160];
+} deStuff_t;
+static deStuff_t s_stuffOrig[DE_MAX_STUFF];
+static int       s_numStuffOrig;
+static deStuff_t s_stuffPend[DE_MAX_STUFF];
+static int       s_numStuffPend;
+
+static qboolean DE_StuffCvarOk(const char *n)
+{
+    return (!Q_stricmpn(n, "coop_", 5) || !Q_stricmpn(n, "r_pp", 4) || !Q_stricmpn(n, "cg_", 3)) ? qtrue : qfalse;
+}
+
+// one word of a console line: quoted or bare; returns the position after it
+static const char *DE_Word(const char *p, char *out, int size)
+{
+    int n = 0;
+    while (*p == ' ' || *p == '\t') {
+        p++;
+    }
+    if (*p == '"') {
+        p++;
+        while (*p && *p != '"' && n < size - 1) {
+            out[n++] = *p++;
+        }
+        if (*p == '"') {
+            p++;
+        }
+    } else {
+        while (*p && *p != ' ' && *p != '\t' && *p != ';' && *p != '\n' && n < size - 1) {
+            out[n++] = *p++;
+        }
+    }
+    out[n] = 0;
+    return p;
+}
+
+static void DE_StuffRemember(const char *name)
+{
+    int i;
+    for (i = 0; i < s_numStuffOrig; i++) {
+        if (!Q_stricmp(s_stuffOrig[i].name, name)) {
+            return;
+        }
+    }
+    if (s_numStuffOrig < DE_MAX_STUFF) {
+        Q_strncpyz(s_stuffOrig[s_numStuffOrig].name, name, sizeof(s_stuffOrig[0].name));
+        Q_strncpyz(s_stuffOrig[s_numStuffOrig].val, Cvar_VariableString(name), sizeof(s_stuffOrig[0].val));
+        s_numStuffOrig++;
+    }
+}
+
+static void DE_StuffPend(const char *name, const char *val)
+{
+    int i;
+    for (i = 0; i < s_numStuffPend; i++) {
+        if (!Q_stricmp(s_stuffPend[i].name, name)) {
+            Q_strncpyz(s_stuffPend[i].val, val, sizeof(s_stuffPend[0].val));
+            return;
+        }
+    }
+    if (s_numStuffPend < DE_MAX_STUFF) {
+        Q_strncpyz(s_stuffPend[s_numStuffPend].name, name, sizeof(s_stuffPend[0].name));
+        Q_strncpyz(s_stuffPend[s_numStuffPend].val, val, sizeof(s_stuffPend[0].val));
+        s_numStuffPend++;
+    }
+}
+
+// walk the `set name value` statements of a stufftext body; remember originals, and queue when pending
+static void DE_StuffScan(const char *text, qboolean pend)
+{
+    char        w[64], name[64], val[160];
+    const char *p = text;
+
+    while (p && *p) {
+        p = DE_Word(p, w, sizeof(w));
+        if (!Q_stricmp(w, "set")) {
+            p = DE_Word(p, name, sizeof(name));
+            p = DE_Word(p, val, sizeof(val));
+            if (name[0] && DE_StuffCvarOk(name)) {
+                DE_StuffRemember(name);
+                if (pend) {
+                    DE_StuffPend(name, val);
+                }
+            }
+        }
+        // on to the next statement
+        while (*p && *p != ';' && *p != '\n') {
+            p++;
+        }
+        while (*p == ';' || *p == '\n') {
+            p++;
+        }
+    }
+}
+
+// a stufftext that normal playback is about to run (CL_GetServerCommand): remember what it changes
+void CL_DemoEd_NoteStuff(const char *text)
+{
+    if (CL_DemoEd_Enabled() && text) {
+        DE_StuffScan(text, qfalse);
+    }
+}
+
+// the stufftext inside a raw server command string ("stufftext \"...\""), for the seek loop
+static void DE_StuffFromCommand(const char *s)
+{
+    char body[1024];
+    if (Q_stricmpn(s, "stufftext", 9)) {
+        return;
+    }
+    DE_Word(s + 9, body, sizeof(body));
+    DE_StuffScan(body, qtrue);
+}
+
+static void DE_StuffRestoreOriginals(void)
+{
+    int i;
+    for (i = 0; i < s_numStuffOrig; i++) {
+        Cvar_Set(s_stuffOrig[i].name, s_stuffOrig[i].val);
+    }
+}
+
+static void DE_StuffForget(void)
+{
+    s_numStuffOrig = 0;
+    s_numStuffPend = 0;
+}
+
+static void DE_StuffResetAll(void)
+{
+    DE_StuffRestoreOriginals();
+    s_numStuffOrig = 0;
+    s_numStuffPend = 0;
+}
+
+static void DE_StuffApplyPending(void)
+{
+    int i;
+    for (i = 0; i < s_numStuffPend; i++) {
+        Cvar_Set(s_stuffPend[i].name, s_stuffPend[i].val);
+    }
+    s_numStuffPend = 0;
+}
+
 static void DE_ApplySeekCommands(int from)
 {
     int         n;
@@ -652,6 +818,7 @@ static void DE_ApplySeekCommands(int from)
             continue;
         }
         s = clc.serverCommands[n & (MAX_RELIABLE_COMMANDS - 1)];
+        DE_StuffFromCommand(s);
         if (!strncmp(s, "cs ", 3) || !strncmp(s, "bcs", 3)) {
             CL_GetServerCommand(n, qfalse); // stores the configstring (bcs pieces reassembled there)
         }
@@ -730,6 +897,8 @@ static void DE_SeekTo(int target)
         cl.snap.valid = qfalse;
         DE_ApplyAllAliasesRaw(qfalse);
         rewound  = qtrue;
+        DE_StuffRestoreOriginals(); // the stuffed client state as this level started
+        s_numStuffPend = 0;
         de.atEnd = qfalse;
     }
 
@@ -755,6 +924,7 @@ static void DE_SeekTo(int target)
         }
         applied = clc.serverCommandSequence;
     }
+    DE_StuffApplyPending();
     clc.lastExecutedServerCommand = clc.serverCommandSequence;
 
     de.demoTime           = target;

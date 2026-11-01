@@ -267,6 +267,56 @@ static void CG_DemoEdDrawStatus(void)
 
 /*
 ==================
+CG_DemoEdNeutralLens - the recorded player's own lens / injury effects (blood on the lens, hit flash,
+low-health wash and dizzy double vision, suppression, heat, muzzle haze, rain on the lens, DoF, DBNO
+view) must never sit on the free camera. The cgame re-publishes these during its 2D pass, after the
+view is set up, and the renderer reads them when the frame is executed - so this runs LAST in the
+cgame frame (end of CG_Draw2D, every HUD mode). coop_dbnoView comes from the server only on change,
+so it is saved on the way in and given back when the free camera goes off.
+==================
+*/
+static void CG_DemoEdSetIf(const char *name, const char *val)
+{
+    cvar_t *c = cgi.Cvar_Get(name, val, 0);
+    if (c && strcmp(c->string, val)) {
+        cgi.Cvar_Set(name, val);
+    }
+}
+
+void CG_DemoEdNeutralLens(void)
+{
+    static qboolean s_was = qfalse;
+    static char     s_dbno[32];
+    cvar_t         *d;
+
+    if (!CG_DemoCamActive()) {
+        if (s_was) {
+            s_was = qfalse;
+            cgi.Cvar_Set("coop_dbnoView", s_dbno);
+        }
+        return;
+    }
+    if (!s_was) {
+        s_was = qtrue;
+        d     = cgi.Cvar_Get("coop_dbnoView", "0", 0);
+        Q_strncpyz(s_dbno, d ? d->string : "0", sizeof(s_dbno));
+    }
+    CG_DemoEdSetIf("r_ppHealthFrac", "1");
+    CG_DemoEdSetIf("r_ppHit", "0");
+    CG_DemoEdSetIf("r_ppBlood", "0");
+    CG_DemoEdSetIf("r_ppSuppress", "0");
+    CG_DemoEdSetIf("r_ppHeat", "0");
+    CG_DemoEdSetIf("r_ppMuzzleAs", "0");
+    CG_DemoEdSetIf("r_ppMuzzleHeat", "0");
+    CG_DemoEdSetIf("r_ppRainWet", "0");
+    CG_DemoEdSetIf("r_ppUnderwaterAir", "0");
+    CG_DemoEdSetIf("r_dofBlur", "0");
+    CG_DemoEdSetIf("r_ppScopeState", "0");
+    CG_DemoEdSetIf("coop_dbnoView", "0");
+}
+
+/*
+==================
 CG_DemoEdDraw2D - names-only / no-HUD modes: qtrue when it drew the whole 2D frame
 ==================
 */

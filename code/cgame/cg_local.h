@@ -755,6 +755,7 @@ const adsGunTune_t *CG_FindAdsTune(const char *wpn);
     int      CG_DemoHudMode(void);
     qboolean CG_DemoEdDraw2D(void);
     void     CG_DemoEdDraw2DTail(void);
+    void     CG_DemoEdNeutralLens(void);
     void     CG_DemoEdCs_f(void);
     void     CG_DemoEdReset_f(void);
     void     CG_DemoEdResetSnapshots(int snapNum, int cmdSeq);

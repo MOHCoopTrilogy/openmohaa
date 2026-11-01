@@ -2267,7 +2267,8 @@ void UI_Update(void)
 
     // Hide the HUD when necessary
     if (!ui_hud || clc.state != CA_ACTIVE || view3d->LetterboxActive() || (currentMenu && currentMenu->isFullscreen())
-        || server_loading || ((cl.snap.ps.pm_flags & PMF_NO_HUD) || (cl.snap.ps.pm_flags & PMF_INTERMISSION))) {
+        || server_loading || ((cl.snap.ps.pm_flags & PMF_NO_HUD) || (cl.snap.ps.pm_flags & PMF_INTERMISSION))
+        || CL_DemoEd_HudMode() != 0) { // HZM coop - clean HUD / demo HUD modes: the weapon bar a kit re-issue pops up stays hidden too
         if (crosshairhud) {
             crosshairhud->ForceHide();
         }
