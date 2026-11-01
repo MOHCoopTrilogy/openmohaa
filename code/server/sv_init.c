@@ -144,6 +144,8 @@ void SV_SetConfigstring (int index, const char *val) {
 
 			SV_SendConfigstring(client, index);
 		}
+
+		SVR_Configstring( index ); // HZM coop [server recorder]
 	}
 }
 
@@ -1163,6 +1165,7 @@ void SV_Init (void)
 	sv_fps = Cvar_Get ("sv_fps", "20", CVAR_SAVEGAME | CVAR_SERVERINFO | CVAR_NORESTART );
 	sv_netProbe = Cvar_Get ("sv_netProbe", "0", 0);	// HZM [joinflood]: per-client net probe
 	sv_lagProbe = Cvar_Get ("sv_lagProbe", "0", 0);	// HZM: report server frame overruns
+	SVR_Init(); // HZM coop [server recorder] sv_record, sv_autoRecord
 	sv_timeout = Cvar_Get ("sv_timeout", "120", CVAR_TEMP );
 	sv_cmdPark = Cvar_Get ("sv_cmdPark", "1", 0);
 	sv_cmdParkBytes = Cvar_Get ("sv_cmdParkBytes", "2400", 0);	// HZM coop [joinflood bug-3910] 0 = count window only		// HZM coop [bug-3480]
@@ -1266,6 +1269,8 @@ void SV_Shutdown( const char *finalmsg ) {
 
 	Com_Printf( "----- Server Shutdown (%s) -----\n", finalmsg );
 	HzmDiag_Event( "host: server shut down (%s)", finalmsg ); // HZM coop [bug-3486]
+
+	SVR_Shutdown(); // HZM coop [server recorder] finish the demo so it plays
 
 	if ( svs.clients && !com_errorEntered ) {
 		SV_FinalMessage( finalmsg );

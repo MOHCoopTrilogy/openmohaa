@@ -93,9 +93,11 @@ typedef struct {
 	int dtindex;
 } cgm_t;
 
-cgm_t g_CGMessages[MAX_CLIENTS];
-qboolean g_CGMRecieve[MAX_CLIENTS] = { qfalse };
-int nextTime[MAX_CLIENTS] = { 0 };
+// HZM coop [server recorder] one slot past the clients collects every effect for sv_demo.c
+#define CGM_NUM_SLOTS ( MAX_CLIENTS + 1 )
+cgm_t g_CGMessages[CGM_NUM_SLOTS];
+qboolean g_CGMRecieve[CGM_NUM_SLOTS] = { qfalse };
+int nextTime[CGM_NUM_SLOTS] = { 0 };
 
 void SV_ClearCGMessage (int iClient)
 {
@@ -117,7 +119,7 @@ void SV_ClearAllCGMessages ()
 	cgm_t *pCGM;
 	int i;
 	pCGM = g_CGMessages;
-	for(i = 0; i < MAX_CLIENTS; i++,pCGM++) {
+	for(i = 0; i < CGM_NUM_SLOTS; i++,pCGM++) {
 		pCGM->cursize = 0;
 		pCGM->dtindex = 0;
 		if(pCGM->data) {
@@ -151,6 +153,34 @@ void SV_InitCGMessage (int iClient)
 	pCGM->dtindex = 0;
 
 	g_CGMRecieve[iClient] = 0;
+}
+
+static void MSG_HandleCGMBufferOverflow(cgm_t* pCGM, qboolean isDatum);
+
+qboolean g_CGMessagesReady (int slot)
+{
+	return g_CGMessages[slot].data != NULL;
+}
+
+void SV_ResetCGMSlot (int slot)
+{
+	g_CGMessages[slot].cursize = 0;
+	g_CGMessages[slot].dtindex = 0;
+	g_CGMRecieve[slot] = 0;
+}
+
+void SV_ArmCGMSlot (int slot)
+{
+	cgm_t *pCGM = &g_CGMessages[slot];
+
+	if ( !SVR_IsRecording() || !pCGM->data ) {
+		return;
+	}
+	if ( pCGM->cursize >= 3968 ) {
+		MSG_HandleCGMBufferOverflow( pCGM, qfalse );
+		return;
+	}
+	g_CGMRecieve[slot] = qtrue;
 }
 
 void SV_InitAllCGMessages ()
@@ -217,7 +247,7 @@ void PF_MSG_WriteBits (int value, int bits)
 	cgm_t *pCGM;
 	int i;
 	pCGM = g_CGMessages;
-	for( i = 0; i < svs.iNumClients; i++, pCGM++ ) {
+	for( i = 0; i < CGM_NUM_SLOTS; i++, pCGM++ ) {
 		if(g_CGMRecieve[i] == 0) 
 			continue;
 		MSG_WriteCGMBits(pCGM,value,bits);
@@ -229,7 +259,7 @@ void PF_MSG_WriteChar (int c)
 	cgm_t *pCGM;
 	int i;
 	pCGM = g_CGMessages;
-	for(i = 0; i < svs.iNumClients; i++,pCGM++) {
+	for(i = 0; i < CGM_NUM_SLOTS; i++,pCGM++) {
 		if(g_CGMRecieve[i] == 0) 
 			continue;
 		// write 8 bit character
@@ -242,7 +272,7 @@ void PF_MSG_WriteByte (int c)
 	cgm_t *pCGM;
 	int i;
 	pCGM = g_CGMessages;
-	for(i = 0; i < svs.iNumClients; i++,pCGM++) {
+	for(i = 0; i < CGM_NUM_SLOTS; i++,pCGM++) {
 		if(g_CGMRecieve[i] == 0) 
 			continue;
 		// write 8 bit unsigned byte
@@ -255,7 +285,7 @@ void PF_MSG_WriteSVC (int c)
 	cgm_t *pCGM;
 	int i;
 	pCGM = g_CGMessages;
-	for(i = 0; i < svs.iNumClients; i++,pCGM++) {
+	for(i = 0; i < CGM_NUM_SLOTS; i++,pCGM++) {
 		if(g_CGMRecieve[i] == 0) 
 			continue;
 		MSG_WriteCGMBits(pCGM,c,8);
@@ -267,7 +297,7 @@ void PF_MSG_WriteShort (int c)
 	cgm_t *pCGM;
 	int i;
 	pCGM = g_CGMessages;
-	for(i = 0; i < svs.iNumClients; i++,pCGM++) {
+	for(i = 0; i < CGM_NUM_SLOTS; i++,pCGM++) {
 		if(g_CGMRecieve[i] == 0) 
 			continue;
 		MSG_WriteCGMBits(pCGM,c,16);
@@ -279,7 +309,7 @@ void PF_MSG_WriteLong (int c)
  	cgm_t *pCGM;
 	int i;
 	pCGM = g_CGMessages;
-	for(i = 0; i < svs.iNumClients; i++,pCGM++) {
+	for(i = 0; i < CGM_NUM_SLOTS; i++,pCGM++) {
 		if(g_CGMRecieve[i] == 0) 
 			continue;
 		MSG_WriteCGMBits(pCGM,c,32);
@@ -296,7 +326,7 @@ void PF_MSG_WriteFloat (float f)
 	int i;
 	dat.fl = f;
 	pCGM = g_CGMessages;
-	for(i = 0; i < svs.iNumClients; i++,pCGM++) {
+	for(i = 0; i < CGM_NUM_SLOTS; i++,pCGM++) {
 		if(g_CGMRecieve[i] == 0) 
 			continue;
 		MSG_WriteCGMBits(pCGM,dat.l,32);
@@ -311,7 +341,7 @@ void PF_MSG_WriteString (const char *s)
 	l = strlen(s);
 	l+=1; // include trailing zero
 	pCGM = g_CGMessages;
-	for(i = 0; i < svs.iNumClients; i++,pCGM++) {
+	for(i = 0; i < CGM_NUM_SLOTS; i++,pCGM++) {
 		if(g_CGMRecieve[i] == 0) 
 			continue;
 		for(j = 0; j < l; j++) {
@@ -325,7 +355,7 @@ void PF_MSG_WriteAngle8 (float f)
  	cgm_t *pCGM;
 	int i;
 	pCGM = g_CGMessages;
-	for(i = 0; i < svs.iNumClients; i++,pCGM++) {
+	for(i = 0; i < CGM_NUM_SLOTS; i++,pCGM++) {
 		if(g_CGMRecieve[i] == 0) 
 			continue;
 		MSG_WriteCGMBits(pCGM,f * 256.0 / 360.0,8);
@@ -337,7 +367,7 @@ void PF_MSG_WriteAngle16 (float f)
  	cgm_t *pCGM;
 	int i;
 	pCGM = g_CGMessages;
-	for(i = 0; i < svs.iNumClients; i++,pCGM++) {
+	for(i = 0; i < CGM_NUM_SLOTS; i++,pCGM++) {
 		if(g_CGMRecieve[i] == 0) 
 			continue;
 		MSG_WriteCGMBits(pCGM,ANGLE2SHORT(f),16);
@@ -358,7 +388,7 @@ void PF_MSG_WriteCoord (float f)
 	}
 
 	pCGM = g_CGMessages;
-	for(i = 0; i < svs.iNumClients; i++,pCGM++) {
+	for(i = 0; i < CGM_NUM_SLOTS; i++,pCGM++) {
 		if(g_CGMRecieve[i] == 0) 
 			continue;
 		MSG_WriteCGMBits(pCGM, write, 19);
@@ -372,7 +402,7 @@ void PF_MSG_WriteDir (vec_t *dir)
 	byte b;
 	b = DirToByte(dir);
 	pCGM = g_CGMessages;
-	for(i = 0; i < svs.iNumClients; i++,pCGM++) {
+	for(i = 0; i < CGM_NUM_SLOTS; i++,pCGM++) {
 		if(g_CGMRecieve[i] == 0) 
 			continue;
 		MSG_WriteCGMBits(pCGM,b,8);
@@ -385,7 +415,7 @@ void PF_MSG_StartCGM (int type)
     int i;
 
 	pCGM = g_CGMessages;
-	for(i = 0; i < svs.iNumClients; i++,pCGM++) {
+	for(i = 0; i < CGM_NUM_SLOTS; i++,pCGM++) {
 		if(g_CGMRecieve[i] == 0) 
 			continue;
 		if(pCGM->cursize <= 0) {
@@ -411,6 +441,10 @@ void PF_MSG_SetClient (int iClient)
 	if(g_CGMessages[iClient].data && (g_CGMessages[iClient].cursize <= 3967))
 	{
 		g_CGMRecieve[iClient] = 1;
+	}
+	// HZM coop [server recorder] what the stored point of view gets, the demo gets
+	if ( iClient == SVR_PovClient() ) {
+		SV_ArmCGMSlot( SVR_CGM_SLOT );
 	}
 }
 
@@ -439,6 +473,7 @@ void MSG_SetBroadcastAll()
 
 		g_CGMRecieve[i] = qtrue;
 	}
+	SV_ArmCGMSlot( SVR_CGM_SLOT ); // HZM coop [server recorder] effects from anywhere on the map
 }
 
 void MSG_SetBroadcastVisible(const vec_t* vPos, const vec_t* vPosB)
@@ -503,6 +538,7 @@ void MSG_SetBroadcastVisible(const vec_t* vPos, const vec_t* vPosB)
 
 		g_CGMRecieve[i] = qtrue;
 	}
+	SV_ArmCGMSlot( SVR_CGM_SLOT ); // HZM coop [server recorder] effects from anywhere on the map
 }
 void MSG_SetBroadcastHearable ( const vec_t *vPos, const vec_t *vPosB)
 {
@@ -514,11 +550,17 @@ void MSG_SetBroadcastHearable ( const vec_t *vPos, const vec_t *vPosB)
 void SV_WriteCGMToClient (client_t *client, msg_t *msg)
 {
 //	byte *pBuffer;
-	cgm_t *pCGMMsg;
 //	int i;
 	int clientNum;
 
 	clientNum = client - svs.clients;;
+	SV_WriteCGMSlot( clientNum, msg );
+}
+
+void SV_WriteCGMSlot (int clientNum, msg_t *msg)
+{
+	cgm_t *pCGMMsg;
+
 	pCGMMsg = &g_CGMessages[clientNum];
 	if ( pCGMMsg->data )
 	{
@@ -1532,6 +1574,7 @@ void PF_centerprintf( gentity_t *ent, const char *fmt, ... )
 	}
 
 	strncpy( svs.clients[ ent->s.number ].stringToPrint, msg, sizeof(svs.clients[ent->s.number].stringToPrint));
+	SVR_CenterPrint( ent->s.number, msg, qfalse, 0, 0 ); // HZM coop [server recorder]
 }
 
 /*
@@ -1561,6 +1604,7 @@ void PF_locationprintf( gentity_t *ent, int x, int y, const char *fmt, ... )
 	svs.clients[ ent->s.number ].XOffset = x;
 	svs.clients[ ent->s.number ].YOffset = y;
 	svs.clients[ ent->s.number ].locprint = qtrue;
+	SVR_CenterPrint( ent->s.number, msg, qtrue, x, y ); // HZM coop [server recorder]
 }
 
 /*

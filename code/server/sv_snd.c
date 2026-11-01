@@ -70,6 +70,11 @@ void SV_Sound( vec3_t *org, int entnum, int channel, const char *sound_name, flo
 {
     int i;
 
+    // HZM coop [server recorder] every sound, wherever it plays
+    if (SVR_IsRecording()) {
+        SVR_Sound(org, entnum, channel, SV_SoundIndex(sound_name, streamed), volume, mindist, pitch, maxdist, streamed);
+    }
+
     for (i = 0; i < svs.iNumClients; i++)
     {
         client_t* client = &svs.clients[i];
@@ -105,6 +110,8 @@ void SV_StopSound( int entnum, int channel )
 	server_sound_t *server_sound;
 	int i;
 	client_t *client;
+
+	SVR_StopSound( entnum, channel ); // HZM coop [server recorder]
 
 	for( client = svs.clients, i = 0; i < svs.iNumClients; client++, i++ )
 	{
