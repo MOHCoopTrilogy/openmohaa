@@ -389,6 +389,10 @@ void SV_AddServerCommand( client_t *client, const char *cmd ) {
 	int		index, i;
 	svPark_t	*pk;
 
+	// HZM coop [server recorder] the demo mirrors what its point of view is sent (before the cs dedupe
+	// below can rewrite a pending command in place)
+	SVR_ServerCommand( client, cmd );
+
 	if ( com_protocol->integer >= PROTOCOL_MOHTA_MIN ) {
 		// Added in 2.0
 		//  Requires spearhead clients.
@@ -1632,6 +1636,10 @@ void SV_Frame( int msec ) {
 
 	// send messages back to the clients
 	SV_SendClientMessages();
+
+	// HZM coop [server recorder] the whole map, every frame (after the clients, so SVF_SENDONCE
+	// entities are still here)
+	SVR_Frame();
 
 	// send a heartbeat to the master if needed
 	SV_MasterHeartbeat();

@@ -314,6 +314,8 @@ CL_WriteDemoMessage
 Dumps the current net message, prefixed by the length
 ====================
 */
+qboolean CL_RecordIsHost( void ); // HZM coop [server recorder]
+
 void CL_WriteDemoMessage ( msg_t *msg, int headerBytes ) {
 	size_t		len, swlen;
 
@@ -341,6 +343,11 @@ void CL_StopRecord_f( void ) {
 	int		len;
 
 	if ( !clc.demorecording ) {
+		// HZM coop [server recorder] the listen-server host's `record` went to the server recorder
+		if ( CL_RecordIsHost() ) {
+			Cbuf_ExecuteText( EXEC_NOW, "sv_stoprecord\n" );
+			return;
+		}
 		Com_Printf ("Not recording a demo.\n");
 		return;
 	}
@@ -381,6 +388,25 @@ void CL_DemoFilename( int number, char *fileName ) {
 
 /*
 ====================
+CL_RecordIsHost
+
+HZM coop [server recorder] true on a listen-server host: there `record` (F9) captures the WHOLE
+map through the server recorder (sv_demo.c), not only what this client was sent. A client on
+someone else's server, or cl_recordFull 0, gets the plain client demo.
+====================
+*/
+qboolean CL_RecordIsHost( void ) {
+	static cvar_t *cl_recordFull;
+
+	if ( !cl_recordFull ) {
+		cl_recordFull = Cvar_Get( "cl_recordFull", "1", CVAR_ARCHIVE );
+	}
+	return (qboolean)( cl_recordFull->integer && com_sv_running && com_sv_running->integer
+		&& !clc.demoplaying && clc.state == CA_ACTIVE && NET_IsLocalAddress( clc.serverAddress ) );
+}
+
+/*
+====================
 CL_Record_f
 
 record <demoname>
@@ -401,6 +427,16 @@ void CL_Record_f( void ) {
 
 	if ( Cmd_Argc() > 2 ) {
 		Com_Printf ("record <demoname>\n");
+		return;
+	}
+
+	// HZM coop [server recorder] hosting: record everything on the map, same file name, same playback.
+	// Ahead of the client's own "Already recording" check: the two recorders are independent.
+	if ( CL_RecordIsHost() ) {
+		char cmd[MAX_STRING_CHARS];
+
+		Com_sprintf( cmd, sizeof( cmd ), "sv_record %s\n", Cmd_Argc() == 2 ? Cmd_Argv( 1 ) : "" );
+		Cbuf_ExecuteText( EXEC_NOW, cmd );
 		return;
 	}
 

@@ -933,6 +933,7 @@ qboolean FS_ComparePaks( char *neededpaks, int len, qboolean dlstring );
 void FS_Rename( const char *from, const char *to );
 
 void FS_Remove( const char *osPath );
+void FS_HomeRemove( const char *homePath ); // HZM coop [server recorder] demo rotation
 
 void	FS_FilenameCompletion( const char *dir, const char *ext,
 		qboolean stripExt, void(*callback)(const char *s), qboolean allowNonPureFilesOnDisk );

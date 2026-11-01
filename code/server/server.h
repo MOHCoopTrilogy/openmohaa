@@ -569,6 +569,27 @@ void		SV_ShutdownGameProgs ( void );
 qboolean	SV_inPVS (const vec3_t p1, const vec3_t p2);
 // su44: MoHAA game -> cgame messages
 void SV_WriteCGMToClient (client_t *client, msg_t *msg);
+
+//
+// sv_demo.c - HZM coop server recorder: demos that hold everything on the map
+//
+#define SVR_CGM_SLOT	MAX_CLIENTS	// its own cgame-message slot, one past the clients
+void		SV_WriteCGMSlot( int slot, msg_t *msg );
+void		SV_InitCGMessage( int iClient );
+qboolean	g_CGMessagesReady( int slot );
+void		SV_ResetCGMSlot( int slot );
+void		SV_ArmCGMSlot( int slot );
+void		SVR_Init( void );
+void		SVR_Frame( void );
+void		SVR_Shutdown( void );
+void		SVR_Stop( void );
+qboolean	SVR_IsRecording( void );
+int			SVR_PovClient( void );
+void		SVR_ServerCommand( client_t *client, const char *cmd );
+void		SVR_Configstring( int index );
+void		SVR_Sound( vec3_t *org, int entnum, int channel, int sound_index, float volume, float mindist, float pitch, float maxdist, qboolean streamed );
+void		SVR_StopSound( int entnum, int channel );
+void		SVR_CenterPrint( int clientNum, const char *msg, qboolean locprint, int x, int y );
 void SV_InitAllCGMessages ();
 
 //
