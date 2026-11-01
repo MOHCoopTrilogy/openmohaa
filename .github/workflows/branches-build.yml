@@ -37,7 +37,7 @@ jobs:
     - name: Install Mesa and a virtual display
       run: |
         sudo apt-get update -qq
-        sudo apt-get install -y -qq xvfb xauth libgl1 libgl1-mesa-dri libglx-mesa0 libegl1 mesa-utils > /dev/null
+        sudo apt-get install -y -qq xvfb xauth libgl1 libgl1-mesa-dri libglx-mesa0 libegl1 mesa-utils gdb > /dev/null
 
     - name: Start the engine on gl2 at 1280x800
       working-directory: ${{github.workspace}}/hzm
@@ -46,13 +46,20 @@ jobs:
         mkdir -p ../data/main ../home
         echo '// CI stub: lets the engine start without game data' > ../data/main/default.cfg
         export LD_LIBRARY_PATH="$PWD" LIBGL_ALWAYS_SOFTWARE=1
+        ARGS=(+set fs_basepath "$GITHUB_WORKSPACE/data" +set fs_homepath "$GITHUB_WORKSPACE/home"
+              +set com_target_game 0 +set cl_renderer opengl2 +set r_fullscreen 0
+              +set r_mode -1 +set r_customwidth 1280 +set r_customheight 800
+              +set developer 1 +set s_initsound 0 +set in_gamepad 0)
         set +e
-        timeout 150 xvfb-run -a -s "-screen 0 1280x800x24" ./openmohaa \
-          +set fs_basepath "$GITHUB_WORKSPACE/data" +set fs_homepath "$GITHUB_WORKSPACE/home" \
-          +set com_target_game 0 +set cl_renderer opengl2 +set r_fullscreen 0 \
-          +set r_mode -1 +set r_customwidth 1280 +set r_customheight 800 \
-          +set developer 1 +set s_initsound 0 +set in_gamepad 0 > ../smoke.log 2>&1
-        echo "engine exit code: $?" >> ../smoke.log
+        timeout 150 xvfb-run -a -s "-screen 0 1280x800x24" ./openmohaa "${ARGS[@]}" > ../smoke.log 2>&1
+        rc=$?
+        echo "engine exit code: $rc" >> ../smoke.log
+        # A crash (SIGSEGV 139 / SIGABRT 134 / SIGBUS 135): run again under gdb for a backtrace.
+        if [ $rc -ge 128 ] && [ $rc -ne 143 ]; then
+          echo "===== gdb backtrace =====" >> ../smoke.log
+          timeout 240 xvfb-run -a -s "-screen 0 1280x800x24" gdb -q -batch -ex run -ex "bt 40" \
+            -ex "info sharedlibrary" --args ./openmohaa "${ARGS[@]}" >> ../smoke.log 2>&1
+        fi
         exit 0
 
     - name: Check the renderer came up
