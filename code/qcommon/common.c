@@ -1818,7 +1818,9 @@ void Com_Init( char *commandLine ) {
 
 	com_target_game = Cvar_Get("com_target_game", "0", CVAR_INIT|CVAR_PROTECTED);
 	com_target_demo = Cvar_Get("com_target_demo", "0", CVAR_INIT|CVAR_PROTECTED);
-#if !defined(DEDICATED)
+#if !defined(DEDICATED) && defined(_WIN32)
+	/* The guard and its variable live in sys_win32.c only: on Linux this block was an undefined-reference link
+	   error (2026-11-01). */
 	/* [bug-2664] off-switch for the overlay-crash guard (sys_win32.c). Default 1 = a fault in an
 	   injected capture/overlay DLL parks that one thread instead of crashing the game. Set 0 only to
 	   debug a suspected mis-classification. The guard is installed earlier (Sys_PlatformInit) and is
