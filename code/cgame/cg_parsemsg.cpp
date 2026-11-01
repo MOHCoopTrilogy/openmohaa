@@ -528,6 +528,8 @@ static void CG_MakeBulletTracerInternal(
     float    fPitch;
     float    fZingDistA, fZingDistB, fZingDistC;
     vec3_t   vZingPosA, vZingPosB, vZingPosC;
+    vec3_t   vSuppPos;    // HZM coop - the TRUE closest point of the nearest pass (vZingPosA is overwritten with the impact)
+    vec3_t   vClosest;
     float    swMuzzle = 0.0f, swImpact = 0.0f; // HZM coop - smoke-whip spawn chances (0..1)
 
     fZingDistB  = 9999.0;
@@ -812,6 +814,7 @@ static void CG_MakeBulletTracerInternal(
 
         fLen      = ProjectPointOnLine(i_vStart, i_vEnd[iBullet], cg.SoundOrg, vPos);
         iHeadDist = (int)Distance(vPos, cg.SoundOrg);
+        VectorCopy(vPos, vClosest);
         if (iHeadDist > 255) {
             continue;
         }
@@ -832,6 +835,7 @@ static void CG_MakeBulletTracerInternal(
         }
 
         if (iHeadDist < fZingDistA) {
+            VectorCopy(vClosest, vSuppPos);
             VectorCopy(vZingPosB, vZingPosC);
             VectorCopy(vZingPosA, vZingPosB);
             fZingDistC = fZingDistB;
@@ -1009,10 +1013,27 @@ static void CG_MakeBulletTracerInternal(
         // HZM coop - SUPPRESSION: an enemy round just cracked past the listener (fZingDistA is the closest
         // approach in units, 0..255; own outgoing shots are already excluded by the start/end-segment gate
         // above). Spike the under-fire screen FX, strongest for the closest pass.
+        // [v1.10.51, user 2026-11-01] "feel like they get suppression effects on their screen when another player is
+        // being shot at and they are not near each other": the pass test ignored walls and used the whole 255 u zing
+        // radius, so a burst at a teammate on the far side of a wall or doorway tinted this screen. Suppression now
+        // needs a clear line from the head to the closest point of the pass (world brushes only) and a pass within
+        // coop_suppressRadius (160 u, ~10 ft). The zing / crack SOUNDS below keep the full radius.
         {
-            float supp = (1.0f - (fZingDistA / 255.0f)) * 0.75f;
-            if (supp > 0.0f) {
-                CG_AddSuppression(supp);
+            static cvar_t *pSR = NULL;
+            float          rad;
+            if (!pSR) { pSR = cgi.Cvar_Get("coop_suppressRadius", "160", CVAR_ARCHIVE); }
+            rad = pSR->value;
+            if (rad > 255.0f) { rad = 255.0f; }
+            if (rad > 0.0f && fZingDistA < rad) {
+                trace_t tr;
+                CG_Trace(&tr, cg.SoundOrg, vec3_origin, vec3_origin, vSuppPos, ENTITYNUM_NONE, MASK_SOLID, qfalse,
+                         qfalse, "CoopSuppressLOS");
+                if (tr.fraction >= 1.0f && !tr.startsolid) {
+                    float supp = (1.0f - (fZingDistA / rad)) * 0.75f;
+                    if (supp > 0.0f) {
+                        CG_AddSuppression(supp);
+                    }
+                }
             }
         }
 
