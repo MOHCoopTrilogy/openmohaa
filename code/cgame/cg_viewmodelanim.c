@@ -682,6 +682,7 @@ qboolean CG_VMScopedReloadAdsClip(void)
 
 // [scopehold 2026-11-01] the newest view clip is the held scoped aim pose standing in for a bolt / reload (no hands motion, no ammo prop)
 static qboolean s_coopScopeHold = qfalse;
+static qboolean s_coopScopeRepick = qfalse; // [scopehold] this anim "change" is the scope coming up mid bolt / reload, not a new clip from the server
 qboolean CG_VMScopeHoldClip(void)
 {
     return (cgi.anim && s_coopAdsSlot >= 0 && s_coopAdsSlot == cgi.anim->g_iCurrentVMAnimSlot && s_coopScopeHold) ? qtrue : qfalse;
@@ -956,6 +957,7 @@ void CG_ViewModelAnimation(refEntity_t *pModel)
             && cgi.Cvar_Get("coop_scopeHoldCycle", "1", CVAR_ARCHIVE)->integer) {
             bAnimChanged      = qtrue;
             s_iCoopPrevVMAnim = cgi.anim->g_iLastVMAnim;
+            s_coopScopeRepick = qtrue;   // the held pose only: no authored row restarted from its first frame, no bolt jolts for a cycle already under way
         }
         s_prevScopedAim = bScopedAim;
     }
@@ -1225,6 +1227,20 @@ void CG_ViewModelAnimation(refEntity_t *pModel)
                 Q_strncpyz(szAnimName, szFirst, sizeof(szAnimName));
             }
         }
+        // [scopehold 2026-11-01] a rifle the modern scope owns never plays `charge` (the server's ADS row): its scoped aim pose is the IDLE row + the rig.
+        // `charge` animates hand bones `idle` does not, and the skeleton gives a bone the full pose of any clip with weight on it - so on every scope
+        // raise the hands snapped to the charge pose the frame it started and back the frame its crossblend weight ran out (0.008 -> 0.006, run b17):
+        // with v1.10.50's later `idle` that second snap landed at the eye - the rifle hopped ~0.45 u and the lens 0.1-0.16 of the screen.
+        // coop_scopeChargeIdle 0 = the server's row as before.
+        if (cgi.anim->g_iLastVMAnim == VM_ANIM_CHARGE && !bWeaponChanged && CG_HzmScopeOwnsAds()
+            && cgi.Cvar_Get("coop_scopeChargeIdle", "1", 0)->integer) {
+            char szIdle[MAX_QPATH];
+            Com_sprintf(szIdle, sizeof(szIdle), "%s_idle", AnimPrefixList[iAnimPrefixIndex]);
+            CoopPerWeaponReloadAnim(pTiki, "idle", szIdle, sizeof(szIdle));
+            if (cgi.Anim_NumForName(pTiki, szIdle) != -1) {
+                Q_strncpyz(szAnimName, szIdle, sizeof(szAnimName));
+            }
+        }
         // HZM coop [revolver reload 2026-10-12] EMPTY GUN: a reload that STARTS on an empty magazine / cylinder plays
         // `<row>_empty` when fps_anims defines it (user: "reloading could be as easy as dumping the entire rounds out
         // if they are all spent") - the row carries what only an empty gun shows, e.g. the cases falling as a
@@ -1315,6 +1331,7 @@ void CG_ViewModelAnimation(refEntity_t *pModel)
                         // aim pose instead (coop_scopeAuthoredRows 1 = the baked reload rows again). Its baked BOLT row is clean now that the lens follows the
                         // rifle and the gun rides the still hand (run b14: reticle centred through the cycle) - played (coop_scopeAuthoredBolt 0 = held pose).
                         if (cgi.Anim_NumForName(pTiki, szPer) != -1
+                            && !s_coopScopeRepick
                             && (cgi.Cvar_Get("coop_scopeAuthoredRows", "0", 0)->integer
                                 || (a == VM_ANIM_RECHAMBER && cgi.Cvar_Get("coop_scopeAuthoredBolt", "1", 0)->integer))) {
                             Q_strncpyz(szAds, szPer, sizeof(szAds));
@@ -1386,6 +1403,13 @@ void CG_ViewModelAnimation(refEntity_t *pModel)
                 }
             }
         }
+        // [scopehold 2026-11-01] user: "there should be slight jolts by the bolt being pulled when in ads" / "realistic weight movement": a bolt cycle at
+        // the eye schedules its jolts (cg_view.c CG_ScopeBoltJolt), timed on the gun's own HIP bolt row (the server's timing)
+        if (cgi.anim->g_iLastVMAnim == VM_ANIM_RECHAMBER && !bWeaponChanged && !s_coopScopeRepick && cg.snap && CG_HzmScopeRaiseOwns() && CG_AimingDownSights()) {
+            const int iHip = cgi.Anim_NumForName(pTiki, s_coopAdsClip ? s_szCoopHipAnim : szAnimName);
+            CG_ScopeBoltStart(iHip != -1 ? cgi.Anim_Time(pTiki, iHip) : 1.0f);
+        }
+        s_coopScopeRepick = qfalse;
         {   // HZM coop [heavy lane 2026-10-13] harness trace of the row that starts now (apply_vmtrace.py)
             static cvar_t *pTrace = NULL;
             if (!pTrace) {
@@ -1562,6 +1586,18 @@ void CG_ViewModelAnimation(refEntity_t *pModel)
     }
 
     pModel->actionWeight = 1.0;
+    if (cgi.Cvar_Get("coop_vmTrace", "0", 0)->integer > 1) {   // [scopehold] per-frame crossblend trace (coop_vmTrace 2)
+        char b[256];
+        int  n = 0;
+        for (i = 0; i < MAX_FRAMEINFOS && n < 200; ++i) {
+            if (pModel->frameInfo[i].weight > 0.0001f) {
+                n += Com_sprintf(b + n, sizeof(b) - n, " %d:%s@%.3f=%.3f", i, cgi.Anim_NameForNum(pTiki, pModel->frameInfo[i].index), pModel->frameInfo[i].time, pModel->frameInfo[i].weight);
+            }
+        }
+        b[n] = 0;
+        cgi.Printf("^~^~^ VMXB t=%d xb=%d dur=%d bt=%.3f cur=%d%s\n", cg.time, (int)cgi.anim->g_bCrossblending, cgi.anim->g_iCurrentVMDuration,
+                   cgi.anim->g_bCrossblending ? fCrossblendTime : -1.0f, cgi.anim->g_iCurrentVMAnimSlot, b);
+    }
     {
         float sw = 0.0f, sa = 0.0f;
         for (i = 0; i < MAX_FRAMEINFOS; ++i) {
